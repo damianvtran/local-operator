@@ -23,6 +23,10 @@ def refusal(code: str) -> str:
         "pairing_needs_app": keys.refusal_needs_app,
         "pairing_not_ready": keys.refusal_not_ready,
         "pairing_expired": keys.refusal_expired,
+        # Outcome-neutral on purpose (security review round 2, S-R2-2): the first
+        # answer may already have admitted the device, so "nothing was approved"
+        # would be false here.
+        "pairing_answered": keys.refusal_answered,
         "no_pending_pairing": keys.refusal_no_pending,
     }.get(code)
     return _t()(msg()) if msg is not None else ""

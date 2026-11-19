@@ -1720,6 +1720,71 @@ class PairDecision:
 
 
 @dataclass
+class PairPreApproval:
+    """An onboarding approval answering ONE future pairing in advance (§3.3).
+
+    WHY A SEPARATE RECORD AND NOT AN UNSTAMPED :class:`PairDecision` (security
+    review round 2, S-R2-1). ``lop network approvals run`` mints an invite and
+    must pre-answer the inviter's confirm, because nobody watches that ceremony.
+    It used to write a generic, unstamped decision, and the relay had to keep
+    "an unstamped decision written before the ceremony started" at the stage-2
+    flip to let it through. That rule could not tell the approval apart from any
+    other unstamped write (a terminal ``lop network confirm`` with no relay
+    running, a decision left over from an earlier ceremony on the same invite),
+    and it leaned on a wall-clock comparison. A distinct record kind, in a
+    distinct file, removes the ambiguity: the flip clears EVERY generic decision
+    it finds, and only this record may stand in for a person.
+
+    THE BINDING. It names the invite, the network and the device that is meant
+    to redeem it. The relay consumes it at the stage-2 flip, under the record
+    lock that every park, flip and answer of the invite holds, and only when the
+    authenticated joiner IS ``joiner_device_id``. Consuming means deleting it and
+    writing a :class:`PairDecision` stamped with the live ceremony, so it is
+    honoured once and through the one decision path. Onboarding writes it only
+    when it knows the joiner's mesh id (from the card, or the node's own
+    ``identity show`` before the join). A brand-new host mints its identity
+    inside ``lop network join``, so no pre-approval is written for it and its
+    ceremony parks a card for a person instead (fail closed).
+
+    The wire code compare still runs before the flip, so a pre-approval never
+    admits a device whose transcription did not match. It expires with the
+    invite (``expires_at``) and is otherwise removed only by the onboarding run
+    that wrote it, never by a relay ceremony's stage-1 cleanup: a stage-1 failure
+    leaves it for the invite's automated retry.
+    """
+
+    invite_id: str
+    network_id: str
+    joiner_device_id: str
+    answered_by: str
+    expires_at: float
+    issued_at: float = field(default_factory=time.time)
+    schema: int = 1
+
+    def is_open(self, now: float | None = None) -> bool:
+        return (time.time() if now is None else now) < self.expires_at
+
+    def matches(self, *, invite_id: str, network_id: str, joiner_device_id: str) -> bool:
+        """Whether this approval answers THAT joiner on THAT invite, and nothing else.
+
+        An empty ``joiner_device_id`` never matches: an approval that does not name
+        its device would admit whoever redeems the token first.
+        """
+        return bool(self.joiner_device_id) and (
+            self.invite_id == invite_id
+            and self.network_id == network_id
+            and self.joiner_device_id == joiner_device_id
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> PairPreApproval:
+        return PairPreApproval(**_known(PairPreApproval, data))
+
+
+@dataclass
 class PendingJoin:
     """A pairing THIS device started from an invite and has not confirmed yet.
 

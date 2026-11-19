@@ -1316,6 +1316,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "The human's recorded answer FILE <config>/network/pending/<invite>.decision.json",
     ),
     (
+        "local_operator/network/store.py::clear_pre_approval",
+        "<path>.unlink",
+        "Onboarding's one-shot pairing pre-approval FILE "
+        "<config>/network/pending/<invite>.preapproval.json, once consumed, expired, "
+        "released by its run, or purged with its network",
+    ),
+    (
         "local_operator/network/store.py::clear_pending_join",
         "<path>.unlink",
         "The JOINER's parked ceremony FILE "

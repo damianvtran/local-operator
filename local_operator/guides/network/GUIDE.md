@@ -144,6 +144,10 @@ and `lop tunnel setup --json`, not mesh admission.
    inviting card share that one deadline. Answering a card needs the signed app on
    a Mac; on another host the card shows the code but cannot be answered there
    (`answer_unavailable: "unsupported_host"`), and the terminal fallback below applies.
+   Signed onboarding (`lop network approvals run`) pre-approves its own pairing only
+   for a node whose mesh id it knows (from the card, or the node's identity before
+   the join). A brand-new host has none until its join mints one, so its pairing
+   parks a normal card here and the run says it is waiting in Mesh approvals.
 
    WITHOUT THE APP (same-user terminal fallback), the inviter's half, when its relay
    runs under a daemon and has no terminal to ask at, is `lop network confirm`:

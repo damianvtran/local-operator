@@ -158,7 +158,8 @@ def test_a_decline_through_the_relay_never_admits(
             server._ctl_pair_confirm(  # noqa: SLF001
                 {"invite_id": "i_abc123", "decision": "admit", "matched": True}
             )
-        assert excinfo.value.code == "pairing_expired"
+        # Outcome-neutral code (S-R2-2): the first answer could have been an admit.
+        assert excinfo.value.code == "pairing_answered"
         kept = store.pair_decision("i_abc123", root)
         assert kept is not None and kept.decision == "decline"
 

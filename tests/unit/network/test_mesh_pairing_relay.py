@@ -444,7 +444,9 @@ def test_after_the_budget_is_spent_no_later_answer_is_recorded_on_any_ingress(
         ):
             with pytest.raises(types.MeshRefusal) as excinfo:
                 server_a._ctl_pair_confirm(late)  # noqa: SLF001
-            assert excinfo.value.code == "pairing_expired", late
+            # S-R2-2: a SECOND answer gets the outcome-neutral code; the decision on
+            # disk could have been an admit.
+            assert excinfo.value.code == "pairing_answered", late
         decided = store.pair_decision(invite_id, server_a.root)
         assert decided is not None and decided.decision == "decline"
         assert decided.reason == "sas_mismatch", "the exhausting decline was overwritten"
@@ -607,3 +609,326 @@ def test_a_legacy_decline_naming_sas_mismatch_consumes_as_before(
     invite = store.load(record.network_id, server_a.root).invite(row["invite_id"])
     assert invite is not None and invite.state == "consumed", "a decline was retried"
     assert invite.attempts == 0, "a decline spent an attempt"
+
+
+# ---------------------------------------------------------------------------
+# Security review round 2, S-R2-1 (and agent review round 2 m1/m2/n1): onboarding's
+# pre-approval is its own record, bound to the invite and the joiner, consumed once
+# at the stage-2 flip; no unstamped decision ever answers a ceremony.
+# ---------------------------------------------------------------------------
+
+
+def _invite_of(server: relay.RelayServer, record: types.NetworkRecord) -> str:
+    return store.load(record.network_id, server.root).invites[-1].invite_id
+
+
+def _pre_approve(
+    server: relay.RelayServer, record: types.NetworkRecord, invite_id: str, joiner: str
+) -> None:
+    """What ``onboard.OnboardRun._write_pre_approval`` writes for an approved run."""
+    store.save_pre_approval(
+        types.PairPreApproval(
+            invite_id=invite_id,
+            network_id=record.network_id,
+            joiner_device_id=joiner,
+            answered_by="approval:ap_test0001",
+            expires_at=time.time() + 600.0,
+        ),
+        server.root,
+    )
+
+
+def _codes_in_order(monkeypatch: pytest.MonkeyPatch, *answers: str | None) -> threading.Event:
+    """The joiner's person across successive joins: ``None`` types the right digits,
+    ``"WRONG"`` six digits that differ from them (a real, well-formed mismatch).
+
+    The FIRST join's read blocks on the returned event, so a cell can act while that
+    ceremony sits in stage 1; later reads answer at once.
+    """
+    first = threading.Event()
+    queue = list(answers)
+    calls: list[int] = []
+
+    def read_code(args: Any, derived: str, fingerprint: str) -> str:
+        del args, fingerprint
+        calls.append(1)
+        if len(calls) == 1:
+            first.wait(60)
+        answer = queue.pop(0) if queue else None
+        if answer == "WRONG":
+            return _wrong(derived)
+        return derived if answer is None else answer
+
+    monkeypatch.setattr(net_cli, "_read_code", read_code)
+    return first
+
+
+def _wrong(code: str) -> str:
+    return "000000" if code != "000000" else "111111"
+
+
+def test_a_previous_ceremonys_unstamped_admit_is_not_a_pre_answer_for_the_next(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 2, m1 (the S-R2-1 repro). Ceremony A parks; an unstamped
+    admit lands during A's stage 1; A is refused retryably (a wire mismatch) and B
+    re-parks the same invite BEFORE A's cleanup runs. B must not read that admit:
+    the old "unstamped and written before B started" rule kept it and admitted B
+    with no person answering."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    invite_id = _invite_of(server_a, record)
+    real_clear = relay.RelayServer._clear_ceremony  # noqa: SLF001
+    ceremony_a: list[str] = []
+    deferred: list[tuple[Any, ...]] = []
+
+    def defer_a(self: relay.RelayServer, network_id: str, invite: str, ceremony: str) -> None:
+        if ceremony_a and ceremony == ceremony_a[0]:
+            deferred.append((self, network_id, invite, ceremony))
+            return
+        real_clear(self, network_id, invite, ceremony)
+
+    monkeypatch.setattr(relay.RelayServer, "_clear_ceremony", defer_a)
+    release_a = _codes_in_order(monkeypatch, "WRONG", None)
+    thread_a, out_a = _join_in_thread(
+        server_b, host=host, port=port, token=token, envelope=envelope
+    )
+    row_a = _wait_row(server_a, types.PAIR_STAGE_AWAITING_JOINER)
+    live_a = store.pending_pairing(invite_id, server_a.root)
+    assert live_a is not None and live_a.ceremony
+    ceremony_a.append(live_a.ceremony)
+    store.save_pair_decision(
+        types.PairDecision(invite_id=invite_id, decision="admit", matched=True), server_a.root
+    )
+    # A's person types a wrong code: a retryable wire mismatch.
+    release_a.set()
+    thread_a.join(30)
+    assert isinstance(out_a.get("error"), types.MeshRefusal), out_a
+    assert row_a["invite_id"] == invite_id
+    assert deferred, "the premise: A's cleanup has not run when B parks"
+    thread_b, out_b = _join_in_thread(
+        server_b, host=host, port=port, token=token, envelope=envelope
+    )
+    try:
+        # A kept admit is read on B's FIRST poll, so B's stage-2 card can vanish before
+        # a reader sees it: watch for the admission itself as well as the card.
+        row_b: dict[str, Any] | None = None
+        deadline = time.time() + 20.0
+        while row_b is None and time.time() < deadline:
+            admitted = store.load(record.network_id, server_a.root).member(
+                server_b.identity.device_id
+            )
+            assert admitted is None, "B read A's unstamped admit"
+            rows = server_a._ctl_pair_pending({"include_stages": True})  # noqa: SLF001
+            row_b = next(
+                (r for r in rows if r.get("stage") == types.PAIR_STAGE_AWAITING_CONFIRMATION),
+                None,
+            )
+            time.sleep(0.05)
+        assert row_b is not None, "B never reached its stage-2 card"
+        time.sleep(0.6)  # three poll ticks: a kept admit would be read here
+        after = store.load(record.network_id, server_a.root)
+        assert after.member(server_b.identity.device_id) is None, "B read A's unstamped admit"
+        server_a._ctl_pair_confirm(  # noqa: SLF001
+            {"invite_id": invite_id, "decision": "decline", "code": "", "nonce": row_b["nonce"]}
+        )
+    finally:
+        thread_b.join(30)
+        for args in deferred:
+            real_clear(*args)
+    assert isinstance(out_b.get("error"), types.MeshRefusal)
+    assert store.load(record.network_id, server_a.root).member(server_b.identity.device_id) is None
+
+
+def test_an_automated_retry_after_a_stage_one_failure_still_uses_the_pre_approval(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reverse case of m1: a ceremony that fails at stage 1 must leave onboarding's
+    pre-approval for the invite's retry (it used to delete the pre-answer, and the
+    retry then waited out its window and admitted nothing). The retry is admitted with
+    no card answer, and the pre-approval is consumed exactly once."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    invite_id = _invite_of(server_a, record)
+    _pre_approve(server_a, record, invite_id, server_b.identity.device_id)
+    release = _codes_in_order(monkeypatch, "WRONG", None)
+    release.set()
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    thread.join(30)
+    assert isinstance(out.get("error"), types.MeshRefusal), "the premise: a stage-1 failure"
+    assert store.pre_approval(invite_id, server_a.root) is not None, "stage-1 cleanup ate it"
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    thread.join(30)
+    assert "error" not in out, out.get("error")
+    member = store.load(record.network_id, server_a.root).member(server_b.identity.device_id)
+    assert member is not None and member.active
+    assert store.pre_approval(invite_id, server_a.root) is None, "a pre-approval is single use"
+    confirmed = [
+        row for row in server_a.audit.tail(limit=500) if row.get("event") == "pairing_confirmed"
+    ]
+    assert confirmed and confirmed[-1]["detail"]["answered_by"] == "approval:ap_test0001"
+
+
+def test_the_flip_consumes_a_matching_pre_approval_once_as_a_stamped_decision(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single use, under the flip's lock: by the time stage 2 is visible the
+    pre-approval file is gone and a decision stamped with THIS ceremony stands in its
+    place; a generic decision left on disk beforehand was cleared, not kept."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    invite_id = _invite_of(server_a, record)
+    _pre_approve(server_a, record, invite_id, server_b.identity.device_id)
+    store.save_pair_decision(
+        types.PairDecision(invite_id=invite_id, decision="decline", reason="declined"),
+        server_a.root,
+    )
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    gate = _gate_the_decision_poll(monkeypatch)
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        live = store.pending_pairing(invite_id, server_a.root)
+        assert live is not None
+        assert store.pre_approval(invite_id, server_a.root) is None, "not consumed at the flip"
+        decided = store.pair_decision(invite_id, server_a.root)
+        assert decided is not None and decided.decision == "admit"
+        assert decided.ceremony == live.ceremony and decided.answered_by == "approval:ap_test0001"
+        assert decided.shares == [], "an approval shares nothing"
+    finally:
+        gate.set()
+        thread.join(30)
+    assert "error" not in out, out.get("error")
+    assert store.load(record.network_id, server_a.root).member(server_b.identity.device_id)
+
+
+def test_a_pre_approval_for_another_joiner_is_refused_and_the_card_parks(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different joiner never matches: the pre-approval is left unconsumed, nothing
+    is admitted, and the ceremony waits on an answerable stage-2 card (what a brand-new
+    host with no pre-approval also gets)."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    invite_id = _invite_of(server_a, record)
+    _pre_approve(server_a, record, invite_id, "d_" + "c" * 32)
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        row = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        time.sleep(0.6)
+        assert (
+            store.load(record.network_id, server_a.root).member(server_b.identity.device_id) is None
+        ), "another joiner's approval admitted this one"
+        assert store.pair_decision(invite_id, server_a.root) is None
+        kept = store.pre_approval(invite_id, server_a.root)
+        assert kept is not None and kept.joiner_device_id == "d_" + "c" * 32
+        assert server_a._ctl_pair_pending({}), "the card is not offered for an answer"
+        server_a._ctl_pair_confirm(  # noqa: SLF001
+            {"invite_id": invite_id, "decision": "decline", "code": "", "nonce": row["nonce"]}
+        )
+    finally:
+        thread.join(30)
+    assert isinstance(out.get("error"), types.MeshRefusal)
+
+
+def test_only_a_decision_stamped_with_the_live_ceremony_answers_stage_two(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The poll reads a decision only when it carries THIS ceremony's id: an unstamped
+    out-of-band admit written during stage 2 is ignored, a stamped one is honoured."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    invite_id = _invite_of(server_a, record)
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        live = store.pending_pairing(invite_id, server_a.root)
+        assert live is not None and live.ceremony
+        store.save_pair_decision(
+            types.PairDecision(invite_id=invite_id, decision="admit", matched=True),
+            server_a.root,
+        )
+        time.sleep(0.6)
+        assert (
+            store.load(record.network_id, server_a.root).member(server_b.identity.device_id) is None
+        ), "an unstamped decision answered the ceremony"
+        store.save_pair_decision(
+            types.PairDecision(
+                invite_id=invite_id, decision="admit", matched=True, ceremony=live.ceremony
+            ),
+            server_a.root,
+        )
+    finally:
+        thread.join(30)
+    assert "error" not in out, out.get("error")
+    assert store.load(record.network_id, server_a.root).member(server_b.identity.device_id)
+
+
+def test_a_code_frame_with_no_share_list_spends_no_attempt(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 2, n1: the share-list shape is judged BEFORE the code
+    compare, so a malformed control-socket frame with a wrong code spends nothing."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    invite_id = _invite_of(server_a, record)
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        row = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        with pytest.raises(types.MeshRefusal) as excinfo:
+            server_a._ctl_pair_confirm(_card(row, code=_wrong(row["sas"])))  # noqa: SLF001
+        assert excinfo.value.code == "bad_request"
+        invite = store.load(record.network_id, server_a.root).invite(invite_id)
+        assert invite is not None and invite.attempts == 0, "a malformed frame spent an attempt"
+        server_a._ctl_pair_confirm(  # noqa: SLF001
+            {"invite_id": invite_id, "decision": "decline", "code": "", "nonce": row["nonce"]}
+        )
+    finally:
+        thread.join(30)
+    assert isinstance(out.get("error"), types.MeshRefusal)
+
+
+def test_a_pre_approval_matches_only_its_invite_network_and_named_joiner(tmp_path: Path) -> None:
+    approval = types.PairPreApproval(
+        invite_id="i_1",
+        network_id="n_1",
+        joiner_device_id="d_a",
+        answered_by="approval:ap_x",
+        expires_at=time.time() + 60,
+    )
+    assert approval.matches(invite_id="i_1", network_id="n_1", joiner_device_id="d_a")
+    assert not approval.matches(invite_id="i_2", network_id="n_1", joiner_device_id="d_a")
+    assert not approval.matches(invite_id="i_1", network_id="n_2", joiner_device_id="d_a")
+    assert not approval.matches(invite_id="i_1", network_id="n_1", joiner_device_id="d_b")
+    unbound = types.PairPreApproval.from_json(dict(approval.to_json(), joiner_device_id=""))
+    assert not unbound.matches(invite_id="i_1", network_id="n_1", joiner_device_id="")
+    # It expires with its invite, and an expired one is removed as it is read.
+    store.save_pre_approval(
+        types.PairPreApproval.from_json(dict(approval.to_json(), expires_at=time.time() - 1)),
+        tmp_path,
+    )
+    assert store.pre_approval("i_1", tmp_path) is None
+    assert not store.pre_approval_path("i_1", tmp_path).exists()
+
+
+def test_a_second_answer_is_refused_with_outcome_neutral_copy() -> None:
+    """S-R2-2: the earlier answer may have admitted the device, so the keyed sentence
+    for ``pairing_answered`` must not say "nothing was approved"."""
+    from local_operator.network import pairing_copy
+
+    sentence = pairing_copy.refusal("pairing_answered")
+    assert sentence == "This pairing is no longer open. This answer wasn't recorded."
+    assert "approved" not in sentence

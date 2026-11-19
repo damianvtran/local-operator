@@ -12875,7 +12875,6 @@ class RelayServer:
         offer_detail: dict[str, Any],
         expires_at: float,
         ceremony: str,
-        started_at: float,
     ) -> PairDecision:
         """Design §5.3's second half: a person on the INVITING device confirms the code.
 
@@ -12945,16 +12944,44 @@ class RelayServer:
         # same lock ``_ctl_pair_confirm`` holds while it checks the stage and writes —
         # so no answer can land between "cleared" and "now stage 2" and survive.
         #
-        # EXCEPT A PRE-ANSWER (``onboard``'s approval, §3.3): an unstamped decision
-        # written BEFORE this ceremony started is the operator's approval answering the
-        # pairing in advance — the shape ``lop network join --automated`` relies on —
-        # not a racing stage-1 answer, and it is still read only after the wire code
-        # compare above. Clearing it too (as 7e88f31c did) left every approved node
-        # onboarding waiting out its window and admitting nothing.
+        # EVERY generic decision goes, stamped or not (security review round 2,
+        # S-R2-1). An unstamped file cannot say who wrote it or for which ceremony
+        # (a terminal confirm with no relay running, a decision left by an earlier
+        # ceremony on this invite whose cleanup has not run yet), so none is ever
+        # read as an answer to this one; the poll below takes only decisions stamped
+        # with ``ceremony``. The previous "unstamped and written before this
+        # ceremony started" exception compared wall clocks and could not tell the
+        # two apart, so it is gone.
+        #
+        # THE ONE STAND-IN FOR A PERSON is onboarding's :class:`PairPreApproval`, a
+        # separate record bound to this invite and to the joiner it was minted for.
+        # It is consumed HERE, inside the same lock as the flip: deleted, and turned
+        # into a decision stamped with this ceremony, so it answers exactly one
+        # ceremony through the one decision path and the latch refuses any later
+        # card answer. A different joiner (or invite, or network) leaves it alone.
+        # This runs only after the wire code compare above, so a pre-approval never
+        # admits a mismatched transcription.
         with store.mutate(record.network_id, self.root):
-            early = store.pair_decision(invite_id, self.root)
-            if not (early is not None and not early.ceremony and early.answered_at < started_at):
-                store.clear_pair_decision(invite_id, self.root)
+            store.clear_pair_decision(invite_id, self.root)
+            approval = store.pre_approval(invite_id, self.root)
+            if approval is not None and approval.matches(
+                invite_id=invite_id, network_id=record.network_id, joiner_device_id=joiner_id
+            ):
+                store.clear_pre_approval(invite_id, self.root)
+                store.save_pair_decision(
+                    PairDecision(
+                        invite_id=invite_id,
+                        decision="admit",
+                        matched=True,
+                        reason="",
+                        answered_by=approval.answered_by,
+                        # An approval shares nothing: credentials are a person's
+                        # choice on the card, never an automated default.
+                        shares=[],
+                        ceremony=ceremony,
+                    ),
+                    self.root,
+                )
             store.save_pending_pairing(pending, self.root)
         self.audit.record(
             AuditEvent(
@@ -13035,10 +13062,11 @@ class RelayServer:
         deadline = time.monotonic() + window
         while time.monotonic() < deadline:
             decision = store.pair_decision(pending.invite_id, self.root)
-            # A decision stamped for ANOTHER ceremony on this invite is not an answer
-            # to this one (S-R1-3); an unstamped one is the legacy out-of-band shape,
-            # which the stage-2 flip already cleared of anything written earlier.
-            if decision is not None and decision.ceremony in ("", pending.ceremony):
+            # ONLY a decision stamped with THIS ceremony answers it (S-R1-3, S-R2-1):
+            # every relay ingress stamps ``live.ceremony`` under the record lock, and
+            # onboarding's pre-approval is stamped when the flip consumes it. An
+            # unstamped file (an out-of-band write) is never an answer.
+            if decision is not None and decision.ceremony and decision.ceremony == pending.ceremony:
                 return decision
             time.sleep(0.2)
         return PairDecision(
@@ -13112,8 +13140,7 @@ class RelayServer:
         # deadline, ``desktop_mesh_pairings.answer``) and the stage-2 decision poll use
         # this one wall-clock instant. Recomputing a fresh ``pair_timeout_seconds`` at
         # the stage-2 flip gave a ceremony up to two windows end to end.
-        ceremony_started_at = time.time()
-        ceremony_expires_at = ceremony_started_at + window
+        ceremony_expires_at = time.time() + window
         # WHICH CEREMONY THIS IS (S-R1-3): stamped on both stage records and on every
         # decision written for them, so this thread's cleanup removes only what belongs
         # to it, never a record a later ceremony on the same invite parked.
@@ -13247,7 +13274,6 @@ class RelayServer:
                 offer_detail=offer_detail,
                 expires_at=ceremony_expires_at,
                 ceremony=ceremony,
-                started_at=ceremony_started_at,
             )
             if (
                 decision.reason == "sas_mismatch"
@@ -13618,8 +13644,15 @@ class RelayServer:
         card (the app lost a live pairing) or its decision (a person's answer vanished).
         So: the card goes only when its ``ceremony`` is ours; the decision goes when it
         is stamped with ours, or is an unstamped out-of-band write while no other
-        ceremony owns the key. Checked and deleted under the record lock that every
-        park, flip and answer of this key also holds.
+        ceremony owns the key (no ceremony ever honours an unstamped decision; the
+        stage-2 flip clears them all). Checked and deleted under the record lock that
+        every park, flip and answer of this key also holds.
+
+        NEVER the onboarding :class:`PairPreApproval` (S-R2-1, the reverse case of
+        agent review round 2, m1): it lives in its own file, so a ceremony that fails
+        at stage 1 leaves it for the invite's automated retry. It is removed only by
+        the flip that consumes it, by its writer's cleanup, or by expiring with the
+        invite.
         """
         with _pairing_lock(network_id, self.root):
             live = store.pending_pairing(invite_id, self.root)
@@ -14560,12 +14593,17 @@ class RelayServer:
         decline sat on disk until the listener's next 0.2 s poll, and a correct code in
         that gap replaced it with an admit. ``pairing_expired`` is the refusal: the
         ceremony is no longer open to answers, which is the sentence the card shows.
+
+        A SECOND ANSWER GETS ITS OWN CODE, ``pairing_answered`` (security review round
+        2, S-R2-2): the decision already on disk may be an admit, so the card's
+        sentence must not claim "nothing was approved" the way ``pairing_expired``'s
+        does; it says only that this answer was not recorded.
         """
         decided = store.pair_decision(live.invite_id, self.root)
         if decided is not None and decided.ceremony in ("", live.ceremony):
             raise MeshRefusal(
-                "pairing_expired",
-                "that pairing has already been answered, so this answer was not recorded",
+                "pairing_answered",
+                "that pairing is no longer open, and this answer was not recorded",
             )
         if spent:
             raise MeshRefusal(
@@ -14722,6 +14760,21 @@ class RelayServer:
                 )
                 store.save_pair_decision(decision, self.root)
                 return self._pair_confirm_reply(live, decision, record)
+            wanted = frame.get("shares")
+            if not isinstance(wanted, list):
+                # THE CARD'S SELECTION IS EXPLICIT (security review round 1, S-R1-1).
+                # A card admit carries exactly the list the person left ticked, and the
+                # app attested that list; "absent = the whole offer" is the legacy
+                # y/N convenience and must never be how a card answer grants, or a
+                # body that attested ``[]`` and then omitted the key would serve every
+                # offered credential. ``[]`` grants nothing; absent is refused.
+                # Judged BEFORE the code compare (agent review round 2, n1): a
+                # malformed frame is not a guess at the code and must spend no attempt.
+                raise MeshRefusal(
+                    "bad_request",
+                    "a code answer must name the credentials to share (an empty list "
+                    "shares none), so nothing was answered",
+                )
             if not sas_matches(live.sas, typed):
                 invite.attempts += 1
                 exhausted = failures_exhausted(record, invite_id)
@@ -14753,28 +14806,14 @@ class RelayServer:
                 }
             offered = list(live.offer) if live.offer_state == offers_mod.OWNER_SENT else []
             servable = offers_mod.served_keys(offered)
-            wanted = frame.get("shares")
-            if not isinstance(wanted, list):
-                # THE CARD'S SELECTION IS EXPLICIT (security review round 1, S-R1-1).
-                # A card admit carries exactly the list the person left ticked, and the
-                # app attested that list; "absent = the whole offer" is the legacy
-                # y/N convenience and must never be how a card answer grants, or a
-                # body that attested ``[]`` and then omitted the key would serve every
-                # offered credential. ``[]`` grants nothing; absent is refused.
+            shares = sorted(str(key) for key in wanted)
+            unoffered = [key for key in shares if key not in servable]
+            if unoffered:
                 raise MeshRefusal(
-                    "bad_request",
-                    "a code answer must name the credentials to share (an empty list "
-                    "shares none), so nothing was answered",
+                    "shares_not_offered",
+                    f"{unoffered[0]!r} is not being served in this ceremony, so it cannot "
+                    "be granted by it — the list can only be reduced here",
                 )
-            else:
-                shares = sorted(str(key) for key in wanted)
-                unoffered = [key for key in shares if key not in servable]
-                if unoffered:
-                    raise MeshRefusal(
-                        "shares_not_offered",
-                        f"{unoffered[0]!r} is not being served in this ceremony, so it cannot "
-                        "be granted by it — the list can only be reduced here",
-                    )
             decision = PairDecision(
                 invite_id=invite_id,
                 decision="admit",

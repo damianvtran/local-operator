@@ -722,15 +722,17 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
     # step, and the invite step is local — no transport call at all.
     first_transport_call = transport.calls[0]
     assert first_transport_call[0] == "connect"
-    # The invite's pre-answer is ON DISK, one-shot, keyed by the invite id, and
-    # written as the approval (never as "human").
+    # The invite's pre-approval is ON DISK, one-shot, keyed by the invite id, bound
+    # to the card's device, and written as the approval (never as "human"). It is
+    # NOT a generic decision (S-R2-1): the relay's stage-2 flip clears those.
     from local_operator.network import store as network_store
 
-    decision = network_store.pair_decision("inv_1")
-    assert decision is not None
-    assert decision.decision == "admit"
-    assert decision.matched is True
-    assert decision.answered_by == "approval:ap_aaaa1111"
+    approval = network_store.pre_approval("inv_1")
+    assert approval is not None
+    assert approval.joiner_device_id == "d_node"
+    assert approval.network_id == "n_1"
+    assert approval.answered_by == "approval:ap_aaaa1111"
+    assert network_store.pair_decision("inv_1") is None
     # The automated join is the ONLY spelling used on the node.
     join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
     assert len(join_calls) == 1
@@ -1519,6 +1521,104 @@ def test_a_join_mismatch_is_a_failed_receipt_naming_the_step(
     # note): the run wrote the admit decision at the invite and died at the
     # join; the runner that wrote it — and only it — clears it.
     assert network_store.pair_decision("inv_1", isolated) is None
+    assert network_store.pre_approval("inv_1", isolated) is None
+
+
+@pytest.mark.parametrize("cards_here", [True, False], ids=["app-answers-cards", "no-card-host"])
+def test_a_fresh_host_writes_no_pre_approval_and_says_where_the_pairing_waits(
+    isolated: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    cards_here: bool,
+) -> None:
+    """S-R2-1, the brand-new-host case. The card names no mesh id and the node has
+    none before its join (``identity show`` answers ``identity_missing``), so nothing
+    can bind a pre-approval: none is written and the ceremony parks a pairing card
+    (the relay half is ``test_mesh_pairing_relay``'s wrong-joiner cell). The run must
+    not look hung: before the blocking join it says the device is waiting, naming
+    Mesh approvals and NO command where this device answers cards, and pointing at
+    the terminal only where it cannot."""
+    from local_operator.network import pairing_attest
+
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    record["device"]["device_id"] = ""
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    monkeypatch.setattr(pairing_attest, "cards_answerable_here", lambda root=None: cards_here)
+    written: list[Any] = []
+    real_save = network_store.save_pre_approval
+    monkeypatch.setattr(
+        network_store,
+        "save_pre_approval",
+        lambda approval, root=None: written.append(approval) or real_save(approval, root),
+    )
+    outputs = [
+        (
+            ("identity show", {"stdout": json.dumps({"ok": False, "code": "identity_missing"})})
+            if command == "identity show"
+            else (command, result)
+        )
+        for command, result in HAPPY_OUTPUTS
+    ]
+    transport = FakeTransport(outputs=outputs)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=transport,
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert written == [], "a pre-approval was written with no joiner identity to bind"
+    assert network_store.pre_approval("inv_1", isolated) is None
+    steps = {row["step"]: row for row in payload["steps"]}
+    assert steps["invite"]["data"]["pre_answered"] is False
+    assert steps["join"]["data"]["awaiting_card"] is True
+    said = capsys.readouterr().err
+    assert "waiting for approval" in said
+    if cards_here:
+        assert "Mesh approvals" in said
+        assert "lop " not in said and "`" not in said, "a card host was told to run a command"
+    else:
+        assert "lop network confirm" in said
+        assert "Mesh approvals" not in said
+
+
+def test_a_node_with_an_identity_is_pre_approved_at_the_join_step(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A card with no mesh id, for a node that already HAS one: the pre-approval is
+    bound at the join step to the id the node reports before joining."""
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    record["device"]["device_id"] = ""
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    written: list[Any] = []
+    real_save = network_store.save_pre_approval
+    monkeypatch.setattr(
+        network_store,
+        "save_pre_approval",
+        lambda approval, root=None: written.append(approval) or real_save(approval, root),
+    )
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=HAPPY_OUTPUTS),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+    assert [approval.joiner_device_id for approval in written] == ["d_node"]
+    steps = {row["step"]: row for row in payload["steps"]}
+    assert steps["invite"]["data"]["pre_answered"] is False
+    assert steps["join"]["data"]["awaiting_card"] is False
 
 
 def test_the_ssh_target_is_freed_before_the_terminal_row_is_readable(
@@ -3204,6 +3304,7 @@ def test_a_tampered_record_cannot_mint_an_invite_or_pre_answer_a_join(
     assert excinfo.value.code == "approval_record_tampered"
     assert minted == [], "an invite must not be minted from an unverified record"
     assert network_store.pair_decision("inv_1", isolated) is None
+    assert network_store.pre_approval("inv_1", isolated) is None
     assert fake.appended == [], "nothing may run, so no receipt may be written"
     assert fake.finished == []
 

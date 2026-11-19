@@ -1,4 +1,5 @@
 {
+  "network.pairing.refusal.answered": "Este emparejamiento ya no está abierto. Esta respuesta no se registró.",
   "network.pairing.refusal.expired": "Este emparejamiento ya no está abierto, así que no se aprobó nada. Inicia un nuevo emparejamiento desde el otro dispositivo.",
   "network.pairing.refusal.mismatch": "{count, plural, =0 {Ese código no coincide con el del otro dispositivo y no quedan intentos.} one {Ese código no coincide con el del otro dispositivo. Queda # intento.} other {Ese código no coincide con el del otro dispositivo. Quedan # intentos.}}",
   "network.pairing.refusal.needs_app": "Para aprobar aquí el emparejamiento de un dispositivo hace falta la app firmada de Local Operator en un Mac. No se aprobó nada. Aún puedes responder desde una terminal en este dispositivo.",

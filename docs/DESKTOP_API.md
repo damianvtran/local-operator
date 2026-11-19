@@ -3084,7 +3084,13 @@ Order of checks — the order is the security property:
    its own derivation (caller `matched` is ignored), spends one attempt on a mismatch
    inside the same lock as the stage check, and declines/consumes when the budget is
    spent. Once the ceremony has a decision, or its budget is spent, every later answer
-   (card or terminal) is `409 pairing_expired` and nothing is overwritten. Joiner: `network.pairing_answers.answer_card` (the CLI's own writer); it
+   (card or terminal) is `409 pairing_answered` (outcome-neutral: the first answer
+   may have admitted the device) or, once the budget is spent, `409 pairing_expired`,
+   and nothing is overwritten. Only a decision stamped with the live ceremony
+   answers it; the stage-2 flip clears every other one. An onboarding run's
+   pre-approval is a separate one-shot record bound to the invite and the joiner's
+   mesh id, consumed at the flip after the wire code compare; a brand-new host (no
+   mesh id before its join) gets none and parks a normal card. Joiner: `network.pairing_answers.answer_card` (the CLI's own writer); it
    never blocks on the other device.
 
 200 → `{status: "sent"|"waiting_for_other_device"|"refused", attempts_left}`.

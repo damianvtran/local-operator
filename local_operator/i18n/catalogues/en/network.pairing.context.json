@@ -1,4 +1,9 @@
 {
+  "network.pairing.refusal.answered": {
+    "note": "Deliberately says nothing about the outcome: an earlier answer may already have approved the device, or declined it.",
+    "role": "Desktop Mesh approvals: a second answer to a pairing that already has one (a double click, or another surface answered first)",
+    "tone": "Plain, calm"
+  },
   "network.pairing.refusal.expired": {
     "note": "Nothing changed on either device.",
     "role": "Desktop Mesh approvals: the pairing window closed or the card is out of date",

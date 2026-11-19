@@ -175,6 +175,23 @@ async def start_service(config_dir: Path) -> app_attest.AttestService | None:
     return None
 
 
+def cards_answerable_here(config_dir: Path | None = None) -> bool:
+    """Whether a pairing card on THIS device can be answered from the app, out of process.
+
+    For callers that do not hold the listener (``onboard``'s runner, deciding whether
+    to send the operator to Mesh approvals or to the terminal): macOS AND the running
+    ``lop serve``'s listener socket is bound at ``<config>/run/attest/mesh-pairing.sock``.
+    A path check only; it creates nothing (``run_dir`` is read-only). A stale socket
+    file left by a crashed server reads as answerable, which errs toward the app.
+    """
+    if not app_attest.supported():
+        return False
+    from local_operator.session.runtime.registry import run_dir
+
+    attest_dir = run_dir(config_dir, app_attest.ATTEST_RUN_DIRNAME)
+    return app_attest.socket_path(attest_dir, LISTENER_NAME).exists()
+
+
 def answer_unavailable(service: app_attest.AttestService | None) -> str:
     """Why this host cannot answer a pairing card (``""`` when it can)."""
     if not app_attest.supported():

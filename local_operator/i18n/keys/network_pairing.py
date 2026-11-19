@@ -9,6 +9,10 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def refusal_answered() -> Msg:
+    return Msg("network.pairing.refusal.answered", {})
+
+
 def refusal_expired() -> Msg:
     return Msg("network.pairing.refusal.expired", {})
 

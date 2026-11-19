@@ -21,9 +21,9 @@ STATUS MAP: 404 ``no_pending_pairing``; 403 ``pairing_needs_app``; 400 ``bad_req
 (an inviter admit with no ``shares`` list, or shares on any other answer; nothing
 spent); 409
 ``sas_mismatch`` (body carries ``attempts_left``; the card stays open),
-``pairing_expired``, ``pairing_not_ready``, and any other relay refusal; 503
-``relay_unavailable``. Messages are keyed copy (``network.pairing``); the renderer
-keys on ``code``.
+``pairing_expired``, ``pairing_answered`` (a second answer; outcome-neutral copy),
+``pairing_not_ready``, and any other relay refusal; 503 ``relay_unavailable``.
+Messages are keyed copy (``network.pairing``); the renderer keys on ``code``.
 """
 
 from __future__ import annotations
