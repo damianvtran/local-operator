@@ -58,8 +58,16 @@ Only on an explicit signal, first match wins:
    `AWS_LAMBDA_FUNCTION_NAME` or `ECS_CONTAINER_METADATA_URI_V4`.
 
 A plain `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` in a laptop shell does **not**
-enable Bedrock, since those usually belong to unrelated work. A stored
-connection always outranks the environment.
+enable Bedrock in the global provider census or default-model suggestions,
+since those usually belong to unrelated work. **Explicitly selecting Bedrock**
+(`lop exec --hosting bedrock` or `SessionSpec(hosting="bedrock", ...)`) does
+use the ordinary AWS default credential chain when no stored or environment
+Bedrock connection exists: access keys and session token, `AWS_PROFILE`, and
+EC2 IMDSv2 roles all work without `LOP_BEDROCK_AUTH` or compute markers. This
+last-resort connection belongs only to that invocation; it is not saved and
+does not make Bedrock globally available. Existing stored/environment
+connections retain their normal precedence. Credential lookup is bounded and
+fails with a classified pre-wire credential error if the chain is empty.
 
 An explicit profile connection ignores ambient `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`.
 
@@ -88,7 +96,7 @@ All configuration comes from the environment:
 
 ```sh
 export AWS_REGION=us-east-1
-export LOP_BEDROCK_AUTH=ambient        # or rely on the container/web-identity markers
+# The ordinary AWS default chain is used; no extra LOP auth switch is required.
 lop exec --hosting bedrock --model us.anthropic.claude-sonnet-5-5 "…"
 ```
 

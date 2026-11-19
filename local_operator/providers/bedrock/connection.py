@@ -33,8 +33,25 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, TypeGuard
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 from urllib.parse import parse_qsl, urlencode, urlsplit
+
+if TYPE_CHECKING:
+    from local_operator.providers.auth_store import AuthStore
+
+
+def configure_invocation_auth(store: AuthStore, hosting: str) -> None:
+    """Enable AWS's default chain only on a store owned by a Bedrock invocation.
+
+    AWS_PROFILE and ordinary IAM keys must not opt every provider census into
+    Bedrock (D6). Once routing has selected Bedrock, however, the SDK/exec/worker
+    must accept those credentials without a second harness-specific opt-in.
+    Tier 7 preserves stored/env connection precedence and defers the bounded,
+    classified credential lookup to the wire path; no network happens here.
+    """
+    if hosting == "bedrock":
+        store.set_fallback_resolver("bedrock", lambda _provider: "bedrock://ambient")
+
 
 #: Descriptor scheme. A key without it is a raw Bedrock API key (the generic
 #: ``PUT /v1/auth/providers/bedrock/key`` and paste-a-key login path).
