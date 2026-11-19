@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import signal
@@ -37,6 +38,9 @@ logger = logging.getLogger("local_operator.providers.auth_cli")
 #: spelling for the CLI and the TUI; it can never collide with a provider id (no
 #: registry row is called ``status``, pinned by a test).
 LOGIN_STATUS_WORD = "status"
+#: Ceiling for a multi-line credential paste (a GCP service-account key is
+#: ~2.3 KiB); matches the loader's own key-file cap in ``oauth/vertex.py``.
+MAX_CREDENTIAL_PASTE_CHARS = 65_536
 
 if TYPE_CHECKING:  # lazy at runtime: the CLI top level must not import these
     from pathlib import Path
@@ -87,12 +91,59 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     # providers this now serves — they want an API key off a dashboard, and a
     # user told to paste a "code" goes looking for an OAuth code that does not
     # exist for them.
-    wants_api_key = definition.paste_prompt_required
-    prompt = (
-        "Paste your API key here (empty to cancel): "
-        if wants_api_key
-        else "Paste the code here (empty to cancel): "
-    )
+    #
+    # A required paste that is NOT an API key (google-vertex-sa: a service
+    # account JSON key or a path to one) gets its own wording and a multi-line
+    # reader -- telling it to paste an "API key" was wrong, and a single
+    # ``readline`` truncated pretty-printed JSON to its opening ``{``.
+    wants_api_key = definition.paste_prompt_required and definition.paste_is_api_key
+    wants_credential = definition.paste_prompt_required and not definition.paste_is_api_key
+    if wants_api_key:
+        prompt = "Paste your API key here (empty to cancel): "
+    elif wants_credential:
+        prompt = "Paste credential or file path (empty to cancel): "
+    else:
+        prompt = "Paste the code here (empty to cancel): "
+    # A prompt opened AFTER the browser/paste race is decided is a follow-up
+    # question (Vertex asks for a project ID); its text arrived via
+    # ``on_progress`` just before, so it gets a neutral input line rather than
+    # "Paste the code here". Reset by ``on_input_rejected``: a rejected paste is
+    # re-offered as the same fallback.
+    race: dict[str, Any] = {"over": False}
+    follow_up_prompt = "Enter value (empty to cancel): "
+
+    def read_credential() -> str:
+        """Read a possibly multi-line credential (JSON object) or a file path.
+
+        Piped stdin is read whole (bounded) so ``cat sa.json | lop login
+        google-vertex-sa`` works. On a terminal, echo is turned off -- the JSON
+        carries a private key that must not land in scrollback -- and lines are
+        gathered until the pasted object parses, a blank line, EOF or the cap.
+        Echo is toggled with TCSANOW, not getpass's TCSAFLUSH, which would
+        discard the rest of a multi-line paste between lines.
+        """
+        if not sys.stdin.isatty():
+            print(prompt, end="", file=sys.stderr, flush=True)
+            return sys.stdin.read(MAX_CREDENTIAL_PASTE_CHARS)
+        print(prompt, end="", flush=True)
+        with _echo_disabled():
+            first = sys.stdin.readline()
+            if not first:
+                raise EOFError
+            buffer = first
+            if first.strip().startswith("{"):
+                while len(buffer) <= MAX_CREDENTIAL_PASTE_CHARS:
+                    try:
+                        json.loads(buffer)
+                        break
+                    except ValueError:
+                        pass
+                    line = sys.stdin.readline()
+                    if not line or not line.strip():
+                        break
+                    buffer += line
+        print()  # echo was off, so the user's Enter left no newline
+        return buffer
 
     def read_line() -> str:
         """Read the pasted value, hiding it when it is a long-lived secret.
@@ -111,6 +162,10 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         check their paste landed whole. Hiding it would cost real legibility to
         protect a value that is not worth protecting.
         """
+        if race["over"]:
+            return input(follow_up_prompt)
+        if wants_credential:
+            return read_credential()
         if wants_api_key:
             if not sys.stdin.isatty():
                 # A PIPED key (`echo $KEY | lop login deepseek`, a provisioning
@@ -168,13 +223,17 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
+        reader["future"] = future
 
-        def deliver(setter: Callable[[], None]) -> None:
+        def deliver(setter: Callable[[asyncio.Future[str]], None]) -> None:
             # The future is resolved from the LOOP thread; a cancelled future
             # (the login ended while the user was still typing) is left alone
-            # rather than raising InvalidStateError into a dead flow.
-            if not future.done():
-                setter()
+            # rather than raising InvalidStateError into a dead flow. The
+            # CURRENT prompt's future is read at delivery time, so a reader
+            # adopted by a follow-up prompt (below) answers that prompt.
+            current = reader["future"]
+            if current is not None and not current.done():
+                setter(current)
 
         def worker() -> None:
             try:
@@ -185,7 +244,8 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
                 # lambda that referenced it directly would raise NameError on
                 # the loop thread instead of delivering the error.
                 error = raised
-                loop.call_soon_threadsafe(deliver, lambda: future.set_exception(error))
+                reader["thread"] = None
+                loop.call_soon_threadsafe(deliver, lambda f: f.set_exception(error))
             except BaseException:
                 # `SystemExit`/`KeyboardInterrupt` raised INSIDE this reader
                 # belong to interpreter teardown on this thread, not to the
@@ -197,21 +257,41 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
                 # future unresolved lets that answer win (agent review round 1,
                 # nit-1). EOF still arrives as the `EOFError` handled below.
                 logger.debug("login paste reader exited during teardown", exc_info=True)
+                reader["thread"] = None
             else:
                 read = value
-                loop.call_soon_threadsafe(deliver, lambda: future.set_result(read))
+                reader["thread"] = None
+                loop.call_soon_threadsafe(deliver, lambda f: f.set_result(read))
 
-        threading.Thread(target=worker, daemon=True, name="lo-login-paste").start()
+        alive = reader["thread"]
+        if alive is not None and alive.is_alive():
+            # The race's fallback reader is still parked in ``input()`` (the
+            # browser callback won). A second thread would compete with it for
+            # the same terminal line, and whichever lost would swallow the
+            # user's answer into a dead future -- so the parked reader is
+            # ADOPTED: it delivers to this prompt's future instead.
+            print(follow_up_prompt, end="", flush=True)
+        else:
+            thread = threading.Thread(target=worker, daemon=True, name="lo-login-paste")
+            reader["thread"] = thread
+            thread.start()
         try:
             value = await future
         except (EOFError, KeyboardInterrupt):
             return None
+        finally:
+            race["over"] = True
         return value.strip() or None
 
+    def on_input_rejected() -> None:
+        race["over"] = False
+
+    reader: dict[str, Any] = {"thread": None, "future": None}
     manual_input = on_manual_code_input if definition.accepts_paste_prompt else None
     return LoginCallbacks(
         on_auth_url=on_auth_url,
         on_progress=on_progress,
+        on_input_rejected=on_input_rejected,
         on_manual_code_input=manual_input,
         displays_warnings=True,
     )
@@ -252,6 +332,26 @@ async def _login_or_cancel(login: Any, callbacks: LoginCallbacks, aborted: Any) 
             if not task.done():
                 task.cancel()
         await asyncio.gather(login_task, abort_task, return_exceptions=True)
+
+
+@contextlib.contextmanager
+def _echo_disabled() -> Iterator[None]:
+    """Turn terminal echo off for a hidden multi-line read; no-op off POSIX TTYs."""
+    try:
+        import termios
+
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+    except Exception:  # noqa: BLE001 — not a POSIX terminal: read with echo
+        yield
+        return
+    hidden = list(saved)
+    hidden[3] = hidden[3] & ~termios.ECHO
+    termios.tcsetattr(fd, termios.TCSANOW, hidden)
+    try:
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, saved)
 
 
 @contextlib.contextmanager

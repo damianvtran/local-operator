@@ -8551,14 +8551,24 @@ def cost_for_usage(
         output *= 1.5
     elif (
         model_info.long_context_threshold
-        and raw_input > model_info.long_context_threshold
+        and (
+            # The tier threshold is measured against the FULL prompt. Where
+            # cached tokens are reported inside ``input_tokens`` (Google,
+            # Vertex, OpenAI-style receipts) the raw input already is the full
+            # prompt; Anthropic reports cache reads/writes as disjoint buckets,
+            # so a mostly-cached 210k prompt would show only ~10k input and
+            # silently miss the >200k tier if we compared raw input alone.
+            raw_input
+            if _cache_tokens_are_inside_input(provider)
+            else raw_input + read + written
+        )
+        > model_info.long_context_threshold
         and (model_info.long_context_input_price or model_info.long_context_output_price)
     ):
-        # Tiered long-context pricing (e.g. Google/Vertex >200k prompt tokens):
-        # threshold is evaluated against the FULL prompt size (``raw_input``)
-        # before subtracting cached tokens, and once crossed the entire request
-        # bills at the long-context tier rates (input, output including thinking
-        # tokens, and cached content reads).
+        # Tiered long-context pricing (e.g. Google/Vertex/Anthropic >200k
+        # prompt tokens): once crossed the entire request bills at the
+        # long-context tier rates (input, output including thinking tokens,
+        # and cached content reads/writes).
         lc_input = model_info.long_context_input_price or model_info.input_price
         lc_output = model_info.long_context_output_price or model_info.output_price
         lc_cache_read = model_info.long_context_cache_reads_price
@@ -8584,11 +8594,13 @@ def cost_for_usage(
         # cannot create more billed tokens than the total write count. Other
         # providers and unknown duration remain on their existing quoted rate.
         one_hour = min(written, _usage_field(usage, "cache_write_1h_tokens"))
-        write_rate = model_info.cache_writes_price or model_info.input_price
+        # Use the tier actually billed above: on a >200k request the 1h write
+        # surcharge is 2x the long-context input rate, not the base rate.
+        write_rate = effective_info.cache_writes_price or effective_info.input_price
         cost += (
             one_hour
-            * (2 * model_info.input_price - write_rate)
-            * tariff.scale_for(model_info, price_moment)
+            * (2 * effective_info.input_price - write_rate)
+            * tariff.scale_for(effective_info, price_moment)
             / 1_000_000.0
         )
     return cost

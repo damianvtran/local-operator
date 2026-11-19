@@ -20,7 +20,11 @@ from local_operator.clients.openrouter import (
 from local_operator.env import get_env_config
 from local_operator.model import discovery
 from local_operator.model.discovery import DiscoveredModel, merge_models
-from local_operator.model.registry import anthropic_models, deepseek_models, google_models
+from local_operator.model.registry import (
+    anthropic_models,
+    deepseek_models,
+    google_models,
+)
 from local_operator.server.app import app
 
 
@@ -738,3 +742,55 @@ def test_anthropic_without_a_cached_document_still_lists_the_registry(
     assert BUNDLED_ANTHROPIC_ID in by_id, sorted(by_id)
     assert by_id[BUNDLED_ANTHROPIC_ID]["info"]["input_price"] == 2.0
     assert fetched.calls == ["anthropic"], "a cold cache must consult the live endpoint"
+
+
+def test_vertex_http_catalogue_builds_no_provider_controller(
+    client, mock_credential_manager, monkeypatch
+):
+    """MINOR 1: the Vertex branch reads the store directly (like anthropic/deepseek)
+    instead of constructing a ProviderController per request that nobody closed."""
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("ProviderController must not be built for google-vertex")
+
+    monkeypatch.setattr("local_operator.server.routes.models.ProviderController", forbidden)
+    monkeypatch.setattr(
+        "local_operator.server.routes.models.available_models",
+        lambda provider, **kw: ([DiscoveredModel(id="gemini-4-neon")], "ok"),
+    )
+    monkeypatch.setattr(
+        "local_operator.server.routes.models._enrich_prices", lambda listed, **_kw: {}
+    )
+    response = client.get("/v1/models?provider=google-vertex")
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()["result"]["models"]] == ["gemini-4-neon"]
+
+
+@pytest.mark.asyncio
+async def test_vertex_listing_credential_passes_oauth_project_and_falls_back_to_key(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from local_operator.server.routes.models import _vertex_listing_credential
+
+    monkeypatch.delenv("GOOGLE_VERTEX_API_KEY", raising=False)
+
+    class Store:
+        def __init__(self, access, key):
+            self._access, self._key = access, key
+
+        async def get_catalogue_access(self, provider):
+            assert provider == "google-vertex"
+            return self._access
+
+        async def get_api_key(self, provider, **_kw):
+            return self._key
+
+    oauth = SimpleNamespace(
+        kind="oauth", access_token="ya29.t", raw={"project_id": "corp-proj"}, org_id=None
+    )
+    oauth_store: Any = Store(oauth, None)
+    key_store: Any = Store(None, "AQ.key")
+    assert await _vertex_listing_credential(oauth_store) == ("ya29.t", True, "corp-proj")
+    assert await _vertex_listing_credential(key_store) == ("AQ.key", False, None)

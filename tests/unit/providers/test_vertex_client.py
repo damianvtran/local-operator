@@ -204,7 +204,7 @@ async def test_vertex_key_check_posts_count_tokens(
 
 def test_vertex_registry_documents_and_model_tables() -> None:
     from local_operator.model.defaults import suggested_model_for
-    from local_operator.model.prices import OPENROUTER_NAMESPACE, _PRICE_CATALOGUE_KEYS
+    from local_operator.model.prices import _PRICE_CATALOGUE_KEYS, OPENROUTER_NAMESPACE
     from local_operator.model.registry import get_model_info
 
     primary = get_provider_definition("google-vertex")
@@ -241,7 +241,8 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
     from local_operator.providers.auth_store import AuthStore
     from local_operator.server.dependencies import get_config_manager
     from local_operator.server.desktop import require_desktop
-    from local_operator.server.routes.auth import get_desktop_auth, router as auth_router
+    from local_operator.server.routes.auth import get_desktop_auth
+    from local_operator.server.routes.auth import router as auth_router
     from local_operator.server.utils.desktop_auth import DesktopAuth
 
     cfg_dir = tmp_path / "cfg"
@@ -455,9 +456,7 @@ async def test_vertex_listing_and_catalogue_credentials_pass_project_id(
         assert is_oauth is True
         assert project_id == "minerva-vertex"
 
-        cat_token, cat_is_oauth, cat_project = _catalogue_credential(
-            "google-vertex", base=tmp_path
-        )
+        cat_token, cat_is_oauth, cat_project = _catalogue_credential("google-vertex", base=tmp_path)
         assert cat_token == "ya29.vertex-token"
         assert cat_is_oauth is True
         assert cat_project == "minerva-vertex"
@@ -632,3 +631,156 @@ def test_vertex_catalogue_search_ranks_vertex_and_gemini_4_neon() -> None:
     assert [r.selector for r in neon_matches] == ["google-vertex/gemini-4-neon"]
     flash_matches = rank_rows(rows, "gemini 3.8")
     assert [r.selector for r in flash_matches] == ["google-vertex/gemini-3.8-flash"]
+
+
+# --- Round 1 remediation regressions -------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"project_id": "minerva-vertex", "location": "attacker.com/x#"},
+        {"project_id": "../other", "location": "global"},
+        {"project_id": "proj/../../x", "location": "us-central1"},
+        {"project_id": "minerva-vertex", "location": "us-central1.evil.example"},
+    ],
+)
+async def test_vertex_client_rejects_host_or_path_injection(raw: dict[str, str]) -> None:
+    """MAJOR 2: stored project/location can never redirect the bearer token."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=_sse_body())
+
+    access = OAuthAccess(
+        access_token="ya29.secret",
+        credential_id=9,
+        kind="oauth",
+        raw={**raw, "auth_mode": "oauth"},
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = GoogleClient(base_url=VERTEX_API_URL, vertex=True, http_client=http)
+        with pytest.raises(ProviderError) as exc_info:
+            async for _ in client.stream(_vertex_request(), api_key=None, oauth_access=access):
+                pass
+    assert exc_info.value.status == 400
+    assert exc_info.value.retryable is False
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_vertex_client_percent_encodes_model_id_in_both_auth_modes() -> None:
+    """MAJOR 2: a model id cannot inject a query or path into the Vertex URL."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=_sse_body())
+
+    access = OAuthAccess(
+        access_token="ya29.secret",
+        credential_id=10,
+        kind="oauth",
+        raw={"project_id": "minerva-vertex", "location": "us-central1"},
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = GoogleClient(base_url=VERTEX_API_URL, vertex=True, http_client=http)
+        for key, oauth in ((None, access), ("AQ.key", None)):
+            _ = [e async for e in client.stream(_vertex_request("m?x=1/../y"), key, oauth)]
+
+    assert len(seen) == 2
+    assert seen[0].url.host == "us-central1-aiplatform.googleapis.com"
+    assert seen[1].url.host == "aiplatform.googleapis.com"
+    for request in seen:
+        assert "m%3Fx%3D1%2F..%2Fy:streamGenerateContent" in str(request.url)
+        assert dict(request.url.params) == {"alt": "sse"}
+
+
+def _anthropic_tiered_info() -> Any:
+    from local_operator.model.registry import ModelInfo
+
+    return ModelInfo(
+        id="claude-tiered",
+        name="Claude Tiered",
+        description="",
+        input_price=3.0,
+        output_price=15.0,
+        cache_reads_price=0.3,
+        cache_writes_price=3.75,
+        long_context_threshold=200_000,
+        long_context_input_price=6.0,
+        long_context_output_price=22.5,
+        long_context_cache_reads_price=0.6,
+        long_context_cache_writes_price=7.5,
+    )
+
+
+def test_anthropic_cached_prompt_crossing_200k_bills_long_context_tier() -> None:
+    """MAJOR 3: Anthropic reports cache buckets disjoint from input_tokens, so the
+    tier threshold counts input + read + written."""
+    from local_operator.harness.types import Usage
+    from local_operator.model.configure import cost_for_usage
+
+    usage = Usage(input_tokens=10_000, output_tokens=1_000, cache_read_tokens=200_000)
+    expected = (10_000 * 6.0 + 200_000 * 0.6 + 1_000 * 22.5) / 1_000_000
+    assert cost_for_usage("anthropic", _anthropic_tiered_info(), usage) == pytest.approx(expected)
+
+
+def test_anthropic_1h_cache_write_surcharge_uses_long_context_rates() -> None:
+    """MAJOR 3: the 1h write surcharge is 2x the TIER input rate on a >200k prompt."""
+    from local_operator.harness.types import Usage
+    from local_operator.model.configure import cost_for_usage
+
+    usage = Usage(
+        input_tokens=10_000,
+        output_tokens=0,
+        cache_read_tokens=200_000,
+        cache_write_tokens=10_000,
+        cache_write_1h_tokens=10_000,
+    )
+    base = (10_000 * 6.0 + 200_000 * 0.6 + 10_000 * 7.5) / 1_000_000
+    surcharge = 10_000 * (2 * 6.0 - 7.5) / 1_000_000
+    assert cost_for_usage("anthropic", _anthropic_tiered_info(), usage) == pytest.approx(
+        base + surcharge
+    )
+
+
+def test_vertex_cached_prompt_crossing_200k_bills_long_context_tier() -> None:
+    """MAJOR 3: Google/Vertex count cache reads INSIDE input_tokens; the threshold
+    uses raw input, and plain = input - read."""
+    from local_operator.harness.types import Usage
+    from local_operator.model.configure import cost_for_usage
+    from local_operator.model.registry import ModelInfo
+
+    info = ModelInfo(
+        id="gemini-tiered",
+        name="Gemini Tiered",
+        description="",
+        input_price=1.25,
+        output_price=10.0,
+        cache_reads_price=0.125,
+        long_context_threshold=200_000,
+        long_context_input_price=2.5,
+        long_context_output_price=15.0,
+        long_context_cache_reads_price=0.25,
+    )
+    usage = Usage(input_tokens=210_000, output_tokens=0, cache_read_tokens=150_000)
+    expected = (60_000 * 2.5 + 150_000 * 0.25) / 1_000_000
+    assert cost_for_usage("google-vertex", info, usage) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("provider", ["google", "google-vertex"])
+def test_static_gemini_25_pro_row_carries_long_context_tier(provider: str) -> None:
+    """MINOR 2: a fully described static row never enters models.dev enrichment,
+    so the >200k tier must be on the row itself."""
+    from local_operator.harness.types import Usage
+    from local_operator.model.configure import cost_for_usage
+    from local_operator.model.registry import get_model_info
+
+    info = get_model_info(provider, "gemini-2.5-pro-preview-05-06")
+    assert info.long_context_threshold == 200_000
+    usage = Usage(input_tokens=250_000, output_tokens=1_000)
+    expected = (250_000 * 2.5 + 1_000 * 15.0) / 1_000_000
+    assert cost_for_usage(provider, info, usage) == pytest.approx(expected)

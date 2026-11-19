@@ -1420,6 +1420,16 @@ class OAuthCallbackFlow(ABC):
         finally:
             for task in waiters:
                 task.cancel()
+            # Let the cancelled helper tasks (the paste-code reader above all)
+            # run their cleanup NOW, before ``exchange_token`` runs. A provider
+            # whose exchange opens a second, post-callback prompt (Vertex asks
+            # for a project ID when none is discoverable) otherwise races the
+            # first prompt's teardown: the host's ``finally`` would clear the
+            # NEW prompt's pending state, leaving Desktop with no field to
+            # answer (409 on input) and the CLI with a stale reader.
+            helpers = [task for task in waiters if isinstance(task, asyncio.Task)]
+            if helpers:
+                await asyncio.wait(helpers)
 
         if not done:
             raise LoginTimeoutError(self._timeout_message())

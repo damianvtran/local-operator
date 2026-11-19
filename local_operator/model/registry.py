@@ -1574,6 +1574,13 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=1.25,
         output_price=10.0,
+        # Google's published >200k prompt-token tier for Gemini 2.5 Pro. A fully
+        # described static row never enters models.dev enrichment (see
+        # ``_needs_enrichment``), so the tier must live on the row itself or
+        # long prompts on google / google-vertex silently bill at base rates.
+        long_context_threshold=200_000,
+        long_context_input_price=2.5,
+        long_context_output_price=15.0,
         description=(
             "Google's state-of-the-art multipurpose model, which excels at coding and "
             "complex reasoning tasks"

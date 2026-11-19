@@ -30,6 +30,7 @@ import os
 import re
 import time
 import unicodedata
+import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
@@ -6216,6 +6217,13 @@ class GoogleClient:
         with a Bearer token; API keys (express mode or service-account-bound)
         call the publisher endpoint with ``x-goog-api-key``.
         """
+        # Every path segment is percent-encoded and project/location are
+        # validated: they come from stored credentials and env vars, and a
+        # value like ``attacker.com/x#`` in ``location`` would otherwise be
+        # spliced into the regional HOST and send the bearer token elsewhere.
+        from local_operator.providers.oauth.vertex import LOCATION_RE, PROJECT_ID_RE
+
+        quoted_model = urllib.parse.quote(model_id, safe="")
         headers = {"Content-Type": "application/json"}
         if oauth_access is not None and oauth_access.kind == "oauth":
             raw = oauth_access.raw or {}
@@ -6238,6 +6246,19 @@ class GoogleClient:
                 or (os.environ.get("VERTEX_LOCATION") or "").strip()
                 or "global"
             )
+            if not PROJECT_ID_RE.fullmatch(project_id) or ".." in project_id:
+                raise ProviderError(
+                    400,
+                    f"Invalid Google Vertex AI project ID {project_id[:80]!r}.",
+                    retryable=False,
+                )
+            if not LOCATION_RE.fullmatch(location):
+                raise ProviderError(
+                    400,
+                    f"Invalid Google Vertex AI location {location[:80]!r} "
+                    "(expected 'global' or a region such as 'us-central1').",
+                    retryable=False,
+                )
             # Only synthesize the regional host when the client is on Vertex's
             # default global host; preserve an explicit custom base URL override
             # (gateway, proxy, or test fixture).
@@ -6246,15 +6267,16 @@ class GoogleClient:
             else:
                 host = self._base_url
             url = (
-                f"{host}/v1/projects/{project_id}/locations/{location}"
-                f"/publishers/google/models/{model_id}:streamGenerateContent?alt=sse"
+                f"{host}/v1/projects/{urllib.parse.quote(project_id, safe='')}"
+                f"/locations/{urllib.parse.quote(location, safe='')}"
+                f"/publishers/google/models/{quoted_model}:streamGenerateContent?alt=sse"
             )
             headers["Authorization"] = f"Bearer {oauth_access.access_token}"
             headers["x-goog-user-project"] = project_id
             return url, headers
 
         url = (
-            f"{self._base_url}/v1/publishers/google/models/{model_id}"
+            f"{self._base_url}/v1/publishers/google/models/{quoted_model}"
             ":streamGenerateContent?alt=sse"
         )
         if api_key:
