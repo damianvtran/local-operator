@@ -12,6 +12,7 @@ import { useScrollCues } from "../lib/use-scroll-cues";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
 import { AskRow } from "./ask-row";
+import { BridgeCardBodyPanel, isBridgeCardNotice } from "./bridge-card-body";
 import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
 import { SupplementBlock } from "./supplement-block";
@@ -280,6 +281,18 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 				<ToolRow entry={entry} />
 			);
 		case "notice":
+			/* An inbound Team Bridge card keeps its receipt line and, on a relay
+			   that can answer bodies, gains the body panel under it. The panel
+			   renders nothing on an older relay, so that card is unchanged. */
+			if (isBridgeCardNotice(entry)) {
+				return (
+					<div className="flex min-w-0 flex-col">
+						<NoticeRow entry={entry} />
+						<BridgeCardBodyPanel pid={pid} entryId={entry.id} />
+					</div>
+				);
+			}
+			return <NoticeRow entry={entry} />;
 		case "compaction":
 			return <NoticeRow entry={entry} />;
 		/* THE QUEUED ASK SETTLING (design §4/§5). Both kinds carry structured

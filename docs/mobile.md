@@ -474,6 +474,53 @@ peer-held file is named but not previewed), the phone app's own WebView frame is
 pending its own lane, and static preview URLs are not yet token-enforced (tokens are
 minted and accepted, but a request without one is not refused).
 
+### Team Bridge card bodies (`team_bridge_card_body`) — `GET /api/sessions/{id}/bridge-cards/{entry_id}/body`
+
+An inbound Team Bridge delivery reaches the phone as a `notice` row with
+`custom_type: "team_bridge_message"` (the live arm also sets
+`details.custom_kind`) whose text is only the receipt line
+(`<sender> · <conversation>`, `harness/bridge_copy.py`). The journal never holds
+the body — it is replayed, forked, exported and compacted, and a body there could
+be neither revoked nor kept out of the model's context. The admitted body lives in
+core's display store and is read separately, keyed by that row:
+
+- **Capability**: `capabilities.features.team_bridge_card_body >= 1` on the
+  session-list frame (the same `server/features.py` flag `/v1/capabilities`
+  carries). Absent, a client must not call the route and keeps today's receipt
+  line unchanged.
+- **Auth**: the cookie gate (`gate()`); `401` without it, like every relay route.
+- **Scope**: only a durable user conversation on THIS machine (`404 {"error":
+  "unknown session"}` otherwise, including a peer's remote row) and only an
+  `entry_id` that names a `team_bridge_message` row in it (`404 {"error": "no such
+  bridge card"}` otherwise) — never an arbitrary message id.
+- **Response** (bare JSON, no envelope; `Cache-Control: private, no-store`):
+
+  ```
+  {v: 1,
+   items: [{message_id, conversation_id,
+            state: "admitted" | "pending" | "held" | "refused" | "not_admitted" | "unavailable",
+            body?: str,              // admitted only; UNTRUSTED markdown
+            source?: "local" | "hub",
+            hold?: {class: "awaiting_review" | "transient", held_for_s},
+            reason?: "signed_out" | "other_account" | "not_member" | "deleted" | "hub_unsupported" | "offline"}],
+   more: int}                        // ≤20 items; a coalesced card's rest is counted here
+  ```
+
+- **States are the server's word.** `held` with `hold.class: "transient"` means
+  screening has not run yet (not a moderation decision); any other class is
+  "held by moderation". `refused` comes only from the hub's rejection and carries
+  no reason to show. `reason` qualifies `unavailable` (`deleted` = the message was
+  deleted; `offline` = the computer could not reach Radient). A client maps an
+  unknown state, an `admitted` item without a body, or a malformed frame to
+  unavailable — never to a guessed outcome.
+- **No caching.** Read on each render; revocation (sign-out, leave, account switch,
+  hub delete) must show on the next read. Render the body as data under an
+  "External message · untrusted content" frame.
+
+Desktop twin and resolution order: `docs/DESKTOP_API.md` (`.../bridge-cards/{entry_id}/body`).
+The web relay's card is `mobile/web/src/components/bridge-card-body.tsx` over
+`lib/bridge-card-body.ts`.
+
 ### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
 
 The relay half of "sessions and delegation": the sessions OTHER devices hold,
