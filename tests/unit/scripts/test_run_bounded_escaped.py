@@ -247,6 +247,11 @@ def test_the_module_imports_without_sigkill_and_sweeps_unproven(monkeypatch, no_
     monkeypatch.delattr(signal, "SIGKILL")
     name = "escaped_descendants_without_sigkill"
     spec = importlib.util.spec_from_file_location(name, ed.__file__)
+    # spec_from_file_location returns ModuleSpec | None, and its loader is
+    # Optional too. Asserting BOTH narrows them for the type checker rather than
+    # leaving pyright to flag an unchecked optional at three call sites.
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)  # dataclasses resolve here
     spec.loader.exec_module(module)
