@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from argparse import Namespace
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -93,7 +94,7 @@ def _arm(source: str) -> None:
     assert github_mod.resolve_source(_root()) == source
 
 
-def _github_row(capsys: pytest.CaptureFixture[str]) -> dict:
+def _github_row(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
     assert net_cli._cmd_credentials(Namespace(json=True, network="")) == 0  # noqa: SLF001
     payload = json.loads(capsys.readouterr().out)
     rows = [row for row in payload["shareable"] if row.get("provider") == "github"]
