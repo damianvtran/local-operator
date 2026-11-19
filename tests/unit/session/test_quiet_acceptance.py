@@ -300,6 +300,7 @@ async def wait_for_new_owner_settlement(
 async def test_settlement_observer_does_not_charge_other_loop_work():
     clock = [0.0]
     held = [True]
+    yields = []
     session = SimpleNamespace(
         is_streaming=False, _turn_lock=SimpleNamespace(locked=lambda: held[0])
     )
@@ -310,10 +311,15 @@ async def test_settlement_observer_does_not_charge_other_loop_work():
         return clock[0]
 
     async def other_loop_work(_):
-        clock[0] += SETTLE_CPU_BUDGET_S + 1
-        # The real worker is already complete, but its owner needs another
-        # scheduled step to release the lock (the controlled pre-fix failure).
-        held[0] = False
+        yields.append(held[0])
+        if len(yields) == 1:
+            clock[0] += SETTLE_CPU_BUDGET_S + 1
+            # Keep the lock held for the next CPU-budget check: releasing it
+            # here would let the old total-loop accounting exit untested.
+        else:
+            # The owner's next scheduled step, not the external CPU work,
+            # releases the lock after the observer has rechecked its budget.
+            held[0] = False
 
     await wait_for_new_owner_settlement(
         session,
@@ -326,6 +332,7 @@ async def test_settlement_observer_does_not_charge_other_loop_work():
     )
     assert clock[0] > SETTLE_CPU_BUDGET_S
     assert not held[0]
+    assert yields == [True, True]
 
 
 @pytest.mark.asyncio
