@@ -102,7 +102,6 @@ DESCRIPTIONS: dict[str, str] = {
     "openai-compatible": "Any OpenAI-compatible endpoint you run",
     "elevenlabs": "Speech only (voice on the phone); not for chat",
     "openai-key": "Speech only (voice); not for chat",
-    "groq": "Speech only (voice); not for chat",
     "typesafe": "Classification only; not for chat",
     "fal": "Media only (image and video); not for chat",
 }
@@ -171,7 +170,6 @@ PICKER_DESCRIPTIONS: dict[str, str] = {
     "openai-compatible": "Your own OpenAI-compatible endpoint",
     "elevenlabs": "Speech only; not for chat",
     "openai-key": "Speech only; not for chat",
-    "groq": "Speech only; not for chat",
     "typesafe": "Classification only; not for chat",
     "fal": "Media only; not for chat",
 }
@@ -221,7 +219,6 @@ PICKER_LABELS: dict[str, str] = {
     "openai-compatible": "Your endpoint",
     "elevenlabs": "ElevenLabs",
     "openai-key": "OpenAI speech",
-    "groq": "Groq",
     "typesafe": "Typesafe",
     "fal": "FAL",
 }
