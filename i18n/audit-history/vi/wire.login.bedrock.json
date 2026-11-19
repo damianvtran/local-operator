@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "wire.login.bedrock",
+  "history_sha256": "9186501e3147f0c2dae2756aca0f4a79f5afc0a73e4d40983f53e065c4a112e5",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "wire.login.bedrock",
+      "source_sha256": "9e9bab9f80d4422057d9c41303bb18da6783b0e3c75225c800a93206845d5025",
+      "context_sha256": "5c8a9309e5e4b10e148c1bb5a2f4384627c4b97ee62e71cc0e487ab23f7f0e99",
+      "target_sha256": "2193397725ea99bc194610c39d425ac17fa8a1f7c0acd6ac0e0ac01d574a5ddf",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job c1195a706c14, commit fc78a78d8fd6",
+        "session": "c1195a706c14",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session a9c39601124d; did not author these translations and read no translator scratchpad",
+        "session": "a9c39601124d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) round 1: independent audit of new namespace wire.login.bedrock, 67/67 keys, against en 9e9bab9f80d4 with context sidecar. Correction applied by the auditor: session_valid 'đã đăng nhập đến {expires}' -> 'đăng nhập còn hiệu lực đến {expires}' (reason: 'đăng nhập đến' can read as 'signed in to {expires}'; en means valid until the timestamp). Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: khu vực matches audited bedrock term; hồ sơ for profile per style guide; thông tin xác thực per glossary; plural other-only; 'token'/'terminal'/'worker' kept English per kept-English list. Findings: blocker 0, major 0, minor 1 (corrected above). Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r1"
+    }
+  ]
+}

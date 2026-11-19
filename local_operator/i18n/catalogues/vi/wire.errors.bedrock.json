@@ -19,7 +19,7 @@
   "wire.errors.bedrock.region_invalid": "{region} không phải là mã khu vực AWS hợp lệ.",
   "wire.errors.bedrock.secret_missing": "Thông tin xác thực Amazon Bedrock đã lưu không còn trong kho được mã hóa. Hãy chạy {command} để kết nối lại.",
   "wire.errors.bedrock.session_expired": "Phiên đăng nhập AWS của hồ sơ {profile} đã hết hạn. Hãy chạy {command}, rồi thử lại.",
-  "wire.errors.bedrock.sso_busy": "Một lượt đăng nhập AWS cho hồ sơ {profile} đang chạy.",
+  "wire.errors.bedrock.sso_busy": "Hồ sơ {profile} đã có một lượt đăng nhập AWS đang chạy.",
   "wire.errors.bedrock.sso_headless": "Máy chủ này không thể mở trình duyệt cho bạn nên không thể chạy đăng nhập AWS tại đây. Hãy tự chạy {command}.",
   "wire.errors.bedrock.sso_not_applicable": "Hồ sơ {profile} không dùng IAM Identity Center hay aws login.",
   "wire.errors.bedrock.use_aws_panel": "Amazon Bedrock kết nối qua bảng AWS riêng: hãy chọn phương thức, khu vực và hồ sơ hoặc khóa ở đó."

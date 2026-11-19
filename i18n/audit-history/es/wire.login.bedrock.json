@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.login.bedrock",
+  "history_sha256": "dbcc86e908a712ddaba6f080a9e4e002a48507c139982355d6cde9565f6c38e8",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.login.bedrock",
+      "source_sha256": "9e9bab9f80d4422057d9c41303bb18da6783b0e3c75225c800a93206845d5025",
+      "context_sha256": "5c8a9309e5e4b10e148c1bb5a2f4384627c4b97ee62e71cc0e487ab23f7f0e99",
+      "target_sha256": "b62dafb1ba46b351c52689a45763777673f8d2270fb295d16871ed1995ebcec2",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job c1195a706c14, commit fc78a78d8fd6",
+        "session": "c1195a706c14",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session a9c39601124d; did not author these translations and read no translator scratchpad",
+        "session": "a9c39601124d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) round 1: independent audit of new namespace wire.login.bedrock, 67/67 keys, against en 9e9bab9f80d4 with context sidecar. Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: tú address; credenciales; región/perfil; plural arms one/many/other per glossary; region_default_desc 'Predeterminada' agrees with región. Nit (not changed): field_hint names the key 'Intro' (Spain keyboard label) while some older es TUI hints write 'enter'; idiomatic, not a defect. Findings: blocker 0, major 0, nit 1 (noted, not changed). Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r1"
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "wire.login.bedrock",
+  "history_sha256": "b7d7b7536f68548b1ecfa8b897da0ccb7b1b3ae8d3e760656671234b679435d5",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "wire.login.bedrock",
+      "source_sha256": "9e9bab9f80d4422057d9c41303bb18da6783b0e3c75225c800a93206845d5025",
+      "context_sha256": "5c8a9309e5e4b10e148c1bb5a2f4384627c4b97ee62e71cc0e487ab23f7f0e99",
+      "target_sha256": "f8a0d9432336990fd034b901b1521e55e7b0d723ceccb5e62bbcd6077229ffea",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job c1195a706c14, commit fc78a78d8fd6",
+        "session": "c1195a706c14",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session a9c39601124d; did not author these translations and read no translator scratchpad",
+        "session": "a9c39601124d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) round 1: independent audit of new namespace wire.login.bedrock, 67/67 keys, against en 9e9bab9f80d4 with context sidecar. Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: учётные данные per glossary; регион; сессия per style guide (Токен сессии, сессия продлевается); plural one/few/many/other with correct case in every arm (профиль/профиля/профилей/профиля); impersonal constructions per style guide. Findings: blocker 0, major 0. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r1"
+    }
+  ]
+}

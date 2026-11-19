@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.errors.bedrock",
-  "history_sha256": "7c2416a361a7e3dd39d0c2c54bf6a158a09c698c201b81fb74b946c15c8cb1e0",
+  "history_sha256": "e5e2fe1acd997e1ac0ef6b0960c065c78c5e117f2f3635c3ab184e07ef464c45",
   "entries": [
     {
       "locale": "hi",
@@ -105,6 +105,40 @@
       "status": "passed",
       "note": "PR #4266 (Amazon Bedrock provider) round 3: independent audit of the one new key wire.errors.bedrock.iam_denied (commit fb916b136690) against en f3ea9f43f7f8 with context sidecar 472b378f897e. Mechanical: key set equals en (15/15); placeholders {action},{resource} preserved; literals AWS, IAM verbatim; NFC; no manual bidi controls; locale punctuation per style guide. Semantic: faithful to en and context (IAM policy denial of one action on one ARN, remedy = admin grant in IAM, other models may work; not console model access); 'identity' term matches the previously audited access_denied key in this locale; address form per style guide. Carry-forward: the other 14 keys are byte-identical in en and in this locale's target versus the pr4266-r1 audited state (diff f959aa8f7229..fb916b136690 adds only the iam_denied line and its context entry), so that audit carries onto the new en hash. No findings on iam_denied. Native-speaker review and rendered-frame certification not claimed.",
       "round": "pr4266-r3"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "bf06ba5e85715a9d8bb67aa51b5dc732d9c8ef1f6c15b4c0f280aef6147251b0",
+      "context_sha256": "c9dac394ce658fd92179e9187aa8c5760bcd291bbf9da9a31af16d03e76d7671",
+      "target_sha256": "f4671e4e04fb41c8a0939e7cc52d8da0482e5a3e75ed44272ba96780102ddd5b",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job c1195a706c14, commit fc78a78d8fd6",
+        "session": "c1195a706c14",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session a9c39601124d; did not author these translations and read no translator scratchpad",
+        "session": "a9c39601124d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) round 1: delta re-audit of wire.errors.bedrock after en moved b004444c47de -> bf06ba5e8571 by exactly 9 added keys (aws_cli_missing, connection_missing, context_failed, input_invalid, region_invalid, sso_busy, sso_headless, sso_not_applicable, use_aws_panel). Proved vs 11f330be58f8 (last audited pr4266-r1 rows): the 14 previously audited keys are value-identical in en, this locale and the en context sidecar; this locale adds exactly the same 9 keys. All 9 new keys read in full against en and context. Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: क्षेत्र matches audited bedrock term; सत्र per style guide; क्रेडेंशियल per glossary; feminine प्रोफ़ाइल consistent with audited profile_not_found (मिली); साइन-इन (noun) vs साइन इन (verb/state) used consistently, mirroring en sign-in/sign in; plural one/other. Findings: blocker 0, major 0. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r1"
     }
   ]
 }

@@ -47,7 +47,7 @@
   "wire.login.bedrock.session_missing": "chưa đăng nhập",
   "wire.login.bedrock.session_refreshable": "phiên tự động gia hạn",
   "wire.login.bedrock.session_token_prompt": "Token phiên (không bắt buộc)",
-  "wire.login.bedrock.session_valid": "đã đăng nhập đến {expires}",
+  "wire.login.bedrock.session_valid": "đăng nhập còn hiệu lực đến {expires}",
   "wire.login.bedrock.sso_browser_opened": "Trình duyệt đã được mở để đăng nhập AWS. Nếu trình duyệt không mở, hãy truy cập {url}",
   "wire.login.bedrock.sso_cancelled": "Đã hủy đăng nhập AWS.",
   "wire.login.bedrock.sso_cli_missing": "Máy này chưa cài AWS CLI (aws) nên không thể chạy đăng nhập. Hãy cài đặt AWS CLI, hoặc chọn cách kết nối khác.",

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.errors.bedrock",
-  "history_sha256": "f9f315c14aa3811bb2deda869db0924cbeaf55e611f4639bed6c6485992e91dd",
+  "history_sha256": "f6f3458f23e6fd1a9a46bfc6eeb0684f464d2fa7bc2ed345991430aa08a65a07",
   "entries": [
     {
       "locale": "zh-CN",
@@ -115,6 +115,40 @@
       "status": "passed",
       "note": "PR #4266 (Amazon Bedrock provider) round 3: independent audit of the one new key wire.errors.bedrock.iam_denied (commit fb916b136690) against en f3ea9f43f7f8 with context sidecar 472b378f897e. Mechanical: key set equals en (15/15); placeholders {action},{resource} preserved; literals AWS, IAM verbatim; NFC; no manual bidi controls; locale punctuation per style guide. Semantic: faithful to en and context (IAM policy denial of one action on one ARN, remedy = admin grant in IAM, other models may work; not console model access); 'identity' term matches the previously audited access_denied key in this locale; address form per style guide. Carry-forward: the other 14 keys are byte-identical in en and in this locale's target versus the pr4266-r1 audited state (diff f959aa8f7229..fb916b136690 adds only the iam_denied line and its context entry), so that audit carries onto the new en hash. zh-B3 (nit): iam_denied '你的AWS身份' keeps the possessive pronoun the zh-CN guide prefers dropped (same class as deferred zh-B1); '当前AWS身份' would read more native; meaning intact — deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
       "round": "pr4266-r3"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "bf06ba5e85715a9d8bb67aa51b5dc732d9c8ef1f6c15b4c0f280aef6147251b0",
+      "context_sha256": "c9dac394ce658fd92179e9187aa8c5760bcd291bbf9da9a31af16d03e76d7671",
+      "target_sha256": "bfb242045f3c854720d43e4abec90cf135e16ec7e06d68d769e92f25dcfe191c",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job c1195a706c14, commit fc78a78d8fd6",
+        "session": "c1195a706c14",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session a9c39601124d; did not author these translations and read no translator scratchpad",
+        "session": "a9c39601124d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) round 1: delta re-audit of wire.errors.bedrock after en moved b004444c47de -> bf06ba5e8571 by exactly 9 added keys (aws_cli_missing, connection_missing, context_failed, input_invalid, region_invalid, sso_busy, sso_headless, sso_not_applicable, use_aws_panel). Proved vs 11f330be58f8 (last audited pr4266-r1 rows): the 14 previously audited keys are value-identical in en, this locale and the en context sidecar; this locale adds exactly the same 9 keys. All 9 new keys read in full against en and context. Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: 凭据 and 区域 match audited bedrock terms; 配置文件 for profile; no space between CJK and Latin runs and …… ellipsis per style guide; full-width punctuation; trailing space kept after ： in choice prompts; plural other-only; AWS terms 代入角色/秘密访问密钥/Web身份 follow AWS China docs usage. Findings: blocker 0, major 0. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r1"
     }
   ]
 }
