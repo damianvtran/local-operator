@@ -523,10 +523,10 @@ def test_models_dev_states_audio_input_three_valued() -> None:
 
 
 def test_the_price_capture_version_carries_the_audio_field() -> None:
-    """Version 3 adds ``input_modalities`` — a FIELD the version-2 writer never
-    recorded — so an existing document must be refetched, not served with every
-    row reading as silent."""
-    assert PRICE_CATALOGUE_CAPTURE == 3
+    """Version 4 adds ``google-vertex`` and ``context_over_200k`` on top of
+    version 3's ``input_modalities``, so an existing cached projection is
+    refetched once instead of serving missing Vertex or >200k tier prices."""
+    assert PRICE_CATALOGUE_CAPTURE == 4
 
 
 # -- the ranked chain: models.dev, then OpenRouter, then nothing ----------------

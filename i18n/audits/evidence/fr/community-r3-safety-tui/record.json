@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "audit_id": "community-round-3-fr-tui.community-08c6dfffd961",
+  "audit_kind": "bounded_independent_second_safety_audit",
+  "repository": "damianvtran/local-operator",
+  "pr": 4221,
+  "locale": "fr",
+  "namespace": "tui.community",
+  "audit_date": "2026-11-18",
+  "audited_revision": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+  "candidate_tree": "13010a25c61439070020148c7f01d0a6261a9f09",
+  "combined_patch_sha256": "7a520bb614cd7694422cd7d955c3b400b830a5e3d2f1bb7b6ae0d74a291db17f",
+  "scope": "Approval-card keys only. Short cues say read first; the roomy cue and unread viewer explicitly say read the whole post/to the end. The two short cues do not literally say “full” in English or target; they do not suggest the preview counts as read.",
+  "auditor": {
+    "agent": "reviewer",
+    "model": "openai/gpt-6.2-sol",
+    "date": "2026-11-18",
+    "session": "08c6dfffd961",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "first_auditors": [
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "c739715f0519",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/fr/community-primary/record.json",
+      "sha256": "bb9c8457e09595da05d211f3cb2b410d07dcae34848903ed5cca8d539a2ca3e2"
+    },
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "837443aac8da",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/fr/community-delta-r2-primary/record.json",
+      "sha256": "14fc9798ffb954509f51c217bbfa8d227d44967a3d2b66991abb3a9b451ae8f2"
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.community.json",
+      "sha256": "67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.community.context.json",
+      "sha256": "d3030886a774ad2ed4cdb2f14e9969e8eb2c3afb2b9cd416c116d20cfa9abd88"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/tui.community.json",
+      "sha256": "c3327521ea82a24507236b0087c21a2b2727783327b62423481d1e20c3885dd2"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "deferred_non_gating_finding_ids": [
+      "R3-M1"
+    ]
+  },
+  "keys_semantically_audited": [
+    "tui.community.post_card_cut",
+    "tui.community.post_allow_unread",
+    "tui.community.post_card_more",
+    "tui.community.post_view_keys",
+    "tui.community.post_view_keys_read"
+  ],
+  "per_key": {
+    "tui.community.post_card_cut": {
+      "en": "… v reads the post",
+      "target": "… v affiche la publication",
+      "verdict": "pass",
+      "reason": "v affiche: v displays the missing post, not an approval."
+    },
+    "tui.community.post_allow_unread": {
+      "en": "Read the post, then allow",
+      "target": "Lire la publication, puis autoriser",
+      "verdict": "pass",
+      "reason": "Lire … puis autoriser: reading comes first; the label does not claim to approve now."
+    },
+    "tui.community.post_card_more": {
+      "en": "… {count, plural, one {# more line} other {# more lines}} of the post · v reads it all (Allow needs that first)",
+      "target": "… {count, plural, one {# ligne de plus} many {# de lignes de plus} other {# lignes de plus}} dans la publication · v la lit en entier (requis avant « Allow »)",
+      "verdict": "pass",
+      "reason": "la lit en entier / requis avant: full post is necessary before Allow, not just opening the viewer."
+    },
+    "tui.community.post_view_keys": {
+      "en": "↑↓ pgup pgdn scroll · read to the end, then esc back",
+      "target": "↑↓ pgup pgdn défiler · lisez jusqu’au bout, puis esc retour",
+      "verdict": "pass",
+      "reason": "lisez jusqu’au bout, puis esc: read to the end before going back."
+    },
+    "tui.community.post_view_keys_read": {
+      "en": "✓ Read in full · esc back to Allow or Deny",
+      "target": "✓ Lu en entier · esc revenir à « Allow » ou « Deny »",
+      "verdict": "pass",
+      "reason": "Lu en entier states completion of reading only; esc returns to the two choices."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/community-r3-safety-tui/report.md",
+      "sha256": "5e8cf6fea4b2fa4a7facaf75af537caf48b5143a250bd8f41a3803bfada0e664"
+    }
+  ]
+}

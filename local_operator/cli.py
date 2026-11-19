@@ -356,6 +356,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
             "kimi",
             "alibaba",
             "google",
+            "google-vertex",
             "mistral",
             "openrouter",
             "xai",
@@ -1260,6 +1261,15 @@ def build_cli_parser() -> LocalizedArgumentParser:
     )
 
     add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
+
+    # `lop community …` (RFC v2.4; the TUI doc's "Commands for scripts"). Hidden
+    # from `lop --help` while the community ships dark: its subparser takes no
+    # `help=` (the `resume-click` idiom) and every verb refuses unless
+    # LOCAL_OPERATOR_COMMUNITY=1. The CLI module defers the client (httpx) to
+    # the verb, so registration stays cheap on every `lop` start.
+    from local_operator.community.cli import add_parser as add_community_parser
+
+    add_community_parser(subparsers, parent_parser)
 
     # `lop disk reclaim` (issue #2676): the sanctioned disk-pressure front door.
     # Stdlib-only registration for the same reason as `network`: the planner is
@@ -19046,6 +19056,10 @@ def main() -> int:
             from local_operator.tunnels.cli import main as tunnel_main
 
             return tunnel_main(args)
+        elif args.subcommand == "community":
+            from local_operator.community.cli import main as community_main
+
+            return community_main(args)
         elif args.subcommand == "team-bridge":
             if getattr(args, "team_bridge_command", None) == "avatar":
                 from local_operator.team_bridge.cli import main as team_bridge_avatar

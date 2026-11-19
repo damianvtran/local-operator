@@ -2579,6 +2579,13 @@ class ToolContext(BaseModel):
     #: (team-bridge-egress.md: "Propagation between sessions").
     #: Tighten-only: a child inherits its parent's taint for life.
     inherited_bridge_taint: bool = False
+    #: The session's community read flag (``community/taint.py``
+    #: ``CommunityTaint``, RFC v2.4 §5.9), owned by the session and injected
+    #: per turn. The bridge tool's ``community_post`` reads it to tell the owner
+    #: why a standing permission does not apply; ``None`` on a host that does
+    #: not track it, which then reads as tainted (fail closed). Host state,
+    #: never serialized.
+    community_taint: Any = Field(default=None, exclude=True, repr=False)
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
@@ -2651,6 +2658,16 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    #: The session's BASE approval gate, present even under ``--yolo`` (where
+    #: ``request_approval`` is ``None`` because yolo skips the tool gate). Only
+    #: for a person-only card a tool raises itself
+    #: (``harness.approval.never_auto_approved``: the community post): every
+    #: base gate routes those to a person or refuses (the TUI card, desktop
+    #: serving, the yolo/tty gate, SDK ``auto()``), so handing it over lets the
+    #: owner at the keyboard answer instead of the run refusing outright.
+    #: ``None`` on hosts that do not set it; callers fall back to
+    #: ``request_approval``. Host state, never serialized.
+    person_approval: ApprovalGate | None = Field(default=None, exclude=True, repr=False)
     # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
     # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
     # store is a user decision, and a model must not be able to stamp its own
