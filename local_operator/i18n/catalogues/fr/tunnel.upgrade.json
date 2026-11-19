@@ -1,0 +1,5 @@
+{
+  "tunnel.upgrade.client.label": "Mise à jour du client de tunnel requise",
+  "tunnel.upgrade.client.guidance": "Radient nécessite un client de tunnel prenant en charge le relais. Exécutez {update_command}, supprimez le paramètre forcé {override} de config.yml s’il est défini, puis reconnectez-vous avec {reconnect_command}. Se reconnecter à son compte ou modifier la facturation ne résoudra pas ce problème.",
+  "tunnel.upgrade.client.plain": "Mettez à jour Local Operator vers une version prenant en charge les tunnels qui passent uniquement par un relais. Dans config.yml, supprimez le paramètre forcé tunnel.transport: cloudflare s’il est défini, puis reconnectez cet ordinateur. Se reconnecter à son compte ou modifier la facturation ne résoudra pas ce problème."
+}
