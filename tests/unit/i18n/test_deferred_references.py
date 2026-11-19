@@ -92,6 +92,44 @@ def test_no_deferred_namespace_gained_a_reference(
     )
 
 
+def test_bedrock_deferred_copy_remains_resolvable_without_the_eager_bundle(monkeypatch) -> None:
+    """Login callbacks and refusal envelopes must not need a client catalogue."""
+    import inspect
+
+    from local_operator.i18n import resolve
+    from local_operator.i18n.keys import wire_login_bedrock
+    from local_operator.i18n.messages import render_resolved
+    from local_operator.providers.bedrock.login import _t
+    from local_operator.server.routes.auth import _bedrock_keys, _bedrock_refusal
+
+    for locale in ("en", "hi"):
+        monkeypatch.setattr(resolve, "resolve_language", lambda: locale)
+        bundle = catalogues.wire_bundle(locale)
+        # Both namespaces stay fetchable on demand, but no eager client copy
+        # is needed to render their text at the process boundary.
+        for namespace in ("wire.login.bedrock", "wire.errors.bedrock"):
+            assert namespace in catalogues.DEFERRED_NAMESPACES
+            assert namespace not in bundle["namespaces"]
+        for name, key in inspect.getmembers(wire_login_bedrock, inspect.isfunction):
+            if name.startswith("_"):
+                continue
+            message = key(
+                **{
+                    arg: "1" if arg == "count" else "fixture"
+                    for arg in inspect.signature(key).parameters
+                }
+            )
+            text = _t(message)
+            assert text == render_resolved(message)
+            assert text and not text.startswith("wire.login.bedrock.")
+        response = _bedrock_refusal(
+            422, "bedrock_input_invalid", _bedrock_keys().input_invalid(field="region")
+        )
+        assert response.detail["code"] == "bedrock_input_invalid"
+        assert response.detail["text"]
+        assert "wire.errors.bedrock" not in str(response.detail)
+
+
 def test_the_census_catches_one_added_reference(
     i18n_deferred_watch: ModuleType, tmp_path: Path
 ) -> None:

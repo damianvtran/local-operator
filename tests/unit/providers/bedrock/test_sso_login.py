@@ -61,6 +61,15 @@ if mode in ("ok", "old"):
 """
 
 
+@pytest.fixture(autouse=True)
+def interactive_display(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These exercise a local interactive login, not the CI runner's display.
+    # Keep the real headless predicate active so SSH/no-display refusal stays tested.
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+
+
 @pytest.fixture
 def fake_aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     isolate_aws(tmp_path, monkeypatch)
@@ -187,10 +196,30 @@ async def test_refusals_spawn_nothing(fake_aws: Path, monkeypatch: pytest.Monkey
     assert not (fake_aws.parent.parent / "aws.log").exists()
 
 
+async def test_linux_without_display_refuses_before_spawn(
+    fake_aws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from functools import partial
+
+    from local_operator.providers import login_catalog
+
+    # Pin Linux explicitly: this negative control must also run on macOS.
+    monkeypatch.setattr(
+        login_catalog, "headless_display", partial(login_catalog.headless_display, platform="linux")
+    )
+    monkeypatch.delenv("DISPLAY")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    assert sso_login.refusal("sso", environ={}) == "headless"
+    with pytest.raises(sso_login.SsoLoginRefused) as raised:
+        await sso_login.run_sso_login("corp-sso", kind="sso", callbacks=Recorder().callbacks())
+    assert raised.value.code == "headless"
+    assert not (fake_aws.parent.parent / "aws.log").exists()
+
+
 @pytest.mark.filterwarnings("ignore")
 def test_refusal_is_offline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     isolate_aws(tmp_path, monkeypatch)
     write_sso_token(tmp_path, "corp", expires_in=timedelta(hours=1), refresh=False)
     monkeypatch.setattr(sso_login.bprofiles, "aws_cli_path", lambda: "/usr/bin/true")
-    assert sso_login.refusal("sso", environ={}) is None
+    assert sso_login.refusal("sso", environ={"DISPLAY": ":99"}) is None
     assert sso_login.refusal("login", environ={"SSH_TTY": "/dev/ttys001"}) == "headless"

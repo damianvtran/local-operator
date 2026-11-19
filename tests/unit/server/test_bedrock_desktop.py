@@ -267,6 +267,11 @@ def _install_fake_aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
     from local_operator.providers.bedrock import profiles as bprofiles
     from tests.unit.providers.bedrock.test_sso_login import FAKE_AWS
 
+    # This fake CLI models a local interactive browser session, even on Linux
+    # CI. Leave the production headless predicate intact for refusal tests.
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
     script = tmp_path / "bin" / "aws"
     script.parent.mkdir(exist_ok=True)
     script.write_text(FAKE_AWS.format(python=sys.executable))
