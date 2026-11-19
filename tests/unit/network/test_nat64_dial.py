@@ -522,3 +522,119 @@ def test_discovery_prefers_the_prefix_both_well_known_addresses_agree_on() -> No
     # One answer alone: nothing to compare, longest length first as before.
     alone = nat64.prefix_from_discovery(answers[:1])
     assert alone is not None and alone.length == 96
+
+
+# --- round 2 remediation (60334 S1 residual, review R2-m1) -----------------------
+
+
+def _lookup_workers() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name == "nat64-getaddrinfo"]
+
+
+def _free_slots() -> int:
+    """How many lookup slots are free right now (acquires and returns them)."""
+    taken = 0
+    while nat64._LOOKUP_SLOTS.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        nat64._LOOKUP_SLOTS.release()
+    return taken
+
+
+def _fallback_dial(resolver: FakeResolver, connector: FakeConnector, timeout: float) -> Any:
+    return nat64.create_connection(
+        (GLOBAL_V4, PORT),
+        timeout=timeout,
+        resolver=resolver,
+        route_check=lambda _a: False,
+        key_reader=lambda: "k",
+        connector=connector,
+    )
+
+
+def test_full_lookup_cap_surfaces_the_original_error_at_once() -> None:
+    # S1 residual / R2-m1: abandoned lookups on a hung resolver must not pile
+    # up without bound, and a dial meeting a full cap must not wait for a slot.
+    assert _free_slots() == nat64.MAX_LOOKUP_WORKERS
+    hung = SlowResolver(30.0)
+    original = OSError(errno.ENETUNREACH, "Network is unreachable")
+    try:
+        for _ in range(nat64.MAX_LOOKUP_WORKERS):
+            with pytest.raises(OSError):
+                _fallback_dial(hung, FakeConnector(v4_error=original), timeout=0.2)
+        assert len(_lookup_workers()) == nat64.MAX_LOOKUP_WORKERS
+        assert _free_slots() == 0
+        calls_before = len(hung.calls)
+        connector = FakeConnector(v4_error=original)
+        started = time.monotonic()
+        with pytest.raises(OSError) as raised:
+            _fallback_dial(hung, connector, timeout=5.0)
+        elapsed = time.monotonic() - started
+        assert raised.value is original
+        assert elapsed < 0.5, elapsed  # no wait for a slot, nor for the 5 s budget
+        assert len(hung.calls) == calls_before  # no new lookup was admitted
+        assert len(_lookup_workers()) <= nat64.MAX_LOOKUP_WORKERS
+        assert connector.dialled == [GLOBAL_V4]
+    finally:
+        hung.release.set()
+        for thread in _lookup_workers():
+            thread.join(2.0)
+    # Abandoned workers return their slots once their lookup ends.
+    assert _free_slots() == nat64.MAX_LOOKUP_WORKERS
+    resolver = FakeResolver({("ipv4only.arpa", socket.AF_INET6): ["64:ff9b::c000:aa"]})
+    assert _fallback_dial(resolver, FakeConnector(), timeout=2.0) == "sock:64:ff9b::808:404"
+
+
+def test_worker_start_failure_surfaces_the_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # S1 residual: "can't start new thread" means no fallback, never a
+    # RuntimeError in place of the connect error, and the slot is returned.
+    def refuse(self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(nat64.threading.Thread, "start", refuse)
+    original = OSError(errno.ENETUNREACH, "Network is unreachable")
+    resolver = FakeResolver({("ipv4only.arpa", socket.AF_INET6): ["64:ff9b::c000:aa"]})
+    connector = FakeConnector(v4_error=original)
+    with pytest.raises(OSError) as raised:
+        _fallback_dial(resolver, connector, timeout=2.0)
+    assert raised.value is original
+    assert connector.dialled == [GLOBAL_V4]
+    monkeypatch.undo()
+    assert _free_slots() == nat64.MAX_LOOKUP_WORKERS
+
+
+class SlowFirstConnector(TimedConnector):
+    """The baseline dial spends ``delay`` seconds before failing, as a slow v4 connect would."""
+
+    def __init__(self, delay: float, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.delay = delay
+
+    def __call__(self, address: tuple[str, int], timeout: float | None = None) -> Any:
+        if ":" not in address[0]:
+            time.sleep(self.delay)
+        return super().__call__(address, timeout)
+
+
+def test_fallback_adds_no_time_beyond_the_remaining_budget() -> None:
+    # Scoped guarantee: the initial dial keeps baseline create_connection
+    # semantics (it gets the caller's timeout untouched); the fallback spends
+    # only what that dial left, so the total stays within the caller's budget.
+    original = OSError(errno.ENETUNREACH, "Network is unreachable")
+    hung = SlowResolver(5.0)
+    connector = SlowFirstConnector(0.7, v4_error=original)
+    started = time.monotonic()
+    try:
+        with pytest.raises(OSError) as raised:
+            _fallback_dial(hung, connector, timeout=1.0)
+        elapsed = time.monotonic() - started
+    finally:
+        hung.release.set()
+        for thread in _lookup_workers():
+            thread.join(2.0)
+    assert raised.value is original
+    assert connector.timeouts[0] == 1.0  # baseline dial unchanged
+    assert elapsed < 1.0 + 0.2, elapsed  # fallback ended at the remaining ~0.3 s
+    assert connector.dialled == [GLOBAL_V4]

@@ -24,13 +24,23 @@ route (a fixed route key, like :func:`network_key`'s), so a host with IPv4 also
 makes zero resolver calls for names; only without one is the name resolved to
 find out whether it is IPv4-only (review M1).
 
-ONE DEADLINE. Everything — first connect, route check, every ``getaddrinfo``
-and the synthesised connect — shares one absolute deadline taken when the dial
-started, so the fallback never makes a dial outlast the budget its caller
-gave. ``getaddrinfo`` has no timeout parameter, so each lookup runs in a
-short-lived daemon thread that is abandoned (not killed — it ends on its own at
-the system resolver's timeout) once the deadline passes; the dial then
-surfaces its ORIGINAL error (60334 S1).
+THE FALLBACK NEVER EXTENDS THE CALLER'S BUDGET; THE INITIAL DIAL KEEPS THE
+BASELINE ``socket.create_connection`` SEMANTICS. The first connect is the
+unchanged stdlib call — its own hostname resolution and per-address connects
+behave exactly as before this module existed, and this module makes no claim
+about them. One absolute deadline is taken when the dial starts, and the
+fallback (route check, every ``getaddrinfo``, the synthesised connect) spends
+only what is left of it. ``getaddrinfo`` has no timeout parameter, so each
+fallback lookup runs in a short-lived daemon thread that is abandoned (not
+killed — it ends on its own at the system resolver's timeout) once the
+deadline passes; the dial then surfaces its ORIGINAL error (60334 S1).
+
+BOUNDED LOOKUP ADMISSION. Abandoned workers can outlive their dial, so at most
+:data:`MAX_LOOKUP_WORKERS` of them may be in flight at once, process-wide. A
+dial that finds every slot taken, or cannot start a thread at all, treats the
+fallback as unavailable and surfaces its ORIGINAL error at once — it never
+waits for a slot, and never reports the thread failure in place of the
+connect error (60334 S1 residual).
 
 HOW IT SYNTHESISES — OS FIRST. (1) ``getaddrinfo(<v4 literal>, AF_INET6)``:
 macOS (and any resolver implementing RFC 7050 discovery itself) returns the
@@ -336,13 +346,29 @@ def network_key() -> str | None:
 # --- the dial deadline -----------------------------------------------------------
 
 
-class _DeadlineExpired(Exception):
-    """The dial's budget ran out inside the fallback.
+class _FallbackUnavailable(Exception):
+    """The fallback cannot run for this dial; the caller re-raises its original error.
 
     Deliberately NOT an ``OSError``: the OS-synthesis step swallows resolver
-    ``OSError``s as "the OS has nothing", and an expired budget must instead end
+    ``OSError``s as "the OS has nothing", and these conditions must instead end
     the whole fallback so the caller sees its original error.
     """
+
+
+class _DeadlineExpired(_FallbackUnavailable):
+    """The dial's budget ran out inside the fallback."""
+
+
+#: Process-wide cap on fallback lookup workers in flight (60334 S1 residual).
+#: A dial runs its lookups one after another, so it holds at most ONE slot at a
+#: time: four slots let four dials sit in the fallback at once. Past that, more
+#: threads would only queue on the same unresponsive resolver, so a further
+#: dial gives up on the fallback instead. Invariant: a slot is released when
+#: its worker's ``getaddrinfo`` returns or raises — even after the dial that
+#: started it has stopped waiting — or immediately if the thread never starts;
+#: so the thread count this module adds never exceeds the cap.
+MAX_LOOKUP_WORKERS = 4
+_LOOKUP_SLOTS = threading.BoundedSemaphore(MAX_LOOKUP_WORKERS)
 
 
 def _remaining(deadline: float | None) -> float | None:
@@ -363,12 +389,17 @@ def _resolve(resolver: Resolver, deadline: float | None, *args: Any) -> list[tup
     An abandoned thread is harmless: it holds no lock or socket of ours, writes
     only into a box nobody reads any more, and ends on its own when the system
     resolver gives up (its own resolv.conf timeout), so a broken-DNS network
-    costs at most one such thread per lookup in flight — never an unbounded dial.
+    costs at most one such thread per lookup in flight — never an unbounded dial
+    — and :data:`MAX_LOOKUP_WORKERS` caps how many are in flight at all.
     A blocking dial (``timeout=None``) keeps blocking semantics: called inline.
     """
     left = _remaining(deadline)
     if left is None:
         return resolver(*args)
+    # Non-blocking: waiting for a slot would spend the caller's budget on other
+    # dials' hung lookups. A full cap means "no fallback", not "later".
+    if not _LOOKUP_SLOTS.acquire(blocking=False):
+        raise _FallbackUnavailable
     box: dict[str, Any] = {}
 
     def run() -> None:
@@ -376,9 +407,17 @@ def _resolve(resolver: Resolver, deadline: float | None, *args: Any) -> list[tup
             box["value"] = resolver(*args)
         except BaseException as exc:  # handed to the waiting dial, re-raised there
             box["error"] = exc
+        finally:
+            _LOOKUP_SLOTS.release()
 
     thread = threading.Thread(target=run, name="nat64-getaddrinfo", daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError:
+        # "can't start new thread": the worker never ran, so its slot is ours to
+        # return, and the dial must still read as its original connect error.
+        _LOOKUP_SLOTS.release()
+        raise _FallbackUnavailable from None
     thread.join(left)
     if thread.is_alive():
         raise _DeadlineExpired
@@ -501,8 +540,11 @@ def create_connection(
 ) -> socket.socket:
     """``socket.create_connection`` with a NAT64 fallback for IPv4-only targets.
 
-    ``timeout`` bounds the WHOLE dial, fallback included: one deadline is taken
-    here, before the first connect, and the fallback spends only what is left.
+    The first connect is the baseline ``socket.create_connection`` call with
+    ``timeout`` unchanged (its own resolution and per-address connects keep the
+    stdlib's semantics). One deadline is taken here, before it, and the
+    fallback spends only what is left: the fallback never extends the caller's
+    budget.
     The keyword hooks exist for tests (a fake resolver and route check); the
     defaults are looked up at call time so a test patching
     ``socket.create_connection`` still sees every dial.
@@ -551,7 +593,8 @@ def fallback(
     ``time.monotonic()`` value taken before its own connect) so the fallback
     shares the dial's budget; without one, ``timeout`` counts from this call.
     ``None`` is returned — the caller re-raises ``original`` — whenever the
-    deadline passes, at any step.
+    deadline passes, at any step, or the lookup cap is full or a worker thread
+    cannot start (:data:`MAX_LOOKUP_WORKERS`).
     """
     resolver = resolver if resolver is not None else socket.getaddrinfo
     route_check = route_check if route_check is not None else ipv4_route
@@ -591,7 +634,7 @@ def fallback(
         if synthesised is None:
             return None
         left = _remaining(deadline)
-    except _DeadlineExpired:
+    except _FallbackUnavailable:  # deadline passed, lookup cap full, no thread
         return None
     except (OSError, UnicodeError, ValueError, IndexError):
         return None
