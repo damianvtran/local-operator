@@ -682,10 +682,16 @@ def test_a_previous_ceremonys_unstamped_admit_is_not_a_pre_answer_for_the_next(
     real_clear = relay.RelayServer._clear_ceremony  # noqa: SLF001
     ceremony_a: list[str] = []
     deferred: list[tuple[Any, ...]] = []
+    # Joiner A's thread returns as soon as it reads its refusal; the relay side of
+    # ceremony A reaches ``_clear_ceremony`` on its own thread, possibly later on a
+    # slow runner (merge-gate run 44451819486). Wait for the interception itself
+    # rather than inferring it from ``thread_a.join()``.
+    a_cleanup_intercepted = threading.Event()
 
     def defer_a(self: relay.RelayServer, network_id: str, invite: str, ceremony: str) -> None:
         if ceremony_a and ceremony == ceremony_a[0]:
             deferred.append((self, network_id, invite, ceremony))
+            a_cleanup_intercepted.set()
             return
         real_clear(self, network_id, invite, ceremony)
 
@@ -706,6 +712,7 @@ def test_a_previous_ceremonys_unstamped_admit_is_not_a_pre_answer_for_the_next(
     thread_a.join(30)
     assert isinstance(out_a.get("error"), types.MeshRefusal), out_a
     assert row_a["invite_id"] == invite_id
+    assert a_cleanup_intercepted.wait(30), "the premise: A's cleanup was intercepted before B parks"
     assert deferred, "the premise: A's cleanup has not run when B parks"
     thread_b, out_b = _join_in_thread(
         server_b, host=host, port=port, token=token, envelope=envelope
