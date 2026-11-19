@@ -955,7 +955,13 @@ def test_silent_connections_are_capped_before_authentication(
     server = serve_shaped_relay(
         root_a,
         monkeypatch,
-        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1", max_handshakes=2),
+        # The first-byte deadline is pushed out of the way: this cell pins the GLOBAL
+        # slot cap by holding silent connections across ~2 s of reads, and the 2 s
+        # default first-byte timer (its own cells: test_relay_preauth_limits.py)
+        # would otherwise close the slot-holders mid-assertion.
+        settings=relay.NetworkSettings(
+            port=0, listen_address="127.0.0.1", max_handshakes=2, first_byte_timeout_s=30.0
+        ),
         identity=identity.mint(root_a, name="cap-device"),
         audit=audit_mod.AuditLog(root_a),
     )

@@ -415,6 +415,14 @@ CAUSES: frozenset[str] = frozenset(
         # in this enum is written as "internal" — which would have reported a
         # deliberately-bounded relay as a relay with an internal fault.
         "handshake_cap",
+        # The PER-SOURCE pre-auth bounds (roaming stage 4): one address past its
+        # in-flight share, one address past its attempt rate, and a connection
+        # that sent nothing before the first-byte deadline. Distinct from
+        # ``handshake_cap`` because the remedy differs: these name ONE source
+        # misbehaving, not this device saturated by everyone.
+        "handshake_source_cap",
+        "handshake_source_rate",
+        "first_byte_timeout",
         "policy",
         # A memory handler refused a batch itself (`bad_memory`): a move whose
         # source tombstone would erase an unseen local revision, or an invalid
@@ -513,6 +521,11 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             # How many identical refusals the relay folded into this row since the
             # last one it wrote (``network.redial.RefusalCoalescer``). Absent = 0.
             "repeats",
+            # The pre-auth per-source rows (roaming stage 4): ``stage`` is where the
+            # connection was dropped (``accept`` or ``first_byte``) and ``source`` the
+            # normalised address the limit was charged to (IP, or IPv6 /64).
+            "stage",
+            "source",
         }
     ),
     # Handler refusals share this event with chokepoint denials. Keep their
