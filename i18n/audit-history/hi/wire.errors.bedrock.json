@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.errors.bedrock",
+  "history_sha256": "0f040646b7b04b6ec2c04507c85a9dab6d212ade93d45a7e84dfaebed793a896",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "b004444c47de06d6a54368193cf6e7ef0067ba9589072180eb2ae6571c8f0bb6",
+      "context_sha256": "18c734a976b1403e0ecc43f431141c86513f6e8c2c18ec450209d292ffcc7958",
+      "target_sha256": "e72f67b47e69d385d79b8df477772b705640f7b34d5a3956ce005e4c7948a38a",
+      "translator": {
+        "agent": "translator not identified to the auditor: lopdev implementation lane, commit 8bfc7b9ed428 'feat(i18n): translate bedrock provider copy' (shared git author identity proves nothing); manager relayed only that other agents translated",
+        "model": null,
+        "date": "2026-11-19",
+        "provenance": "unknown — agent/session/model not available to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4266 (Amazon Bedrock provider) round 1: independent audit of new namespace wire.errors.bedrock, 14/14 keys, against en b004444c47de with context sidecar. Mechanical: key set equals en; placeholder set parity ({region},{model},{profile},{command},{detail},{bearer_env},{auth_env},{seconds}); {seconds} ICU plural carries the locale's CLDR arms; literals IAM, global., us. verbatim; NFC; no manual bidi controls. Semantic: every key faithful to en and context (access_denied=IAM policy refusal, not console model access; check_list_denied is informational; check_unverified says saved unverified); credentials term matches glossary/locale guide and existing catalogue usage; address form and punctuation per style guide. Findings: none. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1"
+    }
+  ]
+}

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "cfb14823d318a27f9834eae21bb63884fd37c8c7ed02dcf56650ba3eff35d7d4",
+  "history_sha256": "9d57aa999b2007052e855890464fa7fa014eba0a376bc835e35a568cf571c393",
   "entries": [
     {
       "locale": "vi",
@@ -1241,6 +1241,38 @@
       "evidence": "i18n/audits/evidence/vi/wire.settings/m4135b/record.json",
       "round": "m4135b",
       "keys_audited": 883
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "fc000662374f07bffb44f2e7d42e9616695fd31570ca27cbfcabbb77acb3dd8f",
+      "context_sha256": "d2561d10017129d746d20993c33984f0094849be6ef7e69af57e7d0da471ddfe",
+      "target_sha256": "5145da795b058c708db2069bd48122d3a9d230cfb89a6bfe3858956217fac48e",
+      "translator": {
+        "agent": "translator not identified to the auditor: lopdev implementation lane, commit 8bfc7b9ed428 'feat(i18n): translate bedrock provider copy' (shared git author identity proves nothing); manager relayed only that other agents translated",
+        "model": null,
+        "date": "2026-11-19",
+        "provenance": "unknown — agent/session/model not available to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4266 round 1: re-audit after en wire.settings moved c62db407a0b2 -> fc000662374f by exactly 4 added keys (providers_bedrock_auth/.region .label/.help). Three-way vs merge-base 0d057990a180: locale diff is exactly those 4 added lines; every other key byte-identical to the previously passed target aa5bed540d61 (prior row c62db407a0b2, carried). 4 new keys audited: faithful; 'ambient' and AWS_REGION verbatim; labels <=29 cells and helps <=76 cells (rich cell_len); placeholder-free; NFC; no bidi controls; key set equals en. Findings: none. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1"
     }
   ]
 }
