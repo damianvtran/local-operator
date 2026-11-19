@@ -1230,6 +1230,65 @@ _HOLD_FOR_COMMIT = {
 _HOLD_FOR_ADOPT = {**_HOLD_FOR_COMMIT, "proof_corrupt": "proof_corrupt"}
 
 
+def _resolve_write_once_conflict(
+    store: Store, owner: OwnerSnapshot, envelope: Envelope
+) -> ScreenResult | None:
+    """A ``write_once_conflict`` refusal answered by the verdict ALREADY committed.
+
+    WHY (holds triage 2026-11-18, finding c; H5). The refusal means this
+    message already has a committed receipt and a later pass produced a
+    different one. Write-once says the FIRST verdict stands, yet the caller
+    held the message under ``write_once_conflict``: no retry could ever commit
+    (the conflict is permanent), no owner action existed (it is not a review
+    code), and the sender was told a human was reviewing it. One such hold was
+    re-driven 368 times over eight days.
+
+    WHAT IT TRUSTS (security review S-1/S-2 on #4249). The committed verdict
+    stands only while it is still evidence under the LIVE policy:
+    :meth:`Store.write_once_resolution` puts it through ``receipt_authority``
+    (template, serving model, admission revision, creator generation, closed
+    categories and verdict) with only the epoch waived, and requires these
+    exact body bytes and envelope, a PREFERRED screener for an ``allow``, and a
+    final privacy allow when the privacy pass is on. A receipt the owner has
+    since superseded keeps the hold: the current pass's answer is never
+    overridden by an older policy's. Every outcome still passes
+    ``pre_handoff_gate`` and the ACK. Nothing is written.
+
+    TEXT ONLY, ENFORCED HERE (S-3). An envelope carrying images or files keeps
+    its hold: a resolution has no image or file grant to carry, so delivering
+    it would only park the message again downstream (``attachments_unbound`` /
+    ``files_unbound`` in the connector) and re-spend a screen on every re-drive.
+
+    ``None`` (keep holding) on anything else, including an unreadable row.
+    """
+
+    if envelope.attachments_hash is not None or envelope.files_hash is not None:
+        return None
+    existing = store.write_once_resolution(
+        owner,
+        envelope.message_id,
+        body_sha256=envelope.body_sha256,
+        envelope_digest=envelope.envelope_digest,
+    )
+    if existing is None:
+        return None
+    verdict = existing["verdict"]
+    receipt = ScreeningReceipt(
+        verdict=str(verdict),
+        model=str(existing.get("model") or ""),
+        prompt_version=str(existing.get("prompt_version") or ""),
+        template_sha256=str(existing.get("template_sha256") or ""),
+        body_sha256=str(existing.get("body_sha256") or ""),
+        categories=tuple(existing.get("categories") or ()),
+        screener_preferred=bool(existing.get("screener_preferred")),
+    )
+    return ScreenResult(
+        "deliver" if verdict == "allow" else "bounce",
+        receipt=receipt,
+        screened_bytes=len(envelope.private_body().encode("utf-8")),
+    )
+
+
 def _persist_hold(
     store: Store,
     owner: OwnerSnapshot,
@@ -1947,6 +2006,10 @@ def _screen_prepare_steps(
                     envelope_digest=envelope.envelope_digest,
                 )
             except StoreRefused as failure:
+                if failure.code == "write_once_conflict":
+                    resolved = _resolve_write_once_conflict(store, owner, envelope)
+                    if resolved is not None:
+                        return resolved
                 code = _HOLD_FOR_ADOPT.get(failure.code, "policy_stale")
                 _persist_hold(store, owner, message_id, code)
                 return ScreenResult("hold", hold_code=code)
@@ -3503,6 +3566,7 @@ def _conclude_parsed(
             screener_preferred=screener_preferred,
             screener_verdict="hold",
             answer_model=cache_model,
+            screener_reason=reason,
         ).set_private_reason(reason)
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
@@ -3519,6 +3583,7 @@ def _conclude_parsed(
             served_hop=served_hop,
             screener_preferred=screener_preferred,
             screener_verdict="hold",
+            screener_reason=reason,
         )
         return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
     if disposition == "bounce" and not categories:
@@ -3547,6 +3612,7 @@ def _conclude_parsed(
             served_hop=served_hop,
             screener_preferred=screener_preferred,
             screener_verdict="bounce",
+            screener_reason=reason,
         )
         return ScreenResult("hold", hold_code="bounce_without_category").set_private_reason(reason)
     if disposition == "bounce":
@@ -3584,6 +3650,7 @@ def _conclude_parsed(
                 screener_preferred=screener_preferred,
                 screener_verdict="bounce",
                 answer_model=cache_model,
+                screener_reason=reason,
             ).set_private_reason(reason)
     # 12b. Final admission fence (R6/Q15): the receipt may only be admitted
     #      while THIS call still owns the account turn — a successor that
@@ -3654,6 +3721,10 @@ def _conclude_parsed(
         else:
             _finish()
     except StoreRefused as failure:
+        if failure.code == "write_once_conflict":
+            resolved = _resolve_write_once_conflict(store, owner, prepared.envelope)
+            if resolved is not None:
+                return resolved
         code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
         _persist_hold(store, owner, message_id, code)
         return ScreenResult("hold", hold_code=code)
@@ -4099,6 +4170,9 @@ def _copy_work_scope_decision(
             screener_hop=_hop_of(source),
             screener_preferred=bool(source.get("screener_preferred")),
             hold_code=code,
+            # The same bytes and envelope, so the source's reason describes
+            # this copy too (owner audit only, finding d).
+            screener_reason=source.get("screener_reason"),
         )
     except StoreRefused:
         pass
@@ -4124,6 +4198,7 @@ def _record_review_decision(
     screener_preferred: bool,
     screener_verdict: str,
     categories: Sequence[str] = (),
+    screener_reason: str | None = None,
     unscreened: bool = False,
 ) -> None:
     """Give a fresh cached-answer hold its EXIT: a per-message review decision row.
@@ -4189,6 +4264,8 @@ def _record_review_decision(
             screener_hop=-1 if served_hop is None else int(served_hop),
             screener_preferred=screener_preferred,
             hold_code=code,
+            # Owner audit only (finding d): stored capped, never logged or sent.
+            screener_reason=screener_reason,
         )
     except StoreRefused:
         logger.info("bridge: review decision unrecorded code=store_refused")
@@ -4328,6 +4405,7 @@ def _commit_work_scope_hold(
     screener_preferred: bool,
     screener_verdict: str,
     answer_model: str | None = None,
+    screener_reason: str | None = None,
 ) -> ScreenResult:
     """Record the converted hold, its answer-cache row and its decision row.
 
@@ -4381,6 +4459,8 @@ def _commit_work_scope_hold(
             screener_preferred=hold_release.preferred_answer(
                 served_provider, actual_model, screener_preferred
             ),
+            # Owner audit only (finding d): stored capped, never logged or sent.
+            screener_reason=screener_reason,
         )
     except StoreRefused:
         pass
