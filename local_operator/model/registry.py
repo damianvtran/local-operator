@@ -1351,6 +1351,42 @@ def _bedrock_price_multiplier(model_id: str) -> float:
     )
 
 
+#: Route label each profile prefix appends to the first-party name, following
+#: the registry's existing convention for a model served by more than one route
+#: (``Qwen3.8 Max (Model Studio)``, ``GLM-5.2 (Token Plan)``): the base name
+#: plus a parenthesised route qualifier.
+#:
+#: WHY a distinct name per row: ``model/naming.py`` builds its honesty index
+#: from every shipped row and refuses any name two selectors answer to. Copying
+#: the first-party ``Claude Opus 5`` onto seven Bedrock rows made that name
+#: ambiguous, so ``anthropic/claude-opus-5`` fell back to its raw selector on the
+#: status band, the pinned-fallback notice and the model picker (which also
+#: showed indistinguishable duplicate rows). The prefix is part of the label
+#: because price (global 1.0x vs regional 1.10x) and data residency differ per
+#: profile, so two Bedrock rows must not read alike either. Global is the
+#: suggested default (``model.defaults``), hence the plain ``(Bedrock)``.
+_BEDROCK_ROUTE_LABELS: Dict[str, str] = {
+    "global": "Bedrock",
+    "us": "Bedrock US",
+    "eu": "Bedrock EU",
+    "apac": "Bedrock APAC",
+    "jp": "Bedrock JP",
+    "au": "Bedrock AU",
+    "us-gov": "Bedrock US GovCloud",
+    "ca": "Bedrock CA",
+}
+
+
+def _bedrock_display_name(name: str, model_id: str) -> str:
+    """``Claude Opus 5`` + ``eu.anthropic.claude-opus-5`` -> ``Claude Opus 5 (Bedrock EU)``.
+
+    A bare in-Region id (no profile prefix) is labelled ``Bedrock in-Region``.
+    """
+    prefix, _, rest = model_id.partition(".")
+    label = _BEDROCK_ROUTE_LABELS.get(prefix) if rest.startswith("anthropic.") else None
+    return f"{name} ({label or 'Bedrock in-Region'})"
+
+
 def _bedrock_priced(row: ModelInfo, model_id: str, overrides: Dict[str, float]) -> ModelInfo:
     factor = _bedrock_price_multiplier(model_id)
 
@@ -1365,6 +1401,7 @@ def _bedrock_priced(row: ModelInfo, model_id: str, overrides: Dict[str, float]) 
         deep=True,
         update={
             "id": model_id,
+            "name": _bedrock_display_name(base.name, model_id),
             "input_price": scaled(base.input_price) or 0.0,
             "output_price": scaled(base.output_price) or 0.0,
             "cache_writes_price": scaled(base.cache_writes_price),

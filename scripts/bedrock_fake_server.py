@@ -282,7 +282,14 @@ def _isolated_env(home: Path, endpoint: str) -> dict[str, str]:
             "LOP_BEDROCK_ENDPOINT_URL": endpoint,
         }
     )
-    return env
+    # The smoke drives the real CLI (`lop exec`), so its child is a harness
+    # child: ``harness_child_env`` declares it one (an agent-shell run would
+    # otherwise refuse the nested session) and sets the notification gate, so
+    # the fake model's reply never lands on the operator's desktop. Imported
+    # here so ``serve`` stays a dependency-free stdlib server.
+    from local_operator.agent_shell import harness_child_env
+
+    return harness_child_env(env)
 
 
 def smoke(model: str, lop: str) -> int:

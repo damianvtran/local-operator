@@ -225,3 +225,21 @@ def test_seal_mints_the_ref_for_an_unsealed_access_key_descriptor(tmp_path: Path
             bconn.parse("bedrock://access-key?region=us-east-2&ref=OTHER", require_ref=False)
     finally:
         store.close()
+
+
+def test_bedrock_rows_name_their_route_and_leave_first_party_names_resolving() -> None:
+    """Merge gate 44521486072: copying first-party names onto the Bedrock rows
+    made ``Claude Opus 5`` ambiguous, so ``model/naming.py`` refused it and the
+    status band, pinned-fallback notice and picker showed raw selectors (and the
+    picker showed indistinguishable duplicate rows). Each Bedrock row now names
+    its route, the way multi-route rows already do (``GLM-5.2 (Token Plan)``)."""
+    from local_operator.model.naming import model_label
+    from local_operator.model.registry import bedrock_models
+
+    assert bedrock_models["global.anthropic.claude-opus-5-5"].name == "Claude Opus 5.5 (Bedrock)"
+    assert bedrock_models["eu.anthropic.claude-opus-5-5"].name == "Claude Opus 5.5 (Bedrock EU)"
+    assert bedrock_models["anthropic.claude-opus-5-5"].name == "Claude Opus 5.5 (Bedrock in-Region)"
+    names = [row.name for row in bedrock_models.values()]
+    assert len(names) == len(set(names))
+    assert model_label("anthropic", "claude-opus-5").full == "Claude Opus 5"
+    assert model_label("bedrock", "us.anthropic.claude-opus-5").full == "Claude Opus 5 (Bedrock US)"

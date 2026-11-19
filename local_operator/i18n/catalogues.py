@@ -226,6 +226,18 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "network/credentials/messages.py and network/credentials/github.py; "
         "the wire and stderr carry finished text, never a catalogue key"
     ),
+    # Deferred rather than raising the eager total ceiling (PR #4266, merge
+    # gate run 44521486072): the Amazon Bedrock remedies (4,166 B in hi) took
+    # hi's eager total to 74,237 B, past EAGER_TOTAL_MAX_BYTES, yet no client
+    # resolves one of its keys. providers/bedrock/errors.py and check.py render
+    # every key in-process through ``_text`` (``render_resolved``) and hand on a
+    # FINISHED sentence as ProviderError / KeyCheck text.
+    "wire.errors.bedrock": (
+        "Amazon Bedrock error remedies and connection-check results rendered "
+        "in-process by providers/bedrock/errors.py and providers/bedrock/check.py "
+        "(_text = render_resolved); ProviderError and KeyCheck carry finished "
+        "text, never a catalogue key"
+    ),
 }
 
 
