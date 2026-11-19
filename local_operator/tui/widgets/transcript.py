@@ -3632,6 +3632,14 @@ class TeamBridgeBlock(PeerMessageBlock):
 
     def _after_toggle(self) -> None:
         super()._after_toggle()
+        if self._card_body is not None:
+            # The header's state line depends on whether the card is open (the
+            # offline retry advice, D8 / #4277 Q1), and ``_snippet`` is only
+            # rebuilt when an answer lands, so a toggle re-derives it. The base
+            # repaints right after this hook.
+            header = self._header_text(self._card_body)
+            if header:
+                self._snippet = header
         if self._expanded:
             self._maybe_load_body()
 
@@ -3695,6 +3703,14 @@ class TeamBridgeBlock(PeerMessageBlock):
             self._card_body = self._card_body or {"v": 1, "items": [], "more": 0}
             self._body_verified = self._body_verified or verified
         self._refresh_row()
+        if self._expanded and not self._body_verified:
+            # Opened while the local-only mount pass was in flight: that open
+            # hit the ``_body_loading`` latch in ``_needs_body`` and started
+            # nothing, and no later event would — the card sat on "Loading
+            # message…" until it was closed and reopened (#4238 review m1).
+            # Only an OPEN card goes on to the hub; a closed one keeps the
+            # mount pass local-only (D1).
+            self._maybe_load_body()
 
     def _header_text(self, result: dict[str, Any]) -> str:
         """The collapsed header's text for a resolver answer, or "" to keep it.
@@ -3807,7 +3823,15 @@ class TeamBridgeBlock(PeerMessageBlock):
         if reason == "not_member":
             return _bt(tui_bridge_card.body_not_member())
         if reason == "offline":
-            return _bt(tui_bridge_card.body_offline())
+            # The body line's retry is "close and reopen"; on the collapsed
+            # header the card is already closed, so it says "open" (D8). An
+            # OPEN card's header sits right above that body line, so it keeps
+            # the body's wording rather than contradicting it (#4277 Q1).
+            return _bt(
+                tui_bridge_card.header_offline()
+                if header and not self._expanded
+                else tui_bridge_card.body_offline()
+            )
         if reason == "deleted":
             return _bt(tui_bridge_card.body_deleted())
         if reason == "not_loaded":

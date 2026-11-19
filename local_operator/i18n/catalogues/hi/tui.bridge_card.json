@@ -16,5 +16,6 @@
   "tui.bridge_card.body.show_less": "कम दिखाएँ",
   "tui.bridge_card.body.more_messages": "{count, plural, one {इस कार्ड में # और संदेश} other {इस कार्ड में # और संदेश}}",
   "tui.bridge_card.header.held_transient": "स्क्रीनिंग का इंतज़ार",
-  "tui.bridge_card.header.open_to_load": "संदेश लोड करने के लिए खोलें"
+  "tui.bridge_card.header.open_to_load": "संदेश लोड करने के लिए खोलें",
+  "tui.bridge_card.header.offline": "Radient से संपर्क नहीं हुआ — दोबारा कोशिश के लिए खोलें"
 }
