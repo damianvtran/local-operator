@@ -114,6 +114,7 @@ from local_operator.remote_compute.arguments import add_remote_arguments, wants_
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Sequence
 
     from local_operator.agents import AgentData, AgentRegistry
@@ -11999,6 +12000,121 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     return listener
 
 
+#: Exit status of a ``--listener-fd`` serve whose boot missed its deadline.
+#: 69 is ``EX_UNAVAILABLE`` from sysexits.h: distinct from the plain ``1`` every
+#: other serve refusal uses (so a log or ``systemctl status`` names THIS failure),
+#: non-zero so the systemd unit's ``Restart=on-failure`` cold-starts its
+#: ``ExecStart`` (which carries ``--port``, never ``--listener-fd``), and not
+#: ``75``, which other units list in ``RestartPreventExitStatus``.
+SERVE_ADOPT_BOOT_DEADLINE_EXIT = 69
+
+#: Overrides the adopted-listener boot deadline, in seconds. ``LOCAL_OPERATOR_``
+#: prefixed and read per call like the other runtime knobs
+#: (``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS``): ``lop`` runs from a uv-tool
+#: install, so an import-time constant would need a rebuild to change.
+SERVE_ADOPT_BOOT_DEADLINE_ENV = "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS"
+
+#: Default boot deadline. A healthy adopt finishes its app import and lifespan
+#: startup in seconds; 90 s leaves an order of magnitude of headroom for a loaded
+#: host while still bounding the outage a wedged boot causes.
+SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS = 90.0
+
+
+def resolve_adopt_boot_deadline_seconds() -> float:
+    """The adopted-listener boot deadline, resolved at call time.
+
+    Precedence: :data:`SERVE_ADOPT_BOOT_DEADLINE_ENV` > the default. Anything that
+    is not a positive finite number (a typo, an empty export, ``0``) falls back to
+    the default rather than disabling the deadline: an unbounded adopt is exactly
+    the wedge this deadline exists to end, so it is not a setting to reach by typo.
+    """
+    raw = os.environ.get(SERVE_ADOPT_BOOT_DEADLINE_ENV)
+    if raw is None or not raw.strip():
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0:
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    return seconds
+
+
+def _exit_missed_adopt_boot(code: int) -> None:
+    """Leave the process NOW. ``os._exit`` because the main thread is the one that
+    is wedged: ``sys.exit`` from this watchdog thread would only end the watchdog,
+    and an orderly interpreter shutdown would wait on the very lifespan that hung.
+    A seam of its own so tests can observe the exit without dying."""
+    os._exit(code)
+
+
+def arm_adopted_boot_deadline(
+    *,
+    fd: int,
+    port: int,
+    is_ready: Callable[[], bool],
+    sockets: Callable[[], "list[socket.socket]"],
+    deadline_s: float | None = None,
+    poll_s: float = 0.25,
+) -> "threading.Event":
+    """Bound how long an ADOPTED listener may sit un-served while this image boots.
+
+    WHY ONLY THE ADOPT PATH (node2 incident). A reload ``execve``s this process with
+    the bound socket inherited as ``--listener-fd``. If the new image then stalls
+    in boot -- an import, a lock wait, a lifespan startup that never returns -- the
+    kernel keeps the port in LISTEN on a descriptor nothing will ever ``accept``
+    from: clients queue or are refused, the old image is gone (same pid, replaced),
+    and anything probing the port sees it taken. A FRESH bind has no such trap: its
+    failed boot releases the port and the supervisor's retry re-binds it. So only
+    an adopt is armed, and ``--reload`` (which never adopts) is untouched.
+
+    WHAT FIRING DOES. One stderr line naming the fd, port and elapsed time; every
+    socket ``sockets()`` returns at that moment is closed (the adopted listener and
+    the handoff owner's dup -- either alone keeps the port in LISTEN); then the
+    process exits :data:`SERVE_ADOPT_BOOT_DEADLINE_EXIT`. The fd lives only in this
+    process, so nothing can re-adopt it: the systemd unit's ``Restart=on-failure``
+    runs its ``ExecStart``, which binds ``--port`` cold.
+
+    READY is ``is_ready()`` -- uvicorn's ``Server.started``, set only after the
+    lifespan startup completed and the sockets are accepting. Returns an event the
+    caller sets once serving has ended, so a clean shutdown never trips the exit.
+    """
+    import threading
+
+    budget = resolve_adopt_boot_deadline_seconds() if deadline_s is None else deadline_s
+    done = threading.Event()
+    started = time.monotonic()
+
+    def watch() -> None:
+        while not done.wait(poll_s):
+            if is_ready():
+                return
+            elapsed = time.monotonic() - started
+            if elapsed < budget:
+                continue
+            # Flushed explicitly: ``os._exit`` skips the interpreter's buffer flush,
+            # and this line is the only record of why the daemon left.
+            print(
+                f"serve: adopted listener fd {fd} on port {port} not serving after "
+                f"{elapsed:.1f}s (boot deadline {budget:g}s); closing it and exiting "
+                f"{SERVE_ADOPT_BOOT_DEADLINE_EXIT} so a cold start can re-bind the port",
+                file=sys.stderr,
+                flush=True,
+            )
+            for sock in sockets():
+                try:
+                    sock.close()
+                except OSError:  # pragma: no cover — already closed is the goal
+                    pass
+            _exit_missed_adopt_boot(SERVE_ADOPT_BOOT_DEADLINE_EXIT)
+            return
+
+    # Daemon: a serve that finished (or crashed) on the main thread must not be
+    # held open by its own watchdog.
+    threading.Thread(target=watch, name="serve-adopt-boot-deadline", daemon=True).start()
+    return done
+
+
 def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     # Install before importing the server or uvicorn: startup diagnostics must
     # not inherit the CLI's synchronous stderr handler. No other CLI changes.
@@ -12095,6 +12211,10 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
 
     listener: socket.socket | None = None
     resolved_port = port
+    # Filled in as the adopt path's boot proceeds, so its deadline watchdog can
+    # read readiness and close the owner's dup; unused on every other path.
+    serve_ref: dict[str, Any] = {}
+    boot_deadline_done: Any = None
     if listener_fd is not None and reload:
         # Both at once is a contradiction rather than a precedence rule: a
         # ``--reload`` child's port belongs to uvicorn's supervisor, which is
@@ -12133,6 +12253,21 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             )
             return 1
         resolved_port = listener.getsockname()[1]
+        # Armed HERE, before the app import below, because that import and the
+        # lifespan are exactly where an adopted boot has been seen to wedge with
+        # the port held (see ``arm_adopted_boot_deadline``). The fresh-bind and
+        # ``--reload`` paths are deliberately never armed.
+        adopted_listener = listener
+        boot_deadline_done = arm_adopted_boot_deadline(
+            fd=listener_fd,
+            port=resolved_port,
+            is_ready=lambda: bool(getattr(serve_ref.get("server"), "started", False)),
+            sockets=lambda: [
+                s
+                for s in (adopted_listener, getattr(serve_ref.get("owner"), "socket", None))
+                if s is not None
+            ],
+        )
     elif not reload:
         try:
             listener = _bind_serve_socket(host, port)
@@ -12197,6 +12332,8 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         asgi_app.state.listener_owner = service_handoff.ListenerOwner(
             asgi_app, servers=[], listener=listener
         )
+        serve_ref["server"] = server
+        serve_ref["owner"] = asgi_app.state.listener_owner
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -12207,6 +12344,11 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             server.run(sockets=[listener])
         except KeyboardInterrupt:
             pass
+        finally:
+            # Serving ended on its own terms: a later shutdown, however slow, is
+            # not a missed boot.
+            if boot_deadline_done is not None:
+                boot_deadline_done.set()
     else:
         # The reloader re-imports ``server.app`` in a CHILD process, so the app
         # object cannot be reached above and the inherited environment is the
