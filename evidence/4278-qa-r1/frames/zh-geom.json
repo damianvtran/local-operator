@@ -1,0 +1,248 @@
+{
+ "light-mount": {
+  "theme": "localOperatorLight",
+  "lang": "zh-CN",
+  "docW": 390,
+  "vw": 390,
+  "panels": [
+   {
+    "state": "ready",
+    "y": 216,
+    "h": 138,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\nHello from Ola — can you check the release notes before Friday?\n\nconfirm the v0.108 changelog\nlink: release board",
+    "toggle": null,
+    "links": [
+     "https://example.com/board"
+    ],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 376,
+    "h": 435,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\nRelease checklist\nLine 1: the quick brown fox jumps over the lazy dog, then checks item 1.\nLine 2: the quick brown fox jumps over the lazy dog, then checks item 2.\nLine 3: the quick brown fox jumps over the",
+    "toggle": {
+     "text": "展开",
+     "expanded": "false"
+    },
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 833,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n已被内容审核暂扣",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 915,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n等待筛查——尚未展示给智能体",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 997,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n已被内容审核拒绝",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1079,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n此消息已被删除",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1161,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n无法连接Radient——重新打开对话以重试",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1244,
+    "h": 655,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\nCoalesced message 1 of 23.\n\nCoalesced message 2 of 23.\n\nCoalesced message 3 of 23.\n\nCoalesced message 4 of 23.\n\nCoalesced message 5 of 23.\n\nCoalesced message 6 of 23.\n\nCoalesced message 7 of 23.\n\nCoalesced ",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   }
+  ],
+  "receipts": [
+   "·",
+   "·",
+   "Ola · 对方",
+   "外部消息 · 内容不可信",
+   "·",
+   "Ola · 对方",
+   "外部消息 · 内容不可信",
+   "·",
+   "Ola · 对方",
+   "外部消息 · 内容不可信",
+   "·",
+   "Ola · 对方"
+  ]
+ },
+ "dark-mount": {
+  "theme": "localOperatorDark",
+  "lang": "zh-CN",
+  "docW": 390,
+  "vw": 390,
+  "panels": [
+   {
+    "state": "ready",
+    "y": 216,
+    "h": 138,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\nHello from Ola — can you check the release notes before Friday?\n\nconfirm the v0.108 changelog\nlink: release board",
+    "toggle": null,
+    "links": [
+     "https://example.com/board"
+    ],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 376,
+    "h": 435,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\nRelease checklist\nLine 1: the quick brown fox jumps over the lazy dog, then checks item 1.\nLine 2: the quick brown fox jumps over the lazy dog, then checks item 2.\nLine 3: the quick brown fox jumps over the",
+    "toggle": {
+     "text": "展开",
+     "expanded": "false"
+    },
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 833,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n已被内容审核暂扣",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 915,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n等待筛查——尚未展示给智能体",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 997,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n已被内容审核拒绝",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1079,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n此消息已被删除",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1161,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\n无法连接Radient——重新打开对话以重试",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1244,
+    "h": 655,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "外部消息 · 内容不可信\n\nCoalesced message 1 of 23.\n\nCoalesced message 2 of 23.\n\nCoalesced message 3 of 23.\n\nCoalesced message 4 of 23.\n\nCoalesced message 5 of 23.\n\nCoalesced message 6 of 23.\n\nCoalesced message 7 of 23.\n\nCoalesced ",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   }
+  ],
+  "receipts": [
+   "·",
+   "·",
+   "Ola · 对方",
+   "外部消息 · 内容不可信",
+   "·",
+   "Ola · 对方",
+   "外部消息 · 内容不可信",
+   "·",
+   "Ola · 对方",
+   "外部消息 · 内容不可信",
+   "·",
+   "Ola · 对方"
+  ]
+ }
+}

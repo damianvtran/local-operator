@@ -1,0 +1,33 @@
+{
+ "unauthBeforeLogin": {
+  "status": 401,
+  "body": "{\"error\":\"authentication required\"}"
+ },
+ "afterClearCookies": {
+  "status": 401
+ },
+ "bodyRequests": [
+  {
+   "id": "2429473.6",
+   "epoch": "init",
+   "url": "http://127.0.0.1:47813/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477270.859879,
+   "cookieSent": false,
+   "status": 401,
+   "cacheControl": null,
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429473.58",
+   "epoch": "mount-1795078445499",
+   "url": "http://127.0.0.1:47813/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477311.688653,
+   "cookieSent": false,
+   "status": 401,
+   "cacheControl": null,
+   "fromDiskCache": false
+  }
+ ]
+}

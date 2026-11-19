@@ -1,0 +1,28 @@
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "conversation_messages", "card": "e_long", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 111, "limit": 1}
+{"call": "conversation_messages", "card": "e_admit", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 101, "limit": 1}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "conversation_messages", "card": "e_refused", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 141, "limit": 1}
+{"call": "conversation_messages", "card": "e_deleted", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 151, "limit": 1}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "conversation_messages", "card": "e_coal", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 171, "limit": 50}
+{"call": "conversation_messages", "card": "e_offline", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 161, "limit": 1}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "conversation_messages", "card": "e_long", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 111, "limit": 1}
+{"call": "conversation_messages", "card": "e_admit", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 101, "limit": 1}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "conversation_messages", "card": "e_refused", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 141, "limit": 1}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "current_access"}
+{"call": "conversation_messages", "card": "e_deleted", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 151, "limit": 1}
+{"call": "conversation_messages", "card": "e_coal", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 171, "limit": 50}
+{"call": "conversation_messages", "card": "e_offline", "tenant_id": "3f2a1111-2222-4333-8444-555566667777", "endpoint_id": "ep_1", "before_seq": 161, "limit": 1}

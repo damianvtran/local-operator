@@ -1,0 +1,83 @@
+[run_bounded] memory budget 5120 MiB (explicit, capped by inherited); sampled owned child group and escaped descendants
+$ node scripts/generate-theme-css.mjs && node scripts/inline-mark.mjs
+Wrote /home/ec2-user/local-operator/.worktrees/bridge-card-phone-web/local_operator/mobile/web/src/styles/themes.generated.css — 31 themes, 29 roles each.
+src/lib/mark.ts regenerated (7211 bytes)
+$ node scripts/check-i18n.mjs && tsc -b && vite build
+relay i18n: 0 enforced fingerprint violation(s); 758 advisory legacy sink literal(s)
+vite v6.4.3 building for production...
+transforming...
+✓ 293 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                              2.29 kB │ gzip:   1.21 kB
+dist/assets/index-BMRQz7Bm.css              70.52 kB │ gzip:  15.87 kB
+dist/assets/RVARI57O-CXmrUIiS.js             0.16 kB │ gzip:   0.15 kB
+dist/assets/V44WA6U7-C9aveky0.js             0.38 kB │ gzip:   0.29 kB
+dist/assets/5THPTBWS-D57irc_4.js             0.48 kB │ gzip:   0.30 kB
+dist/assets/NT5JY5WP-Cgyi6h4H.js             0.49 kB │ gzip:   0.35 kB
+dist/assets/G3MDBVQH-EkdejvdW.js             0.56 kB │ gzip:   0.34 kB
+dist/assets/G6GPDDNC-VR_k6bOA.js             0.60 kB │ gzip:   0.43 kB
+dist/assets/DKTLEL5E-B7ILCVTH.js             0.83 kB │ gzip:   0.40 kB
+dist/assets/7XWI72E6-2N-_Dabv.js             0.95 kB │ gzip:   0.50 kB
+dist/assets/4LWW3ZNH-DHfL-n8K.js             0.97 kB │ gzip:   0.58 kB
+dist/assets/YIK6JTN6-JRFA-Ext.js             1.44 kB │ gzip:   0.79 kB
+dist/assets/7WLXJQOR-DQODvV5U.js             1.95 kB │ gzip:   0.94 kB
+dist/assets/QQW2P742-CtLXZTrU.js             1.97 kB │ gzip:   1.06 kB
+dist/assets/75JW6PN6-2gaFKXdL.js             2.17 kB │ gzip:   1.08 kB
+dist/assets/FTXIJQGB-nrHdCfp7.js             2.58 kB │ gzip:   1.09 kB
+dist/assets/EXE5EH6O-nwB8sKCv.js             3.70 kB │ gzip:   1.73 kB
+dist/assets/S63OEDPG-C1ErRaIe.js             4.08 kB │ gzip:   1.90 kB
+dist/assets/Y5LQLG3M-Dkn75DHf.js             5.22 kB │ gzip:   2.54 kB
+dist/assets/CGIZI67J-BsN1ysZZ.js             5.45 kB │ gzip:   2.73 kB
+dist/assets/HPNUA7RO-Ds7k1_5h.js             5.86 kB │ gzip:   2.89 kB
+dist/assets/UGRSUGA2-9Jxz3qEk.js             6.54 kB │ gzip:   3.10 kB
+dist/assets/SG5TVYLW-C-BszANz.js             7.19 kB │ gzip:   3.27 kB
+dist/assets/6BEWHPQE-BBkxO8Cw.js             7.62 kB │ gzip:   3.42 kB
+dist/assets/GH6G3TJC-DEHLXvL4.js             7.74 kB │ gzip:   3.53 kB
+dist/assets/24BXRY42-CV1x4JWj.js             8.54 kB │ gzip:   3.82 kB
+dist/assets/4FHPYW2L-eI02wQN8.js             9.15 kB │ gzip:   4.23 kB
+dist/assets/LF3NJQAX--ObcrXEP.js             9.48 kB │ gzip:   4.29 kB
+dist/assets/BGW36YJW-D0Y_rrV4.js            10.06 kB │ gzip:   4.89 kB
+dist/assets/VINGRCPA-DqxWCOkI.js            11.28 kB │ gzip:   4.89 kB
+dist/assets/P67P66DB-BHfNqyos.js            11.91 kB │ gzip:   5.22 kB
+dist/assets/WQ63CJYP-BDOg3bSL.js            12.27 kB │ gzip:   5.60 kB
+dist/assets/6PIGVMFT-B1oKGjPz.js            12.29 kB │ gzip:   3.17 kB
+dist/assets/G76NGGFM-BJkPPhMT.js            12.86 kB │ gzip:   5.54 kB
+dist/assets/PFLLLM7K-DjaTYe6X.js            13.68 kB │ gzip:   5.63 kB
+dist/assets/VBUCM3YD-DAjr1gJI.js            13.72 kB │ gzip:   5.92 kB
+dist/assets/JAD36DTZ-j1-QjIT4.js            14.80 kB │ gzip:   6.36 kB
+dist/assets/N7OWWQHY-C6k0ORxe.js            14.90 kB │ gzip:   6.28 kB
+dist/assets/LRZCOFJZ-BhHwQuCV.js            15.40 kB │ gzip:   6.15 kB
+dist/assets/5XYWFMKW-BNVugLi_.js            16.89 kB │ gzip:   7.16 kB
+dist/assets/N5NF2FGY-Dd8LadZR.js            19.30 kB │ gzip:   7.53 kB
+dist/assets/DNNCRC2E-BRhhZd7I.js            20.76 kB │ gzip:   7.80 kB
+dist/assets/WL6DNKX4-_vpsbLlC.js            21.29 kB │ gzip:   8.92 kB
+dist/assets/J77NQRCJ-BR0-1CEh.js            24.21 kB │ gzip:   9.90 kB
+dist/assets/OT7W3RNY-DBtAHO57.js            27.94 kB │ gzip:  11.51 kB
+dist/assets/PVFCHRLY-C8qFkkwV.js            28.06 kB │ gzip:  11.70 kB
+dist/assets/IX6Z2TVR-B1hlPNql.js            28.96 kB │ gzip:  11.32 kB
+dist/assets/E67EBMDD-DHfHyPTL.js            30.44 kB │ gzip:  11.60 kB
+dist/assets/HQRGC5D7-35NeNHOA.js            32.18 kB │ gzip:  12.58 kB
+dist/assets/V67O4WWV-nxZ3fD7P.js            35.08 kB │ gzip:  13.10 kB
+dist/assets/EFYWJBJK-DA7JRO9D.js            38.42 kB │ gzip:  16.57 kB
+dist/assets/bundled.zh-CN.gen-BKcobynE.js   39.64 kB │ gzip:  10.89 kB
+dist/assets/PUAMC4MJ-BmAZtVFZ.js            41.94 kB │ gzip:  15.83 kB
+dist/assets/XOYAOB3S-hIQI-Z2S.js            42.55 kB │ gzip:  16.14 kB
+dist/assets/64PMEAB3-Bqk3t6fY.js            44.92 kB │ gzip:  16.60 kB
+dist/assets/bundled.es.gen-BnopiD9I.js      46.08 kB │ gzip:  11.60 kB
+dist/assets/bundled.vi.gen-DtuPTxcu.js      46.96 kB │ gzip:  11.00 kB
+dist/assets/bundled.fr.gen-DkqCy639.js      47.40 kB │ gzip:  11.76 kB
+dist/assets/lazy-D_UoK_WS.js                50.68 kB │ gzip:  20.81 kB
+dist/assets/bundled.ur.gen-BI5Ot0u3.js      55.36 kB │ gzip:  12.20 kB
+dist/assets/bundled.ru.gen-kYTcohT2.js      62.16 kB │ gzip:  13.52 kB
+dist/assets/bundled.hi.gen-B5_RPefb.js      69.05 kB │ gzip:  12.99 kB
+dist/assets/index-iFBO-g3c.js              797.08 kB │ gzip: 250.43 kB
+
+(!) Some chunks are larger than 600 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 3.73s
+$ node scripts/check-bundle.mjs
+bundle ok: 555 classes for 405 tokens, 1 script(s), 1 stylesheet(s)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=02f90f5c562c4450ad5af38fa012f4b8 completion=/home/ec2-user/.local-operator/sessions/a9eaeb0d96fa/scratchpad/run-bounded-runs/02f90f5c562c4450ad5af38fa012f4b8.completion.json

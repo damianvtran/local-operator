@@ -1,0 +1,209 @@
+{
+ "unauthBeforeLogin": {
+  "status": 401,
+  "body": "{\"error\":\"authentication required\"}"
+ },
+ "afterClearCookies": {
+  "status": 401
+ },
+ "bodyRequests": [
+  {
+   "id": "2429269.6",
+   "epoch": "init",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477239.467412,
+   "cookieSent": false,
+   "status": 401,
+   "cacheControl": null,
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.40",
+   "epoch": "mount-1795078384291",
+   "cookieSent": true,
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477248.770973,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.41",
+   "epoch": "mount-1795078384291",
+   "cookieSent": true,
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_long/body",
+   "method": "GET",
+   "t": 477248.77122,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.42",
+   "epoch": "mount-1795078384291",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_held/body",
+   "method": "GET",
+   "t": 477248.771433,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.43",
+   "epoch": "mount-1795078384291",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_heldt/body",
+   "method": "GET",
+   "t": 477248.771592,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.44",
+   "epoch": "mount-1795078384291",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_refused/body",
+   "method": "GET",
+   "t": 477248.77174,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.45",
+   "epoch": "mount-1795078384291",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_deleted/body",
+   "method": "GET",
+   "t": 477248.771889,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.46",
+   "epoch": "mount-1795078384291",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_offline/body",
+   "method": "GET",
+   "t": 477248.772021,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.47",
+   "epoch": "mount-1795078384291",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_coal/body",
+   "method": "GET",
+   "t": 477248.772208,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.63",
+   "epoch": "mount-1795078397857",
+   "cookieSent": true,
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477262.328876,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.64",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_long/body",
+   "method": "GET",
+   "t": 477262.329126,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.65",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_held/body",
+   "method": "GET",
+   "t": 477262.329251,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.66",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_heldt/body",
+   "method": "GET",
+   "t": 477262.329377,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.67",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_refused/body",
+   "method": "GET",
+   "t": 477262.329499,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.68",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_deleted/body",
+   "method": "GET",
+   "t": 477262.32965,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.69",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_offline/body",
+   "method": "GET",
+   "t": 477262.329777,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.70",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_coal/body",
+   "method": "GET",
+   "t": 477262.329922,
+   "cookieSent": true,
+   "status": 200,
+   "cacheControl": "private, no-store",
+   "fromDiskCache": false
+  },
+  {
+   "id": "2429269.72",
+   "epoch": "mount-1795078397857",
+   "url": "http://127.0.0.1:47812/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477269.156584,
+   "cookieSent": false,
+   "status": 401,
+   "cacheControl": null,
+   "fromDiskCache": false
+  }
+ ]
+}

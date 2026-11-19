@@ -1,0 +1,44 @@
+{
+ "light-mount": {
+  "theme": "localOperatorLight",
+  "lang": "en",
+  "docW": 390,
+  "vw": 390,
+  "panels": [],
+  "receipts": [
+   "·",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·"
+  ]
+ },
+ "dark-mount": {
+  "theme": "localOperatorDark",
+  "lang": "en",
+  "docW": 390,
+  "vw": 390,
+  "panels": [],
+  "receipts": [
+   "·",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·",
+   "Ola · a DM",
+   "·"
+  ]
+ }
+}

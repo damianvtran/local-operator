@@ -1,0 +1,383 @@
+{
+ "light-mount": {
+  "theme": "localOperatorLight",
+  "lang": "en",
+  "docW": 390,
+  "vw": 390,
+  "panels": [
+   {
+    "state": "ready",
+    "y": 216,
+    "h": 138,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nHello from Ola — can you check the release notes before Friday?\n\nconfirm the v0.108 changelog\nlink: release board",
+    "toggle": null,
+    "links": [
+     "https://example.com/board"
+    ],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 376,
+    "h": 435,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nRelease checklist\nLine 1: the quick brown fox jumps over the lazy dog, then checks item 1.\nLine 2: the quick brown fox jumps over the lazy dog, then checks item 2.\nLine 3: the quick ",
+    "toggle": {
+     "text": "Show more",
+     "expanded": "false"
+    },
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 833,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nHeld by moderation",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 915,
+    "h": 78,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nWaiting for screening — not shown to your agent yet",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1014,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nRefused by moderation",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1097,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nThis message was deleted",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1179,
+    "h": 78,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nCouldn't reach Radient — reopen the conversation to retry",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1278,
+    "h": 655,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nCoalesced message 1 of 23.\n\nCoalesced message 2 of 23.\n\nCoalesced message 3 of 23.\n\nCoalesced message 4 of 23.\n\nCoalesced message 5 of 23.\n\nCoalesced message 6 of 23.\n\nCoalesced mess",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   }
+  ],
+  "receipts": [
+   "·",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM"
+  ]
+ },
+ "light-long-expanded": {
+  "h": 1479,
+  "toggle": "Show less",
+  "expanded": "true",
+  "tail": "\nLine 29: the quick brown fox jumps over the lazy dog, then checks item 29.\nLine 30: the quick brown fox jumps over the lazy dog, then checks item 30.\nShow less"
+ },
+ "dark-mount": {
+  "theme": "localOperatorDark",
+  "lang": "en",
+  "docW": 390,
+  "vw": 390,
+  "panels": [
+   {
+    "state": "ready",
+    "y": 216,
+    "h": 138,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nHello from Ola — can you check the release notes before Friday?\n\nconfirm the v0.108 changelog\nlink: release board",
+    "toggle": null,
+    "links": [
+     "https://example.com/board"
+    ],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 376,
+    "h": 435,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nRelease checklist\nLine 1: the quick brown fox jumps over the lazy dog, then checks item 1.\nLine 2: the quick brown fox jumps over the lazy dog, then checks item 2.\nLine 3: the quick ",
+    "toggle": {
+     "text": "Show more",
+     "expanded": "false"
+    },
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 833,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nHeld by moderation",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 915,
+    "h": 78,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nWaiting for screening — not shown to your agent yet",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1014,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nRefused by moderation",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1097,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nThis message was deleted",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1179,
+    "h": 78,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nCouldn't reach Radient — reopen the conversation to retry",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1278,
+    "h": 655,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nCoalesced message 1 of 23.\n\nCoalesced message 2 of 23.\n\nCoalesced message 3 of 23.\n\nCoalesced message 4 of 23.\n\nCoalesced message 5 of 23.\n\nCoalesced message 6 of 23.\n\nCoalesced mess",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   }
+  ],
+  "receipts": [
+   "·",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM"
+  ]
+ },
+ "dark-long-expanded": {
+  "h": 1479,
+  "toggle": "Show less",
+  "expanded": "true",
+  "tail": "\nLine 29: the quick brown fox jumps over the lazy dog, then checks item 29.\nLine 30: the quick brown fox jumps over the lazy dog, then checks item 30.\nShow less"
+ },
+ "remount": {
+  "theme": "localOperatorDark",
+  "lang": "en",
+  "docW": 390,
+  "vw": 390,
+  "panels": [
+   {
+    "state": "ready",
+    "y": 216,
+    "h": 138,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nHello from Ola — can you check the release notes before Friday?\n\nconfirm the v0.108 changelog\nlink: release board",
+    "toggle": null,
+    "links": [
+     "https://example.com/board"
+    ],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 376,
+    "h": 435,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nRelease checklist\nLine 1: the quick brown fox jumps over the lazy dog, then checks item 1.\nLine 2: the quick brown fox jumps over the lazy dog, then checks item 2.\nLine 3: the quick ",
+    "toggle": {
+     "text": "Show more",
+     "expanded": "false"
+    },
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 833,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nHeld by moderation",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 915,
+    "h": 78,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nWaiting for screening — not shown to your agent yet",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1014,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nRefused by moderation",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1097,
+    "h": 61,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nThis message was deleted",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1179,
+    "h": 78,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nCouldn't reach Radient — reopen the conversation to retry",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   },
+   {
+    "state": "ready",
+    "y": 1278,
+    "h": 655,
+    "w": 322,
+    "scrollW": 320,
+    "clientW": 320,
+    "text": "External message · untrusted content\n\nCoalesced message 1 of 23.\n\nCoalesced message 2 of 23.\n\nCoalesced message 3 of 23.\n\nCoalesced message 4 of 23.\n\nCoalesced message 5 of 23.\n\nCoalesced message 6 of 23.\n\nCoalesced mess",
+    "toggle": null,
+    "links": [],
+    "rawHtml": 0
+   }
+  ],
+  "receipts": [
+   "·",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM",
+   "External message · untrusted content",
+   "·",
+   "Ola · a DM"
+  ]
+ }
+}

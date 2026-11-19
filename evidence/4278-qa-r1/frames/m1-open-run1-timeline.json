@@ -1,0 +1,465 @@
+[
+ {
+  "ms": 1578,
+  "ev": "failed",
+  "id": "2431517.9",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 1610,
+  "ev": "failed",
+  "id": "2431517.12",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 1616,
+  "ev": "failed",
+  "id": "2431517.10",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 5040,
+  "ev": "failed",
+  "id": "2431517.25",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 5046,
+  "ev": "failed",
+  "id": "2431517.29",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 5070,
+  "ev": "failed",
+  "id": "2431517.28",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 11031,
+  "ev": "request",
+  "id": "2431517.35",
+  "url": "/api/sessions/abcdef012345/bridge-cards/peer-0ddb5d57d45b491996cd8db61442be37/body"
+ },
+ {
+  "ms": 11031,
+  "ev": "folds-opened",
+  "n": 3
+ },
+ {
+  "ms": 11039,
+  "ev": "response",
+  "id": "2431517.35",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12241,
+  "ev": "request",
+  "id": "2431517.36",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_admit/body"
+ },
+ {
+  "ms": 12241,
+  "ev": "request",
+  "id": "2431517.37",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_long/body"
+ },
+ {
+  "ms": 12241,
+  "ev": "request",
+  "id": "2431517.38",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_held/body"
+ },
+ {
+  "ms": 12241,
+  "ev": "request",
+  "id": "2431517.39",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_heldt/body"
+ },
+ {
+  "ms": 12242,
+  "ev": "request",
+  "id": "2431517.40",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_refused/body"
+ },
+ {
+  "ms": 12242,
+  "ev": "request",
+  "id": "2431517.41",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_deleted/body"
+ },
+ {
+  "ms": 12243,
+  "ev": "request",
+  "id": "2431517.42",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_offline/body"
+ },
+ {
+  "ms": 12243,
+  "ev": "request",
+  "id": "2431517.43",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_coal/body"
+ },
+ {
+  "ms": 12243,
+  "ev": "folds-opened",
+  "n": 1
+ },
+ {
+  "ms": 12249,
+  "ev": "response",
+  "id": "2431517.36",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12256,
+  "ev": "response",
+  "id": "2431517.37",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12266,
+  "ev": "response",
+  "id": "2431517.38",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12273,
+  "ev": "response",
+  "id": "2431517.39",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12298,
+  "ev": "response",
+  "id": "2431517.40",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12308,
+  "ev": "response",
+  "id": "2431517.41",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12316,
+  "ev": "response",
+  "id": "2431517.42",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 12326,
+  "ev": "response",
+  "id": "2431517.43",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 13447,
+  "ev": "folds-opened",
+  "n": 0
+ },
+ {
+  "ms": 16450,
+  "ev": "panels-before-delivery",
+  "n": 9
+ },
+ {
+  "ms": 16454,
+  "ev": "phone-viewing-ready"
+ },
+ {
+  "ms": 16454,
+  "ev": "first-live-request-seen-or-timeout"
+ },
+ {
+  "ms": 17357,
+  "ev": "request",
+  "id": "2431517.44",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_admit/body"
+ },
+ {
+  "ms": 17357,
+  "ev": "request",
+  "id": "2431517.45",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_long/body"
+ },
+ {
+  "ms": 17359,
+  "ev": "request",
+  "id": "2431517.46",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_held/body"
+ },
+ {
+  "ms": 17359,
+  "ev": "request",
+  "id": "2431517.47",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_heldt/body"
+ },
+ {
+  "ms": 17360,
+  "ev": "request",
+  "id": "2431517.48",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_refused/body"
+ },
+ {
+  "ms": 17360,
+  "ev": "request",
+  "id": "2431517.49",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_deleted/body"
+ },
+ {
+  "ms": 17360,
+  "ev": "request",
+  "id": "2431517.50",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_offline/body"
+ },
+ {
+  "ms": 17361,
+  "ev": "request",
+  "id": "2431517.51",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_coal/body"
+ },
+ {
+  "ms": 17361,
+  "ev": "request",
+  "id": "2431517.52",
+  "url": "/api/sessions/abcdef012345/bridge-cards/peer-0ddb5d57d45b491996cd8db61442be37/body"
+ },
+ {
+  "ms": 17361,
+  "ev": "request",
+  "id": "2431517.53",
+  "url": "/api/sessions/abcdef012345/bridge-cards/peer-4dafde881cfa42499d47ead4ce157717/body"
+ },
+ {
+  "ms": 17362,
+  "ev": "response",
+  "id": "2431517.44",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17370,
+  "ev": "response",
+  "id": "2431517.45",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17378,
+  "ev": "response",
+  "id": "2431517.46",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17387,
+  "ev": "response",
+  "id": "2431517.47",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17397,
+  "ev": "response",
+  "id": "2431517.48",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17408,
+  "ev": "response",
+  "id": "2431517.49",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17416,
+  "ev": "response",
+  "id": "2431517.50",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17428,
+  "ev": "response",
+  "id": "2431517.51",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17438,
+  "ev": "response",
+  "id": "2431517.52",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17445,
+  "ev": "response",
+  "id": "2431517.53",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17460,
+  "ev": "request",
+  "id": "2431517.55",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_admit/body"
+ },
+ {
+  "ms": 17460,
+  "ev": "request",
+  "id": "2431517.56",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_long/body"
+ },
+ {
+  "ms": 17460,
+  "ev": "request",
+  "id": "2431517.57",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_held/body"
+ },
+ {
+  "ms": 17460,
+  "ev": "request",
+  "id": "2431517.58",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_heldt/body"
+ },
+ {
+  "ms": 17460,
+  "ev": "request",
+  "id": "2431517.59",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_refused/body"
+ },
+ {
+  "ms": 17460,
+  "ev": "request",
+  "id": "2431517.60",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_deleted/body"
+ },
+ {
+  "ms": 17461,
+  "ev": "request",
+  "id": "2431517.61",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_offline/body"
+ },
+ {
+  "ms": 17461,
+  "ev": "request",
+  "id": "2431517.62",
+  "url": "/api/sessions/abcdef012345/bridge-cards/e_coal/body"
+ },
+ {
+  "ms": 17461,
+  "ev": "request",
+  "id": "2431517.63",
+  "url": "/api/sessions/abcdef012345/bridge-cards/peer-0ddb5d57d45b491996cd8db61442be37/body"
+ },
+ {
+  "ms": 17474,
+  "ev": "response",
+  "id": "2431517.55",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17484,
+  "ev": "response",
+  "id": "2431517.56",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17498,
+  "ev": "response",
+  "id": "2431517.57",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17508,
+  "ev": "response",
+  "id": "2431517.58",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17521,
+  "ev": "response",
+  "id": "2431517.59",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17534,
+  "ev": "response",
+  "id": "2431517.60",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17545,
+  "ev": "response",
+  "id": "2431517.61",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17559,
+  "ev": "response",
+  "id": "2431517.62",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 17570,
+  "ev": "response",
+  "id": "2431517.63",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 42153,
+  "ev": "panel",
+  "panel": {
+   "state": "ready",
+   "text": "External message · untrusted content\n\nLive inbound message bcmsg_live085650 — delivered to an idle session at 08:57:31Z.",
+   "count": 9
+  }
+ },
+ {
+  "ms": 42155,
+  "ev": "request",
+  "id": "2431517.64",
+  "url": "/api/sessions/abcdef012345/bridge-cards/peer-0ddb5d57d45b491996cd8db61442be37/body"
+ },
+ {
+  "ms": 42165,
+  "ev": "response",
+  "id": "2431517.64",
+  "status": 200,
+  "cache": "private, no-store"
+ },
+ {
+  "ms": 42165,
+  "ev": "manual-reread",
+  "later": {
+   "status": 200,
+   "body": "{\"v\":1,\"items\":[{\"message_id\":\"bcmsg_live085650\",\"conversation_id\":\"bcv_abcdefgh\",\"state\":\"admitted\",\"body\":\"**Live** inbound message `bcmsg_live085650` — delivered to an idle session at 08:57:31Z.\",\""
+  }
+ },
+ {
+  "ms": 49367,
+  "ev": "panel-after-remount",
+  "panel2": null
+ }
+]

@@ -1,0 +1,33 @@
+{
+ "unauthBeforeLogin": {
+  "status": 404,
+  "body": "Not Found"
+ },
+ "afterClearCookies": {
+  "status": 404
+ },
+ "bodyRequests": [
+  {
+   "id": "2428816.6",
+   "epoch": "init",
+   "url": "http://127.0.0.1:47810/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477208.395104,
+   "cookieSent": false,
+   "status": 404,
+   "cacheControl": null,
+   "fromDiskCache": false
+  },
+  {
+   "id": "2428816.53",
+   "epoch": "mount-1795078366584",
+   "url": "http://127.0.0.1:47810/api/sessions/abcdef012345/bridge-cards/e_admit/body",
+   "method": "GET",
+   "t": 477237.75852,
+   "cookieSent": false,
+   "status": 404,
+   "cacheControl": null,
+   "fromDiskCache": false
+  }
+ ]
+}

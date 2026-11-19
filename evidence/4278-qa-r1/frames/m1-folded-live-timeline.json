@@ -1,0 +1,76 @@
+[
+ {
+  "ms": 1590,
+  "ev": "failed",
+  "id": "2429756.10",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 1651,
+  "ev": "failed",
+  "id": "2429756.13",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 1883,
+  "ev": "failed",
+  "id": "2429756.11",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 5045,
+  "ev": "failed",
+  "id": "2429756.26",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 5055,
+  "ev": "failed",
+  "id": "2429756.30",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 5069,
+  "ev": "failed",
+  "id": "2429756.29",
+  "err": "net::ERR_ABORTED"
+ },
+ {
+  "ms": 11024,
+  "ev": "phone-viewing-ready"
+ },
+ {
+  "ms": 71101,
+  "ev": "first-live-request-seen-or-timeout"
+ },
+ {
+  "ms": 96812,
+  "ev": "panel",
+  "panel": null
+ },
+ {
+  "ms": 96813,
+  "ev": "request",
+  "id": "2429756.37",
+  "url": "/api/sessions/abcdef012345/bridge-cards/bcmsg_live085426/body"
+ },
+ {
+  "ms": 96821,
+  "ev": "response",
+  "id": "2429756.37",
+  "status": 404
+ },
+ {
+  "ms": 96821,
+  "ev": "manual-reread",
+  "later": {
+   "status": 404,
+   "body": "{\"error\":\"no such bridge card\"}"
+  }
+ },
+ {
+  "ms": 104002,
+  "ev": "panel-after-remount",
+  "panel2": null
+ }
+]
