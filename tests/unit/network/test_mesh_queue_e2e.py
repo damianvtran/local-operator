@@ -113,9 +113,9 @@ async def _wait(predicate: Any, timeout: float = 20.0) -> bool:
 # with the barrier fix.
 @pytest.mark.skip(
     reason=(
-        "QUARANTINED 2026-11-18 flaky-sweep ledger lopdev-E01 (new node, source-first "
-        "diagnosis pending): `AssertionError: the source index survived` (#4235 gate "
-        "job 135307566337, test (3.13, 4)); owner: lopdev E01 ledger; real fix: "
+        "QUARANTINED 2026-11-18 lopdev-E01 (flaky-sweep ledger: new node, #4235 gate "
+        "job 135307566337, diagnosis pending): `AssertionError: the source index "
+        "survived` (test (3.13, 4)); owner: lopdev E01 ledger; real fix: "
         "barrier on the source-index removal before asserting it"
     )
 )
