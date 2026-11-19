@@ -477,7 +477,19 @@ MEASURED_TOKENS: dict[str, int] = {
     # on its own ("Peers, not gatekeepers", +7 chars). Re-measured on the
     # merged tree: 8,178 chars, 1993 tokens — 14 chars of headroom, so the
     # delay clause needs no further trim.
-    "bridge": 1993,
+    # 1993 -> 1999 (fix/bridge-emoji-shortcodes): the react blurb names the
+    # accepted forms ("✅ or shortcode `thumbsup`") and its tail was trimmed to
+    # fit; 8,188 chars.
+    # 1999 -> 1996 (same PR, review round 1 R1 / operator item 2): the operator
+    # asked for the schema itself to say shortcodes work, so ``emoji`` gains the
+    # wire description "Emoji or :shortcode:" (a few tokens, paid every turn by
+    # design). The doc renders that description too, so the react blurb drops
+    # its now-duplicate "(✅ or shortcode `thumbsup`)" to stay under the cap.
+    # Measured by this test's print.
+    # 1996 -> 1990 (same PR, CI context-budget fix): the wire description drops
+    # "teammates use bridge" (restated by the ONE-channel sentence) and the
+    # ``to`` hint's "or substring" (implied by WHOLE), paying for the emoji hint.
+    "bridge": 1990,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
