@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,7 @@ from local_operator.harness.types import (
 )
 from local_operator.notifications.authority import GRANT_NAME, granted, set_grant
 from local_operator.notifications.store import NotificationStore
+from local_operator.output_contract import OutputContract
 from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
 from tests.unit.session.test_session import ScriptedStream, make_session
 
@@ -42,6 +44,26 @@ def test_grant_revoke_preserves_provenance_and_binds_the_session(tmp_path: Path)
     assert (directory / "origin.json").read_bytes() == original
 
 
+def test_grant_replacement_cannot_remove_a_directory_and_cleans_its_staging_file(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "synthetic-specialist"
+    original = _workstream(directory)
+    target = directory / GRANT_NAME
+    target.mkdir()
+    sentinel = target / "preserved.txt"
+    sentinel.write_text("preserve this directory", encoding="utf-8")
+    # The allowlisted replace has a mkstemp FILE source and a fixed sidecar
+    # target. The OS rejects a directory target; cleanup removes only staging.
+    with pytest.raises(OSError):
+        set_grant(directory, allow=True, reason="synthetic operator request")
+    assert sentinel.read_text(encoding="utf-8") == "preserve this directory"
+    assert (directory / "origin.json").read_bytes() == original
+    assert not list(directory.glob(".notification-authority-*"))
+    assert directory.is_dir() and target.is_dir()
+    assert not granted(directory)
+
+
 @pytest.mark.parametrize("case", ["subagent", "agent-shell", "remote", "blank-reason"])
 def test_invalid_grants_are_refused(tmp_path: Path, case: str) -> None:
     directory = tmp_path / "synthetic-specialist"
@@ -60,7 +82,7 @@ def test_invalid_grants_are_refused(tmp_path: Path, case: str) -> None:
 @pytest.mark.parametrize(
     "change", [{"version": 2}, {"granted": "true"}, {"source": "profile"}, {"reason": ""}]
 )
-def test_malformed_grant_fails_closed(tmp_path: Path, change: dict) -> None:
+def test_malformed_grant_fails_closed(tmp_path: Path, change: dict[str, Any]) -> None:
     _workstream(tmp_path)
     grant = set_grant(tmp_path, allow=True, reason="operator request")
     grant.update(change)
@@ -176,7 +198,9 @@ async def test_cli_grant_reaches_next_live_provider_request_and_executes(
         denied = await cached_tool.execute(
             "stale-notify",
             {"title": "Stale", "body": "Must not publish", "key": "stale"},
-            context=cached_context,
+            None,
+            None,
+            cached_context,
         )
         assert "unavailable" in str(denied)
         assert len(NotificationStore(tmp_path).list_items()[0]) == 1
@@ -234,7 +258,7 @@ async def test_grant_never_overrides_hard_exclusions(
     elif exclusion == "one-shot":
         session._one_shot_exit = True
     elif exclusion == "contract":
-        session._output_contract = object()
+        session._output_contract = OutputContract(format="json")
     elif exclusion == "remote":
         (session.transcript.directory / "mesh.json").write_text("{}")
     else:

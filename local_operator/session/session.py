@@ -20061,6 +20061,7 @@ class Session:
                 and self._run_notify_requested
                 and not self._run_notified
                 and messages
+                and isinstance(messages[-1], Message)
             ):
                 door = self._notify_tool_callable()
                 if door is not None:
