@@ -333,6 +333,16 @@ class RadientTunnels:
         if not isinstance(token, str) or not token:
             raise LoginRequired("The tunnel's Radient login expired; log in again.")
         headers = {"Authorization": f"Bearer {token}"}
+        if api_path is None:
+            from local_operator.tunnels import config as tunnel_config
+            from local_operator.tunnels.relay.connector import PROTOCOL
+
+            # Advertising support is opt-in on the wire, not inferred from a
+            # User-Agent version: old servers ignore it and dual-run stays intact.
+            # The explicit Cloudflare kill switch must never promise a relay-only
+            # bootstrap that this device has been told not to use.
+            if tunnel_config.transport_override() != tunnel_config.TRANSPORT_CLOUDFLARE:
+                headers["X-Radient-Tunnel-Protocol"] = PROTOCOL
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         response = await self.client.request(
