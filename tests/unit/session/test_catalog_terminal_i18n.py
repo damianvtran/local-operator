@@ -3,6 +3,7 @@
 Synthetic catalogue markers prove dispatch without inventing target translations.
 The actual locale/audit contribution is intentionally separate from these tests.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,46 +30,69 @@ def english(monkeypatch):
 
 def entry(kind="", *, unseen=False, reason="", **row_fields):
     row = SessionRow("synthetic001", 1.0, "Synthetic session", **row_fields)
-    return catalog.entry_for(row, {
-        "kind": kind, "unseen": unseen, "reason": reason,
-        "completion_token": "synthetic-token" if kind else "",
-    })
+    return catalog.entry_for(
+        row,
+        {
+            "kind": kind,
+            "unseen": unseen,
+            "reason": reason,
+            "completion_token": "synthetic-token" if kind else "",
+        },
+    )
 
 
-@pytest.mark.parametrize(("kind", "code", "label"), [
-    ("interrupted", "interrupted", "Interrupted"),
-    ("retired", "interrupted", "Interrupted — retired for an update"),
-    ("error", "error", "Error"),
-    ("complete", "complete", "Complete"),
-    ("", "recent", "Recent"),
-])
+@pytest.mark.parametrize(
+    ("kind", "code", "label"),
+    [
+        ("interrupted", "interrupted", "Interrupted"),
+        ("retired", "interrupted", "Interrupted — retired for an update"),
+        ("error", "error", "Error"),
+        ("complete", "complete", "Complete"),
+        ("", "recent", "Recent"),
+    ],
+)
 def test_acknowledged_terminal_state(kind, code, label):
     item = entry(kind)
     assert (item.status_code, item.status) == (code, label)
 
 
-@pytest.mark.parametrize(("kind", "label"), [
-    ("interrupted", "Unseen interruption"),
-    ("retired", "Unseen interruption — retired for an update"),
-    ("error", "Unseen error"),
-    ("complete", "Unseen completion"),
-])
+@pytest.mark.parametrize(
+    ("kind", "label"),
+    [
+        ("interrupted", "Unseen interruption"),
+        ("retired", "Unseen interruption — retired for an update"),
+        ("error", "Unseen error"),
+        ("complete", "Unseen completion"),
+    ],
+)
 def test_unseen_terminal_state(kind, label):
     item = entry(kind, unseen=True)
     assert item.status == label
-    assert catalog.status_of(item.row, {
-        "kind": kind, "unseen": True, "completion_token": "synthetic-token",
-    }) == (item.status_code, label)
+    assert catalog.status_of(
+        item.row,
+        {
+            "kind": kind,
+            "unseen": True,
+            "completion_token": "synthetic-token",
+        },
+    ) == (item.status_code, label)
 
 
 @pytest.mark.parametrize("unseen", [False, True])
-@pytest.mark.parametrize(("rung", "phrase"), [
-    ("socket", ""), ("sigterm", " — stopped with a signal by /stop --all"),
-    ("sigkill", " — killed by /stop --all"), ("future", ""),
-])
+@pytest.mark.parametrize(
+    ("rung", "phrase"),
+    [
+        ("socket", ""),
+        ("sigterm", " — stopped with a signal by /stop --all"),
+        ("sigkill", " — killed by /stop --all"),
+        ("future", ""),
+    ],
+)
 def test_stop_escalation_uses_semantic_decoder(unseen, rung, phrase):
     reason = render_cut_off_reason("user-stop") + render_stop_attribution(
-        rung=rung, command="/stop --all", killer_pid=123,
+        rung=rung,
+        command="/stop --all",
+        killer_pid=123,
     )
     item = entry("interrupted", unseen=unseen, reason=reason)
     assert item.status == ("Unseen interruption" if unseen else "Interrupted") + phrase
@@ -85,12 +109,15 @@ def test_stop_escalation_uses_semantic_decoder(unseen, rung, phrase):
 def test_pid_only_attribution_is_unknown_not_a_command(monkeypatch, rung, unseen):
     monkeypatch.setattr(catalog, "_label_locale", lambda: "fr")
     reason = render_cut_off_reason("user-stop") + render_stop_attribution(
-        rung=rung, command="", killer_pid=123,
+        rung=rung,
+        command="",
+        killer_pid=123,
     )
     # Historical partial markers lost the command/pid distinction in their
     # sentence. Identical bytes cannot truthfully recover different actors.
     ambiguous = render_cut_off_reason("user-stop") + render_stop_attribution(
-        rung=rung, command="killer pid 123",
+        rung=rung,
+        command="killer pid 123",
     )
     assert reason == ambiguous
     assert stop_rung_from_reason(reason) == (rung, "")
@@ -101,9 +128,11 @@ def test_pid_only_attribution_is_unknown_not_a_command(monkeypatch, rung, unseen
     from local_operator.i18n.messages import render
 
     key = (
-        keys.unseen_signal_stop(command="none") if unseen else keys.signal_stop(command="none")
-    ) if rung == "sigterm" else (
-        keys.unseen_forced_kill(command="none") if unseen else keys.forced_kill(command="none")
+        (keys.unseen_signal_stop(command="none") if unseen else keys.signal_stop(command="none"))
+        if rung == "sigterm"
+        else (
+            keys.unseen_forced_kill(command="none") if unseen else keys.forced_kill(command="none")
+        )
     )
     assert item.status == render(key.code, dict(key.params), locale="fr")
     assert "killer pid" not in item.status and " via " not in item.status
@@ -113,12 +142,16 @@ def test_pid_only_attribution_is_unknown_not_a_command(monkeypatch, rung, unseen
 
 
 @pytest.mark.parametrize("rung", ["sigterm", "sigkill"])
-@pytest.mark.parametrize("command", ["killer pid 123", "/stop --all opaque-東京", "killer pid 123 extra"])
+@pytest.mark.parametrize(
+    "command", ["killer pid 123", "/stop --all opaque-東京", "killer pid 123 extra"]
+)
 @pytest.mark.parametrize("unseen", [False, True])
 def test_separate_pid_preserves_real_opaque_command(monkeypatch, rung, command, unseen):
     monkeypatch.setattr(catalog, "_label_locale", lambda: "fr")
     reason = render_cut_off_reason("user-stop") + render_stop_attribution(
-        rung=rung, command=command, killer_pid=456,
+        rung=rung,
+        command=command,
+        killer_pid=456,
     )
     assert stop_rung_from_reason(reason) == (rung, command)
     item = entry("interrupted", unseen=unseen, reason=reason)
@@ -128,10 +161,14 @@ def test_separate_pid_preserves_real_opaque_command(monkeypatch, rung, command, 
     assert item.completion_reason == reason
 
 
-@pytest.mark.parametrize("command", ["killer pid 123 extra", "killer pid 0123", "killer pid nope", "prefix killer pid 123"])
+@pytest.mark.parametrize(
+    "command",
+    ["killer pid 123 extra", "killer pid 0123", "killer pid nope", "prefix killer pid 123"],
+)
 def test_noncanonical_actor_is_not_stripped(command):
     reason = render_cut_off_reason("user-stop") + render_stop_attribution(
-        rung="sigkill", command=command,
+        rung="sigkill",
+        command=command,
     )
     assert stop_rung_from_reason(reason) == ("sigkill", command)
     assert stop_rung_from_reason("external killer pid 123") == ("", "")
@@ -148,13 +185,18 @@ def test_known_error_causes_are_message_selectors(cause, unseen):
     assert item.status_code == "error"
 
 
-@pytest.mark.parametrize("reason", ["Provider refusal\nraw second line", "legacy unknown attribution"])
+@pytest.mark.parametrize(
+    "reason", ["Provider refusal\nraw second line", "legacy unknown attribution"]
+)
 def test_unknown_diagnostic_stays_raw_not_a_translated_parameter(reason):
     attention = {"kind": "error", "unseen": True, "completion_token": "t", "reason": reason}
     before = json.dumps(attention)
-    row = SessionRow("synthetic001", 1., "Synthetic")
+    row = SessionRow("synthetic001", 1.0, "Synthetic")
     item = catalog.entry_for(row, attention)
-    assert catalog.status_of(row, attention) == ("error", "Unseen error — " + reason.splitlines()[0])
+    assert catalog.status_of(row, attention) == (
+        "error",
+        "Unseen error — " + reason.splitlines()[0],
+    )
     assert item.completion_reason == reason
     assert json.dumps(attention) == before
     assert entry("interrupted", reason=reason).status == "Interrupted"
@@ -164,7 +206,9 @@ def test_unknown_diagnostic_stays_raw_not_a_translated_parameter(reason):
 def test_dormant_plural_count_and_code(count):
     # The dormant arm requires at least one wake; zero remains the recent arm.
     item = entry(wakes=count, wakes_dormant=True)
-    assert item.status == (f"Stopped ({count} {'wake' if count == 1 else 'wakes'} dormant)" if count else "Recent")
+    assert item.status == (
+        f"Stopped ({count} {'wake' if count == 1 else 'wakes'} dormant)" if count else "Recent"
+    )
     assert item.status_code == ("dormant" if count else "recent")
 
 
@@ -174,9 +218,11 @@ def test_catalogue_not_english_base_and_locale_does_not_change_order(tmp_path, m
     for locale in ("en", "fr"):
         (tmp_path / locale).mkdir()
         # Opaque fixture markers, NOT a translation contribution.
-        payload = messages if locale == "en" else {
-            key: f"fixture:{key.rsplit('.', 1)[1]}" for key in messages
-        }
+        payload = (
+            messages
+            if locale == "en"
+            else {key: f"fixture:{key.rsplit('.', 1)[1]}" for key in messages}
+        )
         (tmp_path / locale / "wire.session_status.json").write_text(json.dumps(payload))
     monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path)
     from local_operator.i18n import resolve
@@ -188,9 +234,14 @@ def test_catalogue_not_english_base_and_locale_does_not_change_order(tmp_path, m
     old = [(item.status_code, item.rank, item.active, item.shows_completion_mark) for item in items]
     monkeypatch.setattr(catalog, "_label_locale", lambda: "fr")
     assert [item.status for item in items] == [
-        "fixture:unseen_retirement", "fixture:error", "fixture:complete", "fixture:recent",
+        "fixture:unseen_retirement",
+        "fixture:error",
+        "fixture:complete",
+        "fixture:recent",
     ]
-    assert [(item.status_code, item.rank, item.active, item.shows_completion_mark) for item in items] == old
+    assert [
+        (item.status_code, item.rank, item.active, item.shows_completion_mark) for item in items
+    ] == old
 
 
 @pytest.mark.parametrize("live_state", ["busy", "attached", "idle"])

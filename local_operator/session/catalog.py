@@ -558,12 +558,14 @@ class CatalogEntry:
         if rung == "sigterm":
             message = (
                 keys.unseen_signal_stop(command=command or "none")
-                if unseen else keys.signal_stop(command=command or "none")
+                if unseen
+                else keys.signal_stop(command=command or "none")
             )
         elif rung == "sigkill":
             message = (
                 keys.unseen_forced_kill(command=command or "none")
-                if unseen else keys.forced_kill(command=command or "none")
+                if unseen
+                else keys.forced_kill(command=command or "none")
             )
         else:
             message = keys.unseen_interruption() if unseen else keys.interrupted()
@@ -585,7 +587,8 @@ class CatalogEntry:
         if cause:
             message = (
                 keys.unseen_error_cause(cause=cause.replace("-", "_"))
-                if unseen else keys.error_cause(cause=cause.replace("-", "_"))
+                if unseen
+                else keys.error_cause(cause=cause.replace("-", "_"))
             )
         elif self.completion_reason.strip():
             return _legacy_external_error_label(self.completion_reason, unseen=unseen)
