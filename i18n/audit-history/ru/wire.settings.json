@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "64529b73086ce9c2f3538d5ad2264c1ef09603deb78c9b81eb9660751f937ad9",
+  "history_sha256": "cc88b6fcd0726e3bc3e27972b07b742856c0a73303daa3c7de8d40562c6f6534",
   "entries": [
     {
       "locale": "ru",
@@ -1247,6 +1247,41 @@
       "status": "passed",
       "note": "PR #4266 round 1: re-audit after en wire.settings moved c62db407a0b2 -> fc000662374f by exactly 4 added keys (providers_bedrock_auth/.region .label/.help). Three-way vs merge-base 0d057990a180: locale diff is exactly those 4 added lines; every other key byte-identical to the previously passed target 3590bab71ef5 (prior row c62db407a0b2, carried). 4 new keys audited: faithful; 'ambient' and AWS_REGION verbatim; labels <=29 cells and helps <=76 cells (rich cell_len); placeholder-free; NFC; no bidi controls; key set equals en. Findings: none. Native-speaker review and rendered-frame certification not claimed.",
       "round": "pr4266-r1"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "fc000662374f07bffb44f2e7d42e9616695fd31570ca27cbfcabbb77acb3dd8f",
+      "context_sha256": "d2561d10017129d746d20993c33984f0094849be6ef7e69af57e7d0da471ddfe",
+      "target_sha256": "0dbe70d97d35f3ab6d2e6b36c63a862e9f44100595a4d549d1971202480886e6",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 35241b9c509a",
+        "session": "35241b9c509a",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), job ab68148cabf7, session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "job": "ab68148cabf7"
+      },
+      "status": "passed",
+      "note": "Provenance correction, same audit and verdict as the preceding pr4266-r1 row (identical source/context/target hashes): translator identity relayed by the manager after the first append (was recorded unknown). PR #4266 round 1: re-audit after en wire.settings moved c62db407a0b2 -> fc000662374f by exactly 4 added keys (providers_bedrock_auth/.region .label/.help). Three-way vs merge-base 0d057990a180: locale diff is exactly those 4 added lines; every other key byte-identical to the previously passed target 3590bab71ef5 (prior row c62db407a0b2, carried). 4 new keys audited: faithful; 'ambient' and AWS_REGION verbatim; labels <=29 cells and helps <=76 cells (rich cell_len); placeholder-free; NFC; no bidi controls; key set equals en. Findings: none. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1-provenance"
     }
   ]
 }
