@@ -189,6 +189,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; its seven
         # locales ride the same PR with their own ledger rows.
         "wire.github",
+        # Effective-team provenance reasons are an approved populated child,
+        # not a stub or a prefix-wide exemption from the exact inventory.
+        "wire.teams.effective",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -205,6 +208,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
+    assert catalogues.load_catalogue("en", "wire.teams.effective") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
@@ -224,7 +228,12 @@ def test_shipped_wire_namespaces_exist() -> None:
 
 @pytest.mark.parametrize(
     "target_namespace",
-    ["wire.errors.files", "wire.errors.sdk_spec", "wire.settings.account_policy"],
+    [
+        "wire.errors.files",
+        "wire.errors.sdk_spec",
+        "wire.settings.account_policy",
+        "wire.teams.effective",
+    ],
 )
 @pytest.mark.parametrize("mutation", ["unexpected-namespace", "missing-declared", "empty-declared"])
 def test_exact_wire_namespace_contract_rejects_mutations(
