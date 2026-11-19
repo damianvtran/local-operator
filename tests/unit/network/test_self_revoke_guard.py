@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -114,10 +115,10 @@ def test_a_revoke_now_thread_that_outlives_its_join_fails_teardown_by_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     release = threading.Event()
-    stuck = threading.Thread(
-        target=release.wait, name=github_mod.REVOKE_NOW_THREAD_NAME, daemon=True
-    )
-    stuck.start()
+    # Through the real revoke_now, not a hand-named thread: the teardown reads
+    # the module's own registry, so only a thread revoke_now started is tracked.
+    monkeypatch.setattr(github_mod, "revoke_installation_token", lambda *_a, **_k: release.wait())
+    [stuck] = github_mod.revoke_now([_installation_grant("tok-stuck-revoke-now")])
     try:
         with pytest.raises(AssertionError, match=github_mod.REVOKE_NOW_THREAD_NAME):
             stop_every_borrower_revoke(join_timeout_s=0.05)
@@ -160,3 +161,53 @@ def test_a_firing_belt_that_outlives_its_join_fails_teardown_by_name(
     assert not belts[0].is_alive()
     assert github_mod.pending_self_revoke_threads() == []
     assert "tok-stuck-firing" not in github_mod._SELF_REVOKE_TIMERS  # noqa: SLF001
+
+
+def _installation_grant(token: str) -> SimpleNamespace:
+    """The three fields :func:`github_mod.is_installation_grant` reads, nothing more."""
+    return SimpleNamespace(
+        access_token=token,
+        token_expires_at_ms=int(time.time() * 1000) + 3_600_000,
+        credential_ref=SimpleNamespace(kind=github_mod.GITHUB_KIND),
+    )
+
+
+def test_teardown_with_nothing_scheduled_never_samples_threading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``tests/unit/conftest.py`` runs this teardown after EVERY unit cell, so it
+    must never scan the process's threads: the thread-leak reporter's own tests
+    monkeypatch ``threading.enumerate``/``active_count`` to fail, and the PR #4263
+    head that enumerated broke them on merge gate 44481472281 (shard 4, 3.12 and
+    3.13). With no revoke ever scheduled the teardown reads empty registries only."""
+
+    def forbidden(*_args: object) -> object:
+        pytest.fail("the per-cell revoke teardown must not sample threading")
+
+    monkeypatch.setattr(threading, "enumerate", forbidden)
+    monkeypatch.setattr(threading, "active_count", forbidden)
+    stop_every_borrower_revoke()
+    assert github_mod.pending_self_revoke_threads() == []
+
+
+def test_a_revoke_now_thread_is_tracked_until_it_finishes_then_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry that replaced the thread scan still sees an in-flight
+    :func:`github_mod.revoke_now` DELETE (so the teardown joins it), and a
+    foreign thread that merely shares the name is not mistaken for one."""
+    release = threading.Event()
+    monkeypatch.setattr(github_mod, "revoke_installation_token", lambda *_a, **_k: release.wait())
+    impostor = threading.Thread(
+        target=release.wait, name=github_mod.REVOKE_NOW_THREAD_NAME, daemon=True
+    )
+    impostor.start()
+    try:
+        [thread] = github_mod.revoke_now([_installation_grant("tok-tracked-revoke-now")])
+        assert github_mod.pending_self_revoke_threads() == [thread]
+    finally:
+        release.set()
+    stop_every_borrower_revoke()
+    impostor.join(10.0)
+    assert not thread.is_alive()
+    assert github_mod.pending_self_revoke_threads() == []

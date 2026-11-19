@@ -133,6 +133,7 @@ import shlex
 import subprocess
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
@@ -2217,10 +2218,20 @@ def cancel_pending_self_revokes(*, join_timeout_s: float | None = None) -> int:
     return len(tokens)
 
 
-#: Name every :func:`revoke_now` thread carries. A test teardown finds the
-#: in-flight immediate revokes by it (they are short-lived daemon threads with no
-#: registry of their own), so it is part of the joinable contract, not cosmetic.
+#: Name every :func:`revoke_now` thread carries, so an overrun teardown names it
+#: and a thread listing tells an immediate revoke from an anonymous ``Thread-N``.
 REVOKE_NOW_THREAD_NAME = "lop-github-revoke-now"
+#: Every :func:`revoke_now` thread this process started, guarded by
+#: ``_SELF_REVOKE_LOCK``. The joinable contract reads THIS, never
+#: ``threading.enumerate()``: ``tests/unit/conftest.py`` runs
+#: :func:`pending_self_revoke_threads` after every unit cell, and a per-cell
+#: thread scan is both wasted cost on thousands of cells and a breach of the
+#: thread-leak reporter's contract, whose own tests monkeypatch ``enumerate`` to
+#: fail (merge gate 44481472281, shard 4). With nothing ever scheduled the read
+#: is an empty-set copy, no ``threading`` sampling at all. A ``WeakSet`` because a
+#: live thread is held strongly by ``threading`` itself, so it stays visible until
+#: it finishes, and a finished one the caller dropped needs no pruning.
+_REVOKE_NOW_THREADS: weakref.WeakSet[threading.Thread] = weakref.WeakSet()
 
 
 def pending_self_revoke_threads() -> list[threading.Thread]:
@@ -2233,9 +2244,7 @@ def pending_self_revoke_threads() -> list[threading.Thread]:
     """
     with _SELF_REVOKE_LOCK:
         alive: list[threading.Thread] = [t for t in _SELF_REVOKE_TIMERS.values() if t.is_alive()]
-    alive.extend(
-        t for t in threading.enumerate() if t.name == REVOKE_NOW_THREAD_NAME and t.is_alive()
-    )
+        alive.extend(t for t in _REVOKE_NOW_THREADS if t.is_alive())
     return alive
 
 
@@ -2321,9 +2330,14 @@ def revoke_now(grants: Any, *, base_url: str | None = None) -> list[threading.Th
             name=REVOKE_NOW_THREAD_NAME,
             daemon=True,
         )
+        # Registered before start so no window exists where it runs untracked.
+        with _SELF_REVOKE_LOCK:
+            _REVOKE_NOW_THREADS.add(thread)
         try:
             thread.start()
         except RuntimeError:  # interpreter shutting down; the ceiling remains
+            with _SELF_REVOKE_LOCK:
+                _REVOKE_NOW_THREADS.discard(thread)
             continue
         started.append(thread)
     return started
