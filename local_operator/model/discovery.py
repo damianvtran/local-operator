@@ -1646,19 +1646,30 @@ _WIRE_TRANSPORTS: dict[WireFormat, _Transport | None] = {
 }
 
 
+#: Providers that carry a ``base_url`` for inference (so wire clients know
+#: where to post) yet expose no uniform ``/models`` GET listing endpoint.
+#: Vertex AI's publisher catalogue is not listable with an API key or plain
+#: OAuth token on ``aiplatform.googleapis.com``; its static Gemini catalogue
+#: supplies the full model list instead.
+_UNLISTABLE_PROVIDERS: frozenset[str] = frozenset(
+    {"google-vertex", "google-vertex-key", "google-vertex-sa"}
+)
+
+
 def _build_transports() -> dict[str, _Transport | None]:
     """Provider id to transport, derived from the registry at import time.
 
     A provider with no ``base_url`` maps to ``None`` unless local setup supplies
     its endpoint at runtime: an unconfigured generic server is not permanently
-    unlistable. That is the shape the credential-brokered providers take (Vertex,
-    Bedrock and Azure, none of which exist in this tree today), so adding one
-    later gets the correct "registry only" behaviour instead of a request to the
-    empty string.
+    unlistable. Providers in :data:`_UNLISTABLE_PROVIDERS` (Vertex AI) also map
+    to ``None`` because they serve inference from a known host yet expose no
+    ``/models`` listing route, so discovery uses their static catalogue directly.
     """
     transports: dict[str, _Transport | None] = {}
     for definition in PROVIDER_REGISTRY:
-        if not definition.base_url and not definition.local_setup:
+        if definition.id in _UNLISTABLE_PROVIDERS or (
+            not definition.base_url and not definition.local_setup
+        ):
             transports[definition.id] = None
             continue
         transports[definition.id] = _WIRE_TRANSPORTS.get(definition.wire)

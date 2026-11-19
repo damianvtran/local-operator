@@ -268,7 +268,7 @@ async def list_models(
                     models.append(
                         ModelEntry(id=row.id, name=info.name, provider="deepseek", info=info)
                     )
-            elif provider_detail.id == "google":
+            elif provider_detail.id in ("google", "google-vertex"):
                 for model_name, model_info in google_models.items():
                     models.append(
                         ModelEntry(

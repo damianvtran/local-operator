@@ -26,6 +26,7 @@ import functools
 import json
 import logging
 import math
+import os
 import re
 import time
 import unicodedata
@@ -3278,7 +3279,7 @@ class OpenAICompatClient:
         # Aggregator identity alone is not the model family: Google keeps its
         # final-user requirement through OpenRouter's OpenAI-compatible wire.
         google_boundary_tokens = 0
-        if request.model.provider == "google" or (
+        if request.model.provider in ("google", "google-vertex") or (
             request.model.provider == "openrouter" and request.model.model_id.startswith("google/")
         ):
             google_boundary_tokens = _google_user_boundary(messages)
@@ -5965,19 +5966,28 @@ class AnthropicClient:
 # ---------------------------------------------------------------------------
 
 GOOGLE_API_URL = "https://generativelanguage.googleapis.com"
+VERTEX_API_URL = "https://aiplatform.googleapis.com"
 
 
 class GoogleClient:
-    """Minimal Gemini client: ``streamGenerateContent?alt=sse``."""
+    """Minimal Gemini client: ``streamGenerateContent?alt=sse``.
+
+    Serves both Google AI Studio (``vertex=False``) and Google Cloud Vertex AI
+    (``vertex=True``), because both endpoints accept the same Gemini request
+    body and SSE chunk schema while differing in URL layout and authentication
+    headers.
+    """
 
     def __init__(
         self,
         base_url: str = GOOGLE_API_URL,
         *,
+        vertex: bool = False,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 600.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._vertex = vertex
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
@@ -6194,18 +6204,81 @@ class GoogleClient:
             return "[tool returned image content]"
         return EMPTY_TOOL_RESULT_TEXT
 
+    def _vertex_endpoint_and_headers(
+        self,
+        model_id: str,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None",
+    ) -> tuple[str, dict[str, str]]:
+        """Resolve Vertex AI's streaming URL and auth headers for this credential.
+
+        OAuth and service-account credentials call the project/location path
+        with a Bearer token; API keys (express mode or service-account-bound)
+        call the publisher endpoint with ``x-goog-api-key``.
+        """
+        headers = {"Content-Type": "application/json"}
+        if oauth_access is not None and oauth_access.kind == "oauth":
+            raw = oauth_access.raw or {}
+            project_id = (
+                str(raw.get("project_id") or "").strip()
+                or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+                or (os.environ.get("VERTEX_PROJECT") or "").strip()
+            )
+            if not project_id:
+                raise ProviderError(
+                    400,
+                    "Google Vertex AI OAuth/service-account credentials require a GCP project ID. "
+                    "Set GOOGLE_CLOUD_PROJECT (or VERTEX_PROJECT) or re-run "
+                    "`/login google-vertex`.",
+                    retryable=False,
+                )
+            location = (
+                str(raw.get("location") or "").strip()
+                or (os.environ.get("GOOGLE_CLOUD_LOCATION") or "").strip()
+                or (os.environ.get("VERTEX_LOCATION") or "").strip()
+                or "global"
+            )
+            # Only synthesize the regional host when the client is on Vertex's
+            # default global host; preserve an explicit custom base URL override
+            # (gateway, proxy, or test fixture).
+            if location != "global" and self._base_url == VERTEX_API_URL:
+                host = f"https://{location}-aiplatform.googleapis.com"
+            else:
+                host = self._base_url
+            url = (
+                f"{host}/v1/projects/{project_id}/locations/{location}"
+                f"/publishers/google/models/{model_id}:streamGenerateContent?alt=sse"
+            )
+            headers["Authorization"] = f"Bearer {oauth_access.access_token}"
+            headers["x-goog-user-project"] = project_id
+            return url, headers
+
+        url = (
+            f"{self._base_url}/v1/publishers/google/models/{model_id}"
+            ":streamGenerateContent?alt=sse"
+        )
+        if api_key:
+            headers["x-goog-api-key"] = api_key
+        return url, headers
+
     async def stream(
         self,
         request: ChatRequest,
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
-        url = (
-            f"{self._base_url}/v1beta/models/{request.model.model_id}:streamGenerateContent?alt=sse"
-        )
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["x-goog-api-key"] = api_key
+        if self._vertex or request.model.provider == "google-vertex":
+            url, headers = self._vertex_endpoint_and_headers(
+                request.model.model_id, api_key, oauth_access
+            )
+        else:
+            url = (
+                f"{self._base_url}/v1beta/models/{request.model.model_id}"
+                ":streamGenerateContent?alt=sse"
+            )
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["x-goog-api-key"] = api_key
         scope = credential_scope(api_key, oauth_access)
         usage: Usage | None = None
         stop_reason = "stop"
@@ -6627,8 +6700,10 @@ def client_for_spec(
             ),
         )
     if wire == "google":
-        base = spec.base_url or GOOGLE_API_URL
-        return GoogleClient(base_url=base, http_client=http_client)
+        is_vertex = spec.provider == "google-vertex"
+        default_base = VERTEX_API_URL if is_vertex else GOOGLE_API_URL
+        base = spec.base_url or (definition.base_url if definition else None) or default_base
+        return GoogleClient(base_url=base, vertex=is_vertex, http_client=http_client)
     base = (
         spec.base_url
         or (definition.base_url if definition else None)

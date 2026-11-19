@@ -287,6 +287,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
             "kimi",
             "alibaba",
             "google",
+            "google-vertex",
             "mistral",
             "openrouter",
             "xai",

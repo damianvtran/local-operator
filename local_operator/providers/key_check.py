@@ -78,6 +78,14 @@ def _base_url(definition: ProviderDefinition) -> str | None:
     return definition.base_url
 
 
+#: Minimal Vertex AI ``countTokens`` payload used to verify an API key.
+#: Vertex AI exposes no ``GET /v1beta/models`` listing on ``aiplatform.googleapis.com``,
+#: so ``countTokens`` is the cheapest authenticated read-only call (no tokens
+#: generated, no billing for output).
+_VERTEX_COUNT_TOKENS_MODEL = "gemini-3.8-flash"
+_VERTEX_COUNT_TOKENS_BODY = {"contents": [{"role": "user", "parts": [{"text": "ping"}]}]}
+
+
 def _request(definition: ProviderDefinition, key: str) -> tuple[str, dict[str, str]] | None:
     """The URL and headers of the cheapest authenticated request, or ``None``."""
     base = _base_url(definition)
@@ -87,6 +95,13 @@ def _request(definition: ProviderDefinition, key: str) -> tuple[str, dict[str, s
     if definition.wire == "anthropic":
         url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
         return url, {"x-api-key": key, "anthropic-version": _ANTHROPIC_VERSION}
+    if definition.id == "google-vertex":
+        # Vertex AI has no /v1beta/models GET listing; countTokens is the
+        # cheapest authenticated probe and takes the key in x-goog-api-key.
+        return (
+            f"{base}/v1/publishers/google/models/{_VERTEX_COUNT_TOKENS_MODEL}:countTokens",
+            {"x-goog-api-key": key},
+        )
     if definition.wire == "google":
         # The header form, not ``?key=``: a query string is what access logs keep.
         return f"{base}/v1beta/models?pageSize=1", {"x-goog-api-key": key}
@@ -230,7 +245,15 @@ async def check_api_key(
     owned = client is None
     http = client or httpx.AsyncClient(timeout=timeout)
     try:
-        response = await http.get(url, headers=headers, timeout=timeout)
+        if definition.id == "google-vertex":
+            response = await http.post(
+                url,
+                headers=headers,
+                json=_VERTEX_COUNT_TOKENS_BODY,
+                timeout=timeout,
+            )
+        else:
+            response = await http.get(url, headers=headers, timeout=timeout)
         return classify(definition, response.status_code, response.text[:2048])
     except Exception as error:  # noqa: BLE001 -- "never raises" is the route's contract
         # Broad on purpose: the save route has no guard of its own, and an

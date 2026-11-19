@@ -221,6 +221,16 @@ BILLING_LINKS: dict[str, BillingLink] = {
             "aistudio.google.com/billing is not discriminating"
         ),
     ),
+    "google-vertex": BillingLink(
+        kind="balance",
+        url="https://console.cloud.google.com/billing",
+        dashboard="the Google Cloud billing console",
+        verified=False,
+        note=(
+            "console.cloud.google.com/billing redirects to Google Cloud sign-in "
+            "(unverified); pricing docs at https://cloud.google.com/vertex-ai/generative-ai/pricing"
+        ),
+    ),
     "mistral": BillingLink(
         kind="balance",
         url="https://admin.mistral.ai/plateforme/billing",

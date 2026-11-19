@@ -2044,6 +2044,8 @@ async def test_an_oauth_paste_is_not_sent_to_the_key_check(desktop, monkeypatch)
 _PASTE_NOT_A_KEY = {
     "anthropic": "the fallback box reads an OAuth authorization code (code#state)",
     "zai-oauth": "the fallback box reads an OAuth authorization code or redirect URL",
+    "google-vertex": "the fallback box reads an OAuth authorization code or redirect URL",
+    "google-vertex-sa": "the prompt reads a GCP service account JSON payload or file path",
 }
 
 
@@ -2064,10 +2066,10 @@ def test_every_paste_prompt_is_classified_for_the_key_check():
     for provider_id in _PASTE_NOT_A_KEY:
         definition = registry.get_provider_definition(provider_id)
         assert definition is not None and not definition.paste_is_api_key, provider_id
-    # Every REQUIRED prompt in the registry today reads a key (the flavour gate
-    # checked all but one of them); a required non-key prompt must be a
-    # deliberate addition to the exemptions, never a silent default.
-    assert {p.id for p in offered if p.paste_is_api_key} >= required
+    # Every REQUIRED prompt must either be checked as an API key or explicitly
+    # listed in _PASTE_NOT_A_KEY (e.g. google-vertex-sa reads a JSON key / path,
+    # never an API key string).
+    assert ({p.id for p in offered if p.paste_is_api_key} | set(_PASTE_NOT_A_KEY)) >= required
 
 
 @pytest.mark.parametrize(

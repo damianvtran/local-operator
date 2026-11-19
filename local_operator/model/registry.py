@@ -80,6 +80,14 @@ SupportedHostingProviders = [
         recommended=True,
     ),
     ProviderDetail(
+        id="google-vertex",
+        name="Google Vertex AI",
+        description="Google Cloud Vertex AI for Gemini models via SSO, API key, or service account",
+        url="https://cloud.google.com/vertex-ai",
+        requiredCredentials=["GOOGLE_VERTEX_API_KEY"],
+        recommended=False,
+    ),
+    ProviderDetail(
         id="mistral",
         name="Mistral AI",
         description="Mistral AI's open and proprietary language models",
@@ -470,7 +478,7 @@ def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "deepseek":
         if model in deepseek_models:
             return deepseek_models[model]
-    elif hosting == "google":
+    elif hosting in ("google", "google-vertex"):
         if model in google_models:
             return google_models[model]
     elif hosting == "openai":
@@ -3172,6 +3180,7 @@ _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
     "anthropic": anthropic_models,
     "openai": openai_models,
     "google": google_models,
+    "google-vertex": google_models,
     "deepseek": deepseek_models,
     "alibaba": qwen_models,
     # Token Plan models are keyed under the canonical storage id only, so a walk

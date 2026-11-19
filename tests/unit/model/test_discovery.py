@@ -1045,12 +1045,15 @@ def test_no_listing_providers_is_derived_from_the_provider_registry() -> None:
     expected = {
         definition.id
         for definition in PROVIDER_REGISTRY
-        if definition.wire == "mock" or (not definition.base_url and not definition.local_setup)
+        if definition.wire == "mock"
+        or definition.id in discovery._UNLISTABLE_PROVIDERS
+        or (not definition.base_url and not definition.local_setup)
     }
 
     # Derived, not hardcoded: with a literal id list, the provider added next is
     # always the one that silently gets no listing.
     assert discovery.NO_LISTING_PROVIDERS == expected
+    assert "google-vertex" in discovery.NO_LISTING_PROVIDERS
     assert expected, "the registry should still contain at least one unlistable provider"
 
 

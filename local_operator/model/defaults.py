@@ -90,6 +90,8 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # agents". Chosen over a Pro model at the operator's direction: it is the
     # model an agent harness should start on for price/latency.
     "google": SuggestedModel("gemini-3.8-flash", "Gemini 3.8 Flash"),
+    # Vertex AI serves the same Gemini publisher model ids as Google AI Studio.
+    "google-vertex": SuggestedModel("gemini-3.8-flash", "Gemini 3.8 Flash"),
     # The API-key host (api.moonshot.cn) spells Kimi K3 ``kimi-k3`` (models.dev,
     # OpenRouter's moonshotai/kimi-k3). An OAuth sign-in reaches the coding-plan
     # host instead, which spells it ``k3`` -- see OAUTH_SUGGESTED_MODELS.
