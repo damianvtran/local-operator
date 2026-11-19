@@ -499,6 +499,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
     ),
+    "local_operator/network/workset_transfer.py": (
+        2,
+        "``CLONE_MARKER`` ('lop-cloned.json') and ``ARRIVED_MARKER`` ('lop-arrived.json') "
+        "are written inside a moved REPOSITORY's git dir (``<repo>/.git/`` or a linked "
+        "worktree's admin dir) on the destination, to recognise a clone/restore this "
+        "move made. They are never an entry of a session directory; the working-set "
+        "staging trees live under ``<config>/network/`` beside ``sessions/``, so session "
+        "sync neither carries nor excludes them.",
+    ),
     "local_operator/network/routing_sync.py": (
         1,
         "``CHAIN_PREFIX`` ('fallbackChains.') prefixes a dotted settings KEY -- one "

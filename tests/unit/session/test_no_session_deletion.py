@@ -1285,6 +1285,147 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic replace of <config>/network/rollouts/ro_<id>.json; "
         "os.replace cannot target a directory",
     ),
+    # The session move's working-set transfer (#4245, workset_move.py and
+    # workset_transfer.py). Its own state lives under <config>/network/
+    # {workset-out,staging,workset-in,workset-consent}/ (ids pinned by
+    # workset_move._sid), its temp files are mkstemp/mkdtemp products of the
+    # same call, and every repository target it writes or removes passed
+    # primary_path_refusal, which refuses dot-components and the config root —
+    # so none of these calls can reach a directory under sessions/.
+    (
+        "local_operator/network/workset_move.py::_write_json",
+        "os.replace",
+        "Publishes this call's mkstemp .tmp-* regular FILE over a json file under "
+        "<config>/network/workset-{out,in,consent}/ or staging/<sid>.workset/; "
+        "os.replace rejects a directory target.",
+    ),
+    (
+        "local_operator/network/workset_move.py::_write_json",
+        "<path>.unlink",
+        "Removes only this call's mkstemp .tmp-* temp FILE after a failed write or "
+        "replace; unlink rejects directories.",
+    ),
+    (
+        "local_operator/network/workset_move.py::_remove_tree",
+        "<path>.unlink",
+        "Unlinks a SYMLINK only (is_symlink branch): never follows it, never a "
+        "session directory.",
+    ),
+    (
+        "local_operator/network/workset_move.py::_remove_tree",
+        "shutil.rmtree",
+        "Every caller passes outgoing_dir/incoming_staging/arrived_dir or a workset- "
+        "out/ child: <config>/network/{workset-out,staging,workset- "
+        "in}/<sid>[.workset], ids pinned by _sid; never under sessions/.",
+    ),
+    (
+        "local_operator/network/workset_move.py::_prune_artifacts",
+        "<path>.unlink",
+        "Unlinks only <64 hex>[.json] non-symlink entries directly in "
+        "<config>/network/workset-out/<sid>/ (the staged bundle cache).",
+    ),
+    (
+        "local_operator/network/workset_move.py::_fetch_artifact",
+        "<path>.unlink",
+        "Discards this pull's <hex>.part FILE (opened O_NOFOLLOW, regular) inside "
+        "<config>/network/staging/<sid>.workset/; unlink rejects directories.",
+        2,
+    ),
+    (
+        "local_operator/network/workset_move.py::_fetch_artifact",
+        "os.replace",
+        "Publishes the verified <hex>.part FILE as <hex> in the same "
+        "<config>/network/staging/<sid>.workset/ directory; os.replace rejects a "
+        "directory target.",
+    ),
+    (
+        "local_operator/network/workset_move.py::promote_incoming",
+        "os.replace",
+        "Moves <config>/network/staging/<sid>.workset/ to <config>/network/workset- "
+        "in/<sid>/ (both this module's own trees, ids pinned by _sid); never a path "
+        "under sessions/.",
+    ),
+    (
+        "local_operator/network/workset_move.py::restore_arrived",
+        "<path>.unlink",
+        "Drops only <64 hex> bundles and *.part files inside "
+        "<config>/network/workset-in/<sid>/ once restored; unlink rejects "
+        "directories.",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::_trees",
+        "<path>.unlink",
+        "Removes only this call's mkstemp lop-move-index-* temporary index FILE in "
+        "the repository's git dir; unlink rejects directories.",
+        2,
+    ),
+    (
+        "local_operator/network/workset_transfer.py::_write_json_atomic",
+        "os.replace",
+        "Publishes this call's mkstemp .tmp-* FILE over a bundle sidecar or a lop- "
+        "cloned/lop-arrived marker inside a repository's .git; os.replace rejects a "
+        "directory target.",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::_write_json_atomic",
+        "<path>.unlink",
+        "Removes only this call's mkstemp .tmp-* temp FILE after a failed write or "
+        "replace; unlink rejects directories.",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::stage_bundle",
+        "<path>.unlink",
+        "Removes only this call's mkstemp .tmp-*.bundle FILE in the move's own "
+        "staged-artifact dir (<config>/network/workset-out/<sid>/); unlink rejects "
+        "directories.",
+        2,
+    ),
+    (
+        "local_operator/network/workset_transfer.py::stage_bundle",
+        "os.replace",
+        "Publishes this call's bundle temp FILE as <sha256> in the same workset- "
+        "out/<sid>/ directory; os.replace rejects a directory target.",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::_rename_noreplace",
+        "os.rename",
+        "No-replace publish of a freshly built clone/restore staging tree to a target "
+        "that must not exist (renameat2 RENAME_NOREPLACE / lexists); cannot replace "
+        "or remove an existing directory, and primary_path_refusal keeps targets out "
+        "of dot-dirs and the config root.",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::_rmdir_quiet",
+        "<path>.rmdir",
+        "Non-recursive rmdir of restore()'s own mkdtemp .lop-restore-* staging dir "
+        "after the publish emptied it.",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::clone_primary",
+        "shutil.rmtree",
+        "Removes only the mkdtemp .lop-clone-* staging dir this call created beside a "
+        "clone target that passed primary_path_refusal (no dot-components, not the "
+        "config root).",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::measure_checkout",
+        "shutil.rmtree",
+        "Removes only its own mkdtemp .measure-* bare probe repository inside the "
+        "move's staging dir (<config>/network/staging/<sid>.workset/).",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::remove_own_clone",
+        "shutil.rmtree",
+        "Rollback of a clone THIS move published: contained_path under home, a lop- "
+        "cloned.json marker naming this session, lease epoch and path; clone targets "
+        "pass primary_path_refusal, so never under the config root or sessions/.",
+    ),
+    (
+        "local_operator/network/workset_transfer.py::restore",
+        "shutil.rmtree",
+        "Removes only restore()'s own mkdtemp .lop-restore-* staging dir beside a "
+        "target that passed primary_path_refusal, when the publish did not happen.",
+    ),
     (
         "local_operator/network/mobility.py::_arrival_resume_note",
         "os.replace",
