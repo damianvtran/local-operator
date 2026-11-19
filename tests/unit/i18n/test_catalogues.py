@@ -65,6 +65,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # the frame still inherits that one English sentence mid-sentence.
         "wire.errors.hosting",
         "wire.errors.media",
+        # Amazon Bedrock connect/credential refusals (`providers/bedrock/errors.py`),
+        # rendered verbatim by the desktop's provider-connect surface.
+        "wire.errors.bedrock",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
         # imaging_unavailable, empty_body), rendered by the desktop and phone

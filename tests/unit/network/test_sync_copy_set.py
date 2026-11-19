@@ -920,6 +920,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "REF_PREFIX is an encrypted provider-secret SQL namespace, not a session "
         "directory entry; neither sealed keys nor account references travel with sessions",
     ),
+    "local_operator/providers/bedrock/auth.py": (
+        1,
+        "SIGNING_NAME is the AWS SigV4 service name ('bedrock'), a request-signing "
+        "scope, never a file or session directory entry",
+    ),
+    "local_operator/providers/bedrock/connection.py": (
+        1,
+        "REF_PREFIX is the encrypted provider-secret namespace for Bedrock credentials, "
+        "not a session directory entry; sealed keys never travel with sessions",
+    ),
     "local_operator/mobile/auth.py": (1, "the mobile session COOKIE's name"),
     "local_operator/mobile/seen.py": (1, "the mobile seen-store under the store root"),
     "local_operator/mobile/push_devices.py": (
