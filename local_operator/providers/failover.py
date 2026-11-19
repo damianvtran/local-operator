@@ -852,6 +852,7 @@ class ProviderError(RenderedStreamError):
         transport: bool = False,
         transport_cause: BaseException | None = None,
         fail_closed: bool = False,
+        block_on_rotate: bool = True,
         provider: str = "",
         model: str = "",
         failover_from: str = "",
@@ -878,6 +879,18 @@ class ProviderError(RenderedStreamError):
         # resource refusals must stop the entire attempt chain, even before any
         # delta was forwarded (or when a host buffers the whole response).
         self.fail_closed = fail_closed
+        #: Whether ``AuthStore.rotate_sibling`` may write a credential BLOCK for
+        #: the failing row (default ``True``: every existing provider keeps its
+        #: behaviour). ``False`` means "rotate away, but the row itself is not
+        #: at fault": the store deprioritises instead, exactly as for a
+        #: server-side failure. Only Bedrock's ``_unresolved`` sets it -- a
+        #: botocore credential CHAIN that failed to resolve (expired SSO /
+        #: ``aws login`` cache, missing profile) is re-read on every attempt, so
+        #: a 60 s block would outlive the user's ``aws sso login`` and report
+        #: "rate limit or quota exceeded" (QA Q8), while NOT rotating would
+        #: strand a session sticky to that row away from a healthy sibling
+        #: connection (review R3-1). Deprioritising satisfies both.
+        self.block_on_rotate = block_on_rotate
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
         #: PROVENANCE, not classification: this error was built from a transport

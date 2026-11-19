@@ -287,6 +287,9 @@ def test_expired_sso_does_not_block_the_stored_connection(tmp_path, monkeypatch)
         err = caught.value.provider_error
         assert err.kind == "auth" and err.request_sent is False
         assert "aws sso login --profile sso" in str(err)
+        # R3-1: rotation-eligible again (a sibling must be reachable), but the
+        # rotation itself must not block this row.
+        assert is_rotation_eligible(err) and err.block_on_rotate is False
         if is_rotation_eligible(err):
             store.rotate_sibling("bedrock", None, err, api_key=descriptor)
         assert store._conn.execute("SELECT * FROM auth_credential_blocks").fetchall() == []
@@ -305,6 +308,46 @@ def test_expired_sso_does_not_block_the_stored_connection(tmp_path, monkeypatch)
         assert resolved.credentials.access_key == "ASIAFRESH"
     finally:
         store.close()
+
+
+def test_expired_sso_sticky_session_rotates_to_sibling_without_block(tmp_path) -> None:
+    """R3-1: a session sticky to an expired-SSO connection is served the sibling.
+
+    Round 2 made the SSO failure non-rotation-eligible to avoid the Q8 block,
+    which also meant ``rotate_sibling`` never ran: the sticky pointer stayed on
+    the dead row and a healthy second Bedrock connection was never asked. The
+    driver mirror below is the same gate ``failover`` applies.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.failover import is_rotation_eligible
+
+    sso = "bedrock://profile?name=sso&region=us-west-2"
+    static = "bedrock://profile?name=static&region=eu-central-1"
+    base = tmp_path / "lop"
+    base.mkdir()
+    store = AuthStore(base / "auth.db", config_dir=base)
+    try:
+        store.upsert_credential("bedrock", {"type": "api_key", "key": sso})
+        store.upsert_credential("bedrock", {"type": "api_key", "key": static})
+        # The session's first turn lands (and sticks) on the SSO connection.
+        assert asyncio.run(store.get_api_key("bedrock", "s1")) == sso
+        with pytest.raises(bauth.BedrockCredentialError) as caught:
+            bauth.resolve_sync(sso)
+        err = caught.value.provider_error
+        assert is_rotation_eligible(err), "sticky session could never leave the dead row"
+        assert store.rotate_sibling("bedrock", "s1", err) is True
+        # The same session's next resolve is the sibling, and nothing was blocked.
+        assert asyncio.run(store.get_api_key("bedrock", "s1")) == static
+        assert store._conn.execute("SELECT * FROM auth_credential_blocks").fetchall() == []
+    finally:
+        store.close()
+
+
+def test_block_on_rotate_defaults_true_for_other_providers() -> None:
+    """Only Bedrock's unresolved-chain errors opt out of the rotation block."""
+    from local_operator.providers.failover import ProviderError
+
+    assert ProviderError(401, "unauthorized", auth_error=True).block_on_rotate is True
 
 
 @pytest.mark.parametrize(

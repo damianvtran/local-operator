@@ -24,6 +24,7 @@ from local_operator.model.registry import (
     RecommendedRadientModelIds,
     SupportedHostingProviders,
     anthropic_models,
+    bedrock_models,
     deepseek_models,
     glm_models,
     google_models,
@@ -308,6 +309,27 @@ async def list_models(
                     info = info_from_discovered_model("deepseek", row.id, row, fallback)
                     models.append(
                         ModelEntry(id=row.id, name=info.name, provider="deepseek", info=info)
+                    )
+            elif provider_detail.id == "bedrock":
+                # Without this branch the provider loop matched nothing and
+                # Bedrock silently contributed zero rows, so Settings' default-
+                # model picker (which reads this route) offered no Bedrock
+                # model while the chat picker listed them (UI QA #1987 Q3).
+                # The SAME discovery the chat picker uses: the stored connection
+                # descriptor (or bearer env var) drives the live listing, and
+                # with nothing configured the registry rows still list, like
+                # every other first-party provider here. ``read_only`` so this
+                # authoring read never moves a running session's stickiness.
+                controller = ProviderController(provider_auth_store, config_manager.config_dir)
+                api_key, _, _ = await controller.listing_credential("bedrock", read_only=True)
+                rows, _ = await asyncio.to_thread(available_models, "bedrock", api_key=api_key)
+                for row in rows:
+                    fallback = bedrock_models.get(row.id) or ModelInfo(
+                        id=row.id, name=row.name or row.id, description="Unknown model"
+                    )
+                    info = info_from_discovered_model("bedrock", row.id, row, fallback)
+                    models.append(
+                        ModelEntry(id=row.id, name=info.name, provider="bedrock", info=info)
                     )
             elif provider_detail.id == "google":
                 for model_name, model_info in google_models.items():

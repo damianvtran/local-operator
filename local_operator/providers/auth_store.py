@@ -6850,8 +6850,14 @@ class AuthStore:
         # left usable and only the sticky pointer moves, which is enough to send
         # THIS attempt to a sibling.
         server_side = is_server_side_failure(error)
+        # Same reasoning for a failure the error itself declares row-neutral
+        # (``ProviderError.block_on_rotate=False``: a Bedrock credential chain
+        # that did not resolve, re-read every attempt). Move the sticky pointer
+        # so a sibling serves this attempt, but write no block that would
+        # outlive the user's fix (R3-1 / Q8).
+        row_neutral = server_side or getattr(error, "block_on_rotate", True) is False
         if failing is not None:
-            if server_side:
+            if row_neutral:
                 self.deprioritize_credential(provider, failing.id)
             else:
                 retry_after = retry_after_ms_from_error(error)

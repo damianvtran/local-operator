@@ -65,20 +65,30 @@ def _prewire(text: str) -> "ProviderError":
 
 def _unresolved(text: str) -> "ProviderError":
     """A pre-wire failure of the botocore CHAIN (SSO/``aws login`` cache, profile,
-    ambient lookup): labelled ``auth`` for the reader, but NOT rotation-eligible.
+    ambient lookup): rotation-eligible, but never BLOCKS the stored row.
 
-    ``auth_error=True`` would make the failover rotate, and rotation writes a
-    60 s ``auth_credential_blocks`` row on the stored connection. Nothing about
-    the row is wrong here -- the chain is re-read on every attempt -- so after
-    the user follows the remedy (``aws sso login``) the very next turn must
-    resolve again instead of hitting the block and reading "rate limit or
-    quota exceeded" (QA round 2, Q8). ``auth_error=False`` with no status and
-    ``retryable=False`` is exactly ``is_rotation_eligible() is False``; the
-    failover then hands over to the fallback chain like any other
-    non-retryable provider failure.
+    Two requirements pull against each other here:
+
+    * Rotate (``auth_error=True``): a session sticky to this connection must
+      reach a healthy sibling Bedrock connection (another account/Region)
+      instead of re-resolving the same dead chain every turn (review R3-1).
+    * Do not block (``block_on_rotate=False``): a plain rotation writes a 60 s
+      ``auth_credential_blocks`` row, yet nothing about the row is wrong -- the
+      chain is re-read on every attempt -- so after ``aws sso login`` the very
+      next turn must resolve again instead of reading "rate limit or quota
+      exceeded" (QA round 2, Q8).
+
+    ``AuthStore.rotate_sibling`` reads the flag and deprioritises the row (the
+    server-side-failure branch) instead of blocking it.
     """
     return _provider_error(
-        None, text, retryable=False, auth_error=False, kind="auth", request_sent=False
+        None,
+        text,
+        retryable=False,
+        auth_error=True,
+        kind="auth",
+        request_sent=False,
+        block_on_rotate=False,
     )
 
 
