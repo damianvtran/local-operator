@@ -24,7 +24,7 @@ import httpx
 import pytest
 
 from local_operator.asks.queue import AskQueue
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import ToolContext, ToolResult
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.secrets.crypto import generate_master_key
 from local_operator.secrets.store import SecretStore
@@ -261,7 +261,12 @@ class Rig:
         return ToolContext(**fields)
 
     def call(self, **args: Any) -> dict[str, Any]:
-        result = asyncio.run(execute_integrations("call-1", args, None, None, self.context()))
+        async def invoke() -> ToolResult:
+            # The guard exposes an Awaitable; Python 3.11's asyncio.run requires
+            # a coroutine, so await the public tool boundary inside one.
+            return await execute_integrations("call-1", args, None, None, self.context())
+
+        result = asyncio.run(invoke())
         self.results.append(result)
         return dict(result.details or {})
 
