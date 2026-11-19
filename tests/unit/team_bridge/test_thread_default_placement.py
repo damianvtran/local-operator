@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -36,8 +37,11 @@ from tests.unit.team_bridge.test_body_turn_e2e import (  # noqa: F401
     TENANT,
     CapturingStream,
     FakeBridgeClient,
+    _carrying,
     _owner,
     _reserve,
+    _row,
+    _runtime,
     _serve_body_turn,
     _session,
     _store,
@@ -254,6 +258,49 @@ async def test_real_session_dispatch_records_the_placement_the_post_uses(
     (sent,) = hub.sends
     assert sent[0] == CONVERSATION_ID
     assert sent[1]["thread_root_id"] == expected_root
+
+
+class _RaisingPlacementRuntime(SimpleNamespace):
+    """A runtime whose placement record fails at the seam."""
+
+    def note_presented(self, ref: Any) -> None:
+        raise RuntimeError("placement store unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["missing", "raising"])
+async def test_a_failed_placement_record_never_breaks_the_body_turn(
+    tmp_path, caplog, variant
+) -> None:
+    """Recording a presented placement is best-effort (PR #4177).
+
+    A miss already degrades to a channel-level post with a warning, so a
+    runtime without ``note_presented`` (older doubles, other runtimes) or one
+    whose record raises must still dispatch, serve and complete the body.
+    """
+    config = tmp_path / "config"
+    config.mkdir()
+    store = _store(config)
+    _reserve(store, config_dir=config)
+    base = _runtime(config, FakeBridgeClient())
+    runtime = base if variant == "missing" else _RaisingPlacementRuntime(**vars(base))
+    assert hasattr(runtime, "note_presented") is (variant == "raising")
+    stream = CapturingStream([[StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, runtime)
+    try:
+        await asyncio.wait_for(_serve_body_turn(session), 60)
+    finally:
+        await session.dispose()
+    assert _carrying(stream) == [0], "the body still reached the provider"
+    assert _row(config)["state"] == "completed"
+    # Logged at debug at most: never surfaced as a failed model stream.
+    loud = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and ("note_presented" in r.getMessage() or "placement store" in r.getMessage())
+    ]
+    assert loud == []
 
 
 # The agent-facing reads must keep ``reply_count`` (the hub's per-root thread

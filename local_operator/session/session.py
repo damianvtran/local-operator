@@ -22342,7 +22342,20 @@ class Session:
                                 # Default thread placement for a later bound
                                 # channel_post reads the hub's own root for
                                 # this message (tool._default_thread_root).
-                                runtime.note_presented(presented)
+                                # Best-effort: a missing record only degrades
+                                # that post to channel-level with a warning,
+                                # so a runtime without the method (or a record
+                                # that raises) must never fail this dispatch,
+                                # which would strand the body unserved.
+                                note = getattr(runtime, "note_presented", None)
+                                if note is not None:
+                                    try:
+                                        note(presented)
+                                    except Exception:
+                                        logger.debug(
+                                            "bridge presented-placement record failed",
+                                            exc_info=True,
+                                        )
                     if carried:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.
