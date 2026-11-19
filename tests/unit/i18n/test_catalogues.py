@@ -189,8 +189,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; its seven
         # locales ride the same PR with their own ledger rows.
         "wire.github",
-        # Per-session voice mode: its route refusals and its settings section
-        # (English-only, own namespace so the audited sources stay untouched).
+        # Per-session voice mode: its route refusals, spoken phrases and its
+        # settings section. Its own namespace so no audited catalogue's hash
+        # moves; all seven locales carry it, each with its own audit ledger rows.
         "wire.voice",
     }
     for namespace in _PENDING_EXTRACTION:
