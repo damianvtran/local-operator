@@ -2103,7 +2103,15 @@ _SELF_REVOKE_SCHEDULED: set[str] = set()
 #: cancels the belt it supersedes: since the belt moved to the hold end it can be
 #: pending for up to the token's hour, and a second DELETE then is noise.
 _SELF_REVOKE_TIMERS: dict[str, threading.Timer] = {}
+#: Tokens whose belt is INSIDE its fire (the DELETE has been committed to). A
+#: firing timer ignores ``cancel()``, so :func:`_cancel_self_revoke` leaves it
+#: registered and its own ``finally`` removes it: a teardown that joins the
+#: registry must keep seeing it until the DELETE returns (PR #4263 R1/Q1).
+_SELF_REVOKE_FIRING: set[str] = set()
 _SELF_REVOKE_LOCK = threading.Lock()
+#: Name every belt timer carries, so an overrun teardown names it and a thread
+#: listing tells a belt from an anonymous ``Thread-N``.
+SELF_REVOKE_BELT_THREAD_NAME = "lop-github-revoke-belt"
 
 
 def _client_for(root: Path | None) -> Any:
@@ -2142,14 +2150,25 @@ def _schedule_self_revoke(token: str, revoke_at_ms: int) -> None:
     delay = max(0.1, revoke_at_ms / 1000.0 - time.time())
 
     def _fire() -> None:
+        # Commit to the DELETE under the lock, and only if this timer is still the
+        # registered one: a cancel that won the race between the Timer's wait
+        # ending and this line has already popped it, and ``cancel()`` could no
+        # longer stop us, so we stand down here instead of firing untracked.
+        with _SELF_REVOKE_LOCK:
+            if _SELF_REVOKE_TIMERS.get(token) is not timer:
+                return
+            _SELF_REVOKE_FIRING.add(token)
         try:
             revoke_installation_token(token)
         finally:
             with _SELF_REVOKE_LOCK:
+                _SELF_REVOKE_FIRING.discard(token)
                 _SELF_REVOKE_SCHEDULED.discard(token)
-                _SELF_REVOKE_TIMERS.pop(token, None)
+                if _SELF_REVOKE_TIMERS.get(token) is timer:
+                    del _SELF_REVOKE_TIMERS[token]
 
     timer = threading.Timer(delay, _fire)
+    timer.name = SELF_REVOKE_BELT_THREAD_NAME
     timer.daemon = True
     with _SELF_REVOKE_LOCK:
         _SELF_REVOKE_TIMERS[token] = timer
@@ -2159,6 +2178,10 @@ def _schedule_self_revoke(token: str, revoke_at_ms: int) -> None:
 def _cancel_self_revoke(token: str) -> None:
     """Cancel a pending belt for ``token`` (it is being revoked now, or never will be)."""
     with _SELF_REVOKE_LOCK:
+        if token in _SELF_REVOKE_FIRING:
+            # Too late to cancel: leave it registered (its ``finally`` removes it)
+            # so pending_self_revoke_threads() still reports it until it returns.
+            return
         timer = _SELF_REVOKE_TIMERS.pop(token, None)
         _SELF_REVOKE_SCHEDULED.discard(token)
     if timer is not None:

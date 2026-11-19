@@ -125,3 +125,38 @@ def test_a_revoke_now_thread_that_outlives_its_join_fails_teardown_by_name(
         release.set()
         stuck.join(10.0)
     assert not stuck.is_alive()
+
+
+def test_a_firing_belt_that_outlives_its_join_fails_teardown_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #4263 R1/Q1: a belt already inside its fire ignores ``cancel()``. If the
+    cancel also dropped it from the registry, the join could expire on it while
+    :func:`pending_self_revoke_threads` no longer saw it, the guard passed, and
+    the DELETE landed in a later cell (QA: a 40 s hang hit ``test_cli_remote``'s
+    tripwire). The overrun must fail the arming cell and name the timer."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_revoke(token: str) -> bool:
+        started.set()
+        release.wait(30.0)
+        return True
+
+    monkeypatch.setattr(github_mod, "revoke_installation_token", blocking_revoke)
+    # The real module, so the belt is invisible to the by-import recorder: only
+    # the product registry can make the guard see it.
+    monkeypatch.setattr(github_mod, "threading", threading)
+    github_mod._schedule_self_revoke("tok-stuck-firing", 0)  # noqa: SLF001 — the 0.1 s floor
+    assert started.wait(10.0), "the belt never fired"
+    belts = [t for t in github_mod.pending_self_revoke_threads() if isinstance(t, threading.Timer)]
+    assert len(belts) == 1, belts
+    try:
+        with pytest.raises(AssertionError, match=github_mod.SELF_REVOKE_BELT_THREAD_NAME):
+            stop_every_borrower_revoke(join_timeout_s=0.05)
+    finally:
+        release.set()
+        belts[0].join(10.0)
+    assert not belts[0].is_alive()
+    assert github_mod.pending_self_revoke_threads() == []
+    assert "tok-stuck-firing" not in github_mod._SELF_REVOKE_TIMERS  # noqa: SLF001
