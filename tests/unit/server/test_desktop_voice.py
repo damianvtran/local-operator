@@ -1002,6 +1002,9 @@ async def test_a_radient_402_on_hearing_says_so_admits_nothing_and_never_reaches
     await _enable(rig, SESSION_A)
     response = await _recording_with(rig)
     assert response.status_code == 402, response.text
+    # The status is the cascade's; the CODE is the one hearing failure this API
+    # documents, so a client branches on one name whatever went wrong upstream.
+    assert response.json()["detail"]["code"] == "stt_unavailable"
     assert "Radient credit balance is too low" in response.json()["detail"]["text"]
     assert real_cascades.called == ["stt:radient"]
     assert rig.pool.remote.admissions == [] and real_cascades.spend == []

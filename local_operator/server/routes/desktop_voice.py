@@ -13,8 +13,9 @@ The frozen contract, which both repositories build against:
         session_syncing (cannot yet tell whether a card waits; retry) |
         stt_unavailable | voice_provider_unset (a recording, and no
         ``speech.provider`` chosen); 413 voice_upload_too_large; 429
-        voice_rate_limited; 402 an out-of-credit provider; 422
-        invalid_voice_request | empty_transcript
+        voice_rate_limited; 402 stt_unavailable (an out-of-credit provider, the
+        cascade's own status under this one code); 502 stt_unavailable (every
+        rung failed); 422 invalid_voice_request | empty_transcript
     POST /v1/desktop/voice/text        body {session_id, source}
         source {kind: message, message_id} | {kind: gate, request_id}
         200 {text, spoken_chars, truncated, segments}; 409 voice_not_enabled;

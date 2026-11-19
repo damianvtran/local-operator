@@ -29,9 +29,10 @@ class VoiceByok(BaseModel):
     """Whether bring-your-own-key voice can run, for the one provider supported.
 
     ``ready`` is the cascade's own answer for a request PINNED to ``provider``
-    (``only=``), so it is false when only another rung (a Radient login, a Groq
-    key) is stored: pinned voice never falls through to those. ``reason`` is the
-    resolver's sentence for the pinned rung, ready or not.
+    (``only=``), so it is false when only another rung has a credential (a Radient
+    login, a Groq key stored outside the desktop picker): pinned voice never falls
+    through to those. ``reason`` is the resolver's sentence for the pinned rung,
+    ready or not.
     """
 
     provider: Literal["elevenlabs"]
