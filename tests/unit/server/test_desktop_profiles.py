@@ -38,6 +38,7 @@ async def api(tmp_path: Path, monkeypatch):
             monkeypatch.delenv(name)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOP_LANG", "en")
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "canonical-profile-test")
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)
@@ -897,7 +898,7 @@ async def test_the_effective_endpoint_names_every_layer_and_its_source(api):
 
     assert rows["scout"]["tier"] == {"value": "lo", "source": "team"}
     assert rows["scout"]["available"] is False
-    assert rows["scout"]["reason"] == "no model configured at subagents.models.lo"
+    assert rows["scout"]["reason"] == "No model is configured at subagents.models.lo."
 
     missing = await client.get("/v1/desktop/teams/nope/effective")
     assert missing.status_code == 404, missing.text
@@ -956,7 +957,14 @@ async def test_the_effective_endpoint_reports_the_sentinel_the_unconfigured_tier
     assert rows["sentinel"]["available"] is True
 
     assert rows["unset"]["available"] is False
-    assert rows["unset"]["reason"] == "no model configured at subagents.models.med"
+    assert rows["unset"]["reason"] == "No model is configured at subagents.models.med."
+    assert rows["unset"]["reason_message"] == {
+        "code": "wire.teams.effective.tier_unconfigured",
+        "params": {"tier": "med"},
+        "text": rows["unset"]["reason"],
+    }
+    assert rows["sentinel"]["reason"] == ""
+    assert "reason_message" not in rows["sentinel"]
     assert rows["unset"]["model"] == {"value": None, "source": "tier"}
     assert rows["unset"]["effort"]["value"] == "xhigh"
 
@@ -971,6 +979,53 @@ async def test_the_effective_endpoint_reports_the_sentinel_the_unconfigured_tier
         "requested": "xhigh",
         "source": "team",
     }
+
+
+async def test_effective_reasons_use_one_fresh_request_language_snapshot(api, monkeypatch):
+    from local_operator.i18n import resolve
+    from local_operator.i18n.text import active_locale
+    from local_operator.server.utils import desktop_profiles as projection
+
+    client, root = api
+    manager = ConfigManager(root)
+    manager.set_config_value("subagents", {"models": {}})
+    made = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(
+            name="language-snapshot",
+            manager="manager",
+            members=[
+                {"role": "synthetic-one", "tier": "hi"},
+                {"role": "synthetic-two", "tier": "med"},
+            ],
+        ),
+    )
+    assert made.status_code == 200, made.text
+    seen = []
+    original = projection._effective_member
+
+    def record(*args, **kwargs):
+        seen.append(kwargs["locale"])
+        return original(*args, **kwargs)
+
+    def no_global_config():
+        raise AssertionError("request language must not read the process-global config")
+
+    monkeypatch.setattr(projection, "_effective_member", record)
+    monkeypatch.setattr(resolve, "config_value", no_global_config)
+    monkeypatch.setenv("LOP_LANG", "ur")
+    active = active_locale()
+    # These assert resolution/provenance, not untranslated French/Urdu copy.
+    for configured, expected in [("en", "en"), ("fr", "fr"), ("auto", "ur")]:
+        ConfigManager(root).set_config_value("language", configured)
+        seen.clear()
+        response = await client.get("/v1/desktop/teams/language-snapshot/effective")
+        assert response.status_code == 200, response.text
+        assert seen == [expected, expected]
+        assert active_locale() == active
+        for row in response.json()["result"]["members"]:
+            assert row["reason"] == row["reason_message"]["text"]
+            assert row["reason_message"]["code"] == "wire.teams.effective.tier_unconfigured"
 
 
 async def test_the_effective_endpoint_does_not_clamp_against_a_model_with_no_ladder(api):
