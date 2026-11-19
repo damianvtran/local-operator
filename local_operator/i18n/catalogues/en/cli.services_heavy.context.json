@@ -43,5 +43,25 @@
     "role": "lop CLI usage error",
     "tone": "terse, operator-facing, preserves safety and command distinctions",
     "note": "Printed when `run` is given no command; nothing was queued. `--` and the example command are literal."
+  },
+  "cli.services_heavy.events_header": {
+    "role": "lop CLI status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Heading above the last few heavy-job lease audit events in `lop services heavy status`. {path} is a file path, literal. Keep the two leading spaces and the trailing colon."
+  },
+  "cli.services_heavy.event_line": {
+    "role": "lop CLI status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "One audit event under the heading. {time} is an ISO-8601 UTC timestamp, {record} is a literal log excerpt (event name and key=value fields such as take slot=0 pid=123); both stay untranslated. Keep the four leading spaces; usually nothing to translate."
+  },
+  "cli.services_heavy.no_events": {
+    "role": "lop CLI status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Shown instead of the event list when the heavy-job lease audit log has no events yet. {path} is a file path, literal. 'lease events' = slot taken/released/timed out/reclaimed records. Keep the two leading spaces."
+  },
+  "cli.services_heavy.audit_row": {
+    "role": "lop services status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "One-line readiness row in `lop services status`. 'heavy jobs audit' labels the heavy-job lease audit trail. {record} is a literal log excerpt (event name plus key=value fields, untranslated), {age} a compact duration such as 8s or 3m05s, {path} a file path."
   }
 }

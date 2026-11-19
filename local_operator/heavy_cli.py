@@ -40,7 +40,7 @@ import sys
 import time
 from typing import Any, Callable, Sequence, TextIO
 
-from local_operator import heavy_lease
+from local_operator import heavy_audit, heavy_lease
 
 #: ``EX_TEMPFAIL`` from sysexits.h: "try again later" is exactly what a full queue
 #: means, and it is distinct from the 1/2 a failing command usually returns.
@@ -50,6 +50,10 @@ EXIT_TIMED_OUT = 75
 #: one a second into a live UI; a terminal or a log file only needs to show it is
 #: alive and who it waits for, and one line a second floods a build log.
 NOTE_EVERY_SECONDS = 5.0
+
+#: Audit events ``status`` shows: enough to see the last two jobs' take/release
+#: pairs, short enough to stay a glance. The whole trail is the jsonl file.
+STATUS_EVENTS = 5
 
 #: How often ``wait`` re-reads the holder records. Matches the lease's own poll
 #: so a freed slot is noticed as fast as a real acquirer would notice it.
@@ -194,6 +198,7 @@ def run_command(
 
     previous = {sig: signal.signal(sig, _on_signal) for sig in _FORWARDED}
     lease: heavy_lease.Lease | None = None
+    exit_code: list[int] = []
     try:
         off = _queue_off_line()
         if off is not None:
@@ -264,10 +269,13 @@ def run_command(
             lease.note_pgid(proc.pid)
         # PEP 475: the handler runs inside wait() and wait() resumes, so the
         # child's real exit status is what comes back after a forwarded signal.
-        return _exit_code(proc.wait())
+        exit_code.append(_exit_code(proc.wait()))
+        return exit_code[0]
     finally:
         if lease is not None:
-            lease.release()
+            # The child's code goes into the audit trail's release line; None
+            # when the child never ran (spawn failure, signal before Popen).
+            lease.release(exit_code=exit_code[0] if exit_code else None)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 
@@ -310,6 +318,26 @@ def status_command(*, out: TextIO | None = None, now: float | None = None) -> in
             holder=holder.who(),
             age=_age(now - holder.started_at),
             command=holder.command or "?",
+        )
+        print(text(line), file=out)
+    # The audit trail's tail (local_operator/heavy_audit.py), so "did those two
+    # jobs serialize?" is answerable here without opening the file. The holder
+    # line above already gives pid/session/age; the matching ``take`` line
+    # below adds its label and absolute start time.
+    #
+    # No waiter count, deliberately: waiters poll a non-blocking flock and
+    # leave no trace until they win or time out, so counting them would need a
+    # new per-waiter registry (writes on every queue entry, plus stale cleanup
+    # for killed waiters) — not cheap, and not needed to prove serialization.
+    path = heavy_audit.audit_path(directory)
+    events = heavy_audit.tail(directory, STATUS_EVENTS)
+    if not events:
+        print(text(copy.no_events(path=str(path))), file=out)
+        return 0
+    print(text(copy.events_header(path=str(path))), file=out)
+    for entry in events:
+        line = copy.event_line(
+            time=heavy_audit.iso_time(entry.get("ts")), record=heavy_audit.describe(entry)
         )
         print(text(line), file=out)
     return 0

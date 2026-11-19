@@ -7,5 +7,9 @@
   "cli.services_heavy.timeout": "Longest to queue for a slot, in seconds (default: the machine's queue limit, {wait_seconds}s unless {env_name} sets another)",
   "cli.services_heavy.command": "The command to run, after `--`",
   "cli.services_heavy.holder": "  slot {slot}: {holder}, running {age}: {command}",
-  "cli.services_heavy.no_command": "Nothing to run: put the command after `--`, for example `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "Nothing to run: put the command after `--`, for example `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  recent lease events (log: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  no lease events recorded yet (log: {path})",
+  "cli.services_heavy.audit_row": "heavy jobs audit: last {record}, {age} ago (log: {path})"
 }

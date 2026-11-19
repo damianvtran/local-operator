@@ -2857,6 +2857,9 @@ async def _acquire_heavy_lease(
         reason=heavy.reason,
         session_id=str(session_id or ""),
         command=preview,
+        # The ceiling this command runs under, for the audit trail; None when
+        # the memory cap is off (there is no ceiling to record).
+        memory_mb=None if memory_budget.source == "disabled" else memory_budget.ceiling_mb,
         on_wait=_on_wait,
         aborted=(lambda: signal is not None and signal.aborted),
     )
@@ -2898,7 +2901,8 @@ def _release_heavy_lease_on_exit(process: Any, lease: heavy_lease.Lease) -> None
         try:
             await process.wait()
         finally:
-            lease.release()
+            # returncode is None only if the wait itself was cancelled.
+            lease.release(exit_code=getattr(process, "returncode", None))
 
     task = asyncio.get_running_loop().create_task(_watch())
     _HEAVY_LEASE_WATCHERS.add(task)

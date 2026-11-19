@@ -7,5 +7,9 @@
   "cli.services_heavy.timeout": "स्लॉट के लिए कतार में प्रतीक्षा की अधिकतम अवधि, सेकंड में (डिफ़ॉल्ट: मशीन की कतार सीमा, {wait_seconds}s, जब तक {env_name} कोई और तय न करे)",
   "cli.services_heavy.command": "चलाने वाली कमांड, `--` के बाद",
   "cli.services_heavy.holder": "  स्लॉट {slot}: {holder}, {age} से चल रहा है: {command}",
-  "cli.services_heavy.no_command": "चलाने के लिए कुछ नहीं: कमांड `--` के बाद लिखें, जैसे `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "चलाने के लिए कुछ नहीं: कमांड `--` के बाद लिखें, जैसे `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  हाल की लीज़ घटनाएँ (लॉग: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  अभी तक कोई लीज़ घटना दर्ज नहीं हुई (लॉग: {path})",
+  "cli.services_heavy.audit_row": "भारी कार्य ऑडिट: अंतिम {record}, {age} पहले (लॉग: {path})"
 }

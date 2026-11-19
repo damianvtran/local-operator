@@ -7,5 +7,9 @@
   "cli.services_heavy.timeout": "سلاٹ کے لیے قطار میں انتظار کی زیادہ سے زیادہ مدت، سیکنڈوں میں (ڈیفالٹ: مشین کی قطار کی حد، {wait_seconds}s، جب تک {env_name} کوئی اور مقرر نہ کرے)",
   "cli.services_heavy.command": "چلانے کے لیے کمانڈ، `--` کے بعد",
   "cli.services_heavy.holder": "  سلاٹ {slot}: {holder}، {age} سے چل رہا ہے: {command}",
-  "cli.services_heavy.no_command": "چلانے کو کچھ نہیں: کمانڈ `--` کے بعد لکھیں، مثلاً `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "چلانے کو کچھ نہیں: کمانڈ `--` کے بعد لکھیں، مثلاً `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  لیز کے حالیہ واقعات (لاگ: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  ابھی تک لیز کا کوئی واقعہ درج نہیں ہوا (لاگ: {path})",
+  "cli.services_heavy.audit_row": "بھاری کام آڈٹ: آخری {record}، {age} پہلے (لاگ: {path})"
 }

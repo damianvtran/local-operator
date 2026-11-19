@@ -82,6 +82,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+from local_operator import heavy_audit
+
 try:  # POSIX only; Windows has no flock and runs without the lease.
     import fcntl
 except ImportError:  # pragma: no cover - exercised on Windows hosts
@@ -1126,11 +1128,23 @@ def _group_alive(pgid: int) -> bool:
 class Lease:
     """One held slot. Release exactly once; closing the fd drops the flock."""
 
-    def __init__(self, slot: int, fd: int, record_path: Path, record: dict[str, Any]):
+    def __init__(
+        self,
+        slot: int,
+        fd: int,
+        record_path: Path,
+        record: dict[str, Any],
+        audit: dict[str, Any] | None = None,
+    ):
         self.slot = slot
         self._fd: int | None = fd
         self._record_path = record_path
         self._record = record
+        # The heavy_audit fields this lease carries into its ``release`` line
+        # (pid/session/label/memory_mb), plus the monotonic take time for
+        # ``held_s``. None for a Lease built without auditing (tests).
+        self._audit = audit
+        self._taken = time.monotonic()
 
     @property
     def held(self) -> bool:
@@ -1157,7 +1171,8 @@ class Lease:
         # an unexpected path must not keep the machine's slot until exit.
         self.release()
 
-    def release(self) -> None:
+    def release(self, exit_code: int | None = None) -> None:
+        """Free the slot; ``exit_code`` is the command's, for the audit line."""
         fd, self._fd = self._fd, None
         if fd is None:
             return
@@ -1180,6 +1195,20 @@ class Lease:
             os.close(fd)
         except OSError:
             pass
+        # Logged only AFTER the unlock: the audit append must never lengthen
+        # how long the slot is held (heavy_audit "CONSTRAINTS"). The next
+        # holder's ``take`` may therefore precede this line by microseconds;
+        # serialization is proved by intervals (take ts + waited, release ts -
+        # held_s), not by line order.
+        if self._audit is not None:
+            heavy_audit.record(
+                self._record_path.parent,
+                "release",
+                slot=self.slot,
+                held_s=round(time.monotonic() - self._taken, 3),
+                exit=exit_code,
+                **self._audit,
+            )
 
 
 def _write_record(path: Path, record: dict[str, Any]) -> None:
@@ -1202,8 +1231,16 @@ def try_acquire(
     session_id: str = "",
     command: str = "",
     pid: int | None = None,
+    waited_s: float = 0.0,
+    memory_mb: int | None = None,
 ) -> Lease | None:
-    """Take a free slot without waiting, or return None when all are held."""
+    """Take a free slot without waiting, or return None when all are held.
+
+    Every take is appended to the audit trail (:mod:`local_operator.heavy_audit`)
+    with ``waited_s`` (the caller's time in the queue) and the ``memory_mb``
+    ceiling; a slot whose previous holder died without releasing is logged as
+    ``stale-reclaim`` first.
+    """
     if fcntl is None:
         return None
     directory.mkdir(parents=True, exist_ok=True)
@@ -1218,18 +1255,57 @@ def try_acquire(
         except OSError:
             os.close(fd)
             continue
+        record_path = directory / f"slot-{slot}.json"
+        holder_pid = pid if pid is not None else os.getpid()
+        # A record still on disk while the flock was free means its holder
+        # never ran release() (which unlinks before unlocking): it was killed
+        # and the kernel dropped the lock. Logged here, at the overwrite, not
+        # in read_holders: that skip happens on every status read, and a
+        # status read must never write.
+        _audit_stale(directory, record_path, slot, holder_pid)
         record = {
             "slot": slot,
-            "pid": pid if pid is not None else os.getpid(),
+            "pid": holder_pid,
             "session_id": session_id,
             "command": command[:PREVIEW_CHARS],
             "started_at": time.time(),
             "pgid": None,
         }
-        record_path = directory / f"slot-{slot}.json"
         _write_record(record_path, record)
-        return Lease(slot, fd, record_path, record)
+        audit = {
+            "pid": holder_pid,
+            "session": session_id or None,
+            "label": heavy_audit.command_label(command),
+            "memory_mb": memory_mb,
+        }
+        heavy_audit.record(directory, "take", slot=slot, waited_s=round(waited_s, 3), **audit)
+        return Lease(slot, fd, record_path, record, audit)
     return None
+
+
+def _audit_stale(directory: Path, record_path: Path, slot: int, new_pid: int) -> None:
+    """Log ``stale-reclaim`` for a dead holder's leftover record; best-effort."""
+    try:
+        raw = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    started = raw.get("started_at")
+    heavy_audit.record(
+        directory,
+        "stale-reclaim",
+        slot=slot,
+        pid=raw.get("pid") if isinstance(raw.get("pid"), int) else None,
+        session=str(raw.get("session_id") or "") or None,
+        label=heavy_audit.command_label(str(raw.get("command") or "")),
+        held_s=(
+            round(max(0.0, time.time() - float(started)), 3)
+            if isinstance(started, (int, float))
+            else None
+        ),
+        reclaimed_by=new_pid,
+    )
 
 
 def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
@@ -1326,6 +1402,7 @@ async def acquire(
     reason: str,
     session_id: str = "",
     command: str = "",
+    memory_mb: int | None = None,
     on_wait: Callable[[str], None] | None = None,
     aborted: Callable[[], bool] | None = None,
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
@@ -1339,7 +1416,14 @@ async def acquire(
     started = time.monotonic()
     last_note = -1.0
     while True:
-        lease = try_acquire(directory, slots, session_id=session_id, command=command)
+        lease = try_acquire(
+            directory,
+            slots,
+            session_id=session_id,
+            command=command,
+            waited_s=time.monotonic() - started,
+            memory_mb=memory_mb,
+        )
         if lease is not None:
             return lease
         waited = time.monotonic() - started
@@ -1347,6 +1431,16 @@ async def acquire(
             return None
         if waited >= wait_seconds:
             holders = tuple(read_holders(directory))
+            heavy_audit.record(
+                directory,
+                "timeout",
+                pid=os.getpid(),
+                session=session_id or None,
+                label=heavy_audit.command_label(command),
+                waited_s=round(waited, 3),
+                memory_mb=memory_mb,
+                holders=[holder.pid for holder in holders],
+            )
             return Refusal(refusal_message(holders, waited, reason, wait_seconds), holders)
         if on_wait is not None and waited - last_note >= 1.0:
             last_note = waited
