@@ -37,6 +37,7 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator.server.utils.desktop_sessions import DesktopSessionBridge
 from local_operator.session.errors import AsideEmptyAnswer, AsideUnanswered
+from tests.unit.server.app_state import restored_app_state
 
 SESSION_ID = "0123456789ab"
 REQUEST_ID = "01234567-89ab-cdef-0123-456789abcdef"
@@ -56,15 +57,10 @@ def restore_app_state() -> Iterator[None]:
     """
     from local_operator.server.app import app
 
-    saved = {key: app.state[key] for key in app.state}
-    state = app.state
-    try:
+    # The shared helper also detaches lifespan-closed hosts, so a lifespan run
+    # here cannot hand a closed auth store back to the next test.
+    with restored_app_state(app):
         yield
-    finally:
-        for key in list(state):
-            del state[key]
-        for key, value in saved.items():
-            state[key] = value
 
 
 class _FakeRemote:

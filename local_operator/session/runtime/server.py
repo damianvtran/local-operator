@@ -81,7 +81,8 @@ if TYPE_CHECKING:
     from local_operator.buildwatch import OffLoopBuildRead
     from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
-from local_operator.asks.surfaces import stamp_answer_surface
+from local_operator.asks.store import parse_mirror_request_id
+from local_operator.asks.surfaces import StampedReceipt, stamp_answer_surface
 from local_operator.harness.approval import (
     ASK_ANSWER_OPS,
     AUTHORITY_OPS,
@@ -161,7 +162,13 @@ logger = logging.getLogger(__name__)
 
 
 def _stamp_ask_answer(
-    authority: _ConnectionAuthority, *, op: str, ask_id: str, mirror: bool = False
+    authority: _ConnectionAuthority,
+    *,
+    op: str,
+    ask_id: str,
+    mirror: bool = False,
+    minted: bool = True,
+    attested: Callable[[], bool] | None = None,
 ) -> str:
     """Stamp one wire ask answer's surface (``asks.surfaces``) and log the decision.
 
@@ -172,29 +179,59 @@ def _stamp_ask_answer(
     INFO line per stamp makes "who answered, and could they prove it" readable
     after the fact. Connection facts only: never the answer's content, never
     the proof.
+
+    ``minted``/``attested`` are F2's inputs (``stamp_answer_surface``): the
+    Part C minted-here rule and the app-signature attestation. ``proof=`` in
+    the line names which one carried the stamp (``app-signature``, ``cap`` or
+    ``none``), so an inherited ask stamped ``unverified`` despite a cap reads
+    as such.
     """
+    used: list[bool] = []
+
+    def _attested() -> bool:
+        # Wrapped so the log can tell an attested stamp from a cap one; still
+        # invoked only by ``stamp_answer_surface`` after its locality checks.
+        hit = bool(attested()) if attested is not None else False
+        used.append(hit)
+        return hit
+
     stamped = stamp_answer_surface(
         proved=authority.operator_proved,
         surface=authority.surface,
         locality=authority.locality,
         kind=authority.kind,
         mirror=mirror,
+        minted=minted,
+        attested=_attested if attested is not None else None,
+    )
+    from local_operator.asks import surfaces as _surfaces
+
+    proof = (
+        _surfaces.APP_SIGNATURE_PROOF
+        if any(used)
+        else ("cap" if stamped in _surfaces.GUARD_TRUSTED_SURFACES else "none")
     )
     # ``ask`` (and ``conn.surface``, from the dialer's hello) are client-supplied
     # and unvalidated here, so they are ``%r``: a newline in a forged id must not
     # mint a second, fake "surface=desktop proved=True" line in the very record
     # this log exists to be trusted for (PR #4127 review R1-m1).
     logger.info(
-        "ask answer stamped: op=%s ask=%r surface=%s conn.kind=%s conn.surface=%r "
-        "locality=%s proved=%s",
+        "ask answer stamped: op=%s ask=%r surface=%s proof=%s conn.kind=%s "
+        "conn.surface=%r locality=%s minted=%s proved=%s",
         op,
         ask_id,
         stamped,
+        proof,
         authority.kind or "-",
         authority.surface or "-",
         authority.locality,
+        minted,
         authority.operator_proved,
     )
+    if any(used):
+        # Persisted as ``answered_by.proof`` beside the stamp (R1-m3), so the
+        # audit trail says WHY this answer is ``desktop`` without the log.
+        return _surfaces.ProvenSurface(stamped, _surfaces.APP_SIGNATURE_PROOF)
     return stamped
 
 
@@ -2110,6 +2147,10 @@ def _ack_frame_parts(outcome: Any) -> tuple[str, dict[str, Any]]:
     """
     if isinstance(outcome, AckDetail):
         return outcome.detail, {"attention": outcome.attention, **outcome.fields}
+    if isinstance(outcome, StampedReceipt):
+        # F2: an ask answer's ack names the label the runtime STAMPED, so the
+        # caller reports what was recorded rather than inferring it from its cap.
+        return str(outcome), {"surface": outcome.surface}
     delivery = getattr(outcome, "delivery", None)
     if isinstance(delivery, dict):
         return str(outcome), {"delivery": delivery}
@@ -2249,6 +2290,53 @@ async def _answer_noting_surface(
         except Exception:  # noqa: BLE001 — routing must never mask the refusal
             logger.debug("origin: could not undo the answer surface", exc_info=True)
         raise
+
+
+def _ask_answer_stamp(
+    server: Any,
+    op: str,
+    frame: dict[str, Any],
+    authority: _ConnectionAuthority,
+    *,
+    ask_id: str,
+) -> str:
+    """The surface for one queued-ask answer: attestation, then Part C, then cap.
+
+    A MODULE function over ``server`` read with ``getattr``: ``_dispatch`` is
+    also driven on bare namespaces by test rigs that carry only ``_handle``.
+    Minted-here is asked of the HANDLE (the queue that minted the ask knows its
+    own session id); a handle without the probe reads not-minted, fail-closed.
+    """
+    probe = getattr(getattr(server, "_handle", None), "ask_minted_here", None)
+    minted = bool(probe(ask_id)) if callable(probe) else False
+    attest = getattr(server, "_attest", None)
+    from local_operator.asks.app_attest import OP_TO_ACT, image_digests
+
+    act = OP_TO_ACT.get(op) if attest is not None else None
+
+    def attested() -> bool:
+        if attest is None or act is None:
+            return False
+        try:
+            return bool(
+                attest.table.consume(
+                    attest.session_id,
+                    ask_id,
+                    act,
+                    frame.get("answers") if act in ("respond", "revise") else {},
+                    image_digests(frame.get("images")) if act == "respond" else [],
+                    # The SAME coercion the dismiss arm forwards with (R1-m1):
+                    # an injected reason is content nobody attested.
+                    str(frame.get("reason") or "") if act == "dismiss" else "",
+                )
+            )
+        except Exception:  # noqa: BLE001 — R1-m2: a malformed frame is unattested
+            logger.debug("attest: consume raised for ask=%r", ask_id, exc_info=True)
+            return False
+
+    # One stamping + log seam (``_stamp_ask_answer``, incident a-48e3's
+    # ``%r``-quoted line) for every wire answer, attested or not.
+    return _stamp_ask_answer(authority, op=op, ask_id=ask_id, minted=minted, attested=attested)
 
 
 def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
@@ -3281,6 +3369,11 @@ class RuntimeServer:
         #: publisher's own default.
         self._config_root: Path | None = None
         self._server: asyncio.AbstractServer | None = None
+        #: F2: this runtime's app-attestation listener and table (macOS only;
+        #: ``None`` elsewhere or when it could not bind). Read by the ask arms
+        #: of ``_dispatch`` through ``getattr`` so test rigs that build a bare
+        #: namespace in place of a server keep working.
+        self._attest: Any = None
         self._unsubscribe_events: Callable[[], None] | None = None
         # Strong references to the one event writer per subscribed client. A
         # bare create_task can be collected mid-flight, which drops frames.
@@ -4196,6 +4289,31 @@ class RuntimeServer:
         finally:
             loop.close()
 
+    async def _start_attest_listener(self) -> None:
+        """Bind ``<config>/run/attest/<session_id>.sock`` on macOS (F2).
+
+        The path is the app's dial contract (``app_attest.ATTEST_RUN_DIRNAME``),
+        pinned by ``test_the_runtime_binds_the_contract_path``.
+
+        Under this runtime's own config root (the one the record is published
+        in), so an isolated config never shares a listener with the operator's.
+        Any failure is logged and leaves ``_attest`` unset: answers then stamp
+        as they did before this listener existed, which is fail-closed.
+        """
+        from local_operator.asks import app_attest
+
+        if not app_attest.supported():
+            return
+        try:
+            from local_operator.session.runtime.registry import run_dir
+
+            service = app_attest.AttestService(str(self._record.session_id))
+            attest_dir = run_dir(self._config_root, app_attest.ATTEST_RUN_DIRNAME)
+            if await service.start(attest_dir) is not None:
+                self._attest = service
+        except Exception:  # noqa: BLE001 — additive, never a boot gate
+            logger.warning("attest: listener not started", exc_info=True)
+
     async def _serve(self) -> None:
         # HOW STRONG THE CAPABILITY'S BOUNDARY IS ON THIS HOST, reported rather
         # than assumed, and reported HERE so every host says it exactly once (the
@@ -4213,6 +4331,11 @@ class RuntimeServer:
             )
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
+            # F2: the app's signature-attestation listener, bound BEFORE the
+            # record is published so a client that finds the record can dial
+            # it. Additive and never a boot gate: without it desktop answers
+            # stamp exactly as they did before (``asks/app_attest``).
+            await self._start_attest_listener()
             # BOOT RECONCILIATION (best-effort): a move whose confirmation was
             # lost is settled against where THIS process actually booted, never
             # reverted. Then the one move watcher starts; with no intent it reads
@@ -4516,6 +4639,9 @@ class RuntimeServer:
         self._event_sends.clear()
         if self._server is not None:
             self._server.close()
+        attest, self._attest = self._attest, None
+        if attest is not None:
+            await attest.close()
         clients = list(self._clients.values())
         for conn in clients:
             self._drop_client(conn, reason="runtime shutdown")
@@ -9515,8 +9641,12 @@ class RuntimeServer:
             # to be copied verbatim, so anyone holding the record key (a model's
             # own ``bash``, any same-uid process) or a mesh peer with ``prompt``
             # could record ``desktop`` and the guard took it as delete consent.
-            # The frame's ``by`` is ignored; see ``asks/surfaces``.
-            stamped_by = _stamp_ask_answer(authority, op=op, ask_id=str(frame.get("ask_id", "")))
+            # The frame's ``by`` is ignored; see ``asks/surfaces``. F2 adds the
+            # app-signature attestation and the minted-here rule
+            # (``_ask_answer_stamp``), which logs through ``_stamp_ask_answer``.
+            stamped_by = _ask_answer_stamp(
+                self, op, frame, authority, ask_id=str(frame.get("ask_id", ""))
+            )
             if op in ("ask_respond", "ask_revise"):
                 raw = frame.get("answers") or {}
                 if not isinstance(raw, dict):
@@ -9564,13 +9694,17 @@ class RuntimeServer:
                 # ADR 0009 R10: the answer's surface rides to the run it opens. A
                 # decline is an answer too ("decide yourself"); a dismissal asks
                 # the model nothing, so it drives no run and is not noted.
-                return cast(
-                    "str",
-                    await _answer_noting_surface(
-                        h, str(frame.get("ask_id", "")), authority, outcome
-                    ),
+                detail = await _answer_noting_surface(
+                    h, str(frame.get("ask_id", "")), authority, outcome
                 )
-            return cast("str", await outcome)
+            else:
+                detail = await outcome
+            # THE STAMPED LABEL RIDES THE ACK (``surface``, ``_ack_frame_parts``),
+            # so the caller can report what the runtime actually recorded (the
+            # desktop's ``consent_bearing``) instead of inferring it from its own
+            # cap. A ``str`` subclass: direct ``_dispatch`` callers still read
+            # the sentence.
+            return StampedReceipt(str(detail), stamped_by)
         if op == "bridge_decide":
             # TB-02 P1: the VERIFIED door for a bridge decision. The authority
             # seam above has already admitted this frame (capability proof or a
@@ -9608,8 +9742,20 @@ class RuntimeServer:
                 # label) for ANY caller. The handle now records what this seam
                 # decides; a handle without the keyword is a test double or an
                 # owner that never mirrors queued asks.
+                mirrored_id = parse_mirror_request_id(str(frame.get("request_id", "")))
+                minted_probe = getattr(h, "ask_minted_here", None)
                 answer_kwargs["by"] = _stamp_ask_answer(
-                    authority, op=op, ask_id=str(frame.get("request_id", "")), mirror=True
+                    authority,
+                    op=op,
+                    ask_id=str(frame.get("request_id", "")),
+                    mirror=True,
+                    # Part C on the mirrored id (``<ask_id>.<qidx>``). Any other
+                    # request id is a LIVE picker, which only this process can
+                    # have opened, so it is minted here by construction.
+                    minted=(
+                        mirrored_id is None
+                        or (callable(minted_probe) and bool(minted_probe(mirrored_id[0])))
+                    ),
                 )
             # ADR 0009 R10: a legacy mirrored id names a QUEUED ask (its answer
             # reaches a later run as an ``ask_response`` row); any other id is a

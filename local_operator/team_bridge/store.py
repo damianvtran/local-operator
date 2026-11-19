@@ -200,11 +200,46 @@ _BUSY_TIMEOUT_MS = 2_000
 
 
 class StoreRefused(RuntimeError):
-    """A store mutation refused. ``code`` is a stable machine-readable tag."""
+    """A store mutation refused. ``code`` is a stable machine-readable tag.
 
-    def __init__(self, code: str, message: str = "") -> None:
+    ``cause`` is an optional CLOSED sub-tag for a ``policy_stale`` authority
+    refusal (``scheduler.AUTHORITY_CAUSES``): the connector needs to tell "the hub
+    says messaging is unavailable" (it ages into the owner's review) from "only
+    the owner can fix this" (sign in, consent, eligibility — never a Deliver)
+    without reading the prose ``message``. Empty means unclassified.
+    """
+
+    def __init__(self, code: str, message: str = "", *, cause: str = "") -> None:
         super().__init__(message or code)
         self.code = code
+        self.cause = cause
+
+
+#: ``StoreRefused.cause`` values for a ``policy_stale`` AUTHORITY refusal (PR #4212,
+#: Q1). ``hub_unavailable``: the hub's status says messaging is not available —
+#: nobody local can fix it, so the hold ages into the owner's review like a
+#: provider outage. The other three are the OWNER's to fix and never become a
+#: Deliver item: ``sign_in`` (no usable / not the enrolled sign-in), ``consent``
+#: (no current consent receipt), ``ineligible`` (organization or endpoint not
+#: eligible/active). Anything else stays an unclassified ``policy_stale``.
+AUTHORITY_CAUSE_HUB_UNAVAILABLE = "hub_unavailable"
+AUTHORITY_CAUSE_SIGN_IN = "sign_in"
+AUTHORITY_CAUSE_CONSENT = "consent"
+AUTHORITY_CAUSE_INELIGIBLE = "ineligible"
+#: No screening chain resolved at all (round 2, S-8 / Q2): no evaluated screener
+#: is configured or credentialed. Like the three above it is the OWNER's to fix
+#: ("configure a screener"), so it never becomes a Deliver item — it used to be
+#: tagged ``hub_unavailable``, which mislabelled it and handed out an
+#: unscreened Deliver for what is the owner's own configuration.
+AUTHORITY_CAUSE_NO_SCREENER = "no_screener"
+
+#: The two independent ageing clocks a held message can run (round 2, R2-1).
+#: ``review``: time held under a code that may age into the unscreened owner
+#: review (screening outage). ``owner_action``: time held because the OWNER must
+#: act (sign in, consent, eligibility, configure a screener). Kept apart so the
+#: hours a message waited on the owner are never charged as screening delay.
+HOLD_CLOCK_REVIEW = "review"
+HOLD_CLOCK_OWNER_ACTION = "owner_action"
 
 
 def state_db_path(config_dir: Path) -> Path:
@@ -610,6 +645,47 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
+    """Create the hold-clock stamps on a store that predates them (PR #4212, S-5).
+
+    One row per (message, clock): WHEN it was first held under a code that may
+    age on that clock (:data:`HOLD_CLOCK_REVIEW` — ``screening.AGED_REVIEW_CODES``;
+    :data:`HOLD_CLOCK_OWNER_ACTION` — the owner-action causes). The hold row's own
+    ``created_at`` is not that fact — it survives code changes, so a message
+    parked for hours under ``bridge_off`` would convert on its first transient
+    pass. Same additive, authority-free rule as :func:`_ensure_unusable_pass_table`:
+    a lost row only restarts the clock, never admits anything.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_hold_clocks ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, clock TEXT NOT NULL, "
+        "first_at REAL NOT NULL, PRIMARY KEY (owner_key, message_id, clock))"
+    )
+
+
+def _ensure_last_success_table(conn: sqlite3.Connection) -> None:
+    """Create the account's route-evidence stamps (PR #4212, S-6 / S-9).
+
+    The breaker row is DELETED on success, so it cannot answer "did anything
+    screen since this message's hold began?". One row per account scope:
+    ``success_at`` — the last provider response to ANY screen or to the
+    content-free route canary; ``canary_failed_at`` — the last time that canary
+    ALSO failed after a message's whole chain did. An outage is corroborated
+    only by a canary failure with no success since (``screening`` reads both):
+    the canary carries no sender bytes, so a crafted message cannot fake it.
+    Additive and authority-free: a lost row means "no evidence", which never
+    corroborates an outage — the hold then ends in the Discard-only
+    ``screening_failed`` (or, for a Deliver already given, stays pending);
+    nothing is ever delivered on it.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_route_evidence ("
+        "account_scope TEXT PRIMARY KEY, success_at REAL, canary_failed_at REAL)"
+    )
 
 
 def _ensure_unusable_pass_table(conn: sqlite3.Connection) -> None:
@@ -1235,8 +1311,17 @@ def receipt_authority(
     *,
     release: Mapping[str, Any] | None = None,
     principal: tuple[str, str] | None = None,
+    epoch_bound: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
+
+    ``epoch_bound=False`` waives ONLY the epoch equality, keeping every other
+    check (template, serving model, admission revision, creator generation and
+    the whole integrity half). Its one caller is
+    :meth:`Store.write_once_resolution`: the epoch also advances on changes
+    that leave the receipt's substance current (holds triage 2026-11-18: H5's
+    receipt is epoch 10 under a live epoch 12 with the same template, revision
+    and serving model), and that caller checks the privacy pass itself.
 
     ``principal`` is the validated envelope's ``(sender_account, sender_kind)``;
     only an :data:`OWNER_PRINCIPAL_SHA256` receipt reads it (see
@@ -1325,7 +1410,9 @@ def receipt_authority(
         # longer be ESTABLISHED at all, which is damage rather than a miss — a
         # miss would invite a caller to re-screen behind a row nobody can read.
         return None, RECEIPT_CORRUPT, "epoch or creator generation is not a number"
-    if policy_epoch != receipt_epoch or creator_generation != owner.enrollment_generation:
+    if (
+        epoch_bound and policy_epoch != receipt_epoch
+    ) or creator_generation != owner.enrollment_generation:
         return None, RECEIPT_STALE, ""
     try:
         decoded = _decode_categories_text(receipt.get("categories"))
@@ -1491,6 +1578,7 @@ _DELIVERY_HOLD_CODES = frozenset(
         "ack_tuple_mismatch",
         "attachments_malformed",
         "attachments_unbound",
+        "files_unbound",
         "body_invalid",
         "body_unavailable",
         "bounce_receipt_missing",
@@ -1643,12 +1731,101 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         # nothing judged the message, so the sender is told screening is
         # unavailable -- never that a human is reviewing it.
         "screening_model_unavailable",
+        # SPINE CODES (holds trace 2026-11-18). Before this they fell through to
+        # ``awaiting_review``: during the 19:13-19:46Z hub outage every
+        # ``conversation_failed`` was published as a review hold and members
+        # saw "Held for review" for a transient exception nobody was looking
+        # at. Each below is written BEFORE any verdict exists, by a failure of
+        # this machine or of the hub's answer, and the row is re-driven on the
+        # loop's retry backoff (``connector.loop.retry_due_holds``):
+        #
+        # an unexpected exception in the conversation spine, and the retry
+        # pass's own catch-all and default;
+        "conversation_failed",
+        "retry_failed",
+        "hold",
+        # the body read failed or the hub's answer could not be validated for
+        # this build (``conversation.py``: "keep it retryable");
+        "body_unavailable",
+        "body_hash_mismatch",
+        "mismatched_id",
+        "sender_malformed",
+        "attachments_malformed",
+        "envelope_missing",
+        "bridge_meta_invalid",
+        "display_context_invalid",
+        # a verdict that lost the image or file set it screened: held and
+        # RE-SCREENED, so nothing has judged those bytes yet;
+        "attachments_unbound",
+        "files_unbound",
+        # a dead connector's claim waiting out its lease, and its re-drive;
+        "stale_claim",
+        "stale_claim_retry",
+        # this machine's own store or identity read failing for the moment
+        # (``owner_changed`` and ``stale_generation`` are already above);
+        "state_unreadable",
+        "not_enrolled",
+        "owner_mismatch",
+        # A8: another live owner holds the privacy stage (bounded retry), or the
+        # privacy authority could not be read consistently this pass.
+        "privacy_pending",
+        "privacy_control_unavailable",
     }
 )
 
 #: Codes written AFTER screening admitted the message: delivery, not moderation,
 #: is what is pending.
-_HOLD_CLASS_DELIVERY_PENDING = frozenset({"delivery_failed", "bridge_off", "phase_refused"})
+#:
+#: ``write_once_conflict`` is deliberately NOT here any more (security review
+#: S-4 on #4249). It was moved here from the ``awaiting_review`` fall-through
+#: because a verdict is already committed. But since the S-1 fix, a conflict the
+#: resolver keeps is one whose committed verdict the LIVE policy no longer
+#: supports, and no retry can clear it. Publishing it as ``delivery_pending``
+#: would tell readers the delay is transient. It falls to ``awaiting_review``,
+#: the conservative class for a terminal hold only the owner can move. An
+#: owner-review release for it is a recorded follow-up.
+#:
+#: Also here (holds trace 2026-11-18), each a delivery-side wait that clears
+#: without anyone reviewing the content:
+#:
+#: * the hub ACK/admission families, written after the verdict;
+#: * a body reservation the store refused or could not prove for an ADMITTED
+#:   message ("the message stays pending");
+#: * the producer fences and owner-setup waits, the same kind of wait as
+#:   ``bridge_off``: the recipient's own designation, consent, credential or
+#:   chief-of-staff session must be in place before delivery, and the owner is
+#:   not judging the message;
+#: * another spine or session already holding the delivery claim.
+#:
+#: WHAT STAYS ``awaiting_review`` (the default arm, never listed): the owner-
+#: review codes (``hold_release.REVIEW_HOLD_CODES``, ``work_scope_hold``) and
+#: the TERMINAL fail-closed holds no retry can clear — content this build can
+#: never screen (``size_exceeded``, ``invalid_content*``, ``body_invalid``,
+#: ``envelope_malformed``/``_unbound``), damaged proof or schema, identity and
+#: ACK-binding anomalies, a local quarantine, and the settled A8 privacy holds
+#: (a completed privacy stage is reused, never re-run). Only the owner can move
+#: those, and both other classes tell a reader the delay is TRANSIENT
+#: (``tool._DELAYED_HOLD_CLASSES``), which for them would be false.
+_HOLD_CLASS_DELIVERY_PENDING = frozenset(
+    {
+        "delivery_failed",
+        "bridge_off",
+        "phase_refused",
+        "ack_recovery",
+        "ack_refused",
+        "ack_not_confirmed",
+        "envelope_refused",
+        "receipt_unavailable",
+        "reservation_refused",
+        "invalid_body_reservation",
+        "credential_changed",
+        "consent_revoked",
+        "no_designation",
+        "open_chief_of_staff",
+        "badge_only",
+        "claimed_elsewhere",
+    }
+)
 
 #: Screening category → the ONE coarse class that may leave this machine.
 #: Keyed by the closed :data:`SCREENING_CATEGORIES`; a category added there
@@ -1664,6 +1841,33 @@ _REFUSAL_CLASS_BY_CATEGORY = {
     "out_of_scope_work": "out_of_scope",
     "new_work_request": "out_of_scope",
 }
+
+
+#: The most of a screener's private REASON a decision row keeps (holds triage
+#: 2026-11-18, finding d). Enough for the one or two sentences a screener gives
+#: ("bids for new work: asks to start …"), short enough that the row can never
+#: become a second copy of the message body.
+SCREENER_REASON_MAX = 200
+
+#: A review hold (``hold_release.REVIEW_HOLD_CODES``) enters the long-hold
+#: rollup only after this long (holds triage 2026-11-18, finding b). Source: the
+#: operator's 2026-11-10 report, "the sidebar badge is sufficient", at most one
+#: DAILY rollup — so a day, not a measured distribution.
+_REVIEW_ROLLUP_AFTER_S = 24 * 3600.0
+
+
+def capped_screener_reason(reason: Any) -> str | None:
+    """The reason as stored: a stripped string of at most ``SCREENER_REASON_MAX`` chars.
+
+    ``None`` (and a blank or non-string reason) stores NULL, so "no reason" and
+    "an empty reason" read the same. NUL characters are dropped: SQLite keeps
+    them, but every reader that renders a row as text would cut at one.
+    """
+
+    if not isinstance(reason, str):
+        return None
+    text = reason.replace("\x00", "").strip()
+    return text[:SCREENER_REASON_MAX] or None
 
 
 def closed_hold_code(hold_code: Any) -> str:
@@ -3299,14 +3503,27 @@ class Store:
         zero. ``now`` defaults to the wall clock.
         """
 
+        from local_operator.team_bridge import hold_release as _hr
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
-        from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
         from local_operator.team_bridge.types import is_conversation_message_id
 
-        review_codes = sorted(REVIEW_HOLD_CODES)
-
         empty: dict[str, Any] = {"count": 0}
-        cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
+        now_v = time.time() if now is None else float(now)
+        cutoff = now_v - float(older_than_s)
+        # A review hold with a decision row counts only once it is at least a
+        # DAY old (or older than the owner's own threshold, if that is longer):
+        # the operator's 2026-11-10
+        # rule was "at most one daily rollup" for review holds, so a model_hold
+        # flood does not move this count (and re-revision the alert) every few
+        # minutes, while a review hold nobody has acted on still surfaces.
+        #
+        # QUANTIZED to a UTC day boundary (agent review m1 on #4249): a plain
+        # 24 h age floor still moved the count once per held message, a day
+        # after the flood, at the cadence it arrived. Holds created before the
+        # start of YESTERDAY all enter together at midnight, so review holds
+        # move this count (and revise the alert) at most once a day.
+        day = _REVIEW_ROLLUP_AFTER_S
+        review_cutoff = min(cutoff, math.floor((now_v - day) / day) * day)
         with self._connect_readonly() as conn:
             if conn is None:
                 return empty
@@ -3322,30 +3539,45 @@ class Store:
             # recorded (``notified_at``). A refused notice keeps it here, so no
             # held message can be invisible to both alerts.
             #
-            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) with a decision
-            # row leaves it too (operator report 2026-11-10: "the sidebar badge
-            # is sufficient", at most one daily rollup). Its decision row IS the
-            # Deliver/Discard item the Agent messages badge and holds list show,
-            # so the owner already sees it; counting it here made this keyed
-            # rollup re-revision (re-banner) on every count change during a
-            # model_hold flood. Keyed on the DECISION, not the hold code alone:
-            # with ``review_held: false`` no decision is written, the hold has no
-            # badge exit, and it stays counted here so it is never invisible to
-            # every alert. Work-scope holds and screening-unavailable codes
-            # (provider errors, parse failures) are unaffected.
+            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) STAYS in this
+            # count (holds triage 2026-11-18, finding b), reversing the
+            # 2026-11-10 exclusion. That exclusion assumed the decision row was
+            # already visible as a Deliver/Discard item in a desktop holds list,
+            # but no such list ships (the owner-audit view has no holds tab), and
+            # a review hold gets no per-message notice either
+            # (``hold_release`` notices only the work-scope class). Excluded
+            # here, nine review holds sat for up to 18 days invisible to every
+            # alert. The re-banner concern that drove the exclusion is bounded by
+            # this rollup's own contract: it moves only when the COUNT of holds
+            # older than ``older_than_s`` moves (and see ``review_cutoff``).
+            #
+            # ``notified_at`` exempts ONLY a work-scope hold. A review hold's
+            # ``notified_at`` is the legacy per-message notice of 2026-11-09,
+            # which ``hold_release.retire_review_notices`` has since DISMISSED
+            # (setting ``cleared_at``, leaving ``notified_at``): measured on the
+            # operator's store, the four oldest holds (11.6-18 days) carried it
+            # and so stayed invisible even with the code exclusion removed.
             try:
                 noticed = {
                     str(r["message_id"])
                     for r in conn.execute(
                         "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
-                        "AND (notified_at IS NOT NULL OR hold_code IN ({}))".format(
-                            ",".join("?" * len(review_codes))
-                        ),
+                        "AND notified_at IS NOT NULL AND hold_code = ?",
+                        (_owner_key(owner), _hr.WORK_SCOPE_HOLD),
+                    ).fetchall()
+                }
+                review_codes = sorted(_hr.REVIEW_HOLD_CODES)
+                reviewed = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
+                        "AND hold_code IN ({})".format(",".join("?" * len(review_codes))),
                         (_owner_key(owner), *review_codes),
                     ).fetchall()
                 }
             except sqlite3.OperationalError:
                 noticed = set()  # a store that predates B4b has no such notice
+                reviewed = set()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
@@ -3359,6 +3591,15 @@ class Store:
             created = _status_timestamp(row["created_at"])
             if created is None:
                 continue
+            if bare in reviewed and row["hold_code"] in _hr.REVIEW_HOLD_CODES:
+                # Only a review hold WITH its decision row is delayed: with
+                # ``review_held: false`` none is written, the hold has no exit
+                # at all, and it keeps the ordinary threshold.
+                #
+                # Shift a review hold's age onto the review cutoff, so ONE
+                # comparison below serves both classes and a message seen under
+                # both spellings still counts once, by its earliest stamp.
+                created += cutoff - review_cutoff
             prior = held.get(bare)
             if prior is None or created < prior:
                 held[bare] = created
@@ -3746,6 +3987,17 @@ class Store:
         conn.execute(
             "DELETE FROM screening_unusable_passes WHERE owner_key = ? AND message_id = ?",
             (owner_key, message_id),
+        )
+        # The aged-hold stamp shares this lifecycle; it is keyed by the BARE id
+        # (the screener's spelling), so a composite delete clears that too.
+        _ensure_aged_hold_table(conn)
+        try:
+            bare = screening_hold_message_id(message_id)
+        except Exception:  # noqa: BLE001 — a malformed key clears its raw spelling only
+            bare = message_id
+        conn.executemany(
+            "DELETE FROM screening_hold_clocks WHERE owner_key = ? AND message_id = ?",
+            [(owner_key, key) for key in {message_id, bare}],
         )
 
     @staticmethod
@@ -6057,6 +6309,125 @@ class Store:
             ).rowcount
             return removed == 1
 
+    def write_once_resolution(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        body_sha256: str,
+        envelope_digest: str,
+    ) -> dict[str, Any] | None:
+        """The committed receipt a ``write_once_conflict`` may be answered with, or ``None``.
+
+        WHY (holds triage 2026-11-18 finding c; security review S-1/S-2 on
+        #4249). Write-once makes the FIRST verdict authoritative, but only while
+        it is still evidence under the LIVE policy: a receipt the owner has
+        since superseded (a tightened template, a new admission revision, a
+        serving model no longer approved, a privacy pass switched on) must
+        never override the current pass's answer. So the row goes through
+        :func:`receipt_authority` — the one copy of the currency and integrity
+        checks — with only the epoch equality waived (see ``epoch_bound``).
+
+        Also required: the same body and envelope (sender, type, request
+        block); an ``allow`` from a PREFERRED screener (an unsent fallback allow
+        is provisional and is re-screened, never revived here); and, when the
+        privacy pass is on or the policy was minted with it, a FINAL privacy
+        allow for this message, envelope, revision and the CURRENT control
+        generation (the same proof :meth:`_require_privacy_proof` demands of a
+        fresh allow). Read-only; ``None`` on anything else, including damage.
+        """
+
+        try:
+            # The ordinary connection (as :meth:`receipt_for_message`), not the
+            # ``mode=ro`` one: ``_privacy_control`` ensures its tables exist, and
+            # a refused CREATE on a read-only handle would read as "no proof"
+            # even with the pass off. Nothing here writes a row.
+            with self._connect() as conn:
+                self._init(conn)
+                key = _owner_key(owner)
+                policy = conn.execute(
+                    "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+                ).fetchone()
+                receipt = conn.execute(
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (key, str(message_id)),
+                ).fetchone()
+                if policy is None or receipt is None:
+                    return None
+                receipt_row = dict(receipt)
+                if (
+                    receipt_row.get("body_sha256") != body_sha256
+                    or receipt_row.get("envelope_digest") != envelope_digest
+                ):
+                    return None
+                decoded, _damage, _note = receipt_authority(
+                    owner, dict(policy), receipt_row, epoch_bound=False
+                )
+                if decoded is None:
+                    return None
+                preferred = receipt_row.get("screener_preferred") == 1
+                if decoded["verdict"] == "allow":
+                    if not preferred:
+                        return None
+                    if not self._final_privacy_allow(
+                        conn,
+                        owner,
+                        dict(policy),
+                        message_id=str(message_id),
+                        envelope_digest=envelope_digest,
+                        admission_revision=receipt_row.get("admission_revision"),
+                    ):
+                        return None
+                return {**decoded, "screener_preferred": preferred}
+        except (sqlite3.Error, StoreRefused, TypeError, ValueError):
+            return None
+
+    def _final_privacy_allow(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        policy: Mapping[str, Any],
+        *,
+        message_id: str,
+        envelope_digest: str,
+        admission_revision: Any,
+    ) -> bool:
+        """Whether an allow may stand under A8: pass off, or a final privacy allow on record.
+
+        The read-only twin of :meth:`_require_privacy_proof`'s acceptance
+        rule, keyed by the message (a resolution has no decision id of its
+        own). A table or column that is absent reads as "no proof".
+        """
+
+        control = self._privacy_control(conn)
+        enabled = control is not None and int(control["enabled"]) == 1
+        minted = int(policy.get("privacy_generation") or 0)
+        if not enabled and minted == 0:
+            return True
+        if not enabled or control is None or minted != int(control["generation"]):
+            return False
+        for row in conn.execute(
+            "SELECT * FROM privacy_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND envelope_digest = ? AND admission_revision = ? AND control_generation = ?",
+            (
+                _owner_key(owner),
+                message_id,
+                envelope_digest,
+                admission_revision,
+                int(control["generation"]),
+            ),
+        ).fetchall():
+            if row["final"] == "bypass" and int(row["first_preferred"]) == 1:
+                return True
+            if (
+                row["final"] == "admit"
+                and row["stage_state"] == "completed"
+                and row["privacy_result"] == "deliver"
+                and row["first_disposition"] == "deliver"
+            ):
+                return True
+        return False
+
     def receipt_for_message(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
         """THE trusted record for one screened message, by message id (H5 F3).
 
@@ -8211,6 +8582,206 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def screening_hold_first_held_at(self, owner: OwnerSnapshot, message_id: str) -> float | None:
+        """When this message was FIRST held, from the durable rows; ``None`` if unheld.
+
+        WHY (operator report 2026-11-17). The screening-unavailable escalation
+        (``screening._aged_review_hold``) needs a hold age that a connector
+        restart cannot reset, so it must not come from the loop's in-memory
+        ``_RETRY_ATTEMPTS``. ``created_at`` is that fact: every re-hold upserts IN
+        PLACE and keeps it (``persist_hold``, PR #3063 m10).
+
+        WHY THE MINIMUM ACROSS BOTH KEYSPACES. A held conversation message has
+        two rows (:func:`_screening_hold_row`): the screener's bare ``bcmsg_``
+        row, which :meth:`retire_due_bare_conversation_holds` deletes every tick
+        once due — so its ``created_at`` restarts on every pass — and the
+        connector's composite feed-ref row, which lives until a verdict. The
+        earliest of them is the age the sender has actually waited. Read-only;
+        a damaged store answers ``None`` (no escalation, the old behaviour).
+        """
+
+        from local_operator.team_bridge.types import (
+            CONVERSATION_FEED_KIND,
+            CONVERSATION_FEED_TYPE,
+            is_conversation_message_id,
+        )
+
+        owner_key = _owner_key(owner)
+        try:
+            exact = _contentless_delivery_key(message_id)
+        except StoreRefused:
+            return None
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                stamps: list[float] = []
+                row = conn.execute(
+                    "SELECT created_at FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, exact),
+                ).fetchone()
+                if row is not None and row["created_at"] is not None:
+                    stamps.append(float(row["created_at"]))
+                if is_conversation_message_id(message_id):
+                    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+                    for candidate in conn.execute(
+                        "SELECT message_id, created_at FROM screening_holds "
+                        "WHERE owner_key = ? AND substr(message_id, 1, ?) = ? "
+                        "AND instr(message_id, ?) > 0",
+                        (owner_key, len(prefix), prefix, f"/{message_id}/"),
+                    ).fetchall():
+                        if (
+                            screening_hold_message_id(str(candidate["message_id"])) == message_id
+                            and candidate["created_at"] is not None
+                        ):
+                            stamps.append(float(candidate["created_at"]))
+        except sqlite3.Error:
+            return None
+        finite = [stamp for stamp in stamps if math.isfinite(stamp)]
+        return min(finite) if finite else None
+
+    def note_aged_hold(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        now: float,
+        clock: str = HOLD_CLOCK_REVIEW,
+    ) -> float | None:
+        """Stamp (once) and return when this message entered a hold on ``clock``.
+
+        PR #4212 S-5: the escalation clock starts at the first hold under a code
+        that may age, not at the row's ``created_at``. Round 2 (R2-1): one stamp
+        per clock, so owner-action time never counts as screening delay. Written
+        only while a hold row for the message exists (``None`` otherwise, which
+        never converts anything); the first stamp wins (``INSERT OR IGNORE``).
+        Cleared with every terminal outcome by :meth:`_clear_unusable_passes`.
+        """
+
+        if self.screening_hold_first_held_at(owner, message_id) is None:
+            return None
+        owner_key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "INSERT OR IGNORE INTO screening_hold_clocks "
+                    "(owner_key, message_id, clock, first_at) VALUES (?, ?, ?, ?)",
+                    (owner_key, message_id, clock, float(now)),
+                )
+                row = conn.execute(
+                    "SELECT first_at FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (owner_key, message_id, clock),
+                ).fetchone()
+        except (sqlite3.Error, StoreRefused):
+            return None
+        if row is None:
+            return None
+        first = float(row["first_at"])
+        return first if math.isfinite(first) else None
+
+    def clear_hold_clock(self, owner: OwnerSnapshot, message_id: str, *, clock: str) -> None:
+        """Drop ONE clock's stamp for a message (R2-1); best effort, never raises.
+
+        Called on every owner-action pass for the REVIEW clock: while the owner
+        must act, the screening-review clock does not run, so a message that
+        waited hours for a sign-in starts its screening clock afresh afterwards.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "DELETE FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (_owner_key(owner), message_id, clock),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def screening_route_evidence(self, owner: OwnerSnapshot) -> dict[str, float | None]:
+        """``{"success_at", "canary_failed_at"}`` for this account (S-6/S-9); read-only."""
+
+        empty: dict[str, float | None] = {"success_at": None, "canary_failed_at": None}
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return empty
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'screening_route_evidence'"
+                ).fetchone()
+                if exists is None:
+                    return empty
+                row = conn.execute(
+                    "SELECT success_at, canary_failed_at FROM screening_route_evidence "
+                    "WHERE account_scope = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+        except sqlite3.Error:
+            return empty
+        if row is None:
+            return empty
+
+        def _finite(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        return {"success_at": _finite(row[0]), "canary_failed_at": _finite(row[1])}
+
+    def record_canary_failure(self, owner: OwnerSnapshot) -> None:
+        """The content-free route canary failed too (S-9): outage evidence. Best effort."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_last_success_table(conn)
+                conn.execute(
+                    "INSERT INTO screening_route_evidence (account_scope, canary_failed_at) "
+                    "VALUES (?, ?) ON CONFLICT(account_scope) "
+                    "DO UPDATE SET canary_failed_at = excluded.canary_failed_at",
+                    (self._account_scope(owner), time.time()),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def drop_review_decision(self, owner: OwnerSnapshot, message_id: str) -> None:
+        """Remove ONE message's review decision and its release row (round 3, Q3).
+
+        Only for an UNSCREENED decision a re-screen just answered: the screener's
+        own decision replaces it, so the owner's next Deliver is a screened
+        decision instead of a dead button on a refused release. Never raises.
+        """
+
+        key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_work_scope_tables(conn)
+                conn.execute(
+                    "DELETE FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+                conn.execute(
+                    "DELETE FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
 
@@ -8480,15 +9051,23 @@ class Store:
             return open_until
 
     def record_screening_success(self, owner: OwnerSnapshot) -> None:
-        """A provider success clears the account breaker."""
+        """A provider success clears the account breaker and stamps the success.
+
+        The stamp (S-6) is what tells an outage from a message-specific failure:
+        see :func:`_ensure_last_success_table`.
+        """
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            scope = self._account_scope(owner)
+            conn.execute("DELETE FROM screening_breaker WHERE account_scope = ?", (scope,))
+            _ensure_last_success_table(conn)
             conn.execute(
-                "DELETE FROM screening_breaker WHERE account_scope = ?",
-                (self._account_scope(owner),),
+                "INSERT INTO screening_route_evidence (account_scope, success_at) VALUES (?, ?) "
+                "ON CONFLICT(account_scope) DO UPDATE SET success_at = excluded.success_at",
+                (scope, time.time()),
             )
 
     def screening_breaker_state(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
@@ -8882,6 +9461,15 @@ class Store:
         ("work_scope_decisions", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
         ("work_scope_decisions", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
         ("work_scope_decisions", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
+        # Holds triage 2026-11-18 (d): the screener's own REASON, capped at
+        # :data:`SCREENER_REASON_MAX` characters, so a hold's calibration can be
+        # audited after the fact (it lived only in ``ScreenResult``'s memory, so
+        # every over-trigger diagnosis was inference). NULL on rows written
+        # before it and on holds no model reason produced. OWNER-VISIBLE ONLY:
+        # it is untrusted model text about untrusted teammate text, so it is
+        # never logged, never put in a prompt, never published to the hub, and
+        # it is NOT part of the signed release payload (``hold_release``).
+        ("work_scope_decisions", "screener_reason", "TEXT"),
         ("owner_releases", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
         ("owner_releases", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
         ("owner_releases", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
@@ -8916,8 +9504,20 @@ class Store:
         screener_hop: int = -1,
         screener_preferred: bool = False,
         hold_code: str = "",
+        screener_reason: str | None = None,
     ) -> dict[str, Any]:
         """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
+
+        ``screener_reason`` is the model's private reason, stored capped at
+        :data:`SCREENER_REASON_MAX` characters for the owner's audit only (see
+        the ``screener_reason`` column note).
+
+        THE SENDER BUDGET COUNTS ONLY ``work_scope_hold`` ROWS (holds triage
+        2026-11-18, finding a). Review rows are always written ``eligible = 1``
+        and spend no budget, but the count did not filter on the code, so a
+        sender's ordinary ``model_hold`` rows used the budget up and the next
+        genuine work-scope hold was written ineligible (H12: no buttons). The
+        budget bounds probing of the CATEGORY-trusting class only.
 
         ``hold_code`` defaults to the work-scope class; a review code
         (``hold_release.REVIEW_HOLD_CODES``) is always eligible — see there for
@@ -8954,8 +9554,14 @@ class Store:
             else:
                 spent = conn.execute(
                     "SELECT COUNT(*) FROM work_scope_decisions WHERE owner_key = ? "
-                    "AND sender_digest = ? AND eligible = 1 AND created_at > ?",
-                    (key, sender_digest, float(now) - hr.SENDER_BUDGET_WINDOW_S),
+                    "AND sender_digest = ? AND hold_code = ? AND eligible = 1 "
+                    "AND created_at > ?",
+                    (
+                        key,
+                        sender_digest,
+                        hr.WORK_SCOPE_HOLD,
+                        float(now) - hr.SENDER_BUDGET_WINDOW_S,
+                    ),
                 ).fetchone()[0]
                 if int(spent) >= hr.SENDER_BUDGET:
                     reason = hr.INELIGIBLE_BUDGET
@@ -8965,8 +9571,8 @@ class Store:
                 "envelope_digest, hold_code, screener_provider, screener_model, "
                 "template_sha256, prompt_version, categories, policy_epoch, "
                 "creator_generation, sender_digest, eligible, ineligible_reason, created_at, "
-                "screener_verdict, screener_hop, screener_preferred) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "screener_verdict, screener_hop, screener_preferred, screener_reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     message_id,
@@ -8988,6 +9594,7 @@ class Store:
                     screener_verdict,
                     int(screener_hop),
                     1 if screener_preferred else 0,
+                    capped_screener_reason(screener_reason),
                 ),
             )
             row = conn.execute(

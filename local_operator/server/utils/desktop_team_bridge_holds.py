@@ -155,14 +155,35 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 or (str(decision.get("conversation_id") or "") if decision else ""),
                 "seq": row["seq"],
                 "held_at": _iso(held_at),
+                # When the message was FIRST held (the hold row's own time).
+                # ``held_at`` is the decision time — the Deliver window's start —
+                # and a review decision can be written days after the hold
+                # (measured 2026-11-18: 17.9 d vs 8.1 d), so "how long has this
+                # sat here" needs this one. Additive; ``lop team-bridge holds``
+                # reads it for its age column.
+                "first_held_at": _iso(row["created_at"]),
                 "kind": _kind(code, eligible),
                 # Closed codes only (``HOLD_CODES`` or ``unknown_hold``), like the read slice.
                 "hold_code": code if code in HOLD_CODES else "unknown_hold",
                 "releasable": eligible,
                 "can_deliver": bool(
-                    eligible and deliver_until is not None and now <= deliver_until
+                    eligible
+                    and deliver_until is not None
+                    and now <= deliver_until
+                    and code not in hr.DISCARD_ONLY_HOLD_CODES
                 ),
                 "can_discard": eligible,
+                # PR #4212 S-4: an aged hold that NO model read (provider outage,
+                # hub unavailable) is a Deliver item too, but the owner must be able
+                # to tell it from a screener's "unsure": its decision row names no
+                # screener and no verdict. A closed boolean; the copy is the
+                # renderer's.
+                "unscreened": bool(
+                    decision is not None
+                    and code in hr.REVIEW_HOLD_CODES
+                    and not str(decision.get("screener_model") or "")
+                    and not str(decision.get("screener_verdict") or "")
+                ),
                 "deliver_until": _iso(deliver_until),
                 "decision": _decision_view(release),
             }
@@ -244,6 +265,10 @@ def decide(
         raise HoldRefused(409, "snapshot_stale")
     if word == "deliver" and now > float(decision["created_at"]) + hr.DELIVER_WINDOW_S:
         raise HoldRefused(409, "deliver_expired")
+    if word == "deliver" and str(decision.get("hold_code") or "") in hr.DISCARD_ONLY_HOLD_CODES:
+        # PR #4212 round 3 (S-13): every screener failed on THIS message while
+        # others screened; nothing read it, so only Discard is offered.
+        raise HoldRefused(409, "hold_not_releasable")
     message = hr.release_payload(
         owner_key=_owner_key(owner),
         generation=int(owner.enrollment_generation),

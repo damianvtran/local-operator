@@ -39,6 +39,7 @@ from pydantic import (
 from starlette.background import BackgroundTask
 from starlette.types import Receive, Scope, Send
 
+from local_operator.asks import surfaces
 from local_operator.harness.types import ModelSpec
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -5250,28 +5251,40 @@ async def answer(session_id: str, body: Answer, request: Request):
                 message = str(error) or "the answer was refused"
                 raise HTTPException(409, message) from None
             # ``consent_bearing`` (feature ``ask_consent_bearing``): whether
-            # THIS backend presented operator proof with the answer, i.e. holds
-            # the capability of the runtime it answered (it started that
-            # runtime). False means the runtime stamped the answer
-            # ``unverified``: recorded, but never delete/move consent (incident
-            # a-48e3, 2026-11-16). Computed from the facade's handshake state,
-            # never from the body (``Answer`` is ``extra="forbid"``, so a body
-            # field of that name is a 422). A peer's conversation is always
+            # the runtime stamped this answer with a guard-trusted surface.
+            # False means it stamped ``unverified`` (or ``remote``): recorded,
+            # but never delete/move consent (incident a-48e3, 2026-11-16).
+            # Computed from the runtime's reply, never from the body
+            # (``Answer`` is ``extra="forbid"``, so a body field of that name is
+            # a 422). A peer's conversation is always
             # False: its answer is relayed and stamped ``remote`` whatever this
             # process holds for a same-numbered local pid. Absent probe (an
             # older facade or a test double) reads False: fail closed. A
             # DECLINE reads null: a decline is never consent, so "this answer
             # can authorise" must not be claimable for one, whatever proof the
             # connection held (PR #4127 QA Q2).
-            probe = getattr(bridge.remote, "ask_consent_bearing", None)
-            consent_bearing: bool | None = (
-                None
-                if body.decline
-                else bool(
-                    getattr(bridge, "remote_row", None) is None and callable(probe) and probe()
-                )
-            )
-            return reply({"detail": detail, "consent_bearing": consent_bearing})
+            #
+            # PR #4132 convergence: the flag is the runtime's STAMP, read off the
+            # ``StampedReceipt`` the client returns (``asks.surfaces``). After F2
+            # the cap probe disagrees with the stamp both ways: an app-signature
+            # attested answer is consent with no cap, and a cap answer to an ask
+            # this runtime did not mint (Part C) is stamped ``unverified``. The
+            # guard reads only the stamp, so the receipt must too. The cap probe
+            # survives ONLY as the fallback for a runtime that predates the ack's
+            # ``surface`` field (``surface is None``): such a runtime has neither
+            # attestation nor Part C, so its stamp is exactly the cap decision.
+            consent_bearing: bool | None
+            if body.decline:
+                consent_bearing = None
+            elif getattr(bridge, "remote_row", None) is not None:
+                consent_bearing = False
+            else:
+                stamped = surfaces.consent_bearing(getattr(detail, "surface", None))
+                if stamped is None:
+                    probe = getattr(bridge.remote, "ask_consent_bearing", None)
+                    stamped = bool(callable(probe) and probe())
+                consent_bearing = stamped
+            return reply({"detail": str(detail), "consent_bearing": consent_bearing})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         if body.request_id.startswith("prv_"):

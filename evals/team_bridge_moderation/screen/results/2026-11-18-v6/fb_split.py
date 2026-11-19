@@ -11,7 +11,10 @@ import json
 import os
 import sys
 
-exec(open(os.environ["ANALYZE_PY"]).read().split("trials = ")[0])
+# Reuse class_gate.py's outcome() (committed beside this file) so both scripts
+# classify a trial identically; only its definitions run, not its argv-driven body.
+_GATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "class_gate.py")
+exec(open(_GATE).read().split("base_path, cand_path")[0])
 
 trials = [json.loads(line) for line in open(sys.argv[1])]
 corpus = {}

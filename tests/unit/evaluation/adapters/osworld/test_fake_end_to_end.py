@@ -25,6 +25,7 @@ asserted only in ``test_spawn.py``, and none of them are asserted here.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -1050,3 +1051,75 @@ def test_the_adapter_probe_deadline_stays_inside_the_harness_deadline() -> None:
     from local_operator.evaluation.adapters.supervisor import AMBIGUOUS_PROBE_TIMEOUT_S
 
     assert _PROBE_TIMEOUT_S * 2 < AMBIGUOUS_PROBE_TIMEOUT_S
+
+
+def _tool_path_infra(value: str) -> tuple[ScopedInfraValue, ...]:
+    return _INFRA_VALUES + (
+        ScopedInfraValue(name="EVALUATOR_TOOL_PATH", purpose="benchmark_compute", value=value),
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_applies_a_declared_tool_path_and_refuses_one_in_the_workspace(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``prepare`` is where the worker gains its PATH, and where a directory
+    the episode can write to is refused before any state is minted."""
+
+    from lop_osworld_v2_adapter.provisioning import ProvisioningError
+
+    monkeypatch.delenv("PATH", raising=False)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+
+    def params(value: str) -> PrepareParams:
+        return PrepareParams(
+            operation_id=f"prepare-{episode_id}",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_tool_path_infra(value),
+        )
+
+    refused = _adapter(tmp_path, FakeProvider())
+    inside = tmp_path / "workspace" / "tasks"
+    with pytest.raises(ProvisioningError, match="EVALUATOR_TOOL_PATH"):
+        await refused.prepare(params(str(inside)))
+    assert "PATH" not in os.environ and refused._refs is None
+
+    adapter = _adapter(tmp_path, FakeProvider())
+    await adapter.prepare(params(str(tools)))
+    assert os.environ["PATH"].split(os.pathsep) == [*os.defpath.split(os.pathsep), str(tools)]
+
+
+@pytest.mark.asyncio
+async def test_reset_start_refuses_a_tool_path_inside_the_episode_root(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artifact root is first named at ``reset_start``; a tool directory
+    under it is refused there, still before anything is allocated."""
+
+    from lop_osworld_v2_adapter.provisioning import ProvisioningError
+
+    monkeypatch.delenv("PATH", raising=False)
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "bin").mkdir(parents=True)
+    provider = FakeProvider()
+    adapter = _adapter(tmp_path, provider)
+    await adapter.prepare(
+        PrepareParams(
+            operation_id=f"prepare-{episode_id}",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_tool_path_infra(str(artifacts / "bin")),
+        )
+    )
+    with pytest.raises(ProvisioningError, match="is inside"):
+        await adapter.reset_start(
+            ResetStartParams(
+                operation_id=f"reset-{episode_id}",
+                task_id="task_plain",
+                episode_id=episode_id,
+                artifact_root=str(artifacts),
+            )
+        )
+    assert provider.allocated is False

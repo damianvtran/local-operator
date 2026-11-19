@@ -372,16 +372,22 @@ async def _verify_live_identity(owner: Any, auth_store: Any, config_dir: Any) ->
         access = await client.current_access()
     except BridgeSignInRequired as failure:
         raise StoreRefused(
-            "policy_stale", "the signed-in Radient account is not available"
+            "policy_stale", "the signed-in Radient account is not available", cause=_cause_sign_in()
         ) from failure
     except BridgeRefusal as failure:
-        raise StoreRefused("policy_stale", "the signed-in credential was refused") from failure
+        raise StoreRefused(
+            "policy_stale", "the signed-in credential was refused", cause=_cause_sign_in()
+        ) from failure
     if (
         access.credential_id != owner.credential_id
         or access.account_id != owner.account_id
         or _bound_hub(access) != str(owner.canonical_base_url).rstrip("/")
     ):
-        raise StoreRefused("policy_stale", "the signed-in identity is not the enrolled owner")
+        raise StoreRefused(
+            "policy_stale",
+            "the signed-in identity is not the enrolled owner",
+            cause=_cause_sign_in(),
+        )
 
 
 def _owner_frame_digest(owner: Any) -> str:
@@ -512,7 +518,11 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     if not _api_supported(status):
         raise StoreRefused("policy_stale", "unsupported api_version in status")
     if status.get("available") is not True:
-        raise StoreRefused("policy_stale", "messaging is not available for this account")
+        raise StoreRefused(
+            "policy_stale",
+            "messaging is not available for this account",
+            cause=_cause_hub_unavailable(),
+        )
     tenants = status.get("tenants")
     if not isinstance(tenants, Sequence) or isinstance(tenants, (str, bytes)):
         raise StoreRefused("policy_stale", "tenants missing from status")
@@ -525,14 +535,20 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
         raise StoreRefused("policy_stale", "owner tenant row missing or duplicated")
     row = rows[0]
     if row.get("eligible") is not True:
-        raise StoreRefused("policy_stale", "owner organization is not eligible")
+        raise StoreRefused(
+            "policy_stale", "owner organization is not eligible", cause=_cause_ineligible()
+        )
     endpoint = row.get("endpoint")
     if not isinstance(endpoint, Mapping):
-        raise StoreRefused("policy_stale", "owner endpoint absent from the tenant row")
+        raise StoreRefused(
+            "policy_stale", "owner endpoint absent from the tenant row", cause=_cause_ineligible()
+        )
     if endpoint.get("id") != owner.endpoint_id:
         raise StoreRefused("policy_stale", "status endpoint is not the enrolled owner endpoint")
     if endpoint.get("state") != "active":
-        raise StoreRefused("policy_stale", "owner endpoint is not active")
+        raise StoreRefused(
+            "policy_stale", "owner endpoint is not active", cause=_cause_ineligible()
+        )
     screening = status.get("screening")
     if not isinstance(screening, Mapping):
         raise StoreRefused("policy_stale", "status carries no screening selector")
@@ -559,12 +575,16 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     accepted_versions = _consent_accepted_versions(consent)
     receipt = store.owner_consent_receipt(owner)
     if receipt is None:
-        raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+        raise StoreRefused(
+            "policy_stale", "no committed consent receipt for the owner", cause=_cause_consent()
+        )
     if not _consent_receipt_is_current(
         receipt["consent_version"], consent_version, accepted_versions
     ):
         raise StoreRefused(
-            "policy_stale", "committed consent is not current for the served version"
+            "policy_stale",
+            "committed consent is not current for the served version",
+            cause=_cause_consent(),
         )
     import hashlib as _hashlib
 
@@ -795,13 +815,17 @@ async def verified_status_capture(
     # candidate leaves every floor untouched.
     receipt_pre = store.owner_consent_receipt(owner)
     if receipt_pre is None:
-        raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+        raise StoreRefused(
+            "policy_stale", "no committed consent receipt for the owner", cause=_cause_consent()
+        )
     if not _consent_receipt_is_current(
         receipt_pre["consent_version"],
         law.consent_served_version,
         law.consent_accepted_versions,
     ) or not receipt_pre.get("consent_ref"):
-        raise StoreRefused("policy_stale", "consent receipt is not the served version")
+        raise StoreRefused(
+            "policy_stale", "consent receipt is not the served version", cause=_cause_consent()
+        )
     store.advance_text_floors(
         owner,
         [
@@ -825,7 +849,11 @@ async def verified_status_capture(
             law.consent_accepted_versions,
         )
     ):
-        raise StoreRefused("policy_stale", "consent receipt changed across the floor advance")
+        raise StoreRefused(
+            "policy_stale",
+            "consent receipt changed across the floor advance",
+            cause=_cause_consent(),
+        )
     return AcceptedCapture(
         _CAPTURE_TOKEN,
         version=law.version,
@@ -892,7 +920,7 @@ async def run_screening_cycle(
         make_screening_runner,
         resolve_screening_chain,
     )
-    from local_operator.team_bridge.screening import ScreenResult, screen_message_async
+    from local_operator.team_bridge.screening import screen_message_async
     from local_operator.team_bridge.settings import read_screening_model
     from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
@@ -930,7 +958,33 @@ async def run_screening_cycle(
         # not count a model call that never happened.
         if batch:
             return None
-        return ScreenResult("hold", hold_code=SCREENING_MODEL_UNAVAILABLE)
+        # PR #4212: this hold never reaches the pipeline, so it ages here. No
+        # screener configured is the OWNER's to fix (round 2, S-8 / Q2): past the
+        # threshold it becomes ``screener_required`` — never a Deliver item, and
+        # it needs no policy epoch, so a machine that never published one exits
+        # too.
+        from local_operator.team_bridge.screening import aged_authority_hold
+        from local_operator.team_bridge.store import AUTHORITY_CAUSE_NO_SCREENER
+
+        # N1 (round 3): on a Radient-only machine a revoked sign-in ALSO empties
+        # the chain (its only credentialed screener is that sign-in), and the
+        # action the owner needs is "sign in again", not "configure a screener".
+        # Both are owner-action codes with no Deliver; this only picks the label.
+        cause = AUTHORITY_CAUSE_NO_SCREENER
+        if auth_store is not None:
+            try:
+                await _verify_live_identity(owner, auth_store, config_dir)
+            except StoreRefused as refusal:
+                cause = str(getattr(refusal, "cause", "") or "") or cause
+            except Exception:  # noqa: BLE001 — a label only; the hold is the same
+                pass
+        return aged_authority_hold(
+            owner,
+            items[0],
+            config_dir=config_dir,
+            cause=cause,
+            held_code=SCREENING_MODEL_UNAVAILABLE,
+        )
     selection = chain[0]
     # ACCEPTED STATUS (R8/Q3): the owner-pinned SDK status is received
     # through the normal accepted-status seam — an injected fetcher (the
@@ -1204,3 +1258,27 @@ async def run_screening_cycle(
         )
 
     return await cycle.run_once(items, _screen)
+
+
+def _cause_sign_in() -> str:
+    from local_operator.team_bridge.store import AUTHORITY_CAUSE_SIGN_IN
+
+    return AUTHORITY_CAUSE_SIGN_IN
+
+
+def _cause_consent() -> str:
+    from local_operator.team_bridge.store import AUTHORITY_CAUSE_CONSENT
+
+    return AUTHORITY_CAUSE_CONSENT
+
+
+def _cause_ineligible() -> str:
+    from local_operator.team_bridge.store import AUTHORITY_CAUSE_INELIGIBLE
+
+    return AUTHORITY_CAUSE_INELIGIBLE
+
+
+def _cause_hub_unavailable() -> str:
+    from local_operator.team_bridge.store import AUTHORITY_CAUSE_HUB_UNAVAILABLE
+
+    return AUTHORITY_CAUSE_HUB_UNAVAILABLE

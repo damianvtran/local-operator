@@ -598,8 +598,10 @@ async def test_a_claim_tightens_the_legacy_control_surface(plane):
     page = {"Origin": PAGE_ORIGIN}
 
     before = await client.get("/v1/config", headers=page)
-    assert before.status_code == 200, "standalone posture: legacy control is open"
-    assert before.headers["access-control-allow-origin"] == PAGE_ORIGIN
+    assert before.status_code == 200, "standalone posture: legacy control READ is open"
+    # ...but a standalone daemon grants no foreign page CORS, so it cannot read
+    # the reply (and ``standalone_browser_write_gate`` refuses its writes).
+    assert "access-control-allow-origin" not in before.headers
 
     assert (await claim(client, headers={"Origin": APP_ORIGIN})).status_code == 200
 
@@ -619,13 +621,15 @@ async def test_a_claim_stops_echoing_foreign_origins(plane):
 
     The claim installs an allowlist, and from then on ``desktop_origin_cors``
     drops the CORS grant on any reply to an origin that is not on it. Before
-    the claim the same request is answered with the requesting origin echoed
-    back and credentials allowed — the drive-by vector at ``app.py:359``.
+    the claim a standalone daemon already withholds the grant from a foreign
+    page (it used to echo it -- the drive-by read vector); the claim must not
+    reopen it.
     """
     client, _ = plane
     page = {"Origin": PAGE_ORIGIN}
     before = await client.get("/v1/capabilities", headers=page)
-    assert before.headers["access-control-allow-origin"] == PAGE_ORIGIN
+    # Standalone: no grant to a foreign page even before the claim.
+    assert "access-control-allow-origin" not in before.headers
 
     assert (await claim(client, headers={"Origin": APP_ORIGIN})).status_code == 200
 
@@ -657,7 +661,8 @@ async def test_a_native_claim_keeps_the_echo_the_packaged_renderer_reads(plane):
     client, _ = plane
     page = {"Origin": PAGE_ORIGIN}
     before = await client.get("/v1/capabilities", headers=page)
-    assert before.headers["access-control-allow-origin"] == PAGE_ORIGIN
+    # Standalone: no grant to a foreign page even before the claim.
+    assert "access-control-allow-origin" not in before.headers
 
     assert (await claim(client)).status_code == 200  # native: no Origin at all
     assert desktop.desktop_posture().origins == frozenset()

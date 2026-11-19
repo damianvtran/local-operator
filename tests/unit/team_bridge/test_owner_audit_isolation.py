@@ -57,6 +57,12 @@ HUMAN_ONLY_MODULES = {
     "team_bridge/client.py",
     "server/routes/desktop_team_bridge.py",
     "server/models/desktop_team_bridge_owner_audit.py",
+    # `lop team-bridge holds`: the operator's terminal view of held messages
+    # (operator report 2026-11-18). It joins sender/excerpt from the audit for
+    # a PERSON at a terminal and refuses the join outright under an agent's
+    # `bash` (`agent_shell.in_agent_shell`); test_team_bridge_holds_cli.py pins
+    # that no audit request leaves the process there.
+    "team_bridge/holds_cli.py",
 }
 AUDIT_METHODS = (
     "owner_audit_conversations",

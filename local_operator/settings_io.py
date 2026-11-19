@@ -6349,10 +6349,11 @@ SETTINGS: tuple[Setting, ...] = (
     # SIX ROWS, AND WHAT IS DELIBERATELY NOT ONE OF THEM.
     # ``team_bridge.onboarding`` is internal UI bookkeeping (the one-time
     # dialog's shown-flag) and is NOT registered: a public row would dress
-    # session-format state as a knob. ``hold_alert_after_minutes`` and
-    # ``hold_release`` are read keys with no row (their constants, and why, are
-    # in ``team_bridge/settings.py``). The allowlist's default state and cues
-    # are server truth (§9), surfaced as data by
+    # session-format state as a knob. ``hold_alert_after_minutes``,
+    # ``hold_release`` and ``screening_hold_review_after_minutes`` are read keys
+    # with no row (their constants, and why, are in ``team_bridge/settings.py``).
+    # The allowlist's default state and cues are server truth (§9), surfaced as
+    # data by
     # ``team_bridge.client.allowlist_view`` — never restated here, where an edit
     # would drift from the server silently.
     #
