@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.voice",
-  "history_sha256": "cee086a52c8aeb7878c34b0760d524cf3b2707168b3212d0b21fd728c721d1db",
+  "history_sha256": "b45d28d366117b317e9b1151ae84959896b7b81f27410ad144cb4b0fd35a485b",
   "entries": [
     {
       "locale": "zh-CN",
@@ -51,6 +51,25 @@
       },
       "status": "passed",
       "note": "Round 1. Independent audit of all 37 keys against en/wire.voice.json + wire.voice.context.json, i18n/glossary.md, the locale style guide and neighbouring wire.settings.speech / wire.voice_availability. Scripted over all 37 keys: key set equals en; {placeholders} identical to en ({session_id},{reason},{limit_mib},{detail}); no ICU plural/select arms in this namespace; identifiers text_origin/qwen_s2s, WAV/WebM/Ogg/MP4, UUID, MiB, Radient and ElevenLabs preserved; no bidi/zero-width controls, no ASCII quotes, no markdown/digit/symbol in the 6 spoken wire.voice.phrase.* strings; max_spoken_chars.help quotes phrase.truncated exactly. target_sha256 is the file audited (post-fix for fr/ru). Glossary/neighbour consistency: conversation, agent, approvals, provider, key and 'try again in a moment' match the shipped corpus of the locale. Back-translations of the 10 most consequential strings (approval/refusal/limit/provider), all faithful: approval_pending: Please first answer the question or approval on the screen.; phrase.on_screen_first: Please first handle the approval on the screen.; not_enabled: Voice mode is not on for this conversation. Please turn it on for this conversation first.; rate_limited_minute: The voice provider's per-minute cap has been reached. Please retry later.; rate_limited_day: The voice provider's daily quota is used up. Please retry after the reset.; upload_too_large: That recording is too large. Please keep it within {limit_mib} MiB.; provider.help: Who listens to you and speaks for you, for hands-free voice and the read-aloud button. Radient bills against your Radient balance; ElevenLabs uses your own key. Only the one you choose is used; if it cannot handle a request it explains why, rather than switching automatically.; provider.choice.none.description: No provider selected yet. Until one is selected, hands-free voice stays off.; provider.choice.elevenlabs.description: Your own ElevenLabs API key. ElevenLabs bills you directly.; provider_unset: Please first choose a voice provider: Radient or your own ElevenLabs key. Voice mode only uses the one you choose..  nit: description first sentence '免提与对话交谈' is stiff (alt. '免提语音交流，一次只对应一个对话'). Not verified: the English 'Speak button' is a UI label; the locale renders it descriptively as a read-aloud button and the client's real label was not checked here. No rendered, native-speaker, or RTL rendering claim (ur: strings only; bidi handled by the render layer per the style guide). Same model family as the translator, different session and brief."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.voice",
+      "source_sha256": "8512860b98c48da1c4fc5f2b86344c6c84b288b2fcb2b618f596647f2c38ebd1",
+      "context_sha256": "aebbfbbb4b6a37442ad74f1316aff7d0297326eda6b357562c95a0e74f27bc3c",
+      "target_sha256": "5f52c97cebc5159b25bed989409ecf5b1824e89ce79eb58869ca78d5a4b71d5e",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 14434fb37ba2",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the review-round delta of wire.voice (Simplified Chinese): new keys session_syncing, spoken.approval_needed ({title}), spoken.approval_needed_untitled, spoken.code_omitted, spoken.link, and the rewritten invalid_message (the {reason} placeholder is gone from the English source). Independent audit NOT completed, so wire.voice is not shipped for this locale until a passed receipt is appended. Source hash pins the full current en namespace; context and translated target hashes are the files translated against. Glossary i18n/glossary.md and i18n/style-guides/zh-CN.md. Placeholders preserved ({title}, {session_id}, {reason}, {limit_mib}, {detail}); the spoken.* strings are read aloud by TTS so kept short and plain, spoken.link is one word, spoken.code_omitted keeps the English parenthesis pair (optional per the context note). No rendered, pseudo or native audit claimed."
     }
   ]
 }

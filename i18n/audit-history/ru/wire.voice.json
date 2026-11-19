@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.voice",
-  "history_sha256": "ce451b0cfdea3fb2baa6336409f8c150e9d040ead013a66249b20b1301dd1596",
+  "history_sha256": "d4d7fa2c9bcb678e6bea8a8d84ef6c58772093e3720dba31420cc6f2094744cf",
   "entries": [
     {
       "locale": "ru",
@@ -51,6 +51,25 @@
       },
       "status": "passed",
       "note": "Round 2 (fr/ru re-audit after translator fix commit 7e6d2b7ac); round 1 for the rest (same session). Independent audit of all 37 keys against en/wire.voice.json + wire.voice.context.json, i18n/glossary.md, the locale style guide and neighbouring wire.settings.speech / wire.voice_availability. Scripted over all 37 keys: key set equals en; {placeholders} identical to en ({session_id},{reason},{limit_mib},{detail}); no ICU plural/select arms in this namespace; identifiers text_origin/qwen_s2s, WAV/WebM/Ogg/MP4, UUID, MiB, Radient and ElevenLabs preserved; no bidi/zero-width controls, no ASCII quotes, no markdown/digit/symbol in the 6 spoken wire.voice.phrase.* strings; max_spoken_chars.help quotes phrase.truncated exactly. target_sha256 is the file audited (post-fix for fr/ru). Glossary/neighbour consistency: conversation, agent, approvals, provider, key and 'try again in a moment' match the shipped corpus of the locale. Back-translations of the 10 most consequential strings (approval/refusal/limit/provider), all faithful: approval_pending: First answer the question or the approval on screen.; phrase.on_screen_first: First answer the approval on screen.; not_enabled: Voice mode is not on for this conversation. First turn it on for this conversation.; rate_limited_minute: The speech provider's per-minute limit was reached. Retry a little later.; rate_limited_day: The speech provider's daily limit is exhausted. Retry after it is reset.; upload_too_large: The recording is too big. Its size must be below {limit_mib} MiB.; provider.help: Who listens to you and speaks for you — for hands-free voice mode and the voicing button. Radient is paid from your Radient credit; ElevenLabs uses your own key. Only the provider you chose is used, and if it can't fulfil a request it reports why instead of switching to another.; provider.choice.none.description: No provider is chosen yet. Hands-free voice mode stays off until you choose a provider.; provider.choice.elevenlabs.description: Your own ElevenLabs API key. ElevenLabs sends the bill to you directly.; provider_unset: First choose a speech provider: Radient or your own ElevenLabs key. Voice mode uses only the provider you chose.. Re-audit round 2 of the 2 changed ru keys (store_busy, rate_limited_minute): diff is exactly 'через минуту'->'чуть позже' and nothing else; back-translation of both: 'Try again a little later.' (matches English 'in a moment' and the ru corpus). nits: approval_pending/phrase.on_screen_first 'ответьте на одобрение' is calque-like; provider.choice.radient.description 'Облачная речь' unnatural. Round 1 found 2 minors ('через минуту' vs en 'in a moment', ru corpus 'чуть позже') — fixed in 7e6d2b7ac, verified. Not verified: the English 'Speak button' is a UI label; the locale renders it descriptively as a read-aloud button and the client's real label was not checked here. No rendered, native-speaker, or RTL rendering claim (ur: strings only; bidi handled by the render layer per the style guide). Same model family as the translator, different session and brief."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.voice",
+      "source_sha256": "8512860b98c48da1c4fc5f2b86344c6c84b288b2fcb2b618f596647f2c38ebd1",
+      "context_sha256": "aebbfbbb4b6a37442ad74f1316aff7d0297326eda6b357562c95a0e74f27bc3c",
+      "target_sha256": "81b66ad97627f3b37c3faf7f02b7d9a7ac0af87bb4941ca958dc6db39b9700f3",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 14434fb37ba2",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the review-round delta of wire.voice (Russian): new keys session_syncing, spoken.approval_needed ({title}), spoken.approval_needed_untitled, spoken.code_omitted, spoken.link, and the rewritten invalid_message (the {reason} placeholder is gone from the English source). Independent audit NOT completed, so wire.voice is not shipped for this locale until a passed receipt is appended. Source hash pins the full current en namespace; context and translated target hashes are the files translated against. Glossary i18n/glossary.md and i18n/style-guides/ru.md. Placeholders preserved ({title}, {session_id}, {reason}, {limit_mib}, {detail}); the spoken.* strings are read aloud by TTS so kept short and plain, spoken.link is one word, spoken.code_omitted keeps the English parenthesis pair (optional per the context note). Russian: 'in a moment' rendered 'чуть позже' as in the audited 7e6d2b7ac fix. No rendered, pseudo or native audit claimed."
     }
   ]
 }

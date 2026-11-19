@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.voice",
-  "history_sha256": "5fc324e2d470fcfb5ad787d61c0b020a217a3ad61c5c70fc28b6028c04baa441",
+  "history_sha256": "5c3a334c5aa52d8e4a42278c3391a4936bd6fb720d4f28fc8b32a11a7e978239",
   "entries": [
     {
       "locale": "fr",
@@ -51,6 +51,25 @@
       },
       "status": "passed",
       "note": "Round 2 (fr/ru re-audit after translator fix commit 7e6d2b7ac); round 1 for the rest (same session). Independent audit of all 37 keys against en/wire.voice.json + wire.voice.context.json, i18n/glossary.md, the locale style guide and neighbouring wire.settings.speech / wire.voice_availability. Scripted over all 37 keys: key set equals en; {placeholders} identical to en ({session_id},{reason},{limit_mib},{detail}); no ICU plural/select arms in this namespace; identifiers text_origin/qwen_s2s, WAV/WebM/Ogg/MP4, UUID, MiB, Radient and ElevenLabs preserved; no bidi/zero-width controls, no ASCII quotes, no markdown/digit/symbol in the 6 spoken wire.voice.phrase.* strings; max_spoken_chars.help quotes phrase.truncated exactly. target_sha256 is the file audited (post-fix for fr/ru). Glossary/neighbour consistency: conversation, agent, approvals, provider, key and 'try again in a moment' match the shipped corpus of the locale. Back-translations of the 10 most consequential strings (approval/refusal/limit/provider), all faithful: approval_pending: First answer the question or the approval shown on screen.; phrase.on_screen_first: First answer the approval on screen.; not_enabled: Voice mode isn't activated for this conversation. Activate it first for this conversation.; rate_limited_minute: The voice provider's per-minute limit is reached. Try again in a moment.; rate_limited_day: The voice provider's daily limit is exhausted. Try again after its reset.; upload_too_large: This recording is too bulky. Keep it under {limit_mib} MiB.; provider.help: Who listens to you and speaks for you, for hands-free voice and the read-aloud button. Radient is billed against your Radient credit; ElevenLabs uses your own key. Only the one you choose is used, and if it can't handle a request it says why instead of switching.; provider.choice.none.description: No provider chosen for now. Hands-free voice stays off until you choose one.; provider.choice.elevenlabs.description: Your own ElevenLabs API key. ElevenLabs bills you directly.; provider_unset: First choose a voice provider: Radient or your own ElevenLabs key. Voice mode only uses the one you choose.. Re-audit round 2 of the 5 changed fr keys (invalid_request, empty_transcript, invalid_request_id, provider.help, provider_unset): diff vs the audited text is exactly U+0020->U+202F before ';'/':' and nothing else; back-translations unchanged in meaning. nit: provider.help 'facturé sur votre crédit' (alt. 'débité de votre crédit'). Round 1 found 5 minors (plain space before ; and : instead of U+202F, fr.md Punctuation) — fixed in 7e6d2b7ac, verified. Not verified: the English 'Speak button' is a UI label; the locale renders it descriptively as a read-aloud button and the client's real label was not checked here. No rendered, native-speaker, or RTL rendering claim (ur: strings only; bidi handled by the render layer per the style guide). Same model family as the translator, different session and brief."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.voice",
+      "source_sha256": "8512860b98c48da1c4fc5f2b86344c6c84b288b2fcb2b618f596647f2c38ebd1",
+      "context_sha256": "aebbfbbb4b6a37442ad74f1316aff7d0297326eda6b357562c95a0e74f27bc3c",
+      "target_sha256": "8b9517c3358d2255d8485f1f70159c8f6bc0c0ef1d5c21d8a51b387cf9e9ae53",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 14434fb37ba2",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the review-round delta of wire.voice (French): new keys session_syncing, spoken.approval_needed ({title}), spoken.approval_needed_untitled, spoken.code_omitted, spoken.link, and the rewritten invalid_message (the {reason} placeholder is gone from the English source). Independent audit NOT completed, so wire.voice is not shipped for this locale until a passed receipt is appended. Source hash pins the full current en namespace; context and translated target hashes are the files translated against. Glossary i18n/glossary.md and i18n/style-guides/fr.md. Placeholders preserved ({title}, {session_id}, {reason}, {limit_mib}, {detail}); the spoken.* strings are read aloud by TTS so kept short and plain, spoken.link is one word, spoken.code_omitted keeps the English parenthesis pair (optional per the context note). French: U+202F before ':' as in the audited 7e6d2b7ac fix. No rendered, pseudo or native audit claimed."
     }
   ]
 }
