@@ -1182,7 +1182,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "device-local store files beside ``sessions/``, never session entries",
     ),
     "local_operator/network/credentials/github.py": (
-        5,
+        7,
+        "``SELF_REVOKE_BELT_THREAD_NAME`` and ``REVOKE_NOW_THREAD_NAME``: thread names, "
+        "not sync paths — the names the revoke belt and revoke-now worker threads run "
+        "under so an overrun teardown names them; identifiers, never a file anywhere. "
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
