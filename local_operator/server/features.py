@@ -1362,10 +1362,19 @@ def live_feature_flags() -> dict[str, Any]:
     # precedents the guard names are ``routes.desktop_profiles`` (imports
     # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
     # ``tunnels.report`` per request).
+    from local_operator.community import community_enabled
     from local_operator.references import at_references_enabled
     from local_operator.remote_compute import is_enabled as remote_compute_enabled
 
     return {
+        # LOCAL OPERATOR COMMUNITY (RFC v2.4 §7.2): the `/v1/desktop/community/*`
+        # member door. CONDITIONAL, a live fact like ``remote_compute``: the
+        # routes answer `community_disabled` while ``LOCAL_OPERATOR_COMMUNITY``
+        # is off (``community.community_enabled`` is the one reader, called here
+        # so this map and the routes cannot disagree), and a renderer that saw
+        # the key on a dark install would paint a surface that only refuses.
+        # Absent ⇒ no community surface, the pre-feature state.
+        **({"community": 1} if community_enabled() else {}),
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the
