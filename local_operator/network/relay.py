@@ -1028,6 +1028,10 @@ def probe_candidates(
             return
         literal = _is_ip_literal(address)
         started = time.monotonic()
+        #: U4 (PR #4260): the timeout this connect was GIVEN, and the instant it
+        #: gave up, stamped before any cleanup. See the ``dial_silent`` gate below.
+        assigned = budget
+        ended: float | None = None
         try:
             if literal:
                 # Build the socket ourselves for a literal so a creation error
@@ -1044,12 +1048,15 @@ def probe_candidates(
                         states[endpoint] = ("issued", started)
                     sock.connect((host, port))
                 except BaseException:
+                    # Stamp first: a slow close must not count as time spent
+                    # waiting for an answer (U4).
+                    ended = time.monotonic()
                     _close_quietly(sock)
                     raise
             else:
                 sock = socket.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
-            waited = time.monotonic() - started
+            waited = (ended if ended is not None else time.monotonic()) - started
             with opened_lock:
                 issued = states.get(endpoint, ("",))[0] == "issued"
             finish(
@@ -1062,10 +1069,19 @@ def probe_candidates(
                     # timeout (every other OSError is a local or remote answer,
                     # U3) after waiting at least the floor: a timeout on a sliver
                     # of a shared deadline is "not attempted long enough" (R3-1).
+                    # U4 requires BOTH halves of "waited the floor": the timeout
+                    # the connect was given must itself reach the floor (a short
+                    # timeout that completed proves only a short wait, however
+                    # the clock reads afterwards), and the wait measured up to
+                    # the moment connect gave up — before the close above —
+                    # must reach it too. Either alone can be inflated: elapsed
+                    # by a slow cleanup or a descheduled thread, the assignment
+                    # by a connect that returned early.
                     dial_silent=(
                         literal
                         and issued
                         and isinstance(exc, TimeoutError)
+                        and assigned >= silent_floor
                         and waited >= silent_floor
                     ),
                 )
@@ -1122,7 +1138,10 @@ def probe_candidates(
 
     # The cutoff: one read of every endpoint's state, under the lock the workers
     # write it under. After ``stop`` is set no worker can append a socket, so the
-    # snapshot is the probe's final knowledge (U3b).
+    # snapshot is the probe's final knowledge (U3b). There is deliberately no
+    # further drain at the cutoff (R4-1, deferred as a MINOR): a worker that has
+    # not written its terminal state by now reads ``no_answer`` with no silence
+    # evidence, which errs toward caution — never a false "isn't answering".
     reported = {row.endpoint for row in attempts}
     with opened_lock:
         stop.set()
