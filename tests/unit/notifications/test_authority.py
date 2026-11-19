@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from local_operator.cli import sessions_notifications_command
+from local_operator.harness.types import (
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+)
 from local_operator.notifications.authority import GRANT_NAME, granted, set_grant
 from local_operator.notifications.store import NotificationStore
 from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
@@ -118,6 +123,88 @@ async def test_granted_specialist_can_notify_and_revoke_closes_stale_tool(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_cli_grant_reaches_next_live_provider_request_and_executes(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import local_operator.cli as cli
+
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    root = tmp_path / "sessions"
+    directory = root / "sess"
+    _workstream(directory)
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="not granted"), StreamEndEvent(stop_reason="stop")],
+            [
+                StreamToolCallDelta(
+                    index=0,
+                    id="notify-memo",
+                    name="notify",
+                    argument_delta=json.dumps(
+                        {"title": "Memo ready", "body": "Synthetic memo", "key": "memo"}
+                    ),
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="memo published"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="revoked"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(root, stream)
+    session._config_dir = tmp_path
+    args = argparse.Namespace(session="sess", grant=True, revoke=False, reason="operator request")
+    try:
+        await session.prompt("Before authorization")
+        assert not any(tool.name == "notify" for tool in stream.requests[0].tools)
+        assert sessions_notifications_command(args) == 0
+        assert json.loads(capsys.readouterr().out)["granted"] is True
+        # A grant does not rewrite an already-published turn's cache prefix.
+        assert not any(tool.name == "notify" for tool in session._wire_tools())
+        await session.prompt("Publish the memo")
+        assert any(tool.name == "notify" for tool in stream.requests[1].tools)
+        items, _ = NotificationStore(tmp_path).list_items()
+        assert len(items) == 1 and items[0]["key"] == "memo"
+        assert session._run_notified is True
+        cached_tool = next(tool for tool in session._tools if tool.name == "notify")
+        cached_context = session._build_tool_context()
+        args.grant, args.revoke = False, True
+        assert sessions_notifications_command(args) == 0
+        assert json.loads(capsys.readouterr().out)["granted"] is False
+        assert any(tool.name == "notify" for tool in session._wire_tools())
+        # An already-resolved tool/context must deny immediately, even before
+        # the next turn reconciles the provider-visible inventory.
+        denied = await cached_tool.execute(
+            "stale-notify",
+            {"title": "Stale", "body": "Must not publish", "key": "stale"},
+            context=cached_context,
+        )
+        assert "unavailable" in str(denied)
+        assert len(NotificationStore(tmp_path).list_items()[0]) == 1
+        await session.prompt("After revocation")
+        assert not any(tool.name == "notify" for tool in stream.requests[3].tools)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", [[], ["no_reply"], ["notify"]])
+async def test_live_grant_respects_declared_inventory(tmp_path: Path, declared: list[str]) -> None:
+    directory = tmp_path / "sess"
+    _workstream(directory)
+    stream = ScriptedStream([[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    try:
+        session.set_tool_inventory(declared)
+        set_grant(directory, allow=True, reason="operator request")
+        await session.prompt("Check bounded inventory")
+        names = {tool.name for tool in stream.requests[0].tools}
+        assert ("notify" in names) == ("notify" in declared)
+        assert names <= set(declared)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_grant_survives_a_fresh_session_owner(tmp_path: Path) -> None:
     directory = tmp_path / "sess"
     _workstream(directory)
@@ -156,5 +243,7 @@ async def test_grant_never_overrides_hard_exclusions(
         monkeypatch.setattr(builtin, "NOTIFY_ENABLED", False)
     try:
         assert session._notify_tool_callable() is None
+        session._reconcile_notify_tool()
+        assert not any(tool.name == "notify" for tool in session._tools)
     finally:
         await session.dispose()

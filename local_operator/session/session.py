@@ -19207,6 +19207,23 @@ class Session:
             return None
         return self._notify_inbox
 
+    def _reconcile_notify_tool(self) -> None:
+        """Apply external authority changes at the next turn's inventory boundary.
+
+        The CLI writes a sidecar, not this owner's in-memory tool list. Rescue
+        only notify: a blanket capability merge could restore tools a delegated
+        role deliberately pruned. Existing declaration filtering still bounds
+        the rescue, and cached invocations independently recheck revocation.
+        """
+        present = any(tool.name == "notify" for tool in self._tools)
+        if self._notify_tool_callable() is not None:
+            if not present:
+                self._merge_capability_tools(("notify",))
+        elif present:
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name != "notify"], republish=False
+            )
+
     def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
         """The deliberate-notify door: inbox reachability plus reporting authority.
 
@@ -22427,6 +22444,9 @@ class Session:
             # turn, so the schema the model sees is consistent for the whole
             # turn (see ``_reconcile_web_tools`` for why not on the tick).
             self._reconcile_web_tools()
+            # Local CLI grants/revocations are external to this live owner;
+            # apply them before either prompt inventory or wire tools freeze.
+            self._reconcile_notify_tool()
             # This turn has published nothing yet, so the first provider call
             # below captures the inventory as it stands NOW — with the web-tool
             # reconcile above already applied — and every later call in the turn
