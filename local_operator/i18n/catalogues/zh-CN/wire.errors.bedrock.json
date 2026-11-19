@@ -5,6 +5,7 @@
   "wire.errors.bedrock.credential_resolution_failed": "无法加载Amazon Bedrock所需的AWS凭据：{detail}",
   "wire.errors.bedrock.credential_timeout": "加载Amazon Bedrock所需的AWS凭据超过了{seconds, plural, other {#秒}}。",
   "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock在{region}中拒绝了这些AWS凭据。",
+  "wire.errors.bedrock.iam_denied": "你的AWS身份无权调用{action}（资源：{resource}）。请让AWS管理员在IAM中授予该权限；其他模型可能仍可使用。",
   "wire.errors.bedrock.invalid_connection": "此Amazon Bedrock连接无效（{detail}）。请重新连接Bedrock。",
   "wire.errors.bedrock.model_access": "此AWS账户无权访问{model}（区域：{region}）。请在Amazon Bedrock控制台中启用该模型的访问权限，或选择其他模型。",
   "wire.errors.bedrock.model_unavailable": "{model}在{region}中不可用。请尝试它的global.或区域推理配置文件（例如us.），或换一个区域。",

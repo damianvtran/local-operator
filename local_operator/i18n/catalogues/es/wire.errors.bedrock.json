@@ -5,6 +5,7 @@
   "wire.errors.bedrock.credential_resolution_failed": "No se pudieron cargar las credenciales de AWS para Amazon Bedrock: {detail}",
   "wire.errors.bedrock.credential_timeout": "Cargar las credenciales de AWS para Amazon Bedrock tardó más de {seconds, plural, one {# segundo} many {# de segundos} other {# segundos}}.",
   "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock rechazó estas credenciales de AWS en {region}.",
+  "wire.errors.bedrock.iam_denied": "Tu identidad de AWS no tiene permiso para llamar a {action} en {resource}. Pide a tu administrador de AWS que te lo conceda en IAM; puede que otros modelos sigan funcionando.",
   "wire.errors.bedrock.invalid_connection": "Esta conexión de Amazon Bedrock no es válida ({detail}). Vuelve a conectar Bedrock.",
   "wire.errors.bedrock.model_access": "Esta cuenta de AWS no tiene acceso a {model} en {region}. Activa el acceso al modelo en la consola de Amazon Bedrock o elige otro modelo.",
   "wire.errors.bedrock.model_unavailable": "{model} no está disponible en {region}. Prueba su perfil de inferencia global. o regional (por ejemplo, us.), u otra región.",
