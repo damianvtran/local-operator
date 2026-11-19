@@ -880,6 +880,16 @@ class CandidateAttempt:
     connected: bool
     detail: str
     latency_ms: float | None = None
+    #: ATTEMPT EVIDENCE OF SILENCE (security review U3, PR #4260): True only when
+    #: a TCP connect to an IP LITERAL was actually issued and nothing answered —
+    #: the probe's own connect timed out, or the connect was still blocked (no
+    #: SYN-ACK, RST or ICMP error yet) when the collector stopped waiting. A
+    #: ``detail`` cannot carry this: ``no_answer`` is also the closing pass's name
+    #: for a worker that never reached its connect, and ``connect_failed:OSError``
+    #: covers local-stack errors (EADDRNOTAVAIL, EACCES, ENOBUFS) raised before any
+    #: SYN. Only the uplink "<peer> isn't answering" reading consumes it; every
+    #: existing reader keeps reading ``detail``.
+    dial_silent: bool = False
 
 
 @dataclass(frozen=True)
@@ -921,6 +931,7 @@ class _AttemptOutcome:
     sock: socket.socket | None
     detail: str
     latency_ms: float
+    dial_silent: bool = False
 
 
 def probe_candidates(
@@ -969,6 +980,12 @@ def probe_candidates(
     opened_lock = threading.Lock()
     stop = threading.Event()
     started_at = time.monotonic()
+    #: Endpoints whose connect is issued and still blocked, guarded by
+    #: ``opened_lock``: a member at the closing pass is a dial that drew neither
+    #: an answer nor an error before the deadline — silence, with evidence that
+    #: the dial began (U3). Literal addresses only: for a hostname the blocked
+    #: call may still be the resolver, which is not a dial.
+    dialing: set[str] = set()
 
     def attempt(endpoint: str) -> None:
         budget = connect_cap
@@ -983,16 +1000,30 @@ def probe_candidates(
         except ValueError:
             results.put(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
             return
+        literal = _is_ip_literal(address)
         started = time.monotonic()
+        if literal:
+            with opened_lock:
+                dialing.add(endpoint)
         try:
             sock = socket.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
+            with opened_lock:
+                dialing.discard(endpoint)
             results.put(
                 _AttemptOutcome(
-                    endpoint, None, f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}", 0.0
+                    endpoint,
+                    None,
+                    f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}",
+                    0.0,
+                    # Only the connect's OWN timeout is silence; every other
+                    # OSError is a local or remote answer, not a quiet peer (U3).
+                    dial_silent=literal and isinstance(exc, TimeoutError),
                 )
             )
             return
+        with opened_lock:
+            dialing.discard(endpoint)
         latency = round((time.monotonic() - started) * 1000, 1)
         with opened_lock:
             if stop.is_set():
@@ -1029,6 +1060,7 @@ def probe_candidates(
                 connected=outcome.sock is not None,
                 detail=outcome.detail,
                 latency_ms=outcome.latency_ms or None,
+                dial_silent=outcome.dial_silent,
             )
         )
         if outcome.sock is not None and winner_sock is None:
@@ -1042,6 +1074,10 @@ def probe_candidates(
             if sock is not winner_sock:
                 _close_quietly(sock)
         opened.clear()
+        # Read under the lock the workers write it under: a worker whose connect
+        # returned an error after the deadline has already left the set, so only
+        # a connect still blocked right now counts as silence (U3).
+        still_dialing = set(dialing)
 
     # An attempt still in flight when the budget ran out never reported. Name it:
     # every declared endpoint appears in the result, so a caller reading the rows
@@ -1055,7 +1091,14 @@ def probe_candidates(
         if endpoint not in reported:
             attempts.append(
                 CandidateAttempt(
-                    endpoint, False, DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER, None
+                    endpoint,
+                    False,
+                    DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER,
+                    None,
+                    # The report deadline alone proves no dial: a worker still
+                    # queued or not yet at its connect is ``no_answer`` here too
+                    # (U3), so silence needs the connect to be in flight.
+                    dial_silent=endpoint in still_dialing,
                 )
             )
 
@@ -1066,6 +1109,17 @@ def probe_candidates(
         complete=settled == len(threads),
         reason="" if winner_sock is not None else probe_reason(attempts),
     )
+
+
+def _is_ip_literal(address: str) -> bool:
+    """Whether ``address`` is an IP literal, so a blocked connect cannot be a lookup."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(address.strip("[]"))
+    except ValueError:
+        return False
+    return True
 
 
 def _dial_candidates(member: MemberRecord) -> list[str]:
@@ -16143,6 +16197,9 @@ class RelayServer:
                         "ok": False,
                         "latency_ms": attempt.latency_ms,
                         "detail": attempt.detail,
+                        # Present only when True, so every other row's shape is
+                        # exactly today's (U3; read by uplink._answered_by_silence).
+                        **({"dial_silent": True} if attempt.dial_silent else {}),
                     }
                 )
         # SCOPE FIRST, THEN INFORMATIONAL (F9; design round 1, D3): the same

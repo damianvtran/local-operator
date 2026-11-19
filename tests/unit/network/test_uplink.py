@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import socket
+import time
 from argparse import Namespace
 from types import SimpleNamespace
 from typing import Any
@@ -361,8 +362,10 @@ NO_ROUTE = lambda endpoint: False  # noqa: E731
 ROUTED = lambda endpoint: True  # noqa: E731
 
 
-def _reach(device: str, endpoint: str, detail: str, ok: bool = False) -> dict[str, Any]:
-    return {
+def _reach(
+    device: str, endpoint: str, detail: str, ok: bool = False, *, dial_silent: bool = False
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "check": "reachability",
         "device_id": device,
         "device_name": "node2",
@@ -370,6 +373,10 @@ def _reach(device: str, endpoint: str, detail: str, ok: bool = False) -> dict[st
         "ok": ok,
         "detail": detail,
     }
+    if dial_silent:
+        # The producer's attempt evidence (U3): probe_candidates set it.
+        row["dial_silent"] = True
+    return row
 
 
 def test_offline_device_row_is_first_and_claims_only_the_internet_route() -> None:
@@ -400,7 +407,7 @@ def test_a_silent_lan_peer_without_a_default_route_isnt_answering(
 ) -> None:
     rows = uplink.uplink_checks(
         OFFLINE,
-        [_reach("d_lan", "192.168.50.7:4097", "connect_failed:TimeoutError")],
+        [_reach("d_lan", "192.168.50.7:4097", "connect_failed:TimeoutError", dial_silent=True)],
         route_reader=_REAL_ENDPOINT,
     )
     assert [row["code"] for row in rows] == ["offline", "peer_not_answering"]
@@ -450,7 +457,7 @@ def test_a_healthy_or_unknown_reading_adds_no_row(reading: Any) -> None:
 def test_a_routed_silent_peer_isnt_answering_and_no_cause_is_named() -> None:
     rows = uplink.uplink_checks(
         DUAL,
-        [_reach("d_n2", "16.52.146.32:4097", "connect_failed:TimeoutError")],
+        [_reach("d_n2", "16.52.146.32:4097", "connect_failed:TimeoutError", dial_silent=True)],
         route_reader=ROUTED,
     )
     assert [row["code"] for row in rows] == ["peer_not_answering"]
@@ -485,6 +492,85 @@ def test_isnt_answering_needs_a_timed_out_dial_to_a_routable_endpoint(
         _reach("d_n2", f"16.52.146.{index}:4097", detail) for index, detail in enumerate(details)
     ]
     assert uplink.uplink_checks(DUAL, peer_rows, route_reader=route) == []
+
+
+def _ready_reach(outcome: str, *, dial_silent: bool) -> dict[str, Any]:
+    """A ``ready``-dialect row: silence rides ``observed``, as _reachability_rows writes it."""
+    observed: dict[str, Any] = {"outcome": outcome, "attempted": True}
+    if dial_silent:
+        observed["dial_silent"] = True
+    return {
+        "check": "reachability",
+        "device_id": "d_n2",
+        "device_name": "node2",
+        "endpoint": "16.52.146.32:4097",
+        "ok": False,
+        "detail": "connect_failed:OSError" if not dial_silent else "connect_failed:TimeoutError",
+        "observed": observed,
+    }
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        # U3 round 2: a local EADDRNOTAVAIL classifies as ``no_answer`` in
+        # ``ready``; without the producer's evidence it is no silence.
+        _ready_reach("no_answer", dial_silent=False),
+        # The report deadline beat the worker: ``no_answer``, nothing dialled.
+        _reach("d_n2", "16.52.146.32:4097", "no_answer"),
+        # A timeout word with no evidence behind it.
+        _reach("d_n2", "16.52.146.32:4097", "connect_failed:TimeoutError"),
+    ],
+)
+def test_isnt_answering_needs_the_producers_attempt_evidence(row: dict[str, Any]) -> None:
+    assert uplink.uplink_checks(DUAL, [row], route_reader=ROUTED) == []
+
+
+def test_a_ready_row_with_dial_evidence_isnt_answering() -> None:
+    rows = uplink.uplink_checks(
+        DUAL, [_ready_reach("no_answer", dial_silent=True)], route_reader=ROUTED
+    )
+    assert [row["code"] for row in rows] == ["peer_not_answering"]
+
+
+def test_probe_evidence_reaches_the_uplink_reading_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Producer to consumer: local error and unstarted worker keep base; silence does not."""
+
+    def local_error(*_args: Any, **_kwargs: Any) -> socket.socket:
+        raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+
+    def time_out(*_args: Any, **_kwargs: Any) -> socket.socket:
+        raise TimeoutError("timed out")
+
+    def rows_for(attempts: list[Any]) -> list[dict[str, Any]]:
+        # The doctor row shape (relay._probe_member): ``dial_silent`` only when True.
+        return [
+            {
+                **_reach("d_n2", attempt.endpoint, attempt.detail),
+                **({"dial_silent": True} if attempt.dial_silent else {}),
+            }
+            for attempt in attempts
+        ]
+
+    endpoint = ["16.52.146.32:4097"]
+    monkeypatch.setattr(relay.socket, "create_connection", local_error)
+    probe = relay.probe_candidates(endpoint, deadline=None, connect_cap=1.0, wait_all=True)
+    assert uplink.uplink_checks(DUAL, rows_for(probe.attempts), route_reader=ROUTED) == []
+
+    monkeypatch.setattr(relay.socket, "create_connection", time_out)
+    with monkeypatch.context() as patch:
+        patch.setattr(relay.threading.Thread, "start", lambda self: None)
+        probe = relay.probe_candidates(
+            endpoint, deadline=time.monotonic() + 0.1, connect_cap=1.0
+        )
+    assert [attempt.detail for attempt in probe.attempts] == ["no_answer"]
+    assert uplink.uplink_checks(DUAL, rows_for(probe.attempts), route_reader=ROUTED) == []
+
+    probe = relay.probe_candidates(endpoint, deadline=None, connect_cap=1.0, wait_all=True)
+    rows = uplink.uplink_checks(DUAL, rows_for(probe.attempts), route_reader=ROUTED)
+    assert [row["code"] for row in rows] == ["peer_not_answering"]
 
 
 def test_ready_renders_the_uplink_rows_first_with_their_remedy() -> None:

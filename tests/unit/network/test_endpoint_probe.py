@@ -200,6 +200,80 @@ def test_a_candidate_that_never_reported_is_named_rather_than_dropped() -> None:
     assert probe.reason == probe.attempts[0].detail
 
 
+def test_a_local_connect_error_is_never_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U3 (PR #4260): an OSError the local stack raises before any SYN is no silence."""
+    import errno
+
+    def refuse_locally(*_args: Any, **_kwargs: Any) -> socket.socket:
+        raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+
+    monkeypatch.setattr(relay.socket, "create_connection", refuse_locally)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9"], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:OSError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_the_connects_own_timeout_is_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    def time_out(*_args: Any, **_kwargs: Any) -> socket.socket:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(relay.socket, "create_connection", time_out)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9", "peer.example:9"],
+        deadline=time.monotonic() + 5.0,
+        connect_cap=2.0,
+        wait_all=True,
+    )
+    by_endpoint = {row.endpoint: row for row in probe.attempts}
+    assert by_endpoint["203.0.113.9:9"].dial_silent is True
+    # A hostname's blocked call may be the resolver: never dial evidence.
+    assert by_endpoint["peer.example:9"].dial_silent is False
+
+
+def test_a_connect_in_flight_at_the_deadline_is_dial_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connect was issued and nothing answered before the report stopped waiting."""
+    import threading
+
+    release = threading.Event()
+
+    def black_hole(*_args: Any, **_kwargs: Any) -> socket.socket:
+        release.wait(5.0)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(relay.socket, "create_connection", black_hole)
+    try:
+        probe = relay.probe_candidates(
+            ["203.0.113.9:9"], deadline=time.monotonic() + 0.2, connect_cap=30.0, wait_all=True
+        )
+    finally:
+        release.set()
+    assert [row.detail for row in probe.attempts] == ["no_answer"]
+    assert probe.attempts[0].dial_silent is True
+
+
+def test_a_worker_the_report_deadline_beat_is_not_dial_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3: the report deadline expiring before a worker runs proves no dial began.
+
+    The worker thread is never started (a queued worker), so the closing pass
+    names the endpoint ``no_answer`` exactly as before — and carries no evidence.
+    """
+    dialled: list[Any] = []
+    monkeypatch.setattr(relay.socket, "create_connection", lambda *a, **k: dialled.append(a))
+    monkeypatch.setattr(relay.threading.Thread, "start", lambda self: None)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9"], deadline=time.monotonic() + 0.1, connect_cap=2.0, wait_all=True
+    )
+    assert dialled == []
+    assert [row.detail for row in probe.attempts] == ["no_answer"]
+    assert probe.attempts[0].dial_silent is False
+
+
 def test_the_probe_keeps_only_the_winner_and_closes_the_rest() -> None:
     """A probe that returns one socket and leaks the others eats the peer's
     connection budget one probe at a time."""

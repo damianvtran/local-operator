@@ -328,6 +328,18 @@ def _answered_by_silence(row: Mapping[str, Any], route_reader: EndpointReader | 
 
     if not readiness._silent_row(row):  # noqa: SLF001 — the shared silence reader
         return False
+    # THE PRODUCER'S ATTEMPT EVIDENCE, NOT THE OUTCOME WORD (security U3, round
+    # 2): ``ready`` classifies a local OSError (EADDRNOTAVAIL, EACCES, ENOBUFS)
+    # and a worker the report deadline beat to its connect as ``no_answer`` too,
+    # so silence needs ``probe_candidates`` to have recorded an issued connect
+    # that drew nothing (``dial_silent``). ``_silent_row`` stays as it is: the
+    # live-link reading also uses it and is out of this change's scope.
+    observed = row.get("observed")
+    evidence = row.get("dial_silent") or (
+        isinstance(observed, Mapping) and observed.get("dial_silent")
+    )
+    if evidence is not True:
+        return False
     endpoint = str(row.get("endpoint") or "")
     return endpoints_route([endpoint], route_reader) is True
 

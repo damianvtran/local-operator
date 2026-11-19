@@ -6736,6 +6736,11 @@ def _reachability_rows(
             "attempted": attempt.detail != relay_mod.DETAIL_NOT_ATTEMPTED,
             "last_seen_at": member.last_seen_at,
         }
+        if attempt.dial_silent and not attempt.connected:
+            # The producer's attempt evidence (U3): set only for an issued
+            # connect that drew nothing. ``outcome`` cannot say it — a local
+            # OSError and an unstarted worker both classify as ``no_answer``.
+            observed["dial_silent"] = True
         if winner:
             observed["winner"] = winner
             observed["winner_verified"] = bool(winner_claim_ok)
