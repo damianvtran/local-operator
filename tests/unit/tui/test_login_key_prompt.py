@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 from textual.app import App, ComposeResult
 
+from local_operator.providers.oauth.callback_server import maybe_await
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.key_prompt import MASK_CHAR, KeyPromptBlock
@@ -997,7 +998,11 @@ async def test_vertex_required_project_field_has_no_oauth_code_semantics(
     async with app.run_test(size=(100, 30)) as pilot:
         callbacks = app._login_callbacks(get_provider_definition("google-vertex"))
         assert callbacks.on_setup_input is not None
-        task = asyncio.create_task(callbacks.on_setup_input("Google Cloud project ID", "", False))
+        # Login callbacks may return synchronously; schedule the normalization
+        # coroutine so this test honors the full callback contract.
+        task = asyncio.create_task(
+            maybe_await(callbacks.on_setup_input("Google Cloud project ID", "", False))
+        )
         await pilot.pause()
         block = app._key_prompt
         assert block is not None
@@ -1025,7 +1030,7 @@ async def test_vertex_service_account_prompt_labels_json_and_stays_secret() -> N
     async with app.run_test(size=(100, 30)) as pilot:
         callbacks = app._login_callbacks(get_provider_definition("google-vertex-sa"))
         assert callbacks.on_manual_code_input is not None
-        task = asyncio.create_task(callbacks.on_manual_code_input())
+        task = asyncio.create_task(maybe_await(callbacks.on_manual_code_input()))
         await pilot.pause()
         block = app._key_prompt
         assert block is not None
