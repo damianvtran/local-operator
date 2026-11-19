@@ -403,8 +403,12 @@ async def test_a_slash_command_is_refused_as_on_messages(rig: Any) -> None:
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "invalid_voice_request"
-    # The validator's own sentence, not the "exactly one of" body-shape copy.
-    assert "/login is a command, not a message" in detail["text"], detail
+    # A fixed keyed sentence (no validator prose, which would be English in every
+    # locale), and not the "exactly one of" body-shape copy.
+    assert detail["text"] == (
+        "That message was not sent: it is too long, or it reads as a command."
+    ), detail
+    assert "params" in detail and detail["params"] == {}
     assert "exactly one" not in detail["text"]
     assert rig.pool.remote.admissions == []
 
@@ -978,6 +982,7 @@ async def test_a_radient_402_on_speech_says_so_and_never_reaches_elevenlabs(
     await _enable(rig, SESSION_A)
     response = await _phrase_speech(rig)
     assert response.status_code == 402, response.text
+    assert response.json()["detail"]["code"] == "voice_credit_low"
     assert response.json()["detail"]["text"] == (
         "Your Radient credit balance is too low for speech. "
         "Add credits in the Radient Console to continue."
@@ -1740,6 +1745,98 @@ async def test_a_non_429_failure_keeps_the_speech_refusal_path(
     response = await _speech(rig, {"kind": "message", "message_id": ASSISTANT_ID})
     assert response.status_code == 402, response.text
     assert response.json()["detail"].get("code") != "voice_rate_limited"
+
+
+@pytest.mark.parametrize(
+    ("upstream", "status", "code"),
+    [
+        # A rejected provider key is NOT a 401 from this API: that status is what
+        # ``require_desktop`` answers for a bad app token.
+        (401, 502, "voice_provider_rejected"),
+        (402, 402, "voice_credit_low"),
+        (500, 502, "voice_upstream_failed"),
+        (503, 503, "voice_temporarily_unavailable"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_speech_refusal_carries_a_machine_code_and_never_a_bare_401(
+    rig: Any, cascades: SimpleNamespace, upstream: int, status: int, code: str
+) -> None:
+    from local_operator.tts import VoicePath
+    from local_operator.tts.cascade import TtsUnavailable
+
+    cascades.tts_error = TtsUnavailable(
+        "x",
+        resolution=None,  # type: ignore[arg-type]
+        error=_limited(status=upstream),
+        failed_path=VoicePath.PROVIDER_TTS_ELEVENLABS,
+    )
+    await _enable(rig, SESSION_A)
+    response = await _speech(rig, {"kind": "message", "message_id": ASSISTANT_ID})
+    assert response.status_code == status, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == code and detail["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_facade_that_cannot_say_whether_a_card_waits_refuses_instead_of_steering(
+    rig: Any,
+) -> None:
+    """Fail CLOSED: a wrong "no card" lets a steer cancel an approval."""
+
+    class Unsynchronised(FakeRemote):
+        @property
+        def pending_gate(self) -> Any:
+            raise RuntimeError("frontend state has not synchronized")
+
+        @pending_gate.setter
+        def pending_gate(self, _value: Any) -> None:
+            return None
+
+    remote = Unsynchronised()
+    rig.pool.remote = remote
+    rig.pool.bridge = FakeBridge(remote)
+    await _enable(rig, SESSION_A)
+    response = await _utter(rig, SESSION_A, "also check the tests")
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "session_syncing" and detail["text"]
+    assert remote.admissions == [] and remote.gate_answers == []
+
+
+@pytest.mark.asyncio
+async def test_the_spoken_stand_ins_come_from_the_locale_not_the_module(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``speakable`` is pure: the route hands it the active locale's words."""
+    text = "See https://example.com now.\n```\nx = 1\n```\nDone."
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, text), raising=True)
+    monkeypatch.setattr(
+        desktop_voice,
+        "_spoken_words",
+        lambda _locale: {"tail": "TAIL.", "code_omitted": "CODE-GONE", "link": "ENLACE"},
+    )
+    await _enable(rig, SESSION_A)
+    result = (await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})).json()[
+        "result"
+    ]
+    assert "ENLACE" in result["text"] and "CODE-GONE" in result["text"]
+    assert "link" not in result["text"] and "code block omitted" not in result["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_gate_sentence_comes_from_the_catalogue(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    rig.pool.remote.pending_gate = SimpleNamespace(
+        request_id="gate-1", kind="approval", title="bash", detail="run ls"
+    )
+    source = {"kind": "gate", "request_id": "gate-1"}
+    titled = (await _text(rig, SESSION_A, source)).json()["result"]["text"]
+    assert titled == "Approval needed: bash. run ls"
+    rig.pool.remote.pending_gate = SimpleNamespace(
+        request_id="gate-1", kind="approval", title="", detail=""
+    )
+    assert (await _text(rig, SESSION_A, source)).json()["result"]["text"] == "Approval needed."
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ The frozen contract, which both repositories build against:
                                        EXACTLY ONE of file (a recording) | text,
                                        text_origin? (qwen_s2s; text door only)
         200 {text, path, admission}; 409 voice_not_enabled | approval_pending |
+        session_syncing (cannot yet tell whether a card waits; retry) |
         stt_unavailable | voice_provider_unset (a recording, and no
         ``speech.provider`` chosen); 413 voice_upload_too_large; 429
         voice_rate_limited; 402 an out-of-credit provider; 422
@@ -23,7 +24,9 @@ The frozen contract, which both repositories build against:
                {kind: phrase, key}
         200 audio/mpeg or audio/wav (X-Voice-Path, X-Voice-Spoken-Chars); 404 unknown_source |
         unknown_segment; 409 voice_not_enabled | voice_unavailable |
-        voice_provider_unset; 429 voice_rate_limited
+        voice_provider_unset; 402 voice_credit_low; 502 voice_provider_rejected
+        (a rejected key, never 401) | voice_upstream_failed; 503
+        voice_temporarily_unavailable; 429 voice_rate_limited
         {scope: day|minute|null, retry_after_s, remaining_requests, rung}; ``scope``
         is null when the provider named no window (the text then quotes it)
 
@@ -482,6 +485,34 @@ def _rate_limit_scope(
     return scope, retry, remaining
 
 
+#: ``/speech``'s upstream refusals as this API's contract: the status the client
+#: sees and the machine ``detail.code`` it classifies by. A rejected provider key
+#: is 502, never 401, exactly as the STT twin folds it
+#: (``PROVIDER_REJECTION_STATUSES``): a 401 from a desktop route is what
+#: ``require_desktop`` answers for a bad APP token, and the client must not read
+#: "your ElevenLabs key was refused" as "sign in to the app again".
+_SPEECH_REFUSAL_CONTRACT: dict[int, tuple[int, str]] = {
+    401: (502, "voice_provider_rejected"),
+    402: (402, "voice_credit_low"),
+    502: (502, "voice_upstream_failed"),
+    503: (503, "voice_temporarily_unavailable"),
+}
+
+
+def _voice_refusal(refusal: HTTPException) -> HTTPException:
+    """``speech.py``'s refusal, re-shaped to the voice contract (status and ``detail.code``).
+
+    The sentence (``detail.text``) and its params are the designed one, untouched;
+    only the machine ``code`` changes, so a client branches on it the way it does
+    for ``voice_unavailable`` and ``voice_rate_limited``.
+    """
+    contract = _SPEECH_REFUSAL_CONTRACT.get(refusal.status_code)
+    if contract is None or not isinstance(refusal.detail, dict):
+        return refusal
+    status, code = contract
+    return HTTPException(status, {**refusal.detail, "code": code})
+
+
 def _provider_sentence(error: BaseException, secrets: Sequence[str] = ()) -> str:
     """The provider's own sentence for a failure, cut to ``_PROVIDER_SENTENCE_CHARS``.
 
@@ -816,8 +847,13 @@ async def _card_pending(request: Request, session_id: str) -> bool:
 
     Read through the CONTROL door for ``_streaming``'s reason: a cold read-door
     answer would report a parked card as absent. A facade whose frontend state
-    has not synchronized yet has no card to show either, so that reads as
-    ``False``; the owner's own steer handling is the backstop for that window.
+    has not synchronized yet cannot say, and FAILS CLOSED: a wrong "no card"
+    would let a steer cancel an approval ("Tool call skipped"), while a wrong
+    "card" costs one refused sentence, so a bounded 409 asks the speaker to try
+    again. Nothing reaches the owner either way (the second read follows STT, so
+    that retry pays for a second transcription, as a card parked during STT does).
+    The window that remains is the millisecond between this read and the owner's own steer
+    handling (the accepted race of the design record).
     """
     async with errors(request):
         async with host(request).session(session_id) as bridge:
@@ -826,18 +862,10 @@ async def _card_pending(request: Request, session_id: str) -> bool:
                 gate = remote.pending_gate if remote is not None else None
                 queued = bool(remote is not None and remote.queued_engine_live)
             except RuntimeError:
-                gate = None
-                queued = False
+                raise _refuse(409, "session_syncing", _wv.session_syncing()) from None
     if gate is None:
         return False
     return not (getattr(gate, "kind", None) == "ask" and queued)
-
-
-def _validation_reason(exc: ValidationError) -> str:
-    """The first validator sentence, without pydantic's ``Value error,`` prefix."""
-    errors_ = exc.errors()
-    message = str(errors_[0].get("msg", "")) if errors_ else str(exc)
-    return message.removeprefix("Value error, ").strip()
 
 
 async def _streaming(request: Request, session_id: str) -> bool:
@@ -912,9 +940,12 @@ async def _admit(
             input_path=path,
         )
     except ValidationError as exc:
-        raise _refuse(
-            422, "invalid_voice_request", _wv.invalid_message(reason=_validation_reason(exc))
-        ) from None
+        # A fixed, keyed sentence: the validator's own text is English prose, and
+        # embedding it would speak English in every locale. Its reasons (over the
+        # size limit, or a whole line that is a slash command) are the two the
+        # sentence names; the detail stays in the log.
+        logger.info("voice utterance refused by the message validator: %s", exc.error_count())
+        raise _refuse(422, "invalid_voice_request", _wv.invalid_message()) from None
     body = await _with_recorded_or_current_mode(request, session_id, body)
     admitted = await messages_route(session_id, body, request)
     return dict(admitted.result or {})
@@ -951,7 +982,9 @@ async def _message_text(request: Request, session_id: str, message_id: str) -> s
     return None
 
 
-async def _gate_text(request: Request, session_id: str, gate_request_id: str) -> str | None:
+async def _gate_text(
+    request: Request, session_id: str, gate_request_id: str, locale: str
+) -> str | None:
     """The pending APPROVAL card's text as the server resolves it, or ``None``.
 
     Read-only: the pending gate is read off the facade, never answered. The
@@ -974,7 +1007,10 @@ async def _gate_text(request: Request, session_id: str, gate_request_id: str) ->
         return None
     title = str(getattr(gate, "title", "") or "").strip()
     detail = str(getattr(gate, "detail", "") or "").strip()
-    sentence = f"Approval needed: {title}." if title else "Approval needed."
+    needed = (
+        _wv.spoken_approval_needed(title=title) if title else _wv.spoken_approval_needed_untitled()
+    )
+    sentence = needed.envelope(locale=locale)["text"]
     return f"{sentence} {detail}".strip() if detail else sentence
 
 
@@ -995,15 +1031,17 @@ async def voice_text(
     ``voice.max_spoken_chars``.
     """
     require_slot(_config_dir(request), body.session_id)
+    # Read once, before any await, so every spoken word of this reply is one language.
+    locale = active_locale()
     source = body.source
     if source.kind == "message":
         raw = await _message_text(request, body.session_id, source.message_id)
     else:
-        raw = await _gate_text(request, body.session_id, source.request_id)
+        raw = await _gate_text(request, body.session_id, source.request_id, locale)
     if raw is None:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
     spoken = voice_segments.speak_segments(
-        raw, max_chars=_max_spoken_chars(config_manager), tail=_spoken_tail(active_locale())
+        raw, max_chars=_max_spoken_chars(config_manager), **_spoken_words(locale)
     )
     if not spoken.text:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
@@ -1020,13 +1058,20 @@ async def voice_text(
 # -- POST /v1/desktop/voice/speech -----------------------------------------------
 
 
-def _spoken_tail(locale: str) -> str:
-    """``speakable``'s closing sentence in ``locale`` (English when unshipped).
+def _spoken_words(locale: str) -> dict[str, str]:
+    """The words ``speak_segments`` speaks that are not the reply's own, in ``locale``.
 
-    The same envelope the ``truncated`` phrase source speaks, so the tail
-    segment, its cache hit and ``PHRASES["truncated"]`` stay one sentence.
+    ``tail`` is ``speakable``'s closing sentence, the same envelope the
+    ``truncated`` phrase source speaks, so the tail segment, its cache hit and
+    ``PHRASES["truncated"]`` stay one sentence. ``code_omitted`` and ``link`` are
+    the stand-ins for a skipped code block and a web address. English when the
+    locale is unshipped; ``speakable`` stays pure and is handed these.
     """
-    return _wv.phrase_truncated().envelope(locale=locale)["text"]
+    return {
+        "tail": _wv.phrase_truncated().envelope(locale=locale)["text"],
+        "code_omitted": _wv.spoken_code_omitted().envelope(locale=locale)["text"],
+        "link": _wv.spoken_link().envelope(locale=locale)["text"],
+    }
 
 
 def _phrase_cache_file(config_dir: Path, rung: str, descriptor: Any, locale: str, key: str) -> Path:
@@ -1130,12 +1175,13 @@ async def voice_speech(
         if source.kind == "message":
             raw = await _message_text(request, body.session_id, source.message_id)
         else:
-            raw = await _gate_text(request, body.session_id, source.request_id)
+            raw = await _gate_text(request, body.session_id, source.request_id, locale)
         if raw is None:
             raise _refuse(404, "unknown_source", _wv.unknown_source())
-        tail = _spoken_tail(locale)
+        words = _spoken_words(locale)
+        tail = words["tail"]
         spoken = voice_segments.speak_segments(
-            raw, max_chars=_max_spoken_chars(config_manager), tail=tail
+            raw, max_chars=_max_spoken_chars(config_manager), **words
         )
         if not spoken.text:
             raise _refuse(404, "unknown_source", _wv.unknown_source())
@@ -1222,7 +1268,9 @@ async def voice_speech(
         from local_operator.server.routes.speech import _speech_refusal
 
         if isinstance(unavailable.error, APIError):
-            refusal = _speech_refusal(unavailable.error, rung=unavailable.failed_path)
+            refusal = _voice_refusal(
+                _speech_refusal(unavailable.error, rung=unavailable.failed_path)
+            )
             refusal.detail = _redacted(refusal.detail, secrets)
             raise refusal from None
         # The error's text, redacted, and not ``exc_info``: a traceback prints the

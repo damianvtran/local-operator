@@ -154,7 +154,12 @@ def segment(text: str, *, max_chars: int = VOICE_SEGMENT_MAX_CHARS) -> list[str]
 
 
 def speak_segments(
-    raw: str, *, max_chars: int, tail: str = voice_speakable.TRUNCATION_TAIL
+    raw: str,
+    *,
+    max_chars: int,
+    tail: str = voice_speakable.TRUNCATION_TAIL,
+    code_omitted: str = voice_speakable.CODE_PLACEHOLDER,
+    link: str = voice_speakable.LINK_WORD,
 ) -> SpokenReply:
     """Clean, cap, then segment: the one call the voice routes make.
 
@@ -162,9 +167,13 @@ def speak_segments(
     segmenting, so a long reply never costs more requests than the cap allows.
     The truncation tail is a fixed phrase that the phrase cache serves, so it is
     its own final segment and never packs into a paid one. ``tail`` is that
-    phrase in the caller's locale (the English sentence by default).
+    phrase in the caller's locale (the English sentence by default); so are
+    ``code_omitted`` and ``link``, the words spoken for a skipped code block and
+    a web address.
     """
-    spoken = voice_speakable.speakable(raw, max_chars=max_chars, tail=tail)
+    spoken = voice_speakable.speakable(
+        raw, max_chars=max_chars, tail=tail, code_omitted=code_omitted, link=link
+    )
     text = spoken.text
     if spoken.truncated and text.endswith(tail):
         segments = [*segment(text[: -len(tail)]), tail]

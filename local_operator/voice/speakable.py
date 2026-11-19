@@ -43,6 +43,9 @@ DEFAULT_MAX_SPOKEN_CHARS = 800
 MIN_MAX_SPOKEN_CHARS = 100
 MAX_MAX_SPOKEN_CHARS = 4000
 
+#: The English stand-ins, and the DEFAULTS of ``clean``/``speakable``. The routes
+#: pass the active locale's words (``wire.voice.spoken.*``) so this module stays
+#: pure and a Spanish reply does not say "link" through the TTS.
 CODE_PLACEHOLDER = "(code block omitted)"
 LINK_WORD = "link"
 #: Spoken, not shown: the listener has no way to see that a cut happened, so the
@@ -90,14 +93,20 @@ def normalise_max_chars(value: object) -> int:
     return max(MIN_MAX_SPOKEN_CHARS, min(MAX_MAX_SPOKEN_CHARS, number))
 
 
-def clean(text: str) -> str:
-    """Steps 1-5 of the module docstring: what a listener should hear."""
-    text = _FENCE.sub(f" {CODE_PLACEHOLDER} ", text)
+def clean(text: str, *, code_omitted: str = CODE_PLACEHOLDER, link: str = LINK_WORD) -> str:
+    """Steps 1-5 of the module docstring: what a listener should hear.
+
+    ``code_omitted`` and ``link`` are the words spoken for a skipped code block
+    and for a web address, in the caller's language. They are inserted through a
+    function so a backslash or ``\\1`` in a translation is text, never a group
+    reference.
+    """
+    text = _FENCE.sub(lambda _match: f" {code_omitted} ", text)
     # Before the link pass, and taking a trailing ``(target)`` with it: a
     # ``[[x]](y)`` would otherwise be read as a link whose text is ``[x``.
     text = _EMBEDDED_COMMAND.sub(" ", text)
     text = _MD_LINK.sub(r"\1", text)
-    text = _URL.sub(LINK_WORD, text)
+    text = _URL.sub(lambda _match: link, text)
     text = _TABLE_RULE.sub(" ", text)
     text = _HEADING.sub("", text)
     text = _BULLET.sub("", text)
@@ -158,7 +167,14 @@ def cap(text: str, max_chars: int, *, tail: str = TRUNCATION_TAIL) -> Speakable:
 
 
 def speakable(
-    text: str, *, max_chars: int = DEFAULT_MAX_SPOKEN_CHARS, tail: str = TRUNCATION_TAIL
+    text: str,
+    *,
+    max_chars: int = DEFAULT_MAX_SPOKEN_CHARS,
+    tail: str = TRUNCATION_TAIL,
+    code_omitted: str = CODE_PLACEHOLDER,
+    link: str = LINK_WORD,
 ) -> Speakable:
     """Clean then cap: the one call ``/voice/text`` makes."""
-    return cap(clean(text), normalise_max_chars(max_chars), tail=tail)
+    return cap(
+        clean(text, code_omitted=code_omitted, link=link), normalise_max_chars(max_chars), tail=tail
+    )

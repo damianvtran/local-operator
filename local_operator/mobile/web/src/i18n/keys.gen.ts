@@ -2261,7 +2261,7 @@ export type MessageParams = {
   "wire.voice.approval_pending": undefined;
   "wire.voice.description": undefined;
   "wire.voice.empty_transcript": undefined;
-  "wire.voice.invalid_message": { "reason": string };
+  "wire.voice.invalid_message": undefined;
   "wire.voice.invalid_request": undefined;
   "wire.voice.invalid_request_id": undefined;
   "wire.voice.invalid_text_origin": undefined;
@@ -2286,6 +2286,11 @@ export type MessageParams = {
   "wire.voice.rate_limited_day": undefined;
   "wire.voice.rate_limited_minute": undefined;
   "wire.voice.rate_limited_unknown": { "detail": string };
+  "wire.voice.session_syncing": undefined;
+  "wire.voice.spoken.approval_needed": { "title": string };
+  "wire.voice.spoken.approval_needed_untitled": undefined;
+  "wire.voice.spoken.code_omitted": undefined;
+  "wire.voice.spoken.link": undefined;
   "wire.voice.store_busy": undefined;
   "wire.voice.stt_unavailable": { "reason": string };
   "wire.voice.title": undefined;

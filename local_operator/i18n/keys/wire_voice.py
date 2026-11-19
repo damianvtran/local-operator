@@ -21,8 +21,8 @@ def empty_transcript() -> Msg:
     return Msg("wire.voice.empty_transcript", {})
 
 
-def invalid_message(*, reason: str) -> Msg:
-    return Msg("wire.voice.invalid_message", {"reason": reason})
+def invalid_message() -> Msg:
+    return Msg("wire.voice.invalid_message", {})
 
 
 def invalid_request() -> Msg:
@@ -119,6 +119,26 @@ def rate_limited_minute() -> Msg:
 
 def rate_limited_unknown(*, detail: str) -> Msg:
     return Msg("wire.voice.rate_limited_unknown", {"detail": detail})
+
+
+def session_syncing() -> Msg:
+    return Msg("wire.voice.session_syncing", {})
+
+
+def spoken_approval_needed(*, title: str) -> Msg:
+    return Msg("wire.voice.spoken.approval_needed", {"title": title})
+
+
+def spoken_approval_needed_untitled() -> Msg:
+    return Msg("wire.voice.spoken.approval_needed_untitled", {})
+
+
+def spoken_code_omitted() -> Msg:
+    return Msg("wire.voice.spoken.code_omitted", {})
+
+
+def spoken_link() -> Msg:
+    return Msg("wire.voice.spoken.link", {})
 
 
 def store_busy() -> Msg:

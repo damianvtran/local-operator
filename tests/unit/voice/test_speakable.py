@@ -24,6 +24,15 @@ def test_code_urls_and_markdown_are_not_read_aloud() -> None:
     assert spoken.startswith("Result Done.")
 
 
+def test_the_stand_in_words_are_the_callers_and_taken_literally() -> None:
+    """The module speaks English by default; a route hands it the locale's words, and a
+    backslash in one is text, not a regex group reference."""
+    text = "Open https://example.com first.\n```\nx = 1\n```\nThen stop."
+    spoken = sp.speakable(text, code_omitted=r"sin c\1digo", link=r"enlace\g<0>").text
+    assert r"enlace\g<0>" in spoken and r"sin c\1digo" in spoken
+    assert "link" not in spoken and "code block omitted" not in spoken
+
+
 def test_an_unterminated_fence_still_hides_the_code() -> None:
     assert "rm -rf" not in sp.speakable("Run this:\n```sh\nrm -rf build").text
 

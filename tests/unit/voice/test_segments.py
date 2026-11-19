@@ -171,3 +171,10 @@ def test_a_cut_never_lands_inside_a_grapheme_cluster(cluster: str, offset: int) 
     assert all(len(part) <= cap for part in parts)
     # Whole in one segment means no seam fell inside it.
     assert any(cluster in part for part in parts)
+
+
+def test_speak_segments_passes_the_stand_in_words_through() -> None:
+    from local_operator.voice.segments import speak_segments
+
+    reply = speak_segments("Mira https://example.com ya.", max_chars=500, link="enlace")
+    assert "enlace" in reply.text and "link" not in reply.text
