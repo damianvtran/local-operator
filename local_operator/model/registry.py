@@ -1275,7 +1275,6 @@ def anthropic_family_model_info(model_id: str) -> Optional[ModelInfo]:
     )
 
 
-
 # ---------------------------------------------------------------------------
 # Amazon Bedrock (Claude via InvokeModelWithResponseStream)
 # ---------------------------------------------------------------------------
@@ -1417,6 +1416,7 @@ def bedrock_family_model_info(model_id: str) -> Optional[ModelInfo]:
     return _bedrock_priced(
         row, model_id, _BEDROCK_GLOBAL_PRICE_OVERRIDES.get(anthropic_id, {})
     ).model_copy(update={"recommended": False})
+
 
 openai_models: Dict[str, ModelInfo] = {
     # GPT-6 Astra -- the suggested default for OpenAI (`model.defaults`), on

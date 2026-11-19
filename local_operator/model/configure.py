@@ -8431,9 +8431,10 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     edit here. An unknown provider is treated as OpenAI-shaped because that is
     what every OpenAI-compatible endpoint in the registry is.
     """
-    from local_operator.providers.registry import get_provider_definition
-
-    from local_operator.providers.registry import is_anthropic_messages_wire
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_anthropic_messages_wire,
+    )
 
     definition = get_provider_definition(provider)
     return not (definition is not None and is_anthropic_messages_wire(definition.wire))

@@ -247,7 +247,14 @@ class BedrockAnthropicClient(AnthropicClient):
         async for event in super().stream(request, api_key, oauth_access):
             yield event
 
-    def _cache_ttl_for(self, request: Any, body: dict[str, Any], *, oauth: bool = False, account: str = "") -> str | None:  # type: ignore[override]
+    def _cache_ttl_for(
+        self,
+        request: Any,
+        body: dict[str, Any],
+        *,
+        oauth: bool = False,
+        account: str = "",
+    ) -> str | None:
         # Bedrock answers ``ValidationException`` to a ``ttl`` on a model that
         # only has the 5m cache. The shared policy picks 1h by context size;
         # keep it only for ids this build KNOWS carry the 1h tier (every row of
@@ -291,7 +298,7 @@ class BedrockAnthropicClient(AnthropicClient):
             # this same credential, so a mismatch only happens if config moved
             # mid-turn. Sign for the instance's Region, which the URL names.
             resolved = bauth.ResolvedAuth(
-                region=self._region, bearer=resolved.bearer, credentials=resolved.credentials
+                region=str(self._region), bearer=resolved.bearer, credentials=resolved.credentials
             )
         return resolved
 

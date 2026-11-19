@@ -95,10 +95,6 @@ def _consumer_defaults() -> dict[str, object]:
         BASH_MEMORY_MODE_DEFAULT,
         BASH_MEMORY_SOFT_FRACTION_DEFAULT,
     )
-    from local_operator.providers.bedrock.connection import (
-        DEFAULT_BEDROCK_AUTH_SETTING,
-        DEFAULT_BEDROCK_REGION_SETTING,
-    )
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
@@ -139,6 +135,10 @@ def _consumer_defaults() -> dict[str, object]:
     # (``SyncSettings.from_config`` falls back to exactly these).
     from local_operator.network.sync import SYNC_DEBOUNCE_S, SYNC_TICK_S
     from local_operator.notifications import sound as notification_sound
+    from local_operator.providers.bedrock.connection import (
+        DEFAULT_BEDROCK_AUTH_SETTING,
+        DEFAULT_BEDROCK_REGION_SETTING,
+    )
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,

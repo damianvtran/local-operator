@@ -33,7 +33,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 #: Descriptor scheme. A key without it is a raw Bedrock API key (the generic
@@ -111,7 +111,9 @@ class Connection:
 
     def descriptor(self) -> str:
         """The canonical ``bedrock://`` string (never contains ``raw_key``)."""
-        return format_descriptor(self.method, region=self.region, profile=self.profile, ref=self.ref)
+        return format_descriptor(
+            self.method, region=self.region, profile=self.profile, ref=self.ref
+        )
 
     def scope_key(self) -> str:
         """Non-secret identity for caches: method/profile/region, never a ref or key.
@@ -127,7 +129,7 @@ class Connection:
         return f"{self.method}:{self.profile or ''}"
 
 
-def is_descriptor(key: str | None) -> bool:
+def is_descriptor(key: object) -> TypeGuard[str]:
     return isinstance(key, str) and key.startswith(SCHEME)
 
 
@@ -186,7 +188,12 @@ def parse(key: str) -> Connection:
         raise DescriptorError("a profile connection needs a profile name")
     if method != "profile" and profile is not None:
         raise DescriptorError(f"a {method} connection carries no profile name")
-    return Connection(method=method, region=region, profile=profile, ref=ref)  # type: ignore[arg-type]
+    return Connection(
+        method=method,  # type: ignore[arg-type]  # validated against METHODS above
+        region=region,
+        profile=profile,
+        ref=ref,
+    )
 
 
 def valid_region(region: str) -> bool:

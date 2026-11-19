@@ -47,7 +47,9 @@ def scratch_aws(tmp_path, monkeypatch):
         "sso_region = us-east-1\nsso_account_id = 111111111111\n"
         "sso_role_name = Dev\nregion = us-west-2\n"
     )
-    creds.write_text("[dev]\naws_access_key_id = AKIDDEVPROFILE\naws_secret_access_key = devsecret\n")
+    creds.write_text(
+        "[dev]\naws_access_key_id = AKIDDEVPROFILE\naws_secret_access_key = devsecret\n"
+    )
     monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
@@ -91,7 +93,11 @@ def test_sealed_api_key_and_access_key_read_the_store(monkeypatch) -> None:
 
     def fake_secret(name: str) -> str:
         seen.append(name)
-        return '{"access_key_id":"AKIDSEALED","secret_access_key":"s"}' if "access" in seen[0] else "tok"
+        return (
+            '{"access_key_id":"AKIDSEALED","secret_access_key":"s"}'
+            if "access" in seen[0]
+            else "tok"
+        )
 
     monkeypatch.setattr(bauth, "_secret_value", lambda r: (seen.append(r), "sealed-token")[1])
     resolved = bauth.resolve_sync(f"bedrock://api-key?region=eu-west-1&ref={ref}", values={})
@@ -241,7 +247,13 @@ def test_sigv4_matches_botocore_for_a_colon_model_id(monkeypatch) -> None:
     # the headers its SignedHeaders names — which must be the two our client
     # sends (plus host/x-amz-*), proving the header set matches the SDK too.
     signed = theirs.split("SignedHeaders=", 1)[1].split(",", 1)[0].split(";")
-    assert signed == ["content-type", "host", "x-amz-date", "x-amz-security-token", "x-amzn-bedrock-accept"]
+    assert signed == [
+        "content-type",
+        "host",
+        "x-amz-date",
+        "x-amz-security-token",
+        "x-amzn-bedrock-accept",
+    ]
     ours_base = {"Content-Type": "application/json", "X-Amzn-Bedrock-Accept": "application/json"}
     resolved = bauth.ResolvedAuth(region="us-east-1", credentials=creds.get_frozen_credentials())
     ours = bauth.sign_headers(resolved, "POST", url, body, ours_base)

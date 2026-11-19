@@ -152,7 +152,7 @@ def test_family_resolver_describes_discovered_unshipped_ids() -> None:
     from local_operator.model.configure import _FAMILY_MODEL_RESOLVERS
 
     info = _FAMILY_MODEL_RESOLVERS["bedrock"]("us.anthropic.claude-haiku-5-5")
-    assert info is not None and info.input_price == 0.0 and info.context_window > 0
+    assert info is not None and info.input_price == 0.0 and (info.context_window or 0) > 0
 
 
 def test_importing_registry_and_clients_leaves_botocore_unloaded() -> None:

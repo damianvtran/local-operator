@@ -97,8 +97,10 @@ def _session_for(conn: Connection) -> Any:
         if cached is not None:
             _sessions.move_to_end(key)
             return cached
-        session = botocore.session.Session(profile=conn.profile) if conn.profile else (
-            botocore.session.Session()
+        session = (
+            botocore.session.Session(profile=conn.profile)
+            if conn.profile
+            else (botocore.session.Session())
         )
         _sessions[key] = session
         while len(_sessions) > _SESSION_CACHE_MAX:

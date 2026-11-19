@@ -167,8 +167,10 @@ _DEFAULT_STATUS = {
 
 def _model_access_denied(message: str) -> bool:
     lowered = message.lower()
-    return "access to the model" in lowered or "model access" in lowered or (
-        "not authorized to invoke this model" in lowered
+    return (
+        "access to the model" in lowered
+        or "model access" in lowered
+        or ("not authorized to invoke this model" in lowered)
     )
 
 
@@ -198,8 +200,10 @@ def provider_error_for(
         return ProviderError(status or 408, shown, retryable=True, kind="timeout")
     if kind_key in _AUTH:
         return ProviderError(
-            status or 403, f"{_text(_keys().credentials_rejected(region=region))} ({shown})",
-            auth_error=True, kind="auth",
+            status or 403,
+            f"{_text(_keys().credentials_rejected(region=region))} ({shown})",
+            auth_error=True,
+            kind="auth",
         )
     if kind_key == "accessdeniedexception":
         if _model_access_denied(message):
@@ -233,15 +237,11 @@ def provider_error_for(
         return ProviderError(status or 400, f"{shown}{suffix}", kind="request")
     # Unknown error type: fall back to status semantics like raise_for_status.
     retryable = status is not None and (status == 429 or status >= 500 or status in (408, 504))
-    return ProviderError(
-        status, shown, retryable=retryable, auth_error=status in (401, 403)
-    )
+    return ProviderError(status, shown, retryable=retryable, auth_error=status in (401, 403))
 
 
 def _header_error_type(response: "httpx.Response") -> str:
-    return response.headers.get("x-amzn-ErrorType") or response.headers.get(
-        "x-amzn-errortype", ""
-    )
+    return response.headers.get("x-amzn-ErrorType") or response.headers.get("x-amzn-errortype", "")
 
 
 def _body_message(response: "httpx.Response") -> tuple[str, str]:

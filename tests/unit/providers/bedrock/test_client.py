@@ -24,7 +24,10 @@ from local_operator.harness.types import (
     StreamUsageEvent,
 )
 from local_operator.providers.bedrock import client as bclient
-from local_operator.providers.bedrock.client import BedrockAnthropicClient, transform_body
+from local_operator.providers.bedrock.client import (
+    BedrockAnthropicClient,
+    transform_body,
+)
 from local_operator.providers.clients import AnthropicClient, _encode_json_body
 from local_operator.providers.failover import ProviderError
 
@@ -238,8 +241,14 @@ async def test_tool_use_and_thinking_carry_through() -> None:
             "type": "content_block_start",
             "content_block": {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {}},
         },
-        {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"cmd":'}},
-        {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '"ls"}'}},
+        {
+            "type": "content_block_delta",
+            "delta": {"type": "input_json_delta", "partial_json": '{"cmd":'},
+        },
+        {
+            "type": "content_block_delta",
+            "delta": {"type": "input_json_delta", "partial_json": '"ls"}'},
+        },
         {"type": "content_block_stop"},
     ]
 
@@ -306,9 +315,30 @@ async def test_mid_stream_exception_frames_raise(frame_type, kind, retryable) ->
             True,
             False,
         ),
-        (400, "ValidationException", "Input is too long for requested model.", "request", False, False),
-        (403, "ExpiredTokenException", "The security token included in the request is expired", "auth", True, False),
-        (403, "UnrecognizedClientException", "The security token included in the request is invalid.", "auth", True, False),
+        (
+            400,
+            "ValidationException",
+            "Input is too long for requested model.",
+            "request",
+            False,
+            False,
+        ),
+        (
+            403,
+            "ExpiredTokenException",
+            "The security token included in the request is expired",
+            "auth",
+            True,
+            False,
+        ),
+        (
+            403,
+            "UnrecognizedClientException",
+            "The security token included in the request is invalid.",
+            "auth",
+            True,
+            False,
+        ),
         (404, "ResourceNotFoundException", "Model not found", "request", False, False),
         (503, "ServiceUnavailableException", "busy", "transient", False, True),
     ],
@@ -380,7 +410,8 @@ async def test_first_party_request_bytes_and_headers_unchanged() -> None:
         messages=[Message.user("hi")],
     )
     events = [e async for e in client.stream(request, "sk-ant-test")]
-    assert events[-1].stop_reason == "stop"
+    end = events[-1]
+    assert isinstance(end, StreamEndEvent) and end.stop_reason == "stop"
     assert seen["url"] == "https://api.anthropic.com/v1/messages"
     body = json.loads(seen["content"])
     expected = httpx.Request("POST", seen["url"], json=body).content

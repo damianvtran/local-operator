@@ -5775,7 +5775,9 @@ class AnthropicClient:
         retry is invisible to the turn; every other status passes through.
         """
         url, content, sent_headers = await self._messages_request(body, headers, api_key)
-        async with self._http.stream("POST", url, content=content, headers=sent_headers) as response:
+        async with self._http.stream(
+            "POST", url, content=content, headers=sent_headers
+        ) as response:
             if not ("diagnostics" in body and await _refuses_diagnostics(response)):
                 yield response
                 return
@@ -5786,7 +5788,9 @@ class AnthropicClient:
             "disabled for this process"
         )
         url, content, sent_headers = await self._messages_request(body, headers, api_key)
-        async with self._http.stream("POST", url, content=content, headers=sent_headers) as response:
+        async with self._http.stream(
+            "POST", url, content=content, headers=sent_headers
+        ) as response:
             yield response
 
     async def stream(
@@ -5888,9 +5892,7 @@ class AnthropicClient:
                         input_reported = True
                         usage.input_tokens = int(fill["input_tokens"])
                         usage.cache_read_tokens = int(fill.get("cache_read_input_tokens") or 0)
-                        usage.cache_write_tokens = int(
-                            fill.get("cache_creation_input_tokens") or 0
-                        )
+                        usage.cache_write_tokens = int(fill.get("cache_creation_input_tokens") or 0)
                         usage.context_tokens = (
                             usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
                         ) or None

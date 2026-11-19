@@ -56,16 +56,26 @@ def test_stored_region_wins_over_everything() -> None:
     conn = bconn.parse("bedrock://profile?name=dev&region=eu-west-1")
     env = {"AWS_REGION": "us-west-2"}
     values = {"providers": {"bedrock": {"region": "ap-south-1"}}}
-    assert bconn.resolve_region(conn, profile_region="ca-central-1", values=values, environ=env) == (
-        "eu-west-1"
-    )
+    assert bconn.resolve_region(
+        conn, profile_region="ca-central-1", values=values, environ=env
+    ) == ("eu-west-1")
 
 
 @pytest.mark.parametrize(
     ("values", "env", "profile", "expected"),
     [
-        ({"providers": {"bedrock": {"region": "ap-south-1"}}}, {"AWS_REGION": "us-west-2"}, "ca-central-1", "ap-south-1"),
-        ({}, {"AWS_REGION": "us-west-2", "AWS_DEFAULT_REGION": "eu-west-1"}, "ca-central-1", "us-west-2"),
+        (
+            {"providers": {"bedrock": {"region": "ap-south-1"}}},
+            {"AWS_REGION": "us-west-2"},
+            "ca-central-1",
+            "ap-south-1",
+        ),
+        (
+            {},
+            {"AWS_REGION": "us-west-2", "AWS_DEFAULT_REGION": "eu-west-1"},
+            "ca-central-1",
+            "us-west-2",
+        ),
         ({}, {"AWS_DEFAULT_REGION": "eu-west-1"}, "ca-central-1", "eu-west-1"),
         ({}, {}, "ca-central-1", "ca-central-1"),
         ({}, {}, None, "us-east-1"),
@@ -73,7 +83,9 @@ def test_stored_region_wins_over_everything() -> None:
 )
 def test_region_precedence(values, env, profile, expected) -> None:
     conn = bconn.parse("bedrock://ambient")
-    assert bconn.resolve_region(conn, profile_region=profile, values=values, environ=env) == expected
+    assert (
+        bconn.resolve_region(conn, profile_region=profile, values=values, environ=env) == expected
+    )
 
 
 def test_laptop_aws_profile_and_access_keys_do_not_enable_bedrock() -> None:
@@ -99,7 +111,11 @@ def test_laptop_aws_profile_and_access_keys_do_not_enable_bedrock() -> None:
         ({"ECS_CONTAINER_METADATA_URI_V4": "http://169.254.170.2/v4"}, {}, "bedrock://ambient"),
         ({}, {"providers": {"bedrock": {"auth": "ambient"}}}, "bedrock://ambient"),
         # Bearer wins over the ambient switch (first match).
-        ({"AWS_BEARER_TOKEN_BEDROCK": "tok", "LOP_BEDROCK_AUTH": "ambient"}, {}, "bedrock://env-bearer"),
+        (
+            {"AWS_BEARER_TOKEN_BEDROCK": "tok", "LOP_BEDROCK_AUTH": "ambient"},
+            {},
+            "bedrock://env-bearer",
+        ),
         # Any other LOP_BEDROCK_AUTH value is not a switch.
         ({"LOP_BEDROCK_AUTH": "yes"}, {}, None),
     ],

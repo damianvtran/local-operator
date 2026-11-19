@@ -77,8 +77,16 @@ def anthropic_events(
             events.append({**event, "index": index})
         index += 1
     events += [
-        {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
-        {"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}},
+        {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "text_delta", "text": text},
+        },
         {"type": "content_block_stop", "index": index},
     ]
     delta: dict[str, Any] = {"type": "message_delta", "delta": {"stop_reason": stop_reason}}
