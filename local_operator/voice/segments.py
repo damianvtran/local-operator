@@ -153,17 +153,19 @@ def segment(text: str, *, max_chars: int = VOICE_SEGMENT_MAX_CHARS) -> list[str]
     return out
 
 
-def speak_segments(raw: str, *, max_chars: int) -> SpokenReply:
+def speak_segments(
+    raw: str, *, max_chars: int, tail: str = voice_speakable.TRUNCATION_TAIL
+) -> SpokenReply:
     """Clean, cap, then segment: the one call the voice routes make.
 
     ``max_chars`` (``voice.max_spoken_chars``) caps the WHOLE text BEFORE
     segmenting, so a long reply never costs more requests than the cap allows.
     The truncation tail is a fixed phrase that the phrase cache serves, so it is
-    its own final segment and never packs into a paid one.
+    its own final segment and never packs into a paid one. ``tail`` is that
+    phrase in the caller's locale (the English sentence by default).
     """
-    spoken = voice_speakable.speakable(raw, max_chars=max_chars)
+    spoken = voice_speakable.speakable(raw, max_chars=max_chars, tail=tail)
     text = spoken.text
-    tail = voice_speakable.TRUNCATION_TAIL
     if spoken.truncated and text.endswith(tail):
         segments = [*segment(text[: -len(tail)]), tail]
     else:

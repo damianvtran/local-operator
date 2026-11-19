@@ -110,14 +110,18 @@ def clean(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
-def cap(text: str, max_chars: int) -> Speakable:
+def cap(text: str, max_chars: int, *, tail: str = TRUNCATION_TAIL) -> Speakable:
     """Step 6: cut ``text`` to ``max_chars`` at the best boundary inside it.
 
     The closing sentence counts against the cap, so the spoken total never
     exceeds it: ``/voice/text``'s ``spoken_chars`` is a promise the caller can trust.
-    That arithmetic is why :data:`TRUNCATION_TAIL` may not grow past
+    That arithmetic is why the tail may not grow past
     ``MIN_MAX_SPOKEN_CHARS - 1``: at the floor the tail would otherwise consume
     the whole budget and the reply would be nothing but a goodbye.
+
+    ``tail`` defaults to :data:`TRUNCATION_TAIL`; the desktop route passes the
+    active locale's ``wire.voice.phrase.truncated`` so a translated listener
+    hears the cut in their own language. This module stays pure (no i18n import).
     """
     if len(text) <= max_chars:
         return Speakable(text=text, truncated=False)
@@ -126,12 +130,12 @@ def cap(text: str, max_chars: int) -> Speakable:
     # the whole budget, the full stop added to end it costs one more character,
     # and a final ``[:max_chars]`` therefore used to remove the tail's own full
     # stop — the listener's only sign that the reply stopped.
-    room = max_chars - len(TRUNCATION_TAIL) - 1
+    room = max_chars - len(tail) - 1
     if room <= 0:
         # Unreachable through the route (the registry floor is 100), but ``cap``
         # is pure and callable with anything: there is no room for an answer, so
         # the announcement stands alone, still inside the promise.
-        return Speakable(text=TRUNCATION_TAIL[: max(0, max_chars)], truncated=True)
+        return Speakable(text=tail[: max(0, max_chars)], truncated=True)
     window = text[:room]
     ends = [match.end() for match in _SENTENCE_END.finditer(window)]
     # A sentence boundary in the back half wins; one near the start would
@@ -147,12 +151,14 @@ def cap(text: str, max_chars: int) -> Speakable:
     # The tail outranks the answer: the cut loses its last character rather than
     # the tail losing its full stop (in practice only the no-whitespace case,
     # whose added period is exactly the one character over).
-    if len(cut) + 1 + len(TRUNCATION_TAIL) > max_chars:
+    if len(cut) + 1 + len(tail) > max_chars:
         cut = cut[:-1].rstrip(" ,;:-")
-    spoken = f"{cut} {TRUNCATION_TAIL}".strip()
+    spoken = f"{cut} {tail}".strip()
     return Speakable(text=spoken, truncated=True)
 
 
-def speakable(text: str, *, max_chars: int = DEFAULT_MAX_SPOKEN_CHARS) -> Speakable:
+def speakable(
+    text: str, *, max_chars: int = DEFAULT_MAX_SPOKEN_CHARS, tail: str = TRUNCATION_TAIL
+) -> Speakable:
     """Clean then cap: the one call ``/voice/text`` makes."""
-    return cap(clean(text), normalise_max_chars(max_chars))
+    return cap(clean(text), normalise_max_chars(max_chars), tail=tail)

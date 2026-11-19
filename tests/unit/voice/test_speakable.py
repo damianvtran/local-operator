@@ -117,3 +117,14 @@ def test_the_cap_falls_back_to_a_word_boundary() -> None:
 )
 def test_a_hand_edited_cap_never_breaks_voice(value: object, expected: int) -> None:
     assert sp.normalise_max_chars(value) == expected
+
+
+def test_a_caller_supplied_tail_replaces_the_english_one_inside_the_cap() -> None:
+    """The route passes the active locale's phrase; the budget is that tail's own length."""
+    tail = "Aquí me detengo: el resto está en pantalla."
+    text = " ".join(f"Sentence number {index} is here." for index in range(100))
+    result = sp.speakable(text, max_chars=sp.MIN_MAX_SPOKEN_CHARS, tail=tail)
+    assert result.truncated
+    assert result.text.endswith(tail) and sp.TRUNCATION_TAIL not in result.text
+    assert len(result.text) <= sp.MIN_MAX_SPOKEN_CHARS
+    assert sp.speakable(text, max_chars=200).text.endswith(sp.TRUNCATION_TAIL)

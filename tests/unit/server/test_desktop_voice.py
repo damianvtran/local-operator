@@ -1708,7 +1708,7 @@ async def test_a_phrase_hit_makes_no_cascade_call_and_a_miss_stores_it(
     assert first.status_code == 200, first.text
     assert len(cascades.tts) == 1 and cascades.tts[0][0] == "Answer the approval on screen first."
     cached = list((rig.root / "voice" / "phrase-cache").glob("*.wav"))
-    assert [path.name for path in cached] == ["provider_tts_groq-female-on_screen_first.wav"]
+    assert [path.name for path in cached] == ["provider_tts_groq-female-en-on_screen_first.wav"]
 
     second = await _speech(rig, source)
     assert second.status_code == 200
@@ -1732,7 +1732,7 @@ async def test_a_cached_mp3_phrase_is_stored_and_served_as_audio_mpeg(
     assert first.status_code == 200, first.text
     assert first.headers["content-type"] == "audio/mpeg"
     cached = list((rig.root / "voice" / "phrase-cache").iterdir())
-    assert [path.name for path in cached] == ["provider_tts_radient-female-on_screen_first.mp3"]
+    assert [path.name for path in cached] == ["provider_tts_radient-female-en-on_screen_first.mp3"]
 
     second = await _speech(rig, source)
     assert second.status_code == 200 and second.headers["x-voice-cache"] == "hit"
@@ -1776,6 +1776,84 @@ async def test_the_truncation_tail_segment_is_served_from_the_phrase_cache(
     calls = len(cascades.tts)
     assert (await _speech(rig, source, last)).headers["x-voice-cache"] == "hit"
     assert len(cascades.tts) == calls
+
+
+@pytest.mark.asyncio
+async def test_the_phrase_cache_is_keyed_by_locale(rig: Any, cascades: SimpleNamespace) -> None:
+    """A phrase cached in one language is never served after a language switch.
+
+    The phrase's text follows the active locale, so a cache name without it
+    would replay the old language's audio for the new language's sentence.
+    """
+    from local_operator.i18n.text import set_active_locale
+
+    await _enable(rig, SESSION_A)
+    source = {"kind": "phrase", "key": "on_screen_first"}
+    english = await _speech(rig, source)
+    assert english.status_code == 200, english.text
+    assert cascades.tts[0][0] == "Answer the approval on screen first."
+
+    set_active_locale("es")
+    spanish = await _speech(rig, source)
+    assert spanish.status_code == 200, spanish.text
+    assert "x-voice-cache" not in spanish.headers, "a Spanish request was served English audio"
+    assert len(cascades.tts) == 2 and cascades.tts[1][0] != cascades.tts[0][0]
+    assert (await _speech(rig, source)).headers["x-voice-cache"] == "hit"
+    assert len(cascades.tts) == 2
+
+    set_active_locale("en")
+    back = await _speech(rig, source)
+    assert back.headers["x-voice-cache"] == "hit" and len(cascades.tts) == 2
+    names = sorted(p.name for p in (rig.root / "voice" / "phrase-cache").iterdir())
+    assert names == [
+        "provider_tts_groq-female-en-on_screen_first.wav",
+        "provider_tts_groq-female-es-on_screen_first.wav",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_pre_locale_cache_file_is_never_served(rig: Any, cascades: SimpleNamespace) -> None:
+    """Files named before the locale joined the key are left alone and never matched."""
+    await _enable(rig, SESSION_A)
+    first = await _speech(rig, {"kind": "phrase", "key": "voice_off"})
+    (cached,) = (rig.root / "voice" / "phrase-cache").glob("*.wav")
+    legacy = cached.with_name("provider_tts_groq-female-failed.wav")
+    legacy.write_bytes(first.content)
+    again = await _speech(rig, {"kind": "phrase", "key": "failed"})
+    assert again.status_code == 200 and "x-voice-cache" not in again.headers
+    assert legacy.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_truncation_tail_follows_the_active_locale(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The closing sentence is the active locale's phrase, spoken and cached as such."""
+    from local_operator import settings_io
+    from local_operator.i18n.text import set_active_locale
+
+    long = "Another fairly ordinary sentence here. " * 60
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, long), raising=True)
+    settings_io.write_setting(
+        ConfigManager(rig.root), settings_io.BY_KEY["voice.max_spoken_chars"], 300
+    )
+    await _enable(rig, SESSION_A)
+    set_active_locale("es")
+    tail = desktop_voice._wv.phrase_truncated().envelope()["text"]
+    assert tail != "That's where I'll stop \u2014 the rest is on screen."
+    source = {"kind": "message", "message_id": ASSISTANT_ID}
+    result = (await _text(rig, SESSION_A, source)).json()["result"]
+    assert result["segments"][-1] == tail and result["text"].endswith(tail)
+    assert result["spoken_chars"] <= 300
+    assert "".join(result["segments"]) == result["text"]
+    last = len(result["segments"]) - 1
+    assert (await _speech(rig, source, last)).status_code == 200
+    assert cascades.tts[-1][0] == tail
+    calls = len(cascades.tts)
+    assert (await _speech(rig, source, last)).headers["x-voice-cache"] == "hit"
+    assert len(cascades.tts) == calls
+    names = [p.name for p in (rig.root / "voice" / "phrase-cache").iterdir()]
+    assert names == ["provider_tts_groq-female-es-truncated.wav"]
 
 
 @pytest.mark.asyncio

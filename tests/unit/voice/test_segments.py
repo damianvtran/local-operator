@@ -136,6 +136,14 @@ def test_the_cap_applies_before_segmenting() -> None:
     assert sum(len(s) for s in reply.segments) <= 300
 
 
+def test_a_supplied_tail_is_the_final_segment() -> None:
+    tail = "Je m’arrête ici : la suite est à l’écran."
+    raw = " ".join(f"This is sentence number {i} of a long reply." for i in range(100))
+    reply = speak_segments(raw, max_chars=300, tail=tail)
+    assert reply.segments[-1] == tail and reply.text.endswith(tail)
+    assert "".join(reply.segments) == reply.text and len(reply.text) <= 300
+
+
 def test_an_uncut_reply_is_cleaned_not_truncated() -> None:
     reply = speak_segments("Here is code. ```\nls\n``` Done.", max_chars=800)
     assert reply.truncated is False

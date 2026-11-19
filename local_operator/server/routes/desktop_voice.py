@@ -118,6 +118,7 @@ from local_operator.clients.radient_cost import RadientCost, cost_from_headers
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
 from local_operator.i18n.keys import wire_voice as _wv
+from local_operator.i18n.text import active_locale
 from local_operator.providers.auth_store import AuthStore
 from local_operator.redaction_shapes import is_credential_name
 from local_operator.server.dependencies import (
@@ -976,7 +977,9 @@ async def voice_text(
         raw = await _gate_text(request, body.session_id, source.request_id)
     if raw is None:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
-    spoken = voice_segments.speak_segments(raw, max_chars=_max_spoken_chars(config_manager))
+    spoken = voice_segments.speak_segments(
+        raw, max_chars=_max_spoken_chars(config_manager), tail=_spoken_tail(active_locale())
+    )
     if not spoken.text:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
     return reply(
@@ -992,16 +995,30 @@ async def voice_text(
 # -- POST /v1/desktop/voice/speech -----------------------------------------------
 
 
-def _phrase_cache_file(config_dir: Path, rung: str, voice: str, key: str) -> Path:
-    """``<config>/voice/phrase-cache/<rung>-<voice>-<key>.<mp3|wav>``.
+def _spoken_tail(locale: str) -> str:
+    """``speakable``'s closing sentence in ``locale`` (English when unshipped).
+
+    The same envelope the ``truncated`` phrase source speaks, so the tail
+    segment, its cache hit and ``PHRASES["truncated"]`` stay one sentence.
+    """
+    return _wv.phrase_truncated().envelope(locale=locale)["text"]
+
+
+def _phrase_cache_file(config_dir: Path, rung: str, voice: str, locale: str, key: str) -> Path:
+    """``<config>/voice/phrase-cache/<rung>-<voice>-<locale>-<key>.<mp3|wav>``.
+
+    The locale is in the name because a phrase's text follows the active
+    locale: without it a phrase cached before a language switch would be
+    replayed in the old language. Files from before the locale joined the name
+    simply never match and are left alone.
 
     The extension is the container the rung answers (:func:`_phrase_cache_format`),
     so a cached phrase is named for what it is. ``key`` is always a member of
-    :data:`PHRASES` and ``rung``/``voice`` are closed vocabularies, so no caller
-    text reaches the path.
+    :data:`PHRASES` and ``rung``/``voice``/``locale`` are closed vocabularies
+    (the locale is the process's active one), so no caller text reaches the path.
     """
     ext, _ = _phrase_cache_format(rung)
-    return config_dir / "voice" / "phrase-cache" / f"{rung}-{voice}-{key}.{ext}"
+    return config_dir / "voice" / "phrase-cache" / f"{rung}-{voice}-{locale}-{key}.{ext}"
 
 
 def _phrase_cache_format(rung: str) -> tuple[str, str]:
@@ -1064,6 +1081,10 @@ async def voice_speech(
     pinned = speech_provider.PINNED_TTS[_chosen_provider(request)]
     source = body.source
     phrase_key: str | None = None
+    # Read before any await: the phrase text below (unpinned on purpose, see the
+    # envelope ratchet) and its cache name are then the same locale even if the
+    # language is switched while this request awaits the cascade.
+    locale = active_locale()
     if source.kind == "phrase":
         phrase = PHRASES.get(source.key)
         if phrase is None or body.segment != 0:
@@ -1077,13 +1098,16 @@ async def voice_speech(
             raw = await _gate_text(request, body.session_id, source.request_id)
         if raw is None:
             raise _refuse(404, "unknown_source", _wv.unknown_source())
-        spoken = voice_segments.speak_segments(raw, max_chars=_max_spoken_chars(config_manager))
+        tail = _spoken_tail(locale)
+        spoken = voice_segments.speak_segments(
+            raw, max_chars=_max_spoken_chars(config_manager), tail=tail
+        )
         if not spoken.text:
             raise _refuse(404, "unknown_source", _wv.unknown_source())
         if body.segment >= len(spoken.segments):
             raise _refuse(404, "unknown_segment", _wv.unknown_segment())
         text = spoken.segments[body.segment]
-        if text == voice_speakable.TRUNCATION_TAIL:
+        if spoken.truncated and text == tail:
             phrase_key = "truncated"
 
     descriptor = descriptor_from_config(config_manager)
@@ -1101,7 +1125,7 @@ async def voice_speech(
         )
         if resolution.servable:
             cache_file = _phrase_cache_file(
-                config_dir, resolution.path.value, descriptor.resolved_gender(), phrase_key
+                config_dir, resolution.path.value, descriptor.resolved_gender(), locale, phrase_key
             )
             try:
                 cached = cache_file.read_bytes()
@@ -1186,7 +1210,11 @@ async def voice_speech(
         info = stt_audio.sniff_audio(outcome.audio)
         if info is not None and info.mime_type == _phrase_cache_format(outcome.path.value)[1]:
             served = _phrase_cache_file(
-                config_dir, outcome.path.value, descriptor.resolved_gender(), phrase_key or ""
+                config_dir,
+                outcome.path.value,
+                descriptor.resolved_gender(),
+                locale,
+                phrase_key or "",
             )
             await asyncio.to_thread(_store_phrase, served, outcome.audio)
     # The label follows the bytes: a Groq answer is WAV but the others answer
