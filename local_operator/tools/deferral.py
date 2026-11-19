@@ -158,6 +158,11 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         "music_status",
         "tags",
         "harness_import",
+        # ``integrations`` (RFC "Radient Team Integrations" §8.1 R4): org admin
+        # provisioning is rare and its op schema is wide; it is already
+        # createIf-gated to interactive, signed-in sessions, and deferral keeps
+        # even those at the purpose phrase until ``read tool://integrations``.
+        "integrations",
     }
 )
 
@@ -200,6 +205,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "music_status": "check or cancel a music job",
     "tags": "list/create/assign session tag categories",
     "harness_import": "import Claude Code/Codex/omp sessions and memory",
+    "integrations": "Radient org integration apps and tokens",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every

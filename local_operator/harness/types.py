@@ -2959,6 +2959,21 @@ class ToolContext(BaseModel):
     #: session's teardown has begun — then nothing may be dispatched. Bound
     #: beside :attr:`enqueue_site_card`.
     begin_site_request: Callable[..., Any] | None = None
+    #: THE TEAM INTEGRATIONS CONSENT SEAM (RFC "Radient Team Integrations"
+    #: §8.2): a ``team_bridge.integration_consent.IntegrationConsent`` over this
+    #: session's ask queue and the ids a PERSON answered in this run. Only the
+    #: session can say that — a tool reading the ask log cannot tell a card
+    #: answer from ``answered_in_chat`` — so publishing an app or minting a
+    #: credential is reachable only where the session binds this. ``None``
+    #: without a queued-ask engine (blocking arm, children, headless hosts),
+    #: which also keeps the ``integrations`` tool off those sessions.
+    integration_consent: Any | None = Field(default=None, exclude=True, repr=False)
+    #: Test seam only: a zero-arg factory returning an object with the
+    #: ``IntegrationsClient`` surface (a faked HTTP layer). Production never
+    #: sets it; the tool then rides the Team Bridge client's pinned OAuth row.
+    integrations_client_factory: Callable[[], Any] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
     #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``

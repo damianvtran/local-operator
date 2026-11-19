@@ -80,6 +80,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "sound-generation",
         "system-tools",
         "team-bridge",
+        "team-bridge-integrations",
         "teams",
         "tunnel",
         "video-generation",
@@ -1302,6 +1303,9 @@ def test_org_hub_guide_is_gated_on_the_radient_team_predicate(tmp_path) -> None:
         # rides the same predicate: a solo or signed-out session must have no
         # trace of it (operator constraint, Team Bridge discoverability).
         "team-bridge": "radient-team",
+        # Team Integrations provisioning is an organization admin feature on the
+        # Team plan (RFC §8.3, S-90): same predicate as the bridge guide.
+        "team-bridge-integrations": "radient-team",
     }
     for name in gated:
         assert name not in {g.name for g in guides_available(guides, tmp_path)}

@@ -705,6 +705,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # and ``to`` field blurbs that put the wire schema 3 tokens over CI's
     # budget (-). Re-measured.
     "hub": 875,
+    "integrations": 501,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
