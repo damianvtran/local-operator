@@ -81,10 +81,41 @@ EVENTS = ("take", "release", "timeout", "stale-reclaim")
 #: The longest label part kept. Subcommands are short words; a long token in
 #: subcommand position is far more likely to be an identifier or a secret.
 _LABEL_PART_MAX = 32
+#: The longest subcommand kept. Real subcommands (``install``, ``typecheck``,
+#: ``run-script``) are well under this; a longer lowercase word in argv[1] is
+#: more often an identifier, a hash or a key (PR #4264 R2/Q2).
+_SUBCOMMAND_MAX = 20
 #: What a subcommand looks like: a lowercase word (``test``, ``run``, ``build``,
-#: ``nx``). Uppercase/mixed case, digits-first, ``=``, ``/``, ``:`` and ``@`` are
-#: rejected on purpose — that is the shape of tokens, URLs, paths and KEY=VALUE.
-_SUBCOMMAND = re.compile(r"[a-z][a-z0-9_.-]*")
+#: ``nx``, ``s3``), with ``-``/``_`` only BETWEEN letter/digit runs. Uppercase or
+#: mixed case, digits-first, ``.``, ``=``, ``/``, ``:`` and ``@`` are rejected on
+#: purpose — that is the shape of tokens, file names, URLs, paths and KEY=VALUE.
+_SUBCOMMAND = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*")
+#: More digits than this in one word reads as an id or a key, not a verb:
+#: subcommands carry at most a version-ish digit or two (``s3``, ``ec2``,
+#: ``k8s``), while lowercase hex (``a1b2c3d4…``) or ``build20261119`` do not.
+_SUBCOMMAND_MAX_DIGITS = 2
+#: Well-known credential prefixes that are themselves lowercase and word-shaped
+#: (``sk-live-abcdef`` passes the pattern above), so they are refused by name.
+_SECRET_PREFIXES = (
+    "sk-",
+    "sk_",
+    "pk-",
+    "pk_",
+    "rk_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "ghr_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxs-",
+    "whsec_",
+    "npm_",
+)
 #: Leading words that are setup, not the program the lease is for.
 _SETUP_WORDS = frozenset({"cd", "export", "set", "source", ".", "pushd", "unset"})
 
@@ -129,10 +160,24 @@ def command_label(command: str) -> str:
         # Only argv[1], and only when it is word-shaped: the first non-flag
         # word anywhere would pick up a flag's VALUE (``--token abc deploy``).
         sub = tokens[1] if len(tokens) > 1 else ""
-        if sub and len(sub) <= _LABEL_PART_MAX and _SUBCOMMAND.fullmatch(sub):
+        if _is_subcommand(sub):
             return f"{head} {sub}"
         return head
     return "?"
+
+
+def _is_subcommand(word: str) -> bool:
+    """Whether ``word`` is short and verb-shaped enough to log next to argv[0].
+
+    Deliberately conservative: a false negative only drops a word from the
+    label (``tool`` instead of ``tool frobnicate``), while a false positive
+    writes a possible secret into a file that outlives the session.
+    """
+    if not word or len(word) > _SUBCOMMAND_MAX or not _SUBCOMMAND.fullmatch(word):
+        return False
+    if sum(ch.isdigit() for ch in word) > _SUBCOMMAND_MAX_DIGITS:
+        return False
+    return not word.startswith(_SECRET_PREFIXES)
 
 
 def record(directory: Path, event: str, **fields: Any) -> None:

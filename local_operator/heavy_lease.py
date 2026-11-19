@@ -135,7 +135,10 @@ _MAX_SLOTS = 4
 
 #: How often a waiter retries; flock(LOCK_NB) is a syscall, so this is cheap.
 _POLL_SECONDS = 0.25
-#: Command preview length in records and messages: enough to recognise a build.
+#: Former raw-preview length of the holder record's ``command``. The record now
+#: stores :func:`heavy_audit.command_label` (argv[0] plus a filtered subcommand)
+#: instead, so no argv text reaches ``slot-N.json``, the status rows or the
+#: waiter messages (PR #4264 Q3); kept as an outer bound on the stored label.
 PREVIEW_CHARS = 80
 
 
@@ -1172,7 +1175,12 @@ class Lease:
         self.release()
 
     def release(self, exit_code: int | None = None) -> None:
-        """Free the slot; ``exit_code`` is the command's, for the audit line."""
+        """Free the slot; ``exit_code`` is the command's, for the audit line.
+
+        A negative ``exit_code`` (asyncio/Popen's ``-N``, "killed by signal N")
+        is logged as the shell's ``128 + N`` — see :func:`shell_exit_code` —
+        so the trail reads the same whichever path held the slot.
+        """
         fd, self._fd = self._fd, None
         if fd is None:
             return
@@ -1206,7 +1214,7 @@ class Lease:
                 "release",
                 slot=self.slot,
                 held_s=round(time.monotonic() - self._taken, 3),
-                exit=exit_code,
+                exit=shell_exit_code(exit_code),
                 **self._audit,
             )
 
@@ -1267,7 +1275,10 @@ def try_acquire(
             "slot": slot,
             "pid": holder_pid,
             "session_id": session_id,
-            "command": command[:PREVIEW_CHARS],
+            # The label, never the command line: this file is readable by the
+            # user's other processes and printed by every status surface, and
+            # a heavy command line routinely carries a token (PR #4264 Q3).
+            "command": heavy_audit.command_label(command)[:PREVIEW_CHARS],
             "started_at": time.time(),
             "pgid": None,
         }
@@ -1283,8 +1294,35 @@ def try_acquire(
     return None
 
 
+def shell_exit_code(returncode: int | None) -> int | None:
+    """``-N`` ("killed by signal N", asyncio/Popen) as the shell's ``128 + N``.
+
+    The audit trail's one convention for ``exit``: the ``bash`` tool hands
+    ``Lease.release`` the raw asyncio returncode (``-9``) while ``heavy run``
+    already converts to ``137``; normalizing at the single write site keeps
+    both paths comparable (PR #4264 R3). Idempotent for non-negative codes.
+    """
+    if isinstance(returncode, int) and returncode < 0:
+        return 128 - returncode
+    return returncode
+
+
 def _audit_stale(directory: Path, record_path: Path, slot: int, new_pid: int) -> None:
-    """Log ``stale-reclaim`` for a dead holder's leftover record; best-effort."""
+    """Log ``stale-reclaim`` for a dead holder's leftover record; best-effort.
+
+    Runs AFTER the slot's flock is taken, so nothing may escape it: an
+    exception here would leave ``try_acquire`` holding an fd it never wraps in
+    a Lease, i.e. a slot locked until this process exits (PR #4264 R1 — a
+    hand-edited or corrupt record's ``started_at: 1e999`` made ``float``
+    overflow). The record is evidence, never a gate.
+    """
+    try:
+        _audit_stale_unguarded(directory, record_path, slot, new_pid)
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+
+
+def _audit_stale_unguarded(directory: Path, record_path: Path, slot: int, new_pid: int) -> None:
     try:
         raw = json.loads(record_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1342,13 +1380,23 @@ def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
                 slot=slot,
                 pid=pid,
                 session_id=str(raw.get("session_id") or ""),
-                command=str(raw.get("command") or ""),
+                # Re-labelled on read: a record written by an older lop holds
+                # the raw 80-char preview, and a holder outlives an upgrade.
+                # command_label is idempotent on labels, so new records pass
+                # through unchanged.
+                command=_holder_label(raw.get("command")),
                 started_at=float(raw.get("started_at") or 0.0),
                 pgid=pgid if isinstance(pgid, int) else None,
                 harness_alive=harness_alive,
             )
         )
     return holders
+
+
+def _holder_label(command: Any) -> str:
+    """A record's ``command`` as a label; ``""`` when the record named none."""
+    text = str(command or "").strip()
+    return heavy_audit.command_label(text) if text else ""
 
 
 def describe_holders(holders: Iterable[Holder]) -> str:

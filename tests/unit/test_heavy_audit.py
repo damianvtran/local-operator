@@ -307,6 +307,25 @@ def test_trail_holds_no_argv_or_env_secret(env: dict[str, str]) -> None:
         ("true", "true"),
         ("cd web", "?"),
         ("", "?"),
+        # Everyday subcommands survive the tighter rule (PR #4264 R2/Q2).
+        ("make test", "make test"),
+        ("npm run build", "npm run"),
+        ("cargo build --release", "cargo build"),
+        ("pnpm install", "pnpm install"),
+        ("aws s3 ls", "aws s3"),
+        ("npm run-script lint", "npm run-script"),
+        # Lowercase secret-shaped argv[1] is dropped (PR #4264 R2/Q2).
+        ("deploy " + "a1b2c3d4" * 4, "deploy"),
+        ("deploy a1b2c3d4e5f6", "deploy"),
+        ("mytool sk-live-abcdef", "mytool"),
+        ("mytool sk_test_abc", "mytool"),
+        ("mytool glpat-abcdefg", "mytool"),
+        ("mytool xoxb-abc-def", "mytool"),
+        ("job build20261119", "job"),
+        ("job x1234", "job"),
+        ("tool abcdefghijklmnopqrstu", "tool"),
+        ("tool script.js", "tool"),
+        ("tool trailing-", "tool"),
     ],
 )
 def test_command_label_keeps_only_program_and_subcommand(command: str, label: str) -> None:
@@ -369,3 +388,154 @@ def test_services_status_audit_row_is_one_line(env: dict[str, str]) -> None:
     assert 'label="make test"' in row and "exit=2 memory_mb=2048" in row
     assert row.endswith(f" ago (log: {heavy_audit.audit_path(directory)})")
     assert "\n" not in row
+
+
+# -- PR #4264 round-1 remediation ------------------------------------------------
+
+
+def test_wait_timeout_is_logged(env: dict[str, str]) -> None:
+    """Q1: `heavy wait` giving up leaves the same timeout line `heavy run` does."""
+    directory = heavy_lease.lease_dir()
+    holder = heavy_lease.try_acquire(directory, 1, command="make -j8")
+    assert holder is not None
+    ticks = iter([0.0, 2.5])
+    try:
+        code = heavy_cli.wait_command(
+            1.0, out=io.StringIO(), sleep=lambda _s: None, clock=lambda: next(ticks)
+        )
+    finally:
+        holder.release()
+    assert code == heavy_cli.EXIT_TIMED_OUT
+    timeout = [e for e in _events(directory) if e["event"] == "timeout"]
+    assert len(timeout) == 1
+    assert timeout[0]["label"] == heavy_cli.WAIT_LABEL == "heavy wait"
+    assert timeout[0]["waited_s"] == 2.5 and timeout[0]["pid"] == os.getpid()
+    assert timeout[0]["holders"] == [os.getpid()]
+    assert "slot" not in timeout[0]
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait(timeout=10)
+    return proc.pid
+
+
+def test_corrupt_stale_record_never_leaves_the_slot_locked(tmp_path: Path) -> None:
+    """R1: an overflowing ``started_at`` must not escape try_acquire's audit."""
+    huge = "1" + "0" * 400  # a JSON int float() cannot represent
+    (tmp_path / "slot-0.json").write_text(
+        f'{{"slot": 0, "pid": {_dead_pid()}, "command": "make", "started_at": {huge}}}'
+    )
+    lease = heavy_lease.try_acquire(tmp_path, 1, command="make test")
+    assert lease is not None
+    lease.release()
+    again = heavy_lease.try_acquire(tmp_path, 1, command="make test")
+    assert again is not None, "slot stayed locked after the audit raised"
+    again.release()
+
+
+def test_signal_exit_is_logged_as_128_plus_n(tmp_path: Path) -> None:
+    """R3: the bash tool's raw ``-9`` and `heavy run`'s 137 log the same code."""
+    for code in (-9, 137, 0, 2):
+        lease = heavy_lease.try_acquire(tmp_path, 1, command="make")
+        assert lease is not None
+        lease.release(exit_code=code)
+    exits = [e.get("exit") for e in _events(tmp_path) if e["event"] == "release"]
+    assert exits == [137, 137, 0, 2]
+    assert heavy_lease.shell_exit_code(None) is None
+    assert heavy_cli._exit_code(-15) == heavy_lease.shell_exit_code(-15) == 143
+
+
+_TOKEN_HOLDER = textwrap.dedent("""
+    import sys, time
+    from pathlib import Path
+    Path(sys.argv[1]).write_text("1")
+    time.sleep(60)
+""")
+
+
+def _leaking_surfaces(token: str) -> list[str]:
+    """Which holder surfaces print ``token``: record file, heavy status, services status."""
+    from local_operator import services
+
+    directory = heavy_lease.lease_dir()
+    leaks = []
+    records = "".join(p.read_text() for p in directory.glob("slot-*.json"))
+    if token in records:
+        leaks.append("slot record")
+    out = io.StringIO()
+    heavy_cli.status_command(out=out)
+    if token in out.getvalue():
+        leaks.append("heavy status")
+    if token in "\n".join(services._heavy_job_lines()):
+        leaks.append("services status")
+    return leaks
+
+
+def test_holder_surfaces_hold_no_argv_or_env_secret(env: dict[str, str], tmp_path: Path) -> None:
+    """Q3: a live holder's record and both status rows show the label only."""
+    directory = heavy_lease.lease_dir()
+    marker = tmp_path / "held"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "local_operator.cli",
+            "services",
+            "heavy",
+            "run",
+            "--",
+            sys.executable,
+            "-c",
+            _TOKEN_HOLDER,
+            str(marker),
+            f"--token={FAKE_TOKEN}",
+            f"https://x:{FAKE_TOKEN}@example.invalid",
+            FAKE_TOKEN,
+        ],
+        env={**env, "GITHUB_TOKEN": FAKE_TOKEN},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        _wait_for(marker.exists)
+        record = json.loads((directory / "slot-0.json").read_text())
+        assert record["command"] == os.path.basename(sys.executable)
+        assert _leaking_surfaces(FAKE_TOKEN) == []
+        assert _leaking_surfaces("example.invalid") == []
+        holders = heavy_lease.read_holders(directory)
+        assert [h.command for h in holders] == [os.path.basename(sys.executable)]
+    finally:
+        _reap(proc)
+
+
+def test_older_raw_preview_record_is_relabelled_on_read(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q3 compatibility: a pre-upgrade holder's raw preview is never printed.
+
+    Includes the negative control: with the old pass-through read restored the
+    same surfaces DO leak, so the clean assertion is not vacuous.
+    """
+    directory = heavy_lease.lease_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    preview = f"deploy --token={FAKE_TOKEN} prod"[: heavy_lease.PREVIEW_CHARS]
+    (directory / "slot-0.json").write_text(
+        json.dumps(
+            {
+                "slot": 0,
+                "pid": os.getpid(),
+                "session_id": "old1",
+                "command": preview,
+                "started_at": time.time(),
+                "pgid": None,
+            }
+        )
+    )
+    assert [h.command for h in heavy_lease.read_holders(directory)] == ["deploy"]
+    assert _leaking_surfaces(FAKE_TOKEN) == ["slot record"]  # the old file itself
+    assert "old1/" in heavy_lease.status_line(directory, 1)
+    monkeypatch.setattr(heavy_lease, "_holder_label", lambda command: str(command or ""))
+    assert _leaking_surfaces(FAKE_TOKEN) == ["slot record", "heavy status", "services status"]

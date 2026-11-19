@@ -46,6 +46,9 @@ from local_operator import heavy_audit, heavy_lease
 #: means, and it is distinct from the 1/2 a failing command usually returns.
 EXIT_TIMED_OUT = 75
 
+#: The audit ``label`` of a ``lop services heavy wait`` that timed out.
+WAIT_LABEL = "heavy wait"
+
 #: How often a waiter prints its "queued behind …" line. The bash tool streams
 #: one a second into a live UI; a terminal or a log file only needs to show it is
 #: alive and who it waits for, and one line a second floods a build log.
@@ -134,6 +137,18 @@ def wait_command(
             return 0
         waited = clock() - started
         if waited >= bound:
+            # Same fields as acquire()'s timeout line, so a waiter that gave up
+            # is on the trail whichever command queued (PR #4264 Q1). The label
+            # is fixed: `wait` runs no command, and there is nothing to filter.
+            heavy_audit.record(
+                directory,
+                "timeout",
+                pid=os.getpid(),
+                session=os.environ.get("LOCAL_OPERATOR_SESSION_ID") or None,
+                label=WAIT_LABEL,
+                waited_s=round(waited, 3),
+                holders=[holder.pid for holder in holders],
+            )
             message = heavy_lease.refusal_message(holders, waited, "lop services heavy wait", bound)
             print(message, file=out)
             return EXIT_TIMED_OUT

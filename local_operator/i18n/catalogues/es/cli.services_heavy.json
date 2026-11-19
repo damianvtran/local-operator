@@ -11,5 +11,5 @@
   "cli.services_heavy.events_header": "  eventos recientes de la concesión (registro: {path}):",
   "cli.services_heavy.event_line": "    {time} {record}",
   "cli.services_heavy.no_events": "  aún no hay eventos de la concesión registrados (registro: {path})",
-  "cli.services_heavy.audit_row": "auditoría de tareas pesadas: último {record}, hace {age} (registro: {path})"
+  "cli.services_heavy.audit_row": "auditoría de trabajos pesados: último {record}, hace {age} (registro: {path})"
 }

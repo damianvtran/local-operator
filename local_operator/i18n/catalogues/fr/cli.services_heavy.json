@@ -8,8 +8,8 @@
   "cli.services_heavy.command": "La commande à exécuter, après `--`",
   "cli.services_heavy.holder": "  emplacement {slot} : {holder}, depuis {age} : {command}",
   "cli.services_heavy.no_command": "Rien à exécuter : placez la commande après `--`, par exemple `lop services heavy run -- make test`",
-  "cli.services_heavy.events_header": "  événements récents du verrou (journal : {path}) :",
+  "cli.services_heavy.events_header": "  événements de bail récents (journal : {path}) :",
   "cli.services_heavy.event_line": "    {time} {record}",
-  "cli.services_heavy.no_events": "  aucun événement du verrou enregistré pour l’instant (journal : {path})",
-  "cli.services_heavy.audit_row": "audit des tâches lourdes : dernier {record}, il y a {age} (journal : {path})"
+  "cli.services_heavy.no_events": "  aucun événement de bail enregistré pour l’instant (journal : {path})",
+  "cli.services_heavy.audit_row": "audit des tâches lourdes : dernier {record}, il y a {age} (journal : {path})"
 }

@@ -11,5 +11,5 @@
   "cli.services_heavy.events_header": "  हाल की लीज़ घटनाएँ (लॉग: {path}):",
   "cli.services_heavy.event_line": "    {time} {record}",
   "cli.services_heavy.no_events": "  अभी तक कोई लीज़ घटना दर्ज नहीं हुई (लॉग: {path})",
-  "cli.services_heavy.audit_row": "भारी कार्य ऑडिट: अंतिम {record}, {age} पहले (लॉग: {path})"
+  "cli.services_heavy.audit_row": "भारी-काम ऑडिट: अंतिम {record}, {age} पहले (लॉग: {path})"
 }

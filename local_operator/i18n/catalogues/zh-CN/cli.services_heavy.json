@@ -11,5 +11,5 @@
   "cli.services_heavy.events_header": "  最近的租约事件（日志：{path}）：",
   "cli.services_heavy.event_line": "    {time} {record}",
   "cli.services_heavy.no_events": "  尚未记录任何租约事件（日志：{path}）",
-  "cli.services_heavy.audit_row": "重型任务审计：最近一次 {record}，{age} 前（日志：{path}）"
+  "cli.services_heavy.audit_row": "重型任务审计：最近一次{record}，{age}前（日志：{path}）"
 }

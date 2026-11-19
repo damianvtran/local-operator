@@ -170,7 +170,8 @@ _PROBE = textwrap.dedent("""
     # The parent records the child's group just after spawning it.
     while (h := heavy_lease.read_holders(d)[0]).pgid is None:
         time.sleep(0.02)
-    cmd_ok = h.command.startswith(shlex.quote(sys.executable) + ' -c ')
+    # The record names the program by its audit label, never the argv (#4264 Q3).
+    cmd_ok = h.command == os.path.basename(sys.executable)
     print(f"free={taken is not None} pid={h.pid} parent={os.getppid()} "
           f"pgid_ok={h.pgid == os.getpgrp()} cmd_ok={cmd_ok}")
 """)
@@ -184,7 +185,7 @@ def test_run_holds_the_slot_while_the_child_runs_then_frees_it(env: dict[str, st
     assert fields["free"] == "False"  # the child ran while holding the slot
     assert fields["pid"] == fields["parent"]  # the record names this lop process
     assert fields["pgid_ok"] == "True"  # ...and the child's own group
-    assert fields["cmd_ok"] == "True"  # ...and the command line
+    assert fields["cmd_ok"] == "True"  # ...and the program's label
     assert _slot_free()
 
 
@@ -271,7 +272,7 @@ def test_status_lists_each_holder(env: dict[str, str]) -> None:
     lines = out.getvalue().splitlines()
     assert rc == 0
     assert lines[0].startswith("heavy jobs: 1/1 slots held")
-    assert lines[1] == f"  slot 0: pid {os.getpid()}, running 1m05s: make -j8"
+    assert lines[1] == f"  slot 0: pid {os.getpid()}, running 1m05s: make"  # label, not argv
 
 
 # -- off and unsupported --------------------------------------------------------
