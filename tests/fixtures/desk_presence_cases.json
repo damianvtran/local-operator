@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "note": "ADR 0008 desk-presence conformance table. Copied byte-identical into agent-server; each repo asserts this file's sha256. 'report' is the wire beat's desk fields, 'received_at' the receiver's wall clock at receipt, 'now' the decision time. expect: active | inactive (known, not active) | unknown (stale or untrusted; both notify).",
+  "cases": [
+    {"name": "recent_input_is_active", "report": {"idle_s": 10, "locked": false, "idle_trusted": true, "away_after_s": 120}, "received_at": 1000.0, "now": 1005.0, "expect": "active"},
+    {"name": "idle_past_threshold_is_inactive", "report": {"idle_s": 115, "locked": false, "idle_trusted": true, "away_after_s": 120}, "received_at": 1000.0, "now": 1010.0, "expect": "inactive"},
+    {"name": "deadline_is_exclusive", "report": {"idle_s": 30, "locked": false, "idle_trusted": true, "away_after_s": 60}, "received_at": 1000.0, "now": 1030.0, "expect": "inactive"},
+    {"name": "just_before_deadline_is_active", "report": {"idle_s": 30, "locked": false, "idle_trusted": true, "away_after_s": 60}, "received_at": 1000.0, "now": 1029.0, "expect": "active"},
+    {"name": "locked_is_away_at_once", "report": {"idle_s": 0, "locked": true, "idle_trusted": true, "away_after_s": 600}, "received_at": 1000.0, "now": 1000.0, "expect": "inactive"},
+    {"name": "untrusted_zero_idle_is_unknown", "report": {"idle_s": 0, "locked": false, "idle_trusted": false, "away_after_s": 120}, "received_at": 1000.0, "now": 1001.0, "expect": "unknown"},
+    {"name": "stale_report_is_unknown", "report": {"idle_s": 0, "locked": false, "idle_trusted": true, "away_after_s": 600}, "received_at": 1000.0, "now": 1046.0, "expect": "unknown"},
+    {"name": "long_threshold_holds", "report": {"idle_s": 290, "locked": false, "idle_trusted": true, "away_after_s": 600}, "received_at": 1000.0, "now": 1040.0, "expect": "active"},
+    {"name": "receiver_clock_ten_minutes_ahead_same_answer", "report": {"idle_s": 115, "locked": false, "idle_trusted": true, "away_after_s": 120}, "received_at": 1600.0, "now": 1610.0, "expect": "inactive"},
+    {"name": "receiver_clock_ten_minutes_behind_same_answer", "report": {"idle_s": 10, "locked": false, "idle_trusted": true, "away_after_s": 120}, "received_at": 400.0, "now": 405.0, "expect": "active"},
+    {"name": "unlisted_threshold_falls_back_to_default", "report": {"idle_s": 100, "locked": false, "idle_trusted": true, "away_after_s": 3600}, "received_at": 1000.0, "now": 1025.0, "expect": "inactive"}
+  ]
+}

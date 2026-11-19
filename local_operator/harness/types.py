@@ -2579,6 +2579,13 @@ class ToolContext(BaseModel):
     #: (team-bridge-egress.md: "Propagation between sessions").
     #: Tighten-only: a child inherits its parent's taint for life.
     inherited_bridge_taint: bool = False
+    #: The session's community read flag (``community/taint.py``
+    #: ``CommunityTaint``, RFC v2.4 §5.9), owned by the session and injected
+    #: per turn. The bridge tool's ``community_post`` reads it to tell the owner
+    #: why a standing permission does not apply; ``None`` on a host that does
+    #: not track it, which then reads as tainted (fail closed). Host state,
+    #: never serialized.
+    community_taint: Any = Field(default=None, exclude=True, repr=False)
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
@@ -2651,6 +2658,16 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    #: The session's BASE approval gate, present even under ``--yolo`` (where
+    #: ``request_approval`` is ``None`` because yolo skips the tool gate). Only
+    #: for a person-only card a tool raises itself
+    #: (``harness.approval.never_auto_approved``: the community post): every
+    #: base gate routes those to a person or refuses (the TUI card, desktop
+    #: serving, the yolo/tty gate, SDK ``auto()``), so handing it over lets the
+    #: owner at the keyboard answer instead of the run refusing outright.
+    #: ``None`` on hosts that do not set it; callers fall back to
+    #: ``request_approval``. Host state, never serialized.
+    person_approval: ApprovalGate | None = Field(default=None, exclude=True, repr=False)
     # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
     # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
     # store is a user decision, and a model must not be able to stamp its own
@@ -3271,6 +3288,16 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: a synthetic end, or one produced by a pre-field build — keeps every
     #: existing reader's behaviour.
     notify: bool = True
+    #: ADR 0009 (mobile repo ``docs/adr/0009-*``): the run's ORIGIN, the surface
+    #: of its most recent human input or the conversation's inherited driver
+    #: (``mobile``/``remote``/``desktop``/``tui``/``unknown``). Stamped by the
+    #: session beside ``notify``; ``""`` (a synthetic end, an older build) reads
+    #: as ``unknown`` and routes as non-mobile.
+    origin: str = ""
+    #: ADR 0009 §3: an ask opened in this run's window is still open at its end.
+    #: Computed independently of ``notify`` (a wake run ending on ``ask_user``
+    #: has ``notify = False`` and must still reach an away phone).
+    needs_user: bool = False
     #: Permission/request is not completion. The loop may nominate a settled
     #: invocation; only the owning Session, after host continuations settle,
     #: commits acceptance. Defaults never reconstruct authority on replay.
@@ -4185,6 +4212,10 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: Owner-only live file capture/binding. Unlike analytics this is awaited:
+    #: metadata freezes adjacent to real producer completion, before arbitrary
+    #: hooks or delayed event delivery. Handles never enter Message/wire JSON.
+    file_provenance: Callable[[str, Any, Any], Awaitable[None]] | None = None
     #: Durably bind a NESTED (``eval`` -> ``tool('write'|'edit')``) archived
     #: full diff to this session as ``(outer_call_id, call_id, tool_name,
     #: descriptor)``; returns ``True`` only once the binding is written. AWAITED

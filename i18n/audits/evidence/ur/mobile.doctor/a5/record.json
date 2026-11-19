@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "audit_id": "a5",
+  "audit_kind": "independent_translation_reaudit_changed_keys",
+  "locale": "ur",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-18",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #4216 round 2: the 4 mobile.doctor.watches keys changed by 193e08e33, judged side by side with English, round-1 wording and en/mobile.doctor.context.json; other keys unchanged since round 1 (a4/a5) and not re-audited",
+  "key_count": 37,
+  "keys_audited": 4,
+  "changed_keys": [
+    "mobile.doctor.watches.near",
+    "mobile.doctor.watches.at_limit",
+    "mobile.doctor.watches.instances_near",
+    "mobile.doctor.watches.instances_at_limit"
+  ],
+  "source_sha256": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+  "target_sha256": "9fc8b4e3793284c4fcaf48b36cdfc113de83d4ff4069de4b3125be37e86a34ea",
+  "source_audit_revision": "193e08e33f5de800203275dce399f0b4730ca7d6",
+  "branch": "fix/inotify-followups",
+  "worktree": "~/local-operator/.worktrees/inotify-followups",
+  "translator": {
+    "agent": "coder subagent of PR #4216 round-1 remediation (commit 193e08e33; rewrote the English source and all 7 translations of the 4 keys)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-18"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n re-auditor, lopdev team member (`task` subagent), session 1689332f69cf; did not write or audit-correct these translations in any earlier round and edited no locale value",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-18",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+    "context": "37cd00260c30fd76cef084e713715cf50f504e8f15a0297b2e4d629674eeed5e",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guide": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "checks": [
+    "placeholder set identical to English for all 4 keys; {how} select has exactly command/program/other arms",
+    "rendered all 3 arms x 4 keys with synthetic params via local_operator.i18n.runtime.render_message: 12/12 OK (sysctl present, {command} verbatim in command arm, holder absent in other arm, no braces, no '? (', no empty parens)",
+    "no arm begins with {name}; fs.inotify.max_user_watches / max_user_instances, {command} and quoted OS errors verbatim",
+    "terminology unchanged from round-1 passed wording (file watch vs watch handle kept distinct)",
+    "copy_scan.py over rendered sentences: 0 findings",
+    "Select arms complete; logical order correct for RTL (Arabic-script clauses, LTR runs {name}/{pid}/{command}/sysctl embedded as in round 1, no stray bidi controls, ۔ full stop, ، comma); نگرانی ہینڈل / فائل نگرانیاں terminology matches round 1."
+  ],
+  "renders": [
+    [
+      "near",
+      "command",
+      "آپ کا اکاؤنٹ اس کمپیوٹر پر 8100 فائل نگرانیاں (حد 8192) استعمال کر رہا ہے، جو حد کے قریب ہے۔ ان میں سے زیادہ تر node (پروسیس 4242) کی ہیں: اسے systemctl --user restart dev.service سے دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_watches بڑھانے کو کہیں۔"
+    ],
+    [
+      "near",
+      "program",
+      "آپ کا اکاؤنٹ اس کمپیوٹر پر 8100 فائل نگرانیاں (حد 8192) استعمال کر رہا ہے، جو حد کے قریب ہے۔ ان میں سے زیادہ تر node (پروسیس 4242) کی ہیں: اس پروگرام کو دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_watches بڑھانے کو کہیں۔"
+    ],
+    [
+      "near",
+      "other",
+      "آپ کا اکاؤنٹ اس کمپیوٹر پر 8100 فائل نگرانیاں (حد 8192) استعمال کر رہا ہے، جو حد کے قریب ہے۔ کسی منتظم سے fs.inotify.max_user_watches بڑھانے کو کہیں۔"
+    ],
+    [
+      "at_limit",
+      "command",
+      "آپ کے اکاؤنٹ نے اس کمپیوٹر پر اپنی فائل نگرانیاں ختم کر لی ہیں (8100، حد 8192)، اس لیے فائلوں کی نگرانی کرنے والے پروگرام “No space left on device” کے ساتھ ناکام ہو جاتے ہیں۔ ان میں سے زیادہ تر node (پروسیس 4242) کی ہیں: اسے systemctl --user restart dev.service سے دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_watches بڑھانے کو کہیں۔"
+    ],
+    [
+      "at_limit",
+      "program",
+      "آپ کے اکاؤنٹ نے اس کمپیوٹر پر اپنی فائل نگرانیاں ختم کر لی ہیں (8100، حد 8192)، اس لیے فائلوں کی نگرانی کرنے والے پروگرام “No space left on device” کے ساتھ ناکام ہو جاتے ہیں۔ ان میں سے زیادہ تر node (پروسیس 4242) کی ہیں: اس پروگرام کو دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_watches بڑھانے کو کہیں۔"
+    ],
+    [
+      "at_limit",
+      "other",
+      "آپ کے اکاؤنٹ نے اس کمپیوٹر پر اپنی فائل نگرانیاں ختم کر لی ہیں (8100، حد 8192)، اس لیے فائلوں کی نگرانی کرنے والے پروگرام “No space left on device” کے ساتھ ناکام ہو جاتے ہیں۔ کسی منتظم سے fs.inotify.max_user_watches بڑھانے کو کہیں۔"
+    ],
+    [
+      "instances_near",
+      "command",
+      "آپ کا اکاؤنٹ اس کمپیوٹر پر 126 نگرانی ہینڈل (حد 128) استعمال کر رہا ہے، جو حد کے قریب ہے۔ سب سے زیادہ ہینڈل node (پروسیس 4242) کے پاس ہیں: اسے systemctl --user restart dev.service سے دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_instances بڑھانے کو کہیں۔"
+    ],
+    [
+      "instances_near",
+      "program",
+      "آپ کا اکاؤنٹ اس کمپیوٹر پر 126 نگرانی ہینڈل (حد 128) استعمال کر رہا ہے، جو حد کے قریب ہے۔ سب سے زیادہ ہینڈل node (پروسیس 4242) کے پاس ہیں: اس پروگرام کو دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_instances بڑھانے کو کہیں۔"
+    ],
+    [
+      "instances_near",
+      "other",
+      "آپ کا اکاؤنٹ اس کمپیوٹر پر 126 نگرانی ہینڈل (حد 128) استعمال کر رہا ہے، جو حد کے قریب ہے۔ کسی منتظم سے fs.inotify.max_user_instances بڑھانے کو کہیں۔"
+    ],
+    [
+      "instances_at_limit",
+      "command",
+      "آپ کے اکاؤنٹ نے اس کمپیوٹر پر اپنے نگرانی ہینڈل ختم کر لیے ہیں (126، حد 128)، اس لیے فائلوں کی نگرانی کرنے والے پروگرام “Too many open files” کے ساتھ ناکام ہو جاتے ہیں۔ سب سے زیادہ ہینڈل node (پروسیس 4242) کے پاس ہیں: اسے systemctl --user restart dev.service سے دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_instances بڑھانے کو کہیں۔"
+    ],
+    [
+      "instances_at_limit",
+      "program",
+      "آپ کے اکاؤنٹ نے اس کمپیوٹر پر اپنے نگرانی ہینڈل ختم کر لیے ہیں (126، حد 128)، اس لیے فائلوں کی نگرانی کرنے والے پروگرام “Too many open files” کے ساتھ ناکام ہو جاتے ہیں۔ سب سے زیادہ ہینڈل node (پروسیس 4242) کے پاس ہیں: اس پروگرام کو دوبارہ شروع کریں، یا کسی منتظم سے fs.inotify.max_user_instances بڑھانے کو کہیں۔"
+    ],
+    [
+      "instances_at_limit",
+      "other",
+      "آپ کے اکاؤنٹ نے اس کمپیوٹر پر اپنے نگرانی ہینڈل ختم کر لیے ہیں (126، حد 128)، اس لیے فائلوں کی نگرانی کرنے والے پروگرام “Too many open files” کے ساتھ ناکام ہو جاتے ہیں۔ کسی منتظم سے fs.inotify.max_user_instances بڑھانے کو کہیں۔"
+    ]
+  ],
+  "not_verified": [
+    "native-speaker review",
+    "rendered desktop/terminal frame"
+  ]
+}

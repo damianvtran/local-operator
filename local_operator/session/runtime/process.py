@@ -78,6 +78,7 @@ from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
+    DEFAULT_KEEP_ALIVE_SECONDS,
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_ON_SIGNAL,
@@ -137,7 +138,10 @@ DEFAULT_GRACE_S = 3.0
 #: window of 0 simply leaves the ordinary drain. It declines held engaged
 #: runtimes too, which is the reading of the preference an operator who set it
 #: meant: hold nothing warm.
-DEFAULT_KEEP_ALIVE_SECONDS = 300
+#:
+#: ``DEFAULT_KEEP_ALIVE_SECONDS`` (300) is imported from ``session.runtime.types``
+#: above and re-exported from here unchanged: the mesh relay reads the same window
+#: and may not import this module (it owns sessions).
 
 #: HOW MANY IDLE CLIENTLESS RUNTIMES ONE INSTALL KEEPS WARM
 #: (``runtime.keep_alive_max``).
@@ -5311,6 +5315,10 @@ async def _run_owner_prompt(
     # field, so a pre-stamp row replays exactly as it did.
     parameters = inspect.signature(run).parameters
     fields: dict[str, Any] = {}
+    if "_file_admission" in parameters:
+        from local_operator.session.file_provenance import CONTINUATION
+
+        fields["_file_admission"] = CONTINUATION
     if "wait_for_turn" in parameters:
         # The BOOT drain must not wait (the socket is not listening yet; see
         # ``ServingSessionHandle.prompt``). The live pass also opts out:
@@ -5323,6 +5331,13 @@ async def _run_owner_prompt(
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
     if "owner_typed" in parameters and (getattr(line, "sender", None) or {}).get("remote_origin"):
         fields["owner_typed"] = False
+    if "input_surface" in parameters:
+        # ADR 0009: a prompt spooled across a runtime swap keeps the surface it
+        # was typed on, so a phone prompt replayed by the successor still routes
+        # its completion to the phone.
+        from local_operator.session.session import spooled_input_surface
+
+        fields["input_surface"] = spooled_input_surface(line)
     try:
         if live and getattr(line, "mode", "") == "steer":
             # A LIVE-QUEUED STEER: the user's mid-turn message that the busy
@@ -5370,12 +5385,20 @@ async def _run_owner_prompt(
         # prompt arm above does — probed for the same reason: a handle one
         # version behind has no such keyword and must not be handed one.
         steer_fields: dict[str, Any] = {}
+        if "_file_admission" in inspect.signature(steer).parameters:
+            from local_operator.session.file_provenance import CONTINUATION
+
+            steer_fields["_file_admission"] = CONTINUATION
         if "harness_injected" in inspect.signature(steer).parameters:
             steer_fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
         if "owner_typed" in inspect.signature(steer).parameters and (
             getattr(line, "sender", None) or {}
         ).get("remote_origin"):
             steer_fields["owner_typed"] = False
+        if "input_surface" in inspect.signature(steer).parameters:
+            from local_operator.session.session import spooled_input_surface
+
+            steer_fields["input_surface"] = spooled_input_surface(line)
         logger.info(
             "spooled prompt %s arrived mid-turn; joining the turn in flight",
             command_id or "<no id>",

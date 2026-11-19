@@ -40,6 +40,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
 )
 from local_operator.update import BuildStamp
+from tests.unit.server.app_state import restored_app_state
 
 OLD = BuildStamp(version="0.54.30", source_ref="1111111")
 NEW = BuildStamp(version="0.54.31", source_ref="2222222")
@@ -669,15 +670,10 @@ def restore_app_state() -> Iterator[None]:
     """
     from local_operator.server.app import app
 
-    saved = {key: app.state[key] for key in app.state}
-    state = app.state
-    try:
+    # The shared helper also detaches lifespan-closed hosts, so a lifespan run
+    # here cannot hand a closed auth store back to the next test.
+    with restored_app_state(app):
         yield
-    finally:
-        for key in list(state):
-            del state[key]
-        for key, value in saved.items():
-            state[key] = value
 
 
 def test_the_create_route_refuses_with_a_503_and_no_receipt(

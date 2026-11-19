@@ -150,10 +150,11 @@ def _publish(
     anchor: str = "a1",
     *,
     notify: bool = True,
+    origin: str = "",
 ) -> str:
     token = str(uuid.uuid4())
     AttentionStore(root / "attention.db").publish(
-        f"session/{session_id}", token, anchor, kind, notify=notify
+        f"session/{session_id}", token, anchor, kind, notify=notify, origin=origin
     )
     return token
 
@@ -425,6 +426,34 @@ def test_a_quiet_completion_is_never_announced(tmp_path):
     assert len(announced) == 1, frames
     assert announced[0]["session_id"] == loud
     assert announced[0]["payload"]["completion_token"] == loud_token
+
+
+@pytest.mark.parametrize("phone_emits", [True, False])
+def test_a_mobile_origin_completion_is_the_phones_while_it_would_emit(
+    tmp_path, monkeypatch, phone_emits
+):
+    """ADR 0009 §2 footnote 1, on the feed: a mobile-origin row raises no desktop
+    banner while the phone would be told, and banners as before when it would
+    not (no device, category off), so it is never silent everywhere. The
+    desktop-origin control in the same tick always banners."""
+    from local_operator.notifications import routing as push_routing
+
+    monkeypatch.setattr(push_routing, "phone_would_emit", lambda state, root, **_: phone_emits)
+    root = tmp_path
+    phone, desk = "p" * 12, "d" * 12
+    _session(root, phone)
+    _session(root, desk)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, phone, origin="mobile")
+    _publish(root, desk, origin="desktop")
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    announced = sorted(frame["session_id"] for frame in _notified(frames))
+    assert announced == (sorted([phone, desk]) if not phone_emits else [desk]), frames
 
 
 def test_two_rows_one_tick_gate_per_row_quiet_then_loud(tmp_path):

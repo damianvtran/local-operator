@@ -81,6 +81,7 @@ from local_operator.helpers import retention_label
 # a stdlib-only module; every existing consumer of the name here is unaffected.
 # The ``as`` spelling is what marks this as a deliberate re-export rather than
 # an unused import.
+from local_operator.install_defaults import DEFAULT_AUTO_PRUNE_GENERATIONS
 from local_operator.install_defaults import (
     DEFAULT_KEEP_GENERATIONS as DEFAULT_KEEP_GENERATIONS,
 )
@@ -112,6 +113,14 @@ PYPI_JSON_URL = "https://pypi.org/pypi/local-operator/json"
 #: than the full index — it already knows the version it is asking about, and
 #: the full document is ~1.3 MB and grows with every release.
 PYPI_VERSION_JSON_URL = "https://pypi.org/pypi/local-operator/{version}/json"
+
+#: The PEP 691 JSON simple index: the page uv itself resolves against, and a
+#: DIFFERENT Fastly object from :data:`PYPI_JSON_URL`, so the two go stale
+#: independently. :func:`_fetch_pypi_read` cross-checks the project document
+#: against it because a client cannot bust PyPI's edge cache for the project
+#: document (see the CDN-lag note there).
+PYPI_SIMPLE_URL = "https://pypi.org/simple/local-operator/"
+_SIMPLE_JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
 
 #: Short enough that a hung PyPI cannot stall a splash worker across the
 #: TUI suite; long enough for a slow but living mirror.
@@ -785,10 +794,21 @@ class DaemonStatus:
 
     The vocabulary is :data:`DaemonStatusKind`'s and it is what the report's
     ``daemons[].status`` carries.
+
+    ``reason`` (2026-11-17, update-parity fix A/B) is WHY a daemon is not
+    ``refreshed``/``already`` — "its unit would stop the conversations it
+    started", "move pending, retrying in the background". It used to be
+    implicit, and the report's ``services[].reason`` was the literal ``""`` for
+    every supervised row, so a node whose wakes supervisor sat two releases
+    behind read ``central_services_complete: true`` with nothing to say why.
+    Defaulted so every existing ``DaemonStatus(name, status)`` stays valid, and
+    carried on the child's ``daemon_report:`` line as an EXTRA key a
+    pre-upgrade parent's parser simply ignores.
     """
 
     name: str
     status: DaemonStatusKind
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -1227,23 +1247,157 @@ class _PypiRead:
     named_version: str | None = None
 
 
-def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
-    """One live read: ready version, or an answered-but-not-ready refusal."""
+def _final_release(value: Any) -> Any | None:
+    """``packaging`` Version for a final (non-pre, non-dev) release string, else None."""
+    from packaging.version import InvalidVersion, Version
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = Version(value.strip())
+    except InvalidVersion:
+        return None
+    if parsed.is_prerelease or parsed.is_devrelease:
+        return None
+    return parsed
+
+
+def _newest_listed_release(payload: dict[str, Any]) -> str | None:
+    """Newest final ``releases`` key with at least one non-yanked file.
+
+    An empty file list is skipped on purpose: that is a release still being
+    created, and it stays the readiness gate's ("still publishing") call via
+    ``info.version``, not a version this picks over a ready one.
+    """
+    releases = payload.get("releases")
+    if not isinstance(releases, dict):
+        return None
+    best: tuple[Any, str] | None = None
+    for key, files in releases.items():
+        parsed = _final_release(key)
+        if parsed is None or not isinstance(files, list):
+            continue
+        if not any(isinstance(f, dict) and not f.get("yanked") for f in files):
+            continue
+        if best is None or parsed > best[0]:
+            best = (parsed, str(key).strip())
+    return best[1] if best else None
+
+
+def _newest_simple_release(payload: Any) -> str | None:
+    """Newest final version with a non-yanked file on a PEP 691 simple page.
+
+    Versions come from the FILENAMES, not the PEP 700 ``versions`` list,
+    because yanking is per file: a version whose files are all yanked is not
+    offered, exactly as uv treats it.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("files"), list):
+        return None
+    from packaging.utils import (
+        InvalidSdistFilename,
+        InvalidWheelFilename,
+        parse_sdist_filename,
+        parse_wheel_filename,
+    )
+
+    best: Any | None = None
+    for entry in payload["files"]:
+        if not isinstance(entry, dict) or entry.get("yanked"):
+            continue
+        name = entry.get("filename")
+        if not isinstance(name, str):
+            continue
+        try:
+            if name.endswith(".whl"):
+                version = parse_wheel_filename(name)[1]
+            else:
+                version = parse_sdist_filename(name)[1]
+        except (InvalidWheelFilename, InvalidSdistFilename):
+            continue
+        parsed = _final_release(str(version))
+        if parsed is not None and (best is None or parsed > best):
+            best = parsed
+    return str(best) if best is not None else None
+
+
+def _get_json(url: str, client: Any | None, headers: dict[str, str] | None = None) -> Any:
+    """One bounded GET returning parsed JSON; raises on any failure."""
     import httpx
 
+    getter = httpx.get if client is None else client.get
+    if headers:
+        response = getter(url, timeout=_FETCH_TIMEOUT_S, headers=headers)
+    else:
+        response = getter(url, timeout=_FETCH_TIMEOUT_S)
+    response.raise_for_status()
+    return response.json()
+
+
+def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
+    """One live read: ready version, or an answered-but-not-ready refusal.
+
+    THE PROJECT DOCUMENT ALONE LAGS A RELEASE (2026-11-17, fix/update-live-index).
+    ``/pypi/local-operator/json`` is served by PyPI's Fastly edge with
+    ``cache-control: max-age=900``; right after a publish an edge can keep the
+    previous object for minutes. Reproduced twice that day on two hosts:
+    ~1 min after 0.106.6 went live ``lop update`` said 0.106.5 was latest, and
+    ~4 min after 0.106.7 ``lop update --check`` said 0.106.6, while the same URL
+    fetched elsewhere already named the new release. Measured the same day, a
+    client CANNOT bust that object: ``Cache-Control: no-cache`` and
+    ``max-age=0`` request headers and a random query string all still came back
+    ``x-cache: ...HIT`` with the same ETag. So the answer is a cross-check of
+    independently cached sources, taking the newest that is proven ready:
+
+    1. the project document — ``info.version``, raised to its newest final,
+       non-yanked ``releases`` key when those two disagree;
+    2. the JSON simple index (:data:`PYPI_SIMPLE_URL`, a separate edge object,
+       and the page uv resolves against); a newer final version there is
+       confirmed through ITS per-version document, an object no client has
+       asked the edge for yet, so it cannot be a stale copy of the release.
+
+    The simple-index probe is best effort: unreachable, malformed, or naming a
+    version whose own document is not served (or names something else) leaves
+    the project document's answer exactly as before. The readiness gate is
+    unchanged: a newer version with no installer wheel yet is the same
+    "still publishing" refusal (``answered`` with ``named_version``).
+    """
     try:
-        if client is None:
-            response = httpx.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
-        else:
-            response = client.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
-        response.raise_for_status()
-        payload = response.json()
+        payload = _get_json(PYPI_JSON_URL, client)
     except Exception:
         return _PypiRead(version=None)
     named = _named_pypi_version(payload)
     if named is None:
         return _PypiRead(version=None)
-    return _PypiRead(version=_ready_pypi_version(payload), answered=True, named_version=named)
+    ready = _ready_pypi_version(payload)
+    listed = _newest_listed_release(payload)
+    named_final = _final_release(named)
+    if listed is not None and (named_final is None or _final_release(listed) > named_final):
+        releases = payload.get("releases")
+        files = releases.get(listed) if isinstance(releases, dict) else None
+        if _downloadable_wheel(files, listed):
+            named, ready = listed, listed
+
+    try:
+        simple = _newest_simple_release(
+            _get_json(PYPI_SIMPLE_URL, client, headers={"Accept": _SIMPLE_JSON_ACCEPT})
+        )
+    except Exception:
+        simple = None
+    baseline = _final_release(named)
+    if simple is not None and (baseline is None or _final_release(simple) > baseline):
+        document, _why = _pypi_release_document(simple, client=client)
+        if document is not None:
+            logger.info(
+                "PyPI project JSON names %s but the simple index and %s's own document "
+                "name %s; using the newer (CDN lag right after publish)",
+                named,
+                simple,
+                simple,
+            )
+            return _PypiRead(
+                version=_ready_pypi_version(document), answered=True, named_version=simple
+            )
+    return _PypiRead(version=ready, answered=True, named_version=named)
 
 
 def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
@@ -2323,9 +2477,23 @@ def generation_in_argv(argv: str) -> Path | None:
     fields = argv.split(None, 1)
     if not fields:
         return None
-    candidate = Path(fields[0])
+    return generation_containing(Path(fields[0]))
+
+
+def generation_containing(path: Path) -> Path | None:
+    """The generation root ``path`` lies under, spelled as an ANCESTOR of ``path``.
+
+    The path-level half of :func:`generation_in_argv`, with the same lexical-file /
+    resolved-ancestors rule (see there for why both halves are load-bearing). The
+    answer is one of ``path``'s own (unresolved) ancestors, so a caller can
+    ``path.relative_to(answer)`` to re-anchor the same file under
+    :func:`pointer_path` — which is what the bash tool's ``lop`` shim does so its
+    link follows ``lop update`` instead of pinning the generation it was made in.
+
+    ``None`` for a path not under ``generations_dir()`` and for that directory itself.
+    """
     generations = generations_dir().resolve()
-    for parent in candidate.parents:
+    for parent in path.parents:
         if parent.parent.resolve() == generations:
             return parent
     return None
@@ -4316,10 +4484,10 @@ def install_into_generation(
     that point, and a machine whose sandbox denies a write must not be told the
     upgrade failed. PRUNING IS THE CALLER'S, not this function's: it is a
     deletion, so a caller that wants one asks for it explicitly where it can
-    report what went (``lop install prune``). No update tail prunes
-    automatically: automatic generation collection is frozen (AGENTS.md,
-    "Immutable rolling promotion"), because a complete record census is not proof
-    that a runtime will never read another file from its loaded generation.
+    report what went. The update tails ask for one AFTER this returns, through
+    :func:`reclaim_after_promotion` — the same guarded :func:`prune_generations`
+    ``lop install prune`` runs, on by default since 2026-11-16 (``update.auto_prune``,
+    ``update.keep_generations``); see that function for why the freeze ended.
 
     NO STAGING RENAME, deliberately. Building in ``<id>.partial`` and renaming
     it into place looks tidier and is WRONG here: uv bakes the installation path
@@ -5886,9 +6054,11 @@ def prune_generations(
     only when :func:`note_doomed_runtimes` still finds a runtime to attest, which
     the veto above now makes rare.
 
-    THIS RUNS ONLY ON DEMAND (``lop install prune``) and, as ``dry_run``, from
-    capacity measurement. No update tail calls it: automatic collection is frozen
-    in the PyPI, snapshot and mesh promotion paths. Deletion is what keeps the
+    THIS RUNS ON DEMAND (``lop install prune``), AFTER EVERY SUCCESSFUL PROMOTION
+    (:func:`reclaim_after_promotion`, the PyPI, snapshot and mesh tails, unless
+    ``update.auto_prune`` is off) and, as ``dry_run``, from capacity measurement.
+    One function for all three, so the automatic pass can never be looser than the
+    command an operator runs by hand. Deletion is what keeps the
     layout from being a leak — each generation is a whole venv — so removals are
     returned rather than only logged, because the caller reports them: a silent
     136 MB delete is not something this tool gets to do. The KEEPS are returned too, with their
@@ -6254,6 +6424,12 @@ def prune_notice_lines(plan: PrunePlan) -> list[str]:
             # D14). The wording is the prune command's own reason string.
             lines.append(f"pruned unfinished generation {decision.path.name} ({decision.reason})")
     return lines
+
+
+def _print_prune_notice(plan: PrunePlan) -> None:
+    """Print :func:`prune_notice_lines` — the CLI tails' ``on_prune`` reporter."""
+    for line in prune_notice_lines(plan):
+        print(line)
 
 
 def install_migrate_command() -> int:
@@ -7232,8 +7408,9 @@ def _run_installer(argv: list[str], *, executable: str | None = None) -> int:
 def _note_capacity_after_promotion(promoted: Path) -> None:
     """Record capacity pressure on the promoted candidate's own operation, or nothing.
 
-    THE ONLY AUTOMATIC ACTION THIS TAIL TAKES TOWARD DISK, and it is a RECORD, not
-    a deletion: it measures count and free space, and crossing a threshold writes
+    A RECORD, not a deletion, run by :func:`reclaim_after_promotion` AFTER the
+    automatic prune, so it reports only pressure the prune could not relieve: it
+    measures count and free space, and crossing a threshold writes
     the durable ``handoff.capacity`` sub-map (``note_capacity``) so a controller
     that can consult the fleet has the request. The candidate's own operation is the
     right record — ``operation_for_generation`` ties recovery to THIS candidate, not
@@ -7258,6 +7435,235 @@ def _note_capacity_after_promotion(promoted: Path) -> None:
         threshold=measurement.threshold,
         cohort=(),
     )
+
+
+#: The registry keys :func:`auto_prune_policy` reads (``settings_io`` rows
+#: ``update.auto_prune`` / ``update.keep_generations``, section ``updates``).
+#: Spelled once so the reader and the tests cannot drift from the registry path.
+AUTO_PRUNE_PATH: tuple[str, str] = ("update", "auto_prune")
+KEEP_GENERATIONS_PATH: tuple[str, str] = ("update", "keep_generations")
+
+
+@dataclass(frozen=True)
+class AutoPrunePolicy:
+    """What the two ``update.*`` retention settings say, read fresh from config."""
+
+    enabled: bool
+    keep: int
+
+
+def auto_prune_policy(config_root: Path | None = None) -> AutoPrunePolicy | None:
+    """``update.auto_prune`` and ``update.keep_generations``, or ``None`` if unreadable.
+
+    READ LIVE, per update, straight off ``config.yml`` (:func:`read_config_values`,
+    the no-side-effect reader) — an update is a fresh decision, and the registry
+    section says edits apply to the next update.
+
+    EVERY DOUBT LEANS TOWARD KEEPING TREES, because only one direction of a wrong
+    answer here is recoverable:
+
+    * an unreadable/torn ``config.yml`` returns ``None`` and the caller prunes
+      nothing this time — the operator may have switched this off, and a read
+      that did not finish cannot say they did not;
+    * a non-boolean ``auto_prune`` (a hand-edited ``"no"``) reads as OFF, not as
+      the default, with a warning naming the value: the registry refuses such a
+      value on write, so only a hand edit produces it, and a hand edit of this key
+      is someone trying to stop it;
+    * an ``update`` block that is not a mapping, or a ``keep_generations`` that is
+      not a non-negative integer (a float, a string, a negative, a ``bool`` —
+      ``True`` is an ``int``), returns ``None`` with a warning: the prune is
+      SKIPPED, never run at the default 2. Falling back would delete with a margin
+      the operator did not choose — someone who typed ``keep_generations: "10"``
+      meant to keep more, not fewer (review round 1, R1).
+    """
+    from local_operator.config import read_config_values
+    from local_operator.paths import config_dir
+
+    values = read_config_values(config_dir() if config_root is None else config_root)
+    if values is None:
+        return None
+    block = values.get(AUTO_PRUNE_PATH[0])
+    if block is None:
+        section: Mapping[str, Any] = {}
+    elif isinstance(block, Mapping):
+        section = block
+    else:
+        logger.warning(
+            "config.yml 'update' is %s, not a mapping; skipping the automatic prune",
+            type(block).__name__,
+        )
+        return None
+    # An explicit ``null`` is UNSET (a reset or a bare ``key:`` line), not a bad
+    # value: it reads the default exactly as a missing key does.
+    raw_enabled = section.get(AUTO_PRUNE_PATH[1])
+    if raw_enabled is None:
+        raw_enabled = DEFAULT_AUTO_PRUNE_GENERATIONS
+    if not isinstance(raw_enabled, bool):
+        # N2: said out loud, because "off" is not what the value looks like it says.
+        logger.warning("update.auto_prune is %r, not true/false; treating it as off", raw_enabled)
+    enabled = raw_enabled if isinstance(raw_enabled, bool) else False
+    raw_keep = section.get(KEEP_GENERATIONS_PATH[1])
+    if raw_keep is None:
+        raw_keep = DEFAULT_KEEP_GENERATIONS
+    if not isinstance(raw_keep, int) or isinstance(raw_keep, bool) or raw_keep < 0:
+        logger.warning(
+            "update.keep_generations is %r, not a non-negative integer; "
+            "skipping the automatic prune",
+            raw_keep,
+        )
+        return None
+    return AutoPrunePolicy(enabled=enabled, keep=raw_keep)
+
+
+def auto_prune_after_promotion(
+    promoted: Path | None, *, previous: Path | None = None
+) -> PrunePlan | None:
+    """Apply ``lop install prune``'s retention policy after a promotion; ``None`` if skipped.
+
+    WHY THIS EXISTS (operator decision, 2026-11-16). Automatic collection had been
+    frozen at every promotion tail (a589a3f27) on the argument that a record census
+    is not a lifetime-pin proof, and :mod:`local_operator.capacity_recovery` was
+    meant to be the other half. Its controller never got a production caller: the
+    tail only RECORDED a ``handoff.capacity`` request nobody consumed, and node2
+    reached 113 generations (~8.6 GB, reclaimed by one manual ``lop install prune
+    --keep 2``). The operator chose: prune automatically, with the same policy as
+    the command.
+
+    THE SAME PATH, NOT A SECOND ONE. This calls :func:`prune_generations` exactly
+    as :func:`install_prune_command` does (same ``referenced_install_roots()``
+    census, ``keep`` from ``update.keep_generations``), so every protection is
+    shared rather than re-implemented:
+
+    * the pointer's target (the build just promoted) and the tree THIS process
+      runs from (:func:`_running_generation` — the updater still imports from the
+      generation it replaced) are never candidates;
+    * any generation a live, persisted, reaped-sidecar or boot record names is
+      kept, and each removal candidate gets a FRESH census that vetoes it;
+    * an incomplete census keeps every candidate, an unresolvable pointer keeps
+      everything, and an unmarked tree younger than the partial TTL is kept as an
+      install in flight;
+    * ``keep`` newest unreferenced generations survive as the margin for a
+      runtime with no record yet;
+    * ``previous`` — the build ``current`` named BEFORE this run's flip, captured
+      by the caller — is kept too, whatever ``keep`` says (review round 1, R2).
+      Anything launched just before the flip started from it and may not have
+      published a record yet; the running-tree rule covers only THIS process,
+      and a mesh relay or desktop updater can run from an older tree than the
+      one the pointer named. It is added to the census as one more named root,
+      so the protection is ``prune_generations``' own record rule, not a new one.
+
+    THE LIFETIME-PIN CAVEAT IS NOT CLOSED, IT IS BOUNDED: a process no supported
+    namespace describes is not protected by the census, which is why the keep
+    margin exists and why anything the census cannot prove dead is retained. That
+    residual is accepted by the operator decision above, against the certainty of
+    disk exhaustion with no collection at all.
+
+    NOTHING IS KILLED OR MOVED. The capacity controller's cohort-move half
+    (:func:`capacity_recovery.run_capacity_recovery`) stays out of this path; a
+    generation still in use is simply kept.
+
+    SKIPPED, returning ``None``: no promoted path; ``update.auto_prune`` off; a
+    config that could not be read; no generations directory; or a pointer that no
+    longer names ``promoted`` (a concurrent actor flipped it — that actor's own
+    tail decides, and pruning on a pointer this run does not own is the guess the
+    rest of this module refuses to make). Exceptions propagate; the caller
+    (:func:`reclaim_after_promotion`) is what keeps them from failing an update.
+    """
+    if promoted is None:
+        return None
+    policy = auto_prune_policy()
+    if policy is None:
+        # The reader already warned with the specific reason (unreadable file,
+        # non-mapping block or invalid keep); this line names the consequence.
+        logger.warning("keeping every install generation this time")
+        return None
+    if not policy.enabled:
+        return None
+    if not generations_dir().is_dir():
+        return None
+    current = current_generation()
+    if current is None or _real(current) != _real(Path(promoted)):
+        logger.info("install pointer no longer names %s; skipping the automatic prune", promoted)
+        return None
+    census = referenced_install_roots()
+    if previous is not None:
+        census = _with_named_generation(census, Path(previous))
+    return prune_generations(keep=policy.keep, referenced=census, actor=ACTOR_UPGRADE)
+
+
+def _with_named_generation(
+    census: Iterable[str | Path] | ReferencedTrees, generation: Path
+) -> ReferencedTrees:
+    """``census`` plus ``generation``'s venv as one more named root.
+
+    The venv (``<gen>/tools/<dist>``) is the shape a record carries and the shape
+    ``prune_generations`` normalises two levels up, so the added root is kept by
+    the existing record rule. ``complete``/``gaps`` are carried over unchanged —
+    adding a protection must never turn an incomplete read into a complete one.
+    """
+    extra = generation / "tools" / DISTRIBUTION_NAME
+    if isinstance(census, ReferencedTrees):
+        return ReferencedTrees(
+            roots=(*census.roots, extra), complete=census.complete, gaps=census.gaps
+        )
+    return ReferencedTrees(roots=(*(Path(root) for root in census), extra))
+
+
+def previous_generation_for_reclaim() -> Path | None:
+    """The generation ``current`` names now, read BEFORE a flip; ``None`` on doubt.
+
+    Callers capture this before installing and hand it to
+    :func:`reclaim_after_promotion` so the build being replaced survives the
+    post-promotion prune (R2). A read that fails returns ``None``: the prune
+    then relies on its other protections, and a failed READ must not fail an
+    update that has not started yet. No ``try`` here: :func:`current_generation`
+    already answers ``None`` for an unreadable pointer (it catches the
+    ``OSError`` from ``os.readlink``, and ``is_dir`` does not raise), so a
+    handler around it could never run (review round 2, R2-N1).
+    """
+    return current_generation()
+
+
+def reclaim_after_promotion(
+    promoted: Path | None,
+    *,
+    previous: Path | None = None,
+    on_prune: Callable[["PrunePlan"], None] | None = None,
+) -> PrunePlan | None:
+    """The one post-promotion disk step every update tail runs; never raises.
+
+    Two halves, in this order: the automatic prune
+    (:func:`auto_prune_after_promotion`), then the capacity note
+    (:func:`_note_capacity_after_promotion`) measured AFTER it, so a request is
+    recorded only for pressure the prune could not relieve (everything left is
+    referenced or inside the keep margin).
+
+    BEST-EFFORT BY CONTRACT: the build is already current when this runs, so a
+    failure here (a busy install lock, an unreadable tree, a reporter that
+    raised) is logged and the update still succeeds. ``on_prune`` receives the
+    plan so the front end prints removals on its own surface
+    (:func:`prune_notice_lines`); it is not called when the pass was skipped.
+    ``previous`` is the pre-flip ``current`` (:func:`previous_generation_for_reclaim`),
+    kept by the prune whatever the keep margin says.
+    """
+    plan: PrunePlan | None = None
+    try:
+        plan = auto_prune_after_promotion(promoted, previous=previous)
+    except Exception:  # noqa: BLE001 — a reclaim never fails an install
+        logger.warning(
+            "automatic generation prune failed; the update itself succeeded", exc_info=True
+        )
+    if plan is not None and on_prune is not None:
+        try:
+            on_prune(plan)
+        except Exception:  # noqa: BLE001 — reporting a prune never fails an install
+            logger.warning("could not report the automatic prune", exc_info=True)
+    if promoted is not None:
+        try:
+            _note_capacity_after_promotion(promoted)
+        except Exception:  # noqa: BLE001 — a capacity note never fails an install
+            logger.warning("could not record capacity pressure", exc_info=True)
+    return plan
 
 
 def upgrade_runs_in_generation(kind: InstallKind) -> bool:
@@ -7349,6 +7755,8 @@ def perform_upgrade(
         # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
         # ``commit``/``ref`` describe that case, and leaving them empty is what
         # makes the marker say ``pypi <version>``.
+        # Read BEFORE the flip: the build being replaced survives the prune (R2).
+        previous = previous_generation_for_reclaim()
         promoted = install_into_generation(
             source,
             version=target,
@@ -7359,24 +7767,19 @@ def perform_upgrade(
         )
         if on_promoted is not None:
             on_promoted(promoted)
-        # Rolling promotion must retain EVERY previous runtime/resource tree.
-        # Discovery/argv/open-file absence is not a lifetime-pin proof: an old
-        # process may load an asset later with no handle open now. Automatic GC
-        # stays frozen, including on unreadable census, rather than weakening
-        # install admission or assuming that a successful pointer swap retires A.
-        # Explicit maintenance keeps its own guarded policy; this tail never
-        # invokes it or the historical on_prune observer.
-        #
-        # WHAT THE TAIL DOES DO ABOUT CAPACITY: measure and RECORD, never delete.
-        # Crossing a threshold writes the durable capacity request on this
-        # candidate's own operation, so a later controller (which CAN see the
-        # fleet) has the pressure on the record. Recording here is best-effort: a
-        # machine whose sandbox denies the write must not be told the upgrade
-        # failed, and nothing observable has been reclaimed by this step.
-        try:
-            _note_capacity_after_promotion(promoted)
-        except Exception:  # noqa: BLE001 — a capacity note never fails an install
-            logger.warning("could not record capacity pressure", exc_info=True)
+        # AUTOMATIC COLLECTION, THROUGH THE COMMAND'S OWN POLICY (2026-11-16).
+        # This tail used to retain every previous tree (a589a3f27: a census is
+        # not a lifetime-pin proof) and only RECORD capacity pressure for a
+        # controller that never got a caller, so nothing reclaimed disk and a
+        # fleet node reached 113 generations. Now it runs the same guarded
+        # ``prune_generations`` as ``lop install prune``: current, the tree this
+        # process runs from, every record-named root and the ``keep`` newest
+        # unreferenced generations survive, and an incomplete census keeps
+        # everything. ``update.auto_prune: false`` turns it off. The capacity
+        # note still runs, after the prune, for pressure the prune could not
+        # relieve. Best-effort: the build is already current, so nothing here
+        # may fail the upgrade (see ``reclaim_after_promotion``).
+        reclaim_after_promotion(promoted, previous=previous, on_prune=on_prune)
         return target
     argv, image = installer_invocation(
         detected,
@@ -7727,44 +8130,22 @@ def _background_stopped_sentence(unit: str, out: str, bound_s: float) -> str:
     return f"{stopped}; run {commands or '`lop services restart`'} to bring it back"
 
 
-def _hand_off_when_slow(
+def _start_watched_worker(
     *,
     unit: str,
     argv: Sequence[str],
-    executable: str,
+    executable: str | None,
     bound_s: float,
-    handoff_at: float,
     runs_root: Path,
     worker_env: Mapping[str, str] | None = None,
-    parent_knows_pending: bool = True,
-) -> int:
-    """Run ``argv`` as a watched background worker; relay it, or hand it off.
+) -> Path:
+    """Start ``argv`` as a detached worker under the stdlib watchdog; its run dir.
 
-    See the block comment above :data:`_REFRESH_ROLE_ENV` for the why. Returns
-    the worker's exit code when it finished before ``handoff_at`` (its stdout and
-    stderr relayed unchanged, so the parent's line protocol is untouched), else
-    ``0`` after printing the hand-off: one ``pending`` report and one "still
-    restarting" line per daemon the worker had not finished.
-
-    THE HAND-OFF STRIPS THE ``refreshing:`` ANNOUNCEMENTS of unfinished daemons.
-    A parent reads an announced-but-unreported daemon as KILLED and words it
-    ``failed`` \u2014 and the pre-upgrade parent that installs this release does not
-    know the ``pending`` status, so it would do exactly that. Without the
-    announcement that parent reports nothing for a SERVICE daemon, and prints the
-    "still restarting" line this child wrote; a parent with this code reads the
-    ``pending`` report.
-
-    MOBILE IS DIFFERENT UNDER THAT OLD PARENT, and no child can fix it: the
-    pre-upgrade ``refresh_mobile_after_upgrade`` knows only rc!=0 (``failed`` —
-    the bug this fixes), an ``already`` report (equally untrue) and rc 0, which it
-    words "mobile daemon restarted" and reports ``refreshed`` while the bounce is
-    still running here. So on that one transition update the mobile line below
-    says so itself (``parent_knows_pending`` False: no hand-off time was passed,
-    which only a pre-hand-off parent omits), and the release notes disclose it
-    (PR #4004 review R1-1, measured against the real v0.103.0 parent).
-
-    Raises only BEFORE the watchdog exists (the run directory or the spawn), so
-    the caller can fall back to the in-process body without running it twice.
+    Extracted from :func:`_hand_off_when_slow` (2026-11-17, fix B) so the serve
+    move retry (:func:`schedule_serve_move_retry`) reuses the SAME bounded,
+    recorded, ``lop services status``-visible worker rather than a parallel
+    background mechanism. Raises only before the watchdog exists (run directory
+    or spawn), exactly as the hand-off's fallback contract requires.
     """
     import subprocess
 
@@ -7808,6 +8189,56 @@ def _hand_off_when_slow(
         # Past the spawn nothing may raise (the fallback would run the body a
         # second time); without the pid the clock alone detects a dead watchdog.
         pass
+    return run_dir
+
+
+def _hand_off_when_slow(
+    *,
+    unit: str,
+    argv: Sequence[str],
+    executable: str,
+    bound_s: float,
+    handoff_at: float,
+    runs_root: Path,
+    worker_env: Mapping[str, str] | None = None,
+    parent_knows_pending: bool = True,
+) -> int:
+    """Run ``argv`` as a watched background worker; relay it, or hand it off.
+
+    See the block comment above :data:`_REFRESH_ROLE_ENV` for the why. Returns
+    the worker's exit code when it finished before ``handoff_at`` (its stdout and
+    stderr relayed unchanged, so the parent's line protocol is untouched), else
+    ``0`` after printing the hand-off: one ``pending`` report and one "still
+    restarting" line per daemon the worker had not finished.
+
+    THE HAND-OFF STRIPS THE ``refreshing:`` ANNOUNCEMENTS of unfinished daemons.
+    A parent reads an announced-but-unreported daemon as KILLED and words it
+    ``failed`` \u2014 and the pre-upgrade parent that installs this release does not
+    know the ``pending`` status, so it would do exactly that. Without the
+    announcement that parent reports nothing for a SERVICE daemon, and prints the
+    "still restarting" line this child wrote; a parent with this code reads the
+    ``pending`` report.
+
+    MOBILE IS DIFFERENT UNDER THAT OLD PARENT, and no child can fix it: the
+    pre-upgrade ``refresh_mobile_after_upgrade`` knows only rc!=0 (``failed`` —
+    the bug this fixes), an ``already`` report (equally untrue) and rc 0, which it
+    words "mobile daemon restarted" and reports ``refreshed`` while the bounce is
+    still running here. So on that one transition update the mobile line below
+    says so itself (``parent_knows_pending`` False: no hand-off time was passed,
+    which only a pre-hand-off parent omits), and the release notes disclose it
+    (PR #4004 review R1-1, measured against the real v0.103.0 parent).
+
+    Raises only BEFORE the watchdog exists (the run directory or the spawn), so
+    the caller can fall back to the in-process body without running it twice.
+    """
+    run_dir = _start_watched_worker(
+        unit=unit,
+        argv=argv,
+        executable=executable,
+        bound_s=bound_s,
+        runs_root=runs_root,
+        worker_env=worker_env,
+    )
     result_path = run_dir / "result.json"
     while not result_path.exists() and time.time() < handoff_at:
         time.sleep(_REFRESH_POLL_S)
@@ -7908,6 +8339,25 @@ def _run_refresh_child(body: Callable[[], int], *, unit: str, bound_s: float) ->
         return body()
 
 
+def _serve_since_moved() -> bool:
+    """Is every live ``serve`` daemon PROVABLY on the current build now?
+
+    WHY (review R1-4, 2026-11-17): a serve retry run is the only record this
+    status reads, and a later manual ``lop services restart`` writes none (it
+    passes no ``schedule_retry``). Without this a failed retry kept printing
+    "FAILED … run `lop services restart`" after that very command had moved
+    serve. Only a proven ``[]`` clears the row — ``None`` (no build stamp to
+    compare against) keeps the failure visible, because "none stale" would then
+    be a claim nobody read.
+    """
+    try:
+        from local_operator import services
+
+        return services.stale_serve_daemons() == []
+    except Exception:  # noqa: BLE001 — a status row must not fail the command
+        return False
+
+
 def background_refresh_lines() -> list[str]:
     """``lop services status`` rows for each unit's LATEST background refresh.
 
@@ -7918,8 +8368,13 @@ def background_refresh_lines() -> list[str]:
     """
     root = _refresh_runs_root()
     lines: list[str] = []
-    recovery = {"services": "lop services restart", "mobile": "lop mobile restart"}
-    for unit in ("services", "mobile"):
+    recovery = {
+        "services": "lop services restart",
+        "mobile": "lop mobile restart",
+        # The serve move retry (fix B): same run-directory record, own unit.
+        "serve": "lop services restart",
+    }
+    for unit in ("services", "mobile", "serve"):
         try:
             # Latest by START (the name), not mtime: see :func:`_run_stamp`.
             runs = _refresh_runs(root, unit)
@@ -7931,6 +8386,8 @@ def background_refresh_lines() -> list[str]:
         result = latest / "result.json"
         if not result.exists():
             if _run_abandoned(latest):
+                if unit == "serve" and _serve_since_moved():
+                    continue
                 started = _read_json(latest / "spec.json").get("started_at")
                 when = time.strftime(
                     "%Y-%m-%d %H:%M",
@@ -7941,6 +8398,17 @@ def background_refresh_lines() -> list[str]:
                     f"stopped before the restart finished); run `{recovery[unit]}` "
                     f"(log: {latest})"
                 )
+            elif unit == "serve":
+                # A move can land INSIDE a retry attempt, and the worker writes
+                # its result only after its next pre-check sleep (120 s observed,
+                # up to 480 s). Until then status printed "serve … current" and
+                # "pending" together (#4175 QA Q1). The same proven-``[]`` read
+                # that clears a failed row clears this one; ``None`` keeps it.
+                if _serve_since_moved():
+                    continue
+                # The operator's words for fix B's state: the update did not
+                # give up, a bounded retry is still asking serve to move.
+                lines.append(f"serve move: pending, retrying in the background ({latest})")
             else:
                 lines.append(f"background {unit} refresh: still running ({latest})")
             continue
@@ -7953,6 +8421,8 @@ def background_refresh_lines() -> list[str]:
         ]
         if record.get("rc") == 0 and not failed_daemons:
             lines.append(f"background {unit} refresh: finished {when}, ok")
+            continue
+        if unit == "serve" and _serve_since_moved():
             continue
         if record.get("timed_out"):
             why = f"did not finish within {_bound_label(float(record.get('bound_s') or 0))}"
@@ -7971,6 +8441,64 @@ def background_refresh_lines() -> list[str]:
             f"(log: {latest})"
         )
     return lines
+
+
+#: The watchdog bound on the serve move retry worker. Derived, not measured:
+#: the sum of ``services.SERVE_MOVE_RETRY_DELAYS_S`` (930 s) plus one
+#: ``services.RELOAD_WAIT_S`` (45 s) per attempt (225 s) is 1155 s; 1500 s
+#: leaves interpreter start and the scans their margin, and still makes the
+#: worker a bounded process rather than a new long-lived one.
+_SERVE_RETRY_BACKGROUND_BOUND_S = 1500.0
+
+
+def schedule_serve_move_retry(
+    *,
+    rolling: bool = False,
+    runs_root: Path | None = None,
+    start: Callable[..., Path] | None = None,
+    invocation: Callable[..., tuple[list[str], str | None] | None] | None = None,
+) -> bool:
+    """Start (or join) the bounded background serve move retry; True if one runs.
+
+    FIX B (2026-11-17): a ``serve`` daemon that missed the update's 45 s move
+    budget on a loaded machine used to stay on the old build until a person ran
+    ``lop services restart``. This hands the miss to the update's existing
+    watched worker (:func:`_start_watched_worker`) running
+    ``services.retry_serve_move`` from the build the pointer names, so the retry
+    logic is the NEW build's even though the update parent is the old one.
+
+    AT MOST ONE AT A TIME: a retry already running (no result, not abandoned)
+    is joined rather than doubled — two workers would only send duplicate,
+    idempotent reload requests and double the status rows. False when no worker
+    could be started (no interpreter, unwritable run directory), and the caller
+    then keeps the old "try again by hand" sentence.
+    """
+    try:
+        root = runs_root or _refresh_runs_root()
+        if root.exists():
+            runs = _refresh_runs(root, "serve")
+            if runs and not (runs[-1] / "result.json").exists() and not _run_abandoned(runs[-1]):
+                return True
+        tail = ["--retry-serve-move", *(["--rolling"] if rolling else [])]
+        from local_operator import procname
+
+        found = (invocation or _post_upgrade_invocation)(
+            procname.LABEL_SERVE_MOVE_RETRY, tail, module="local_operator.services"
+        )
+        if found is None:
+            return False
+        argv, executable = found
+        (start or _start_watched_worker)(
+            unit="serve",
+            argv=argv,
+            executable=executable,
+            bound_s=_SERVE_RETRY_BACKGROUND_BOUND_S,
+            runs_root=root,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a missed schedule is reported by the caller
+        logger.warning("could not start the serve move retry", exc_info=True)
+        return False
 
 
 def _mobile_restart_invocation() -> tuple[list[str], str | None] | None:
@@ -8142,7 +8670,9 @@ def _daemon_refresh_invocation() -> tuple[list[str], str | None] | None:
     )
 
 
-def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], str | None] | None:
+def _post_upgrade_invocation(
+    label: str, tail: list[str], *, module: str = "local_operator.cli"
+) -> tuple[list[str], str | None] | None:
     """``(argv, executable)`` for a child that must run the build just installed.
 
     THE INTERPRETER MOVED WITH THE GENERATION LAYOUT, and this is where that has
@@ -8180,9 +8710,11 @@ def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], st
         if not (sys.executable and Path(sys.executable).exists()):
             return None
         argv0, image = procname.spawn_identity(label)
-        return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", *tail], image
+        return [argv0, SAFE_PATH_FLAG, "-m", module, *tail], image
     argv0, image = procname.spawn_identity_for_interpreter(label, str(interpreter))
-    return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", *tail], image
+    # ``module`` (fix B): the serve move retry runs ``local_operator.services``
+    # rather than a hidden CLI verb; same interpreter and label rules.
+    return [argv0, SAFE_PATH_FLAG, "-m", module, *tail], image
 
 
 def _installed_daemon_plists() -> list[Path]:
@@ -8378,7 +8910,7 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
     installed = _installed_daemon_plists()
     if not installed:
         if not _DAEMONS_ARE_LAUNCHD_AGENTS:
-            if not _linux_relay_unit_installed():
+            if not (_linux_relay_unit_installed() or _linux_restart_units_installed()):
                 return DaemonRefresh(
                     name,
                     lines=(
@@ -8812,23 +9344,452 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
     )
 
 
-def _linux_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
-    """The Linux child's step table: the relay's unit, when it is installed.
+#: The Linux systemd user units this child moves by RESTART ONLY (2026-11-17,
+#: update-parity fix A): ``(name, unit, recovery, keeps_children)``.
+#:
+#: THE MEASURED GAP. node2 updated to 0.106.7 and its report said
+#: ``central_services_complete: true`` while ``ps`` showed the wakes supervisor
+#: on 0.102.2 and the browser bridge on 0.105.3. Every per-daemon refresher
+#: answers ``unsupported`` off launchd (``wakes/install.refresh_plist_if_stale``,
+#: ``browser_bridge/install.refresh_plist_if_stale``), and this table used to
+#: carry the relay alone, so nothing on Linux ever asked those processes which
+#: generation they run. ``unsupported`` maps to ``already``, which is how the
+#: report came out "complete".
+#:
+#: NO UNIT REWRITE HERE, deliberately: each unit names the stable shim
+#: (``procname.supervised_image``), which resolves ``current`` at exec, so a
+#: restart alone re-executes the new build — the same "second staleness
+#: question" ``launchd.restart_if_build_moved`` answers on macOS with a
+#: ``kickstart -k``. Rewriting a unit stays each installer's job (audit A24),
+#: because each needs its own identity guard before it may touch the file.
+#:
+#: ``keeps_children`` marks a unit whose main process STARTS CONVERSATIONS that
+#: live in its cgroup (the wakes supervisor's wake-spawned runtimes; the bridge
+#: connector's engaged sessions). Restarting such a unit is safe only under
+#: ``KillMode=process`` — under systemd's default ``control-group`` a restart
+#: SIGTERMs every one of those sessions (the #3028 M2 finding that made the
+#: wakes renderer pin ``kill_mode="process"``). The LOADED value is read from the
+#: manager, never the file: a unit rewritten without a ``daemon-reload`` still
+#: stops with its old KillMode. The tunnel is ``False`` because its cloudflared
+#: connector is the unit's own child and is meant to go down with it (see the
+#: CONTINUITY block in :func:`refresh_daemons_after_upgrade`); the browser bridge
+#: starts no children.
+#:
+#: KILLMODE IS NECESSARY, NOT SUFFICIENT (review R1-1, 2026-11-17). It keeps
+#: SYSTEMD's signal off the children, but a main process that forwards its own
+#: stop reaches them anyway. The wakes supervisor does exactly that: its stop
+#: handler calls ``owned_runtimes.sweep(any_owner=True)``
+#: (``wakes/supervisor.py``, the ``if stop_requested:`` block after the loop),
+#: which SIGTERMs every wake-started runtime in the store. So the wakes row is
+#: also gated on :data:`_UNIT_CHILD_CENSUS` — restarted only when that census
+#: proves zero such runtimes. The bridge connector needs no census: its stop
+#: (``team_bridge/connector/__main__.py`` ``_supervise``, ~line 499) only sets
+#: an ``asyncio.Event``, lets the in-flight iteration finish or cancels it, and
+#: exits; nothing under ``team_bridge/connector/`` signals another process
+#: except ``reap.py``, which targets only an OLDER connector holding the store
+#: lock. The sessions it engages (``wake.py`` → ``launch.engage_runtime``) are
+#: therefore left running under ``KillMode=process``.
+#:
+#: The relay is not here: its own ``refresh_unit_if_stale`` also rewrites its
+#: unit and owns that installer's guards.
+_WAKES_UNIT = "local-operator-wakes.service"
 
-    ONE ENTRY, deliberately (2026-10-11, stale-relay memo): the relay is the
-    only Linux unit this child may refresh. The other three daemons' units are
-    audit A24's named follow-up — each needs its own installer's identity guard
-    before a rewrite — and inventing them here would widen a slice scoped to
-    the stale relay. The gate is the unit FILE, the same cheap probe the
-    parent's Linux branch asks; ``refresh_unit_if_stale`` re-answers platform,
-    addressability and image identity for itself, so this only decides whether
-    a step exists at all.
+_LINUX_RESTART_UNITS: tuple[tuple[str, str, str, bool], ...] = (
+    ("browser bridge", "local-operator-browser.service", "lop browser install", False),
+    ("tunnel", "lop-tunnel.service", "lop tunnel install", False),
+    ("wakes supervisor", _WAKES_UNIT, "lop wake install", True),
+    (
+        "bridge connector",
+        "local-operator-bridge-connector.service",
+        "lop team-bridge receiver install",
+        True,
+    ),
+)
+
+
+def _wake_owned_runtime_count() -> int | None:
+    """Wake-started runtimes a wakes-supervisor stop would end; ``None`` if unknown.
+
+    Every config root, not just this process's: the refresh child cannot read
+    which root the installed unit serves, and over-counting only defers.
     """
-    if not _linux_relay_unit_installed():
-        return ()
-    from local_operator.network import relay as relay_install
+    from local_operator.wakes import owned_runtimes
 
-    return (("network relay", "lop network install", relay_install.refresh_unit_if_stale),)
+    return owned_runtimes.count_owned(None)
+
+
+def wake_children_deferral(count: int | None) -> str:
+    """The one sentence both the update report and ``lop services status`` print.
+
+    Shared so the two surfaces cannot drift (review R1-3: status used to print
+    a static recovery that did not say why the update left the daemon). The
+    recovery names the next move, not an override: ``lop services restart``
+    takes the same guard, so it moves the supervisor only once they have ended.
+    """
+    if count is None:
+        return (
+            "left running because the wake-started conversations could not be counted "
+            "(a restart would stop them); it moves on the next `lop update` or `lop "
+            "services restart` that can count them"
+        )
+    noun = "conversation" if count == 1 else "conversations"
+    return (
+        f"{count} wake-started {noun} running; moves when they end — the next "
+        "`lop update` or `lop services restart` after that"
+    )
+
+
+def kill_mode_deferral(unit: str, kill_mode: str, recovery: str) -> str:
+    """Why a unit that keeps children was left, when its LOADED KillMode forbids a restart.
+
+    Shared by the update report and ``lop services status`` (#4175 QA Q2): a
+    wakes unit still on ``KillMode=control-group`` does NOT move when its
+    conversations end, it needs its unit rewritten first. Status used to give
+    the census sentence ("moves when they end") for it, which contradicted the
+    report and named a recovery that never arrives. ``""`` (the manager did
+    not answer) reads as ``unknown``, the same refusal the restart takes.
+    """
+    return (
+        f"restarting {unit} under KillMode={kill_mode or 'unknown'} would stop the "
+        f"conversations it started — run `{recovery}` to rewrite the unit, then `lop "
+        "services restart`"
+    )
+
+
+def wakes_unit_kill_mode() -> str | None:
+    """The wakes unit's LOADED ``KillMode`` as the restart gate reads it, or ``None``.
+
+    ``None`` means the KillMode gate does not apply: not Linux, no unit file,
+    or a unit this home cannot address (a redirected ``HOME``). That is the
+    same set of cases where :func:`_systemd_restart_if_build_moved` never
+    reaches its KillMode check, so status and report take the same branch.
+    ``""`` means the unit is ours but the manager gave no answer, which the
+    gate refuses as ``unknown``. Never raises: a status row is a report.
+    """
+    try:
+        from local_operator import supervisors
+
+        if not sys.platform.startswith("linux"):
+            return None
+        if not supervisors.systemd_unit_path(_WAKES_UNIT).exists():
+            return None
+        if not supervisors.systemd_unit_is_addressable(_WAKES_UNIT):
+            return None
+        return _systemd_show(supervisors.systemctl_user, _WAKES_UNIT).get("KillMode", "")
+    except Exception:  # noqa: BLE001 — a status row must not fail the command
+        logger.debug("wakes unit KillMode read failed", exc_info=True)
+        return None
+
+
+#: Unit → census of the conversations its main process would stop on SIGTERM.
+#: Only units whose stop handler forwards the signal belong here (see the
+#: KILLMODE block above :data:`_LINUX_RESTART_UNITS`).
+_UNIT_CHILD_CENSUS: dict[str, Callable[[], int | None]] = {
+    _WAKES_UNIT: _wake_owned_runtime_count,
+}
+
+
+def _linux_restart_units_installed() -> bool:
+    """Is any of :data:`_LINUX_RESTART_UNITS` installed for this (real) home?
+
+    The same cheap file probe as :func:`_linux_relay_unit_installed`, so the
+    parent's Linux branch spawns the new-wheel child when THESE daemons exist
+    even on a host with no relay unit. A redirected ``HOME`` finds nothing.
+    """
+    try:
+        from local_operator import supervisors
+
+        return sys.platform.startswith("linux") and any(
+            supervisors.systemd_unit_path(unit).exists() for _, unit, _, _ in _LINUX_RESTART_UNITS
+        )
+    except Exception:  # noqa: BLE001 — a probe must not fail an upgrade
+        return False
+
+
+def _systemd_show(systemctl: Callable[..., Any], unit: str) -> dict[str, str]:
+    """``systemctl --user show -p MainPID -p KillMode <unit>`` as a dict.
+
+    ``{}`` on any failure: an unreadable manager answer is "no proof", and every
+    caller declines on missing proof rather than guessing a pid.
+    """
+    shown = systemctl("show", "-p", "MainPID", "-p", "KillMode", unit)
+    if getattr(shown, "returncode", 1) != 0:
+        return {}
+    fields: dict[str, str] = {}
+    for line in str(getattr(shown, "stdout", "") or "").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def _main_pid(fields: Mapping[str, str]) -> int | None:
+    """The unit's MainPID, or ``None`` for a stopped unit (systemd says ``0``)."""
+    try:
+        pid = int(fields.get("MainPID", "0"))
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def systemd_install_build_line(
+    *,
+    name: str,
+    unit: str,
+    recovery: str,
+    restart_when_unproven: bool,
+    systemctl: Callable[..., Any] | None = None,
+    stale_of: Callable[[int], Path | None] | None = None,
+    verdict_of: Callable[[int], bool | None] | None = None,
+) -> launchd.InstallBuildCheck:
+    """The Linux installers' build check after ``enable --now``.
+
+    THE SAME TRAP AS THE MACOS "ALREADY CURRENT" BRANCH (field finding,
+    2026-11-18): ``systemctl --user enable --now`` does not restart a unit that
+    is already running, and the unit file names the stable shim, so a re-install
+    after an upgrade left the old build serving.
+
+    Answers the SAME :class:`launchd.InstallBuildCheck` as the macOS
+    :func:`launchd.check_running_build_on_install`, so both platforms share the
+    keyed ``cli.daemon_build`` copy and the same failure handling (review R1-2:
+    a ``failed`` outcome fails the install, it is not an ordinary step).
+
+    PROOF FIRST, via #4175's :func:`_systemd_restart_if_build_moved` reused
+    UNCHANGED (the update path's behaviour is not this PR's to alter): it
+    restarts on proven staleness and answers ``current`` otherwise. THAT
+    ``current`` CONFLATES "proven current" WITH "could not read" (its two-state
+    reader maps unreadable to not-stale; review R1-1), which on a pip/uv
+    in-place install left the old process running in silence. So a ``current``
+    is re-asked here with the tri-state reader: ``False`` stays silent; anything
+    else restarts when the daemon can take an unrequested bounce
+    (``restart_when_unproven`` — mobile, mirroring macOS) and otherwise answers
+    ``unconfirmed``, whose step names ``recovery``.
+
+    The collaborators are injectable so tests never reach a live user manager.
+    """
+    from local_operator import supervisors
+
+    run = systemctl or supervisors.systemctl_user
+    staleness = stale_of or stale_generation_of_process
+    verdict_reader = verdict_of or generation_staleness_of_process
+    # The mover's proof, captured on the way through: its ``restarted`` detail
+    # is the generation, but its ``unverified`` detail is a sentence, and the
+    # keyed step needs the bare generation either way.
+    proven: list[Path] = []
+
+    def stale_capture(pid: int) -> Path | None:
+        found = staleness(pid)
+        if found is not None:
+            proven.append(found)
+        return found
+
+    moved = _systemd_restart_if_build_moved(
+        name=name,
+        unit=unit,
+        recovery=recovery,
+        keeps_children=False,
+        systemctl=run,
+        stale_of=stale_capture,
+    )
+    if moved.kind in {"restarted", "unverified"}:
+        # ``unverified`` = a NEW MainPID whose build could not be read: the same
+        # confirmation (a new process behind the unit) macOS's ``restarted``
+        # rests on, so it gets the same line.
+        generation = proven[0].name if proven else moved.detail
+        return launchd.InstallBuildCheck(kind="restarted", recovery=recovery, generation=generation)
+    if moved.kind in {"failed", "stale"}:
+        # ``stale`` (a deferral) cannot arise with ``keeps_children=False``; if
+        # it ever does, a needed restart did not happen, which is a failure.
+        return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+    if moved.kind != "current":
+        # not-installed / not-addressable: the unit this install just enabled
+        # is not one this home can address; the enable step already spoke.
+        return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+    try:
+        pid = _main_pid(_systemd_show(run, unit))
+        if pid is None:
+            # A stopped unit right after ``enable --now`` has no running build
+            # to be stale; whatever stopped it is the install's health check's.
+            return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+        if verdict_reader(pid) is False:
+            return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+        # None (unreadable) or a late True (the pointer moved between the
+        # mover's read and this one) is UNPROVEN, as on macOS.
+        if not restart_when_unproven:
+            return launchd.InstallBuildCheck(kind="unconfirmed", recovery=recovery)
+        restarted = run("restart", unit, timeout=120)
+        if getattr(restarted, "returncode", 1) != 0:
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        after = _main_pid(_systemd_show(run, unit))
+        if after is None or after == pid:
+            # No NEW process: the restart did not happen, whatever the exit
+            # code said (the mover's and ``launchd._await_new_pid``'s rule).
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        return launchd.InstallBuildCheck(kind="restarted-unconfirmed", recovery=recovery)
+    except Exception:  # noqa: BLE001 — an install's build probe never raises
+        if restart_when_unproven:
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        return launchd.InstallBuildCheck(kind="unconfirmed", recovery=recovery)
+
+
+def _systemd_restart_if_build_moved(
+    *,
+    name: str,
+    unit: str,
+    recovery: str,
+    keeps_children: bool,
+    systemctl: Callable[..., Any] | None = None,
+    stale_of: Callable[[int], Path | None] | None = None,
+    unit_installed: Callable[[str], bool] | None = None,
+    addressable: Callable[[str], bool] | None = None,
+    child_census: Callable[[], int | None] | None = None,
+    verify_of: Callable[[int], bool | None] | None = None,
+) -> launchd.PlistRefresh:
+    """Restart ``unit`` when its RUNNING process is on a superseded generation.
+
+    The Linux twin of ``launchd.restart_if_build_moved`` and the same reading:
+    the generation is taken from the live process's own argv
+    (:func:`stale_generation_of_process` on systemd's ``MainPID``), never from
+    the unit file, which names the stable shim and is byte-identical across
+    builds. It acts only on PROOF of staleness; an unreadable answer declines.
+
+    Outcomes, all no-raise:
+
+    * no unit / not addressable from this home → ``not-installed`` /
+      ``not-addressable`` (silent, like every other refresher);
+    * stopped, or not provably stale → ``current`` — a stopped unit is its
+      installer's to start, not this refresh's;
+    * stale but ``keeps_children`` and the LOADED ``KillMode`` is not
+      ``process`` → ``stale`` with the reason (the restart would stop the
+      conversations it started; the rolling-no-kill contract forbids that);
+    * stale, and ``child_census`` (a unit whose main process forwards its stop
+      to the conversations it started) counts any, or cannot count →
+      ``stale`` with :func:`wake_children_deferral`'s reason (review R1-1);
+    * restarted and the new MainPID is PROVABLY current (``verify_of`` is the
+      tri-state reader and must answer ``False``) → ``restarted``;
+    * restarted onto a new MainPID whose build cannot be read → ``unverified``
+      (reported pending, never counted as moved; review R1-2);
+    * restart refused, or the new process is still on an old build →
+      ``failed`` naming the recovery.
+
+    The collaborators are injectable so the unit tests can stub systemd and the
+    process inventory without reaching the developer's live user manager.
+    """
+    from local_operator import supervisors
+
+    run = systemctl or supervisors.systemctl_user
+    staleness = stale_of or stale_generation_of_process
+    installed = unit_installed or (lambda u: supervisors.systemd_unit_path(u).exists())
+    reachable = addressable or supervisors.systemd_unit_is_addressable
+    try:
+        if not installed(unit):
+            return launchd.PlistRefresh(name=name, kind="not-installed")
+        if not reachable(unit):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        fields = _systemd_show(run, unit)
+        pid = _main_pid(fields)
+        if pid is None:
+            return launchd.PlistRefresh(name=name, kind="current")
+        stale = staleness(pid)
+        if stale is None:
+            return launchd.PlistRefresh(name=name, kind="current")
+        kill_mode = fields.get("KillMode", "")
+        if keeps_children and kill_mode != "process":
+            return launchd.PlistRefresh(
+                name=name,
+                kind="stale",
+                detail=f"left on {stale.name}: {kill_mode_deferral(unit, kill_mode, recovery)}",
+            )
+        if child_census is not None:
+            # Read-only and taken LAST, right before the restart, so the window in
+            # which a wake can start a conversation the restart would end is as
+            # short as this code can make it. Unknown (``None``) defers like a
+            # positive count: the asymmetry is a stale daemon vs a killed turn.
+            running = child_census()
+            if running != 0:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="stale",
+                    detail=f"left on {stale.name}: {wake_children_deferral(running)}",
+                )
+        restarted = run("restart", unit, timeout=120)
+        if getattr(restarted, "returncode", 1) != 0:
+            return launchd.PlistRefresh(
+                name=name,
+                kind="failed",
+                detail=(
+                    f"systemctl could not restart {unit}: "
+                    f"{supervisors.translate_systemctl_error(getattr(restarted, 'stderr', ''))}"
+                    f" — run `{recovery}`"
+                ),
+            )
+        after = _main_pid(_systemd_show(run, unit))
+        verdict = (verify_of or generation_staleness_of_process)(after) if after else True
+        if after is None or after == pid or verdict is True:
+            # A restart that brought no NEW process onto the current build is
+            # not a move, whatever systemctl's exit code said.
+            return launchd.PlistRefresh(
+                name=name,
+                kind="failed",
+                detail=(
+                    f"restarted {unit} but it is not running the new build "
+                    f"(MainPID {after or 'none'}) — run `{recovery}`"
+                ),
+            )
+        if verdict is None:
+            # A NEW pid whose build cannot be read is not proof of a move (review
+            # R1-2): the two-state reader maps "unreadable" to "not stale", which
+            # would have counted it as restarted. The shim makes the new build
+            # likely, but the report claims only what was read.
+            return launchd.PlistRefresh(
+                name=name,
+                kind="unverified",
+                detail=(
+                    f"restarted {unit} (was on {stale.name}) but could not read which "
+                    f"build MainPID {after} runs — check `lop services status`"
+                ),
+            )
+        return launchd.PlistRefresh(name=name, kind="restarted", detail=stale.name)
+    except Exception as exc:  # noqa: BLE001 — a refresher never raises
+        return launchd.PlistRefresh(name=name, kind="failed", detail=f"{exc} — run `{recovery}`")
+
+
+def _linux_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
+    """The Linux child's step table: the relay's unit plus every restart-only unit.
+
+    The relay keeps its own refresher (it rewrites its unit too; 2026-10-11
+    stale-relay memo). The daemons in :data:`_LINUX_RESTART_UNITS` joined on
+    2026-11-17 (see that table for the measured gap); each step is gated on its
+    unit FILE so a host without that daemon has no row for it, and
+    :func:`_systemd_restart_if_build_moved` re-answers addressability itself.
+    """
+    from local_operator import supervisors
+
+    steps: list[tuple[str, str, Callable[[], launchd.PlistRefresh]]] = []
+    if _linux_relay_unit_installed():
+        from local_operator.network import relay as relay_install
+
+        steps.append(("network relay", "lop network install", relay_install.refresh_unit_if_stale))
+    for name, unit, recovery, keeps_children in _LINUX_RESTART_UNITS:
+        if not supervisors.systemd_unit_path(unit).exists():
+            continue
+
+        def step(
+            name: str = name,
+            unit: str = unit,
+            recovery: str = recovery,
+            keeps: bool = keeps_children,
+        ) -> launchd.PlistRefresh:
+            return _systemd_restart_if_build_moved(
+                name=name,
+                unit=unit,
+                recovery=recovery,
+                keeps_children=keeps,
+                child_census=_UNIT_CHILD_CENSUS.get(unit),
+            )
+
+        steps.append((name, recovery, step))
+    return tuple(steps)
 
 
 def _platform_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
@@ -8990,6 +9951,16 @@ _PLIST_STATUS: dict[str, DaemonStatusKind] = {
     "not-addressable": "already",
     "not-installed": "already",
     "failed": "failed",
+    # LEFT RUNNING ON AN OLD BUILD, ON PURPOSE (2026-11-17): the repair proved the
+    # running process is a superseded generation but a rule forbade the move (a
+    # unit that would stop the conversations it started). ``pending`` rather than
+    # ``failed`` because nothing was attempted and nothing broke; the outcome's
+    # detail rides out as the status's ``reason`` so the report says why.
+    "stale": "pending",
+    # RESTARTED, BUILD UNREAD (review R1-2): a new process exists but its
+    # generation could not be read, so the move is not claimed. ``pending``, not
+    # ``refreshed``; the detail rides out as the reason like ``stale``'s.
+    "unverified": "pending",
 }
 
 # ``pending`` is accepted from a child since the slow-restart hand-off: a daemon
@@ -9004,7 +9975,7 @@ def _plist_status(kind: str) -> DaemonStatusKind | None:
     return _PLIST_STATUS.get(kind)
 
 
-def _daemon_report_line(name: str, status: str) -> str:
+def _daemon_report_line(name: str, status: str, reason: str = "") -> str:
     """The child's per-daemon machine line — completion marker and report source.
 
     ``status`` is normally one of :data:`DaemonStatusKind`; the raw outcome kind
@@ -9013,7 +9984,12 @@ def _daemon_report_line(name: str, status: str) -> str:
     status is deliberately declined by the parser rather than forced into a word
     that would be wrong.
     """
-    payload = json.dumps({"name": name, "status": status}, separators=(",", ":"))
+    # ``reason`` only when there is one, so a healthy run's lines stay
+    # byte-identical to the shape every earlier parent parses.
+    fields: dict[str, str] = {"name": name, "status": status}
+    if reason:
+        fields["reason"] = reason
+    payload = json.dumps(fields, separators=(",", ":"))
     return f"{_DAEMON_REPORT_PREFIX}{payload}"
 
 
@@ -9034,6 +10010,7 @@ def _parse_daemon_reports(*streams: object) -> tuple[DaemonStatus, ...]:
     the machine channel must not turn a mangled line into a daemon verdict.
     """
     found: dict[str, DaemonStatusKind] = {}
+    reasons: dict[str, str] = {}
     for stream in streams:
         for line in _text(stream).splitlines():
             if not line.startswith(_DAEMON_REPORT_PREFIX):
@@ -9051,7 +10028,11 @@ def _parse_daemon_reports(*streams: object) -> tuple[DaemonStatus, ...]:
                 and name not in found
             ):
                 found[name] = status  # type: ignore[assignment]  # checked against _STATUS_KINDS
-    return tuple(DaemonStatus(name, status) for name, status in found.items())
+                reason = payload.get("reason")
+                reasons[name] = reason if isinstance(reason, str) else ""
+    return tuple(
+        DaemonStatus(name, status, reasons.get(name, "")) for name, status in found.items()
+    )
 
 
 def _child_daemon_statuses(*streams: object) -> tuple[DaemonStatus, ...]:
@@ -9158,7 +10139,14 @@ def daemons_refresh_command() -> int:
             # repair FINISHED — printing nothing would leave the parent
             # synthesizing a false ``failed`` for a daemon that completed
             # (round 1 review, finding 4).
-            print(_daemon_report_line(name, status or outcome.kind), flush=True)
+            print(
+                _daemon_report_line(
+                    name,
+                    status or outcome.kind,
+                    outcome.detail if outcome.kind in ("stale", "unverified") else "",
+                ),
+                flush=True,
+            )
 
     threads = [
         threading.Thread(target=run_step, args=step, name=f"lop-daemon-repair-{index}")
@@ -9547,6 +10535,10 @@ def _services_stage(*, wait_s: float | None = None, supervised: bool = True) -> 
             options["wait_s"] = wait_s
         if not supervised:
             options["supervised"] = False
+        # A MISSED SERVE MOVE IS RETRIED (fix B, 2026-11-17): the update hands
+        # the miss to a bounded background worker instead of telling the
+        # operator to restart by hand. See ``schedule_serve_move_retry``.
+        options["schedule_retry"] = schedule_serve_move_retry
         refreshes = restart_services(**options)
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
         print(
@@ -9558,8 +10550,57 @@ def _services_stage(*, wait_s: float | None = None, supervised: bool = True) -> 
     print_refreshes(refreshes)
     return StageReport(
         serve=_serve_moves(before, _live_serve_records()),
-        daemons=_collect_daemon_statuses(refreshes),
+        daemons=_reconcile_with_processes(_collect_daemon_statuses(refreshes)),
     )
+
+
+def _reconcile_with_processes(
+    statuses: tuple[DaemonStatus, ...],
+    *,
+    inventory: Callable[[], Sequence[Any]] | None = None,
+) -> tuple[DaemonStatus, ...]:
+    """The stage's statuses, corrected by what the daemon PROCESSES now run.
+
+    THE REPORT USED TO TRUST THE REFRESHERS' OWN WORDS (2026-11-17, fix A): on
+    Linux every per-daemon refresher but the relay's answered ``unsupported`` →
+    ``already``, so node2's report said ``central_services_complete: true`` over
+    a wakes supervisor and a secret broker on 0.102.2 and a browser bridge on
+    0.105.3. After the stage, each background daemon process is asked which
+    generation it runs (``services.stale_background_daemons``); one still on a
+    superseded generation is ``pending`` WITH ITS REASON, whatever its refresher
+    said — and a daemon no refresher owns (the secret broker) gains a row. A
+    status that already carries a reason (a deferral) keeps it.
+    """
+    try:
+        if inventory is None:
+            from local_operator.services import stale_background_daemons
+
+            inventory = stale_background_daemons
+        stale = list(inventory())
+    except Exception:  # noqa: BLE001 — a report correction must not fail the stage
+        logger.debug("post-stage daemon inventory failed", exc_info=True)
+        return statuses
+    if not stale:
+        return statuses
+    reasons: dict[str, str] = {}
+    for daemon in stale:
+        reasons.setdefault(
+            daemon.name, f"still running {daemon.generation} (pid {daemon.pid}); {daemon.reason}"
+        )
+    out: list[DaemonStatus] = []
+    seen: set[str] = set()
+    for status in statuses:
+        seen.add(status.name)
+        if status.name in reasons and status.status in ("refreshed", "already"):
+            out.append(DaemonStatus(status.name, "pending", reasons[status.name]))
+        elif status.name in reasons and not status.reason:
+            out.append(DaemonStatus(status.name, status.status, reasons[status.name]))
+        else:
+            out.append(status)
+    for name, reason in reasons.items():
+        if name not in seen:
+            out.append(DaemonStatus(name, "pending", reason))
+    return tuple(out)
 
 
 def move_serve_after_upgrade(*, wait_s: float | None = None) -> StageReport:
@@ -9807,7 +10848,9 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     except Exception:  # noqa: BLE001 — failed inventory is explicit
         serving_measured = False
         serving_readable = False
-    supervised = [{"name": item.name, "state": item.status, "reason": ""} for item in stage.daemons]
+    supervised = [
+        {"name": item.name, "state": item.status, "reason": item.reason} for item in stage.daemons
+    ]
     # Completeness is a CONJUNCTION of measurements, never an assumption:
     # a census that could not be read cannot prove anything, and an empty
     # daemon list is not an authoritative "all clear" (the same rule the old
@@ -9827,7 +10870,11 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
         elif item.status == "unsupervised":
             incomplete.append(f"daemon {item.name} is unsupervised")
         elif item.status == "pending":
-            incomplete.append(f"daemon {item.name} is pending")
+            incomplete.append(
+                f"daemon {item.name} is pending ({item.reason})"
+                if item.reason
+                else f"daemon {item.name} is pending"
+            )
         else:
             incomplete.append(f"daemon {item.name} reported no usable status ({item.status!r})")
     pending_serve = [row for row in serving if row["state"] != "current"]
@@ -9866,6 +10913,18 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
         "runtimes": {
             "measured": measured,
             **{key: value if measured else None for key, value in counts.items()},
+            # "RETIRING", NOT "LEFT BEHIND" (update-parity item 4, 2026-11-18). The
+            # receipt is written seconds after the flip, but an idle runtime on a
+            # superseded generation leaves on its OWN soft refresh — the settle
+            # (``buildwatch.BUILD_SETTLE_S``, 10 s) plus a stagger of up to
+            # ``BUILD_STAGGER_S`` (20 s) — so ``known_old_idle`` alone read as
+            # runtimes the update had stranded when they were ~30 s from gone.
+            # The smaller of the two honest fixes: a label, not a 35 s re-count
+            # that would hold every `lop update` exit (and the desktop app's
+            # blocking wait on this line) for a reading that changes nothing it
+            # does. Additive, so the ``rolling-no-kill-v1`` keys keep their
+            # meaning; busy ones are NOT retiring — they wait for their turn.
+            "retiring": counts["known_old_idle"] if measured else None,
         },
     }
 
@@ -9976,13 +11035,16 @@ def _generation_upgrade(
     before_version: str = "",
     via: str = "snapshot",
     promoted_generation: Path | None = None,
+    previous_generation: Path | None = None,
 ) -> int:
     """The tail successful installs share: report, retain roots, refresh, succeed.
 
     ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
-    ``installed`` line and then runs the same tail. Automatic collection is frozen
-    on BOTH paths: committing B does not retire the package/dependency/resource
-    roots that still-running A processes may read later.
+    ``installed`` line and then runs the same tail. BOTH paths prune automatically
+    after a promotion (:func:`reclaim_after_promotion`, the same guarded policy as
+    ``lop install prune``; off with ``update.auto_prune: false``) — here only when
+    ``promoted_generation`` names the build this run promoted, so a tail that did
+    not promote anything never deletes.
 
     ``services=False`` (``lop update --no-services``) stops after the supervised
     daemons are repaired, which is the pre-``services`` behaviour exactly: a caller
@@ -9999,8 +11061,12 @@ def _generation_upgrade(
     between the services tail and the report line.
     """
     _print_current_generation()
-    # Match perform_upgrade's no-collection tail. A snapshot/controller caller
-    # must not silently reintroduce deletion after immutable promotion succeeds.
+    # perform_upgrade's tail, for the snapshot route (``lop-update`` lands here,
+    # which is how most fleet generations are made). Printed right under the
+    # ``current`` line, in the same words and position the PyPI path uses (D4).
+    reclaim_after_promotion(
+        promoted_generation, previous=previous_generation, on_prune=_print_prune_notice
+    )
     _reach("services")
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
@@ -10068,6 +11134,8 @@ def _snapshot_command(
     # ref has nothing for members to do (note §3, condition 1).
     stamp_before = disk_build()
     before_version = str(stamp_before.version) if stamp_before is not None else ""
+    # The same "before", as a TREE: the post-promotion prune keeps it (R2).
+    previous_generation = previous_generation_for_reclaim()
     _reach("download")
     try:
         snapshot = resolve_snapshot(value)
@@ -10286,6 +11354,7 @@ def _snapshot_command(
         before_version=before_version,
         via="snapshot",
         promoted_generation=promoted_generation,
+        previous_generation=previous_generation,
     )
 
 

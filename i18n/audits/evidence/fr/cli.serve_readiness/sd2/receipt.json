@@ -1,0 +1,15 @@
+{
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd2",
+  "sha256": {
+    "audit.log": "3176affdf6c6ed6a1c55363b9717ea4911bb14f888f9f57d86c8148602995ebb",
+    "report.md": "be9a13d6c9e01f6d2e970904f57a1197edb0100c95e3fd09701da8756724dc73",
+    "rendered.txt": "494dd8f2116d165a495127efc99402811147d98fa8f52b7db504bea841daace7",
+    "record.json": "ce426beee7ca44cf4841cf1b7893b372db92ba63bb5934384a53e335b13dc8c8",
+    "reproduce.py.txt": "8896855117f614341eb08d28eb640e23797c2c475fb422b6f0f49cddfc41b31b",
+    "independent-verdict.json": "1b744d59c110a0b43f84b64ccd58af55cdd2c176f3d42a04a7c99bbebf685131",
+    "comparison-note.md": "06f73dbf7c530d09c040021e99c68e993b32a70c41dff2ca08d8536608e4b0a2",
+    "driver-recovery.log": "107999ed1808d2b282aefa36095053521d1b7b145cd7c187a6dba1e3abbeb8c3"
+  }
+}

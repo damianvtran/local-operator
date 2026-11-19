@@ -29,6 +29,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.asks.queue import AskQueue
+from local_operator.harness.bridge_egress import TEAM_BRIDGE_MESSAGE_TYPE
 
 # Bound at IMPORT time, before the autouse ``_boundaries`` fixture swaps the
 # module attribute for the receive-side fake: a function-local import would
@@ -518,3 +519,146 @@ def test_the_ledger_schema_is_what_it_claims(tmp_path) -> None:
     finally:
         conn.close()
     assert "ask_issuance" in tables
+
+
+# --- H5-F3-4 reconcile repair over the REAL persisted row shape ---------------
+#
+# The repair used to scan for ``custom`` entries, but a delivered bridge row is a
+# CustomMessage persisted as a ``message`` row, so it never matched anything (and
+# read the whole journal doing so — see test_read_custom_entries_bounds.py). Now
+# that it can match, these pin that it raises asks ONLY where the live hook's
+# validator (``_authorize_bridge_envelope``) would, and never twice.
+
+
+def _persist_bridge_rows(tmp_path, *rows: tuple[str, dict[str, Any], float | None]) -> None:
+    """Append ``(row_id, details, ts_override)`` rows through the REAL writer.
+
+    ``ts_override`` rewrites only the ``ts`` of a row the writer produced, so an
+    "older than the window" row keeps the exact persisted shape.
+    """
+    import asyncio
+    import json
+
+    from local_operator.harness.types import CustomMessage
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(tmp_path / "sessions" / "s1")
+    overrides: dict[str, float] = {}
+    for row_id, details, ts in rows:
+        asyncio.run(
+            transcript.append_message(
+                CustomMessage(
+                    custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                    attribution="user",
+                    details=details,
+                    id=row_id,
+                )
+            )
+        )
+        if ts is not None:
+            overrides[row_id] = ts
+    if overrides:
+        path = transcript.directory / "transcript.jsonl"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            if row.get("id") in overrides:
+                row["ts"] = overrides[row["id"]]
+                line = json.dumps(row, separators=(",", ":"))
+            lines.append(line)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_the_repair_raises_one_ask_for_an_unclaimed_request_row(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+    _recorder(monkeypatch, calls)
+    # An append-before-claim kill: the durable row exists, the ledger does not.
+    _persist_bridge_rows(tmp_path, (LOCAL_ROW_ID, {"bridge": _meta()}, None))
+    stub = _StubSession(_runtime(tmp_path), object(), config_dir=tmp_path)
+    ledger = AskIssuance(tmp_path)
+    assert ledger.read(_owner(), "bmsg_1") is None
+
+    Session._retry_pending_bridge_issuances(stub)
+    assert len(calls) == 1
+    assert calls[0]["message_id"] == "bmsg_1"
+    assert _read(ledger, _owner(), "bmsg_1")["state"] == "raised"
+
+    # Every later boundary (turn start, ask op, deadline tick) re-runs the
+    # repair: the ledger record now exists, so no second ask.
+    Session._retry_pending_bridge_issuances(stub)
+    Session._retry_pending_bridge_issuances(stub)
+    assert len(calls) == 1
+
+
+def test_the_repair_skips_rows_the_live_validator_would_refuse(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+    _recorder(monkeypatch, calls)
+    note_envelope = dict(_FakeStore(tmp_path).screened_request_delivery(None))
+    note_envelope["message_kind"] = "note"
+    monkeypatch.setattr(
+        _FakeStore, "screened_request_delivery", lambda self, owner, **kwargs: note_envelope
+    )
+    _persist_bridge_rows(
+        tmp_path,
+        # A screened NOTE whose locator claims ``type: request``: the STORED kind
+        # decides, so no ask — exactly as on the live hook.
+        (LOCAL_ROW_ID, {"bridge": _meta()}, None),
+        # A bridge-typed row with no locator at all (a plain delivery).
+        ("peer-" + "cd" * 16, {"body": "hello"}, None),
+    )
+    stub = _StubSession(_runtime(tmp_path), object(), config_dir=tmp_path)
+    Session._retry_pending_bridge_issuances(stub)
+    assert calls == []
+    row = _read(AskIssuance(tmp_path), _owner(), "bmsg_1")
+    assert row["state"] == "unrecoverable"
+    assert row["reason"] == "stored_kind_not_request"
+
+
+def test_the_repair_leaves_claimed_and_out_of_window_rows_alone(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    calls: list[dict[str, Any]] = []
+    _recorder(monkeypatch, calls)
+    seen: list[str] = []
+    real_authorize = Session._authorize_bridge_envelope
+
+    def _spy(self, runtime, store, owner, meta, message_id, *args, **kwargs):
+        seen.append(message_id)
+        return real_authorize(self, runtime, store, owner, meta, message_id, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "_authorize_bridge_envelope", _spy)
+    from local_operator.session import transcript as transcript_mod
+
+    scans: list[dict[str, Any]] = []
+    real_read = transcript_mod.read_custom_entries
+
+    def _scan_spy(directory, custom_type, **kwargs):
+        scans.append(kwargs)
+        return real_read(directory, custom_type, **kwargs)
+
+    monkeypatch.setattr(transcript_mod, "read_custom_entries", _scan_spy)
+    _persist_bridge_rows(
+        tmp_path,
+        # Older than the repair's 24 h window: never re-driven.
+        ("peer-" + "ef" * 16, {"bridge": _meta(message_id="bmsg_old")}, time.time() - 2 * 86400),
+        # Already has a ledger record (the live hook ran): skipped.
+        (LOCAL_ROW_ID, {"bridge": _meta()}, None),
+    )
+    ledger = AskIssuance(tmp_path)
+    ledger.claim(_owner(), "bmsg_1", {}, delivery_ref="dref_test", local_row_id=LOCAL_ROW_ID)
+    ledger.mark_unrecoverable(_owner(), "bmsg_1", "test_preclaimed")
+    stub = _StubSession(_runtime(tmp_path), object(), config_dir=tmp_path)
+    Session._retry_pending_bridge_issuances(stub)
+    assert seen == []
+    assert calls == []
+    # The window is pushed INTO the walk (the journal-size bound), not only
+    # applied after reading: the scan must be told its age limit.
+    assert len(scans) == 1
+    assert scans[0]["custom_messages"] is True
+    assert 0 < time.time() - scans[0]["min_ts"] - 86400 < 60

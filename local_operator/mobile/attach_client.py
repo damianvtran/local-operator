@@ -40,7 +40,7 @@ import logging
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple, Sequence
 
 from local_operator.profile_actions import ProfileActionReply
 from local_operator.session.runtime.types import JOURNAL_ORDER_CAPABILITY
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     # on its own side, and the annotation is a string either way (PEP 563).
     from local_operator.session.runtime.launch import Errand
 
+from local_operator.asks.surfaces import StampedReceipt
 from local_operator.harness.approval import (
     ASK_ANSWER_OPS,
     frame_authority,
@@ -207,6 +208,20 @@ def is_bind_failed_reason(reason: str) -> bool:
     return reason == BIND_FAILED_REASON or reason.startswith(_BIND_FAILED_CAUSE_PREFIX)
 
 
+def bind_failed_cause(reason: str) -> str:
+    """Return only the canonical announcement's already-sanitized cause.
+
+    A one-shot CLI needs its own retry wording; parsing arbitrary exception prose
+    there would confuse unrelated disconnects with an announced bind failure.
+    Keep this inverse beside the formatter, without changing other surfaces' copy.
+    """
+    if not reason.startswith(_BIND_FAILED_CAUSE_PREFIX):
+        return ""
+    return reason[len(_BIND_FAILED_CAUSE_PREFIX) :].removesuffix(
+        "; the session is alive — reconnect to retry"
+    )
+
+
 def bind_failed_reason(message: object) -> str:
     """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
 
@@ -310,6 +325,19 @@ def _reset_reason(announced: str) -> str:
 logger = logging.getLogger(__name__)
 
 
+def _stamped_receipt(reply: Mapping[str, Any]) -> StampedReceipt:
+    """An answer ack's sentence plus the label the runtime STAMPED (F2).
+
+    ``surface`` is absent from a runtime that predates it, which reads ``None``
+    (unknown), never as consent. Still a ``str``, so callers that only want the
+    sentence are unchanged.
+    """
+    surface = reply.get("surface")
+    return StampedReceipt(
+        str(reply.get("detail", "")), str(surface) if isinstance(surface, str) else None
+    )
+
+
 class _OversizedFrame(Exception):
     """A readline overrun, re-raised under its own type so the pump's outer
     handler cannot confuse it with a ``ValueError`` a frame CALLBACK raised —
@@ -391,6 +419,16 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     #: The owner holds a live connection; an unacknowledged request is worth
     #: resending. Read through ``getattr`` by ``server/routes/desktop_sessions.py``.
     owner_alive = True
+
+
+class RemoteStreamUnresponsiveError(ConnectionError):
+    """An admitted remote stream stopped answering, not proof of runtime load.
+
+    The owner relay reads the runtime's welcome before acknowledging the stream.
+    Losing its forwarded welcome (or hearing nothing after it) therefore cannot
+    inherit the local socket's owner_alive/busy inference. Keep the connection
+    observation typed so callers do not claim that no session was ever reached.
+    """
 
 
 class OwnerWelcomeTimeout(ConnectionError):
@@ -1095,8 +1133,14 @@ class AttachClient:
         on_move_pending: Callable[[dict[str, Any]], None] | None = None,
         surface: str = "terminal",
         on_operator_prompt: Callable[[str], None] | None = None,
+        origin: str = "",
     ) -> None:
         self._surface = surface
+        #: ADR 0009: ``"mobile"`` when this client carries the PHONE's human
+        #: input (declared by the mobile daemon only), else ``""``. Sent as the
+        #: auth frame's ``origin`` key, which the owner reads once at auth time
+        #: to route the run's completion to the phone.
+        self._origin = origin
         #: Whether the host behind this client ADOPTS the directory a ``retiring``
         #: frame names (the own-cwd move). Declared to the owner in the auth frame
         #: and defaulted FALSE so an embedder that never grows adoption cannot
@@ -1175,6 +1219,10 @@ class AttachClient:
         #: supplies no callback still gets the line in the log rather than no line
         #: anywhere.
         self._on_operator_prompt = on_operator_prompt
+        # Observation only, not authority: a welcome can be the last bytes on
+        # a half-dead mesh pipe. Sync-timeout copy needs a subsequent runtime
+        # frame before claiming that the far loop is alive but busy.
+        self.received_after_welcome = False
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         #: Fired when a ``move_pending`` frame arrives: the owner is about to
@@ -1312,6 +1360,7 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        self.received_after_welcome = False
         # THE CAPABILITY IS RESOLVED PER DIAL, from the pid in the record being
         # dialled, because "may I loosen this session's gate" is a property of
         # the pairing (this process, that runtime) and not of this client. A
@@ -1407,6 +1456,11 @@ class AttachClient:
             auth["cwd_adoption"] = True
         if self._surface == "desktop":
             auth["surface"] = "desktop"
+        if self._origin == "mobile":
+            # ADR 0009. Additive: an owner from before the key ignores it, and
+            # the mesh relay's ``AUTH_FIELDS`` never forwards it, so only a dial
+            # made on this machine with the control key can declare it.
+            auth["origin"] = "mobile"
         if self._events:
             # v4 capability flag. A v3 owner ignores unknown auth fields and
             # simply never sends event frames — the caller gates on
@@ -1545,6 +1599,8 @@ class AttachClient:
                 except ValueError:
                     continue
                 op = frame.get("op")
+                if isinstance(op, str) and op:
+                    self.received_after_welcome = True
                 if op in ("projection", "welcome"):
                     try:
                         # pid=0 record: the attach screen keys nothing on the
@@ -2961,7 +3017,9 @@ class AttachClient:
             fields["images"] = list(images)
         if operator_ask:
             fields["_operator_ask"] = True
-        return await self._request("ask_respond", **fields)
+        reply = await self._request_frame("ask_respond", **fields)
+        self._raise_for_reply_error(reply)
+        return _stamped_receipt(reply)
 
     async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> str:
         """Decide an AGENT-MESSAGES request from its card (TB-02 wiring).
@@ -3002,7 +3060,9 @@ class AttachClient:
             fields["by"] = by
         if operator_ask:
             fields["_operator_ask"] = True
-        return await self._request("ask_revise", **fields)
+        reply = await self._request_frame("ask_revise", **fields)
+        self._raise_for_reply_error(reply)
+        return _stamped_receipt(reply)
 
     async def ask_decline(self, ask_id: str, *, by: str = "", operator_ask: bool = False) -> str:
         """Decline a queued ask: explicit "no answer, decide yourself"."""
@@ -3127,8 +3187,13 @@ async def engage_session_client(
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
     locality: str = "local",
+    origin: str = "",
 ) -> tuple[AttachClient, str]:
     """Make a runtime exist for ``session_id``, then dial it: ``(client, detail)``.
+
+    ``origin`` is ADR 0009's auth tag: the phone daemon passes ``"mobile"`` so a
+    cold answer or a cold-wake prompt routes its completion back to the phone
+    (the wake's own delivery dial gets it through ``PromptErrand.origin``).
 
     ``locality`` is what the dial declares in its hello. The phone daemon's
     cold ask route passes ``"remote"``: it relays a portal answer, and the
@@ -3182,6 +3247,7 @@ async def engage_session_client(
         on_projection or (lambda projection: None),
         lambda reason: None,
         locality=locality,
+        origin=origin,
     )
     try:
         await client.connect(record, session_id)
@@ -3197,6 +3263,7 @@ async def continue_command(
     *,
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
+    origin: str = "",
 ) -> tuple[AttachClient, str]:
     """Deliver one retained command to whichever host wins the session lease.
 
@@ -3225,7 +3292,9 @@ async def continue_command(
             command_id=command.command_id,
             input_mode=command.input_mode,
             input_path=command.input_path,
+            origin=origin,
         ),
         deadline_s=deadline_s,
         on_projection=on_projection,
+        origin=origin,
     )

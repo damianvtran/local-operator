@@ -118,6 +118,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    attach_frame_attention,
     bound_ask_snapshot_in_place,
     bound_delta_rows_in_place,
     job_trajectory_wire_value,
@@ -3740,7 +3741,9 @@ class DesktopSessionBridge:
             # the read that lands afterwards is published as the correction.
             stale, self.attention_served_stale = self.attention_served_stale, False
             if previous or stale:
-                self.publish("attention", state)
+                # The frame carries the attach projection; ``self.attention`` and
+                # the notification edge below keep the full store state (R3-2).
+                self.publish("attention", attach_frame_attention(state))
                 # THE NOTIFICATION EDGE, published AFTER the attention frame so
                 # a reader that toasts already holds the receipt state that
                 # explains the toast. The same `previous` baseline rule governs
@@ -4033,10 +4036,15 @@ class DesktopSessionBridge:
         #
         # Deep-copied either way: the worker serializes it later, and the
         # bridge's own ``attention`` is replaced by receipt reads on the loop.
-        attention = copy.deepcopy(
-            dict(getattr(reference, "attention", {}) or {})
-            if self.remote_row is not None
-            else self.attention
+        # A local read is raw ``AttentionStore.state`` and ``model_copy`` at the
+        # snapshot build skips the model validator, so the attach projection is
+        # applied here (R3-2); a peer's copy is already projected by its store.
+        attention = attach_frame_attention(
+            copy.deepcopy(
+                dict(getattr(reference, "attention", {}) or {})
+                if self.remote_row is not None
+                else self.attention
+            )
         )
         return _WireCapture(reference=reference, attention=attention)
 
@@ -4849,7 +4857,9 @@ class DesktopSessionBridge:
             if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
                 return answer
             return (
-                await self._journal_order_page(answer, [page], order_ids or [])
+                await self._journal_order_page(
+                    answer, [page], order_ids or [], paint_deadline=paint_deadline
+                )
                 if journal_order
                 else answer
             )
@@ -5085,7 +5095,9 @@ class DesktopSessionBridge:
             step("journal_order", source="facts")
             return answer
         if journal_order:
-            answer = await self._journal_order_page(answer, order_pages, order_ids or [])
+            answer = await self._journal_order_page(
+                answer, order_pages, order_ids or [], paint_deadline=paint_deadline
+            )
             step("journal_order", source="page", state=answer.get("journal_order_state"))
         return answer
 
@@ -5294,7 +5306,12 @@ class DesktopSessionBridge:
         return apply_journal_order(self.root, self.session_id, answer, source, ids)
 
     async def _journal_order_page(
-        self, answer: dict[str, Any], pages: list[Any], ids: list[str]
+        self,
+        answer: dict[str, Any],
+        pages: list[Any],
+        ids: list[str],
+        *,
+        paint_deadline: float | None = None,
     ) -> dict[str, Any]:
         """Answer ``journal_order`` from the cheapest source that can prove it.
 
@@ -5326,12 +5343,37 @@ class DesktopSessionBridge:
         converges onto. Same singleflight, not awaited, and only when nothing is
         resident: no scan is added to this request's latency and none is started
         twice.
+
+        THE COMPANION READ IS BOUNDED BY THE FIRST FRAME'S DEADLINE
+        (``paint_deadline``, set only for the snapshot's embedded page), exactly as
+        ``_frame_source``'s summary and ``_resolve_frame_source``'s ``frame_facts``
+        hops are (#3904). It was the one open-frame worker hop still awaited in
+        full: on the operator's v0.106.7 desktop (13 traced sidebar opens,
+        ``LOP_OPEN_TRACE``, 2026-11-17) ``a.hist.journal_order`` reached 1,547 and
+        3,081 ms on a 743 MB / 134k-entry journal while the whole frame's budget is
+        ``OPEN_FRAME_SNAPSHOT_BUDGET_S`` (120 ms); across 146 ``ready`` answers
+        the read was median 1.7 ms, p90 34 ms, max 3,429 ms — a cheap read with a
+        multi-second tail (SQLite contention, a cold page cache under swap).
+
+        A companion that answers INSIDE what is left of the deadline is still
+        used, so the common open keeps a final order on first paint. Past it the
+        frame answers source (3) — ``building`` plus the existing
+        ``_order_correction`` singleflight, whose ``start_refresh`` is also the
+        resident scan a companion answer would have armed — and the renderer
+        RECONCILES the order after first paint from the ``journal_order`` events
+        that correction publishes. That after-paint change is the accepted price:
+        a conversation on screen in ~100 ms that settles its order a moment later
+        beats one held blank for seconds. The abandoned read keeps running on its
+        worker (a thread cannot be cancelled) and ``_bounded_frame_read`` retrieves
+        its outcome; it is not retried here. A standalone ``/history``
+        (``paint_deadline=None``) still waits for the companion in full.
         """
         ids = list(dict.fromkeys(ids))
         source = index_read_model.page_source(pages)
         if self._apply_journal_order(answer, source, ids):
             return answer
-        projected = await asyncio.to_thread(
+        finished, projected = await _bounded_frame_read(
+            paint_deadline,
             index_read_model.order_facts,
             self.root,
             self.session_id,
@@ -5339,6 +5381,9 @@ class DesktopSessionBridge:
             order_ids=ids,
             source=source,
         )
+        if not finished:
+            _OpenFrameSteps(self.session_id)("journal_order.companion", state="deadline")
+            return self._journal_page(answer, pages, ids)
         if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
             self._warm_resident_scan()
             return answer
@@ -9374,6 +9419,36 @@ class DesktopSessions:
         if isinstance(result, _OnPeer):
             return await self._peer_file(session_id, digest, member_id=session_id)
         return result
+
+    async def bridge_card_body(self, session_id: str, entry_id: str) -> dict[str, Any]:
+        """The admitted body behind one inbound Team Bridge card (bridge-body §4).
+
+        Outside :meth:`session` for :meth:`attachment`'s reason: viewing a past
+        card must not start a runtime. The session gate is the same durable
+        user-session namespace check; the resolver then answers only for a
+        ``team_bridge_message`` row in that conversation, whose validated
+        receipt names the live owner (``other_account`` otherwise). A peer's
+        conversation has no local journal here and reads as unknown (404) —
+        the phone/desktop keep today's copy for it.
+
+        ``KeyError`` (404) for an unknown session or a row that is not a card.
+        """
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        if not SESSION_ID.fullmatch(session_id):
+            raise KeyError("Unknown session")
+        path = self.root / "sessions" / session_id
+        if not await asyncio.to_thread(lambda: path.is_dir() and is_user_session(path)):
+            raise KeyError("Unknown session")
+        try:
+            return await resolve_card_body(
+                self.root, session_id, entry_id, sessions_root=self.root / "sessions"
+            )
+        except CardBodyNotFound as missing:
+            raise KeyError("Unknown bridge card") from missing
 
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.

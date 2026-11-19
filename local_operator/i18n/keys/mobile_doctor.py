@@ -131,3 +131,99 @@ def tunnel_turned_off() -> Msg:
 
 def versions_ok(*, lop: str, python: str, platform: str) -> Msg:
     return Msg("mobile.doctor.versions.ok", {"lop": lop, "python": python, "platform": platform})
+
+
+def watches_at_limit(
+    *,
+    watches: str,
+    limit: str,
+    how: str,
+    name: str,
+    pid: str,
+    command: str,
+) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.at_limit",
+        {
+            "watches": watches,
+            "limit": limit,
+            "how": how,
+            "name": name,
+            "pid": pid,
+            "command": command,
+        },
+    )
+
+
+def watches_instances_at_limit(
+    *,
+    instances: str,
+    instance_limit: str,
+    how: str,
+    name: str,
+    pid: str,
+    command: str,
+) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.instances_at_limit",
+        {
+            "instances": instances,
+            "instance_limit": instance_limit,
+            "how": how,
+            "name": name,
+            "pid": pid,
+            "command": command,
+        },
+    )
+
+
+def watches_instances_near(
+    *,
+    instances: str,
+    instance_limit: str,
+    how: str,
+    name: str,
+    pid: str,
+    command: str,
+) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.instances_near",
+        {
+            "instances": instances,
+            "instance_limit": instance_limit,
+            "how": how,
+            "name": name,
+            "pid": pid,
+            "command": command,
+        },
+    )
+
+
+def watches_near(*, watches: str, limit: str, how: str, name: str, pid: str, command: str) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.near",
+        {
+            "watches": watches,
+            "limit": limit,
+            "how": how,
+            "name": name,
+            "pid": pid,
+            "command": command,
+        },
+    )
+
+
+def watches_ok(*, watches: str, limit: str, instances: str, instance_limit: str) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.ok",
+        {
+            "watches": watches,
+            "limit": limit,
+            "instances": instances,
+            "instance_limit": instance_limit,
+        },
+    )
+
+
+def watches_unknown() -> Msg:
+    return Msg("mobile.doctor.watches.unknown", {})

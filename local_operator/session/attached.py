@@ -4173,6 +4173,11 @@ class AttachedSession:
     def ask_consent_bearing(self) -> bool:
         """Whether the last ask answer this facade sent carried operator proof.
 
+        FALLBACK ONLY since PR #4132: the route reports the runtime's stamped
+        surface (``StampedReceipt.surface``) and reads this probe only when the
+        runtime predates that ack field, i.e. has no app-signature attestation
+        and no minted-here rule, so the cap decision IS its stamp.
+
         Read by the desktop answer route right after :meth:`ask_respond` (so a
         cold bind that this process just engaged counts), and reported to the
         card as ``consent_bearing``. The value is captured at SEND time from the
@@ -4287,6 +4292,30 @@ class AttachedSession:
                 "bridge_decide", ask_id, None, by="desktop", tail=(question_id, word)
             )
         )
+
+    async def bridge_decide_signature_free(self) -> bool:
+        """Whether :meth:`bridge_decide` on this facade would reach the runtime unsigned.
+
+        WHY IT EXISTS (decision a-856f; PR #4208 security round 1, S-1). The
+        attach client signs an authority-increasing frame with the operator key
+        (an OS Touch ID sheet) whenever this process does not hold the runtime's
+        spawn capability, e.g. when the designated session was started from a
+        terminal rather than by the desktop backend. An ordinary Team Bridge
+        approve/deny must never prompt, so the desktop answer route asks this
+        first and, when it is False, decides a Team Bridge request through the
+        bearer-authorised single-item path instead. ``site:v1:`` cards keep the
+        signed door whatever this says: a node's browser extension re-verifies
+        that signature.
+
+        Binds first, exactly as ``bridge_decide`` would (a cold session is
+        started by THIS process and so becomes capability-bearing). True only
+        when the connected client proved the capability at handshake, which is
+        the one case ``AttachClient._present_operator_signature`` returns the
+        frame untouched. A disconnected or older client reads False, which
+        routes to the no-prompt path: fail toward no prompt, never toward one.
+        """
+        await self._ensure_bound()
+        return self._client_proof_held(self._client)
 
     async def _ask_verdict(self, call: Callable[[], Awaitable[str]]) -> dict[str, Any]:
         """Run one ask op for its VERDICT: ``{"ok": ...}``, never an exception.
@@ -6147,6 +6176,20 @@ class AttachedSession:
                 await asyncio.sleep(0)
             if future.done():
                 return future.result()
+            # A remote welcome is historical evidence, not proof that its
+            # forwarding path still answers. A silent, non-EOF pipe cannot
+            # distinguish a wedged link from a busy runtime. Keep that failure
+            # in the ordinary transport lane; local binds retain their existing
+            # classification and a post-welcome runtime frame restores the
+            # evidence needed for the typed busy answer. No probes or retries.
+            if self.runtime_locality == "another-machine" and not bool(
+                getattr(self._client, "received_after_welcome", False)
+            ):
+                from local_operator.mobile.attach_client import (
+                    RemoteStreamUnresponsiveError,
+                )
+
+                raise RemoteStreamUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from exc
             raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from exc
 
     async def _await_frontend_preemptible(

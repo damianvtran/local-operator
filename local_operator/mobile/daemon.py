@@ -103,6 +103,7 @@ from local_operator.mobile.auth import (
     sign_cookie,
     verify_cookie,
 )
+from local_operator.mobile.community import community_routes
 from local_operator.mobile.start_receipts import CAPABILITY as START_CAPABILITY
 from local_operator.mobile.start_receipts import (
     START_BODY_MAX_BYTES,
@@ -3202,7 +3203,15 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         entry.operator_nonce = operator_nonce() if entry.operator_cap is not None else ""
         entry.operator_salt = ""
         entry.authority_bearing = False
-        auth: dict[str, Any] = {"key": record.control_key, "locality": "remote"}
+        # ADR 0009: ``origin: "mobile"`` on every dial that carries the phone's
+        # human input, so the runtime routes the completion of work started or
+        # steered here back to the phone. The runtime reads it once at auth time
+        # and never from a frame; the mesh relay never forwards it.
+        auth: dict[str, Any] = {
+            "key": record.control_key,
+            "locality": "remote",
+            "origin": "mobile",
+        }
         if entry.operator_nonce:
             # A nonce, never the capability: see ``harness/approval._proof``.
             auth["operator_nonce"] = entry.operator_nonce
@@ -6096,6 +6105,9 @@ class MobileDaemon:
             repaint,
             lambda _reason: None,
             locality="remote",
+            # ADR 0009: this viewer carries the phone's input (see the control
+            # socket's auth frame).
+            origin="mobile",
             # A PROMPT RAISED FOR A RELAY'S OWN SIGNATURE NAMES THE SESSION IN THE
             # LOG (UX round 6, U3 = design round 6, D3). There is no human at this
             # process's terminal — the person who asked is on the phone, and the
@@ -7415,6 +7427,20 @@ def build_app(daemon: MobileDaemon):
                 # unknown field, failing the whole registration; the app sends
                 # the key only when this capability is present.
                 "push_previews": {"available": True},
+                # ADR 0009 routing by origin: the register body accepts the
+                # enum keys ``preferences.completions_scope`` (phone | all) and
+                # ``preferences.attention`` (away | always | never). Its own key
+                # for the reason ``push_previews`` has one: an older daemon
+                # refuses either as an unknown field and would fail the whole
+                # registration, so the app sends them only when this is present.
+                "push_routing": {"available": True},
+                # ADR 0008 desk presence: ``GET/PATCH
+                # /api/settings/phone-away-after`` reads and writes this
+                # computer's ``notifications.phone_away_after_s`` ("send to
+                # phone when I'm away for N"). The phone shows its
+                # per-computer row only when this key is present; an older
+                # relay 404s the route.
+                "phone_away_after": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".
@@ -7855,6 +7881,62 @@ def build_app(daemon: MobileDaemon):
         try:
             payload = await asyncio.to_thread(
                 policy_payload, config_dir(), patch, write=request.method == "PATCH"
+            )
+        except AccountRoutingError as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": str(exc)},
+                status_code=exc.status,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    async def api_phone_away_after(request: Request) -> Response:
+        """ADR 0008: the phone edits THIS computer's "away for N" threshold.
+
+        One named key, through the same projection as account routing
+        (``account_routing.setting_payload``): the phone can never reach an
+        arbitrary config path. It is a computer setting because it describes
+        the desk; the desktop app reads it and sends it on its presence beat.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.i18n.keys import wire_settings_account_policy as _ap
+        from local_operator.mobile.account_routing import (
+            PHONE_AWAY_AFTER_CAPABILITY,
+            PHONE_AWAY_AFTER_KEY,
+            AccountRoutingError,
+            setting_payload,
+        )
+        from local_operator.paths import config_dir
+
+        patch = None
+        if request.method == "PATCH":
+            try:
+                patch = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse(
+                    {
+                        "code": "invalid_setting",
+                        "error": _ap.error_invalid_json().envelope(locale=resolve_language())[
+                            "text"
+                        ],
+                    },
+                    status_code=422,
+                )
+        try:
+            payload = await asyncio.to_thread(
+                setting_payload,
+                config_dir(),
+                PHONE_AWAY_AFTER_KEY,
+                PHONE_AWAY_AFTER_CAPABILITY,
+                patch,
+                write=request.method == "PATCH",
+                unavailable_code="setting_unavailable",
+                # Unreachable in practice: the key is registered in this same
+                # build (pinned by test_phone_away_routes). The generic
+                # "could not be saved" copy is the honest fallback.
+                unavailable=_ap.error_write_failed(),
             )
         except AccountRoutingError as exc:
             return JSONResponse(
@@ -9019,6 +9101,37 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
+    async def api_session_bridge_card_body(request: Request) -> Response:
+        """The admitted body behind one inbound Team Bridge card (design §4).
+
+        The relay twin of ``GET /v1/desktop/sessions/{id}/bridge-cards/{entry}/body``:
+        both call ``team_bridge.card_body.resolve_card_body`` so a phone and a
+        desktop can never disagree about what a card may show. Keyed by the
+        transcript row the phone can already read, never by a message id, and
+        only for a durable user conversation on THIS machine. Bodies are
+        untrusted third-party text: private, never cached.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry_id = str(request.path_params["entry_id"])
+        directory = await asyncio.to_thread(_durable_user_session_dir, session_id, root=relay_root)
+        if directory is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        try:
+            answer = await resolve_card_body(
+                relay_root, session_id, entry_id, sessions_root=directory.parent
+            )
+        except CardBodyNotFound:
+            return JSONResponse({"error": "no such bridge card"}, status_code=404)
+        return JSONResponse(answer, headers={"Cache-Control": "private, no-store"})
+
     async def api_session_attachment(request: Request) -> Response:
         """One attachment's bytes, with byte-Range (206) support.
 
@@ -9411,10 +9524,13 @@ def build_app(daemon: MobileDaemon):
         ``Content-Disposition: attachment`` rides every non-image class, and nothing
         navigates a browsing context to this route (S-R6; bytes are rendered in-app).
 
-        An ended session's cwd is NOT recorded durably (the daemon's own resume notes
-        this), so a cwd-relative path without a live record is refused rather than
-        resolved against a guess; ``~``-relative paths serve in either case. A
-        peer-hosted conversation has no local directory and is refused the same way.
+        An ended session's cwd IS recorded durably (``_durable_identity``: marker,
+        frontend checkpoint, wake index), but only as a recollection: a cwd-relative
+        path without a live record is joined against it only when the file still
+        matches the row's recorded size and mtime (``resolve_supplement_file``'s
+        ``fallback_cwd``), else refused rather than resolved against a guess;
+        ``~``-relative paths serve in either case. A peer-hosted conversation has no
+        local directory and is refused the same way.
         """
         denied = gate(request)
         if denied is not None:
@@ -9451,7 +9567,13 @@ def build_app(daemon: MobileDaemon):
                 return "missing"
             entry = _entry_for_session(daemon, session_id)
             resolved = resolve_supplement_file(
-                directory, job, index, cwd=entry.record.cwd if entry is not None else ""
+                directory,
+                job,
+                index,
+                cwd=entry.record.cwd if entry is not None else "",
+                # An ended session has no live record: its durable cwd may join a
+                # relative path when the file matches the row's fingerprint.
+                fallback_cwd="" if entry is not None else _durable_identity(directory).cwd,
             )
             if isinstance(resolved, str):
                 return resolved
@@ -9663,7 +9785,9 @@ def build_app(daemon: MobileDaemon):
                 )
 
                 async def _deliver_prompt() -> str:
-                    client, detail = await continue_command(config_dir(), command)
+                    # ADR 0009: a phone prompt that wakes a cold conversation
+                    # keeps the phone's origin (``PromptErrand.origin``).
+                    client, detail = await continue_command(config_dir(), command, origin="mobile")
                     client.close()
                     return detail
 
@@ -9792,7 +9916,12 @@ def build_app(daemon: MobileDaemon):
                     # runtime records it as ``remote`` (``asks.surfaces``), the
                     # label the live daemon route already gets — not consent.
                     client, _ = await engage_session_client(
-                        config_dir(), session_id, AskErrand(ask_id=ask_id), locality="remote"
+                        config_dir(),
+                        session_id,
+                        AskErrand(ask_id=ask_id),
+                        locality="remote",
+                        # ADR 0009: the cold answer is the phone's input.
+                        origin="mobile",
                     )
                     try:
                         if op == "ask_respond":
@@ -10955,6 +11084,7 @@ def build_app(daemon: MobileDaemon):
                 lambda _projection: None,
                 lambda _reason: None,
                 locality="remote",
+                origin="mobile",
                 on_operator_prompt=lambda copy: logger.warning(
                     "mobile session move: owner prompts an operator: %s", copy
                 ),
@@ -12502,6 +12632,10 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
+        Route(
+            "/api/sessions/{session_id:str}/bridge-cards/{entry_id:str}/body",
+            api_session_bridge_card_body,
+        ),
         # The supplement sound family (sound parity, lane C): digest-addressed audio
         # bytes with Range support, and the peaks sidecar beside them. Both are
         # keyed by the beat's own ``sounds[].attachment`` rather than a message
@@ -12564,6 +12698,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/usage/reset", api_usage_reset, methods=["POST"]),
         Route("/api/config/events", api_config_events),
         Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
+        Route("/api/settings/phone-away-after", api_phone_away_after, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),
@@ -12634,6 +12769,12 @@ def build_app(daemon: MobileDaemon):
             api_push_device_unrevoke,
             methods=["POST"],
         ),
+        # Relay web's community door (RFC v2.4 §7.2): exactly the member
+        # operations of `community.member_ops.MEMBER_OPERATIONS`, behind this
+        # daemon's own `gate`; no staff operation is reachable over relay.
+        # Every template starts with the literal `/api/community/communities`,
+        # which nothing above declares. See `mobile/community.py`.
+        *community_routes(gate),
         Route("/mark.png", mark_png),
         Route("/manifest.webmanifest", manifest),
         Route("/", index),

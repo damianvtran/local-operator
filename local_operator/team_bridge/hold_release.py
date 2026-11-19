@@ -7,7 +7,8 @@ release, and the owner heard only a count after 60 minutes. A genuine relay
 silently parked or bounced. B4b lets the RECEIVING person decide, per message,
 for exactly one kind of decision: the screener said the message bids for new
 work and nothing else. Everything here is behind ``team_bridge.hold_release``
-(default OFF, B4b DESIGN §8.1 slice S1).
+(default ON since slice S3a, 2026-11-18; a real ``false`` restores the
+pre-B4b reject — see ``settings.DEFAULT_HOLD_RELEASE``).
 
 WHAT IS RELEASABLE, AND WHY IT IS SO NARROW (DECISIONS Amendment 1, D2/D4):
 
@@ -88,9 +89,26 @@ WORK_SCOPE_HOLD = "work_scope_hold"
 #: spends no sender budget: those gates exist because a work-scope conversion
 #: TRUSTS the screener's category to offer a release, while a review hold trusts
 #: only the person, and a hold with no exit is the failure this closes.
+#: Terminal owner state for a message EVERY screener failed on while the account
+#: screened other messages fine (PR #4212 round 3, S-13 / R3-1 / Q4). Nothing read
+#: it and the failure is the message's own, so it is DISCARD-ONLY: the owner can
+#: end it, never deliver it (:data:`DISCARD_ONLY_HOLD_CODES`). A review code so it
+#: has a decision row, a notice and a replay with no further dispatch.
+SCREENING_FAILED_HOLD = "screening_failed"
+
 REVIEW_HOLD_CODES = frozenset(
-    {"model_hold", "model_refused", "reply_truncated", "bounce_without_category"}
+    {
+        "model_hold",
+        "model_refused",
+        "reply_truncated",
+        "bounce_without_category",
+        SCREENING_FAILED_HOLD,
+    }
 )
+#: Review codes whose only word is Discard. Enforced where a Deliver could be
+#: signed (the desktop decide route) AND where one is consumed (the connector),
+#: so a hand-written release row cannot deliver one either.
+DISCARD_ONLY_HOLD_CODES = frozenset({SCREENING_FAILED_HOLD})
 RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD}) | REVIEW_HOLD_CODES
 
 #: The ONLY category tuple that may become a releasable hold (Amendment 1, D2).
@@ -258,15 +276,53 @@ def converts(categories: Sequence[str]) -> bool:
 
 
 def enabled(config_dir: Path | str) -> bool:
-    """The setting, read fresh from disk; a torn or absent read is OFF."""
+    """``team_bridge.hold_release``: ON unless the file says a real ``false``.
+
+    Default ON since slice S3a (see ``DEFAULT_HOLD_RELEASE``): a torn or absent
+    read takes the default, like ``review_enabled``, because what it opens is a
+    hold the person decides — never an admit.
+    """
 
     from local_operator.config import read_config_values
-    from local_operator.team_bridge.settings import TeamBridgeSettings
+    from local_operator.team_bridge.settings import (
+        DEFAULT_HOLD_RELEASE,
+        TeamBridgeSettings,
+    )
 
     values = read_config_values(Path(config_dir))
     if values is None:
-        return False
+        return DEFAULT_HOLD_RELEASE
+    _warn_non_boolean_once(values)
     return TeamBridgeSettings.from_values(values).hold_release
+
+
+#: Whether the non-boolean ``hold_release`` notice has been logged in this process.
+_non_boolean_logged = False
+
+
+def _warn_non_boolean_once(values: Any) -> None:
+    """Log ONCE when ``team_bridge.hold_release`` holds a non-boolean (security S-3).
+
+    Only a real ``false`` is the off switch, so a quoted ``"false"``, ``off`` or
+    ``0`` reads ON. That direction is safe (a hold, never an admit), but an
+    operator who believes they turned it off would keep getting holds with no
+    clue why. One ``info`` line per process names the fix without echoing the
+    value (config text is the operator's, and the log is not).
+    """
+
+    global _non_boolean_logged
+    if _non_boolean_logged or not isinstance(values, Mapping):
+        return
+    section = values.get("team_bridge")
+    if not isinstance(section, Mapping) or "hold_release" not in section:
+        return
+    if isinstance(section["hold_release"], bool):
+        return
+    _non_boolean_logged = True
+    logger.info(
+        "bridge: team_bridge.hold_release is not a boolean and reads ON; "
+        "write an unquoted false to turn it off"
+    )
 
 
 def review_enabled(config_dir: Path | str) -> bool:
@@ -282,6 +338,31 @@ def review_enabled(config_dir: Path | str) -> bool:
     if values is None:
         return DEFAULT_REVIEW_HELD
     return TeamBridgeSettings.from_values(values).review_held
+
+
+def screening_hold_review_after_s(config_dir: Path | str) -> float | None:
+    """Seconds a screening-unavailable hold may age before owner review; ``None`` = never.
+
+    ``None`` when ``review_held`` is off (a review hold would have no exit) or
+    ``team_bridge.screening_hold_review_after_minutes`` is ``0``; see that
+    constant in ``team_bridge/settings.py`` for why the default is 30.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.team_bridge.settings import (
+        DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES,
+        TeamBridgeSettings,
+    )
+
+    values = read_config_values(Path(config_dir))
+    if values is None:
+        minutes, review = DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES, review_enabled(config_dir)
+    else:
+        settings = TeamBridgeSettings.from_values(values)
+        minutes, review = settings.screening_hold_review_after_minutes, settings.review_held
+    if not review or minutes <= 0:
+        return None
+    return float(minutes) * 60.0
 
 
 def enabled_for(config_dir: Path | str, hold_code: str | None) -> bool:

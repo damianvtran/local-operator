@@ -21,6 +21,7 @@
     "local_operator/server/routes/desktop_lifecycle.py",
     "local_operator/server/routes/desktop_mcp.py",
     "local_operator/server/routes/desktop_mesh.py",
+    "local_operator/server/routes/desktop_mesh_pairings.py",
     "local_operator/server/routes/desktop_profiles.py",
     "local_operator/server/routes/desktop_projects.py",
     "local_operator/server/routes/desktop_quota.py",

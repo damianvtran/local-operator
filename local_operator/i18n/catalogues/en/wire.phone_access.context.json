@@ -18,5 +18,35 @@
     "role": "Settings toggle help text",
     "tone": "Plain, reassuring about money",
     "note": "The safety meaning must survive translation: the background run NEVER activates billing or spends credit."
+  },
+  "wire.phone_access.away_after.label": {
+    "role": "Settings choice label",
+    "tone": "Plain sentence fragment completed by the chosen duration",
+    "note": "ADR 0008 desk presence. The row's value (1/2/5/10 minutes) is rendered after this label, so it ends with 'for'. 'Away' means no keyboard or mouse input, or the screen locked."
+  },
+  "wire.phone_access.away_after.help": {
+    "role": "Settings choice help text",
+    "tone": "Plain, two or three short sentences",
+    "note": "Explain that idle time (no keyboard/mouse input) decides when a finished task goes to the phone instead of the desktop; locking the screen counts as away immediately; it needs the desktop app, which measures the idle time."
+  },
+  "wire.phone_access.away_after.choice.1m.label": {
+    "role": "Settings choice option",
+    "tone": "Duration",
+    "note": "1 minute(s). Follows the label 'Send to phone when I'm away from my computer for'; use the grammatical case that reads naturally after that label."
+  },
+  "wire.phone_access.away_after.choice.2m.label": {
+    "role": "Settings choice option",
+    "tone": "Duration",
+    "note": "2 minute(s). Follows the label 'Send to phone when I'm away from my computer for'; use the grammatical case that reads naturally after that label."
+  },
+  "wire.phone_access.away_after.choice.5m.label": {
+    "role": "Settings choice option",
+    "tone": "Duration",
+    "note": "5 minute(s). Follows the label 'Send to phone when I'm away from my computer for'; use the grammatical case that reads naturally after that label."
+  },
+  "wire.phone_access.away_after.choice.10m.label": {
+    "role": "Settings choice option",
+    "tone": "Duration",
+    "note": "10 minute(s). Follows the label 'Send to phone when I'm away from my computer for'; use the grammatical case that reads naturally after that label."
   }
 }

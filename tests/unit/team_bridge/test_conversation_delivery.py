@@ -43,6 +43,9 @@ from local_operator.team_bridge.events import plan_feed_refs
 from local_operator.team_bridge.screening import ScreenResult
 from local_operator.team_bridge.store import OwnerReceipt, Store, StoreRefused
 from local_operator.team_bridge.types import OwnerSnapshot, project_events_batch
+from tests.unit.team_bridge.test_hold_release import (  # noqa: F401 — used by review_rig
+    rig,
+)
 
 CONVERSATION_ID = "bcv_abcdefgh"
 MESSAGE_ID = "bcmsg_abcdef01"
@@ -141,6 +144,12 @@ class FakeServer:
     view_calls: list[str] = field(default_factory=list)
     history_calls: list[dict[str, Any]] = field(default_factory=list)
     admits: list[dict[str, Any]] = field(default_factory=list)
+    #: A thread REPLY's root (``ids.thread_root_id``); ``None`` = a channel-level row.
+    thread_root: str | None = None
+    #: agent-server #402's ``ids.passive``; ``None`` = ABSENT (an older hub).
+    passive: bool | None = None
+    #: The body read's ``conversation_kind``; ``None`` = ABSENT (an older body route).
+    conversation_kind: str | None = None
 
     def event_for(self, endpoint: str) -> dict[str, Any] | None:
         if not self.active.get(endpoint, False):
@@ -163,6 +172,10 @@ class FakeServer:
                     "sender_kind": self.sender["kind"],
                 }
             )
+        if self.thread_root is not None:
+            ids["thread_root_id"] = self.thread_root
+        if self.passive is not None:
+            ids["passive"] = self.passive
         return {"type": "message_available", "ids": ids, "at": HISTORY_AT}
 
     def events_answer(self, endpoint: str) -> dict[str, Any]:
@@ -233,7 +246,7 @@ class FakeServer:
         return {"messages": rows[: limit or 50], "has_more": False}
 
     def body_response(self) -> dict[str, Any]:
-        return {
+        response = {
             "message_id": MESSAGE_ID,
             "body": self.body_override if self.body_override is not None else self.body,
             "body_hash": hashlib.sha256(self.body.encode("utf-8")).hexdigest(),
@@ -241,6 +254,9 @@ class FakeServer:
             "sender_label": self.sender["display_label"],
             "sender_kind": self.sender["kind"],
         }
+        if self.conversation_kind is not None:
+            response["conversation_kind"] = self.conversation_kind
+        return response
 
 
 class FakeWire:
@@ -1426,6 +1442,31 @@ def test_invalid_body_provenance_never_admits_or_wakes(tmp_path, monkeypatch, ki
     assert server.view_calls == server.history_calls == []
 
 
+def test_an_integration_post_is_screened_and_carded_as_an_app(tmp_path, monkeypatch):
+    """Team Integrations: ``sender_kind=integration`` is not malformed provenance.
+
+    It still passes through screening (one screen call, before any wake), and the
+    card names the sender as an ``app`` — never ``human``/``agent`` — so a model
+    cannot read an alert post as a member's or its owner's instruction.
+    """
+
+    owner = _owner("a", 1)
+    _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(active={"bep_a": True}, notify={"bep_a": "all"})
+    screen_calls: list[str] = []
+    transcripts, _ = _wire_rig(
+        monkeypatch, server, {"a": (owner, tmp_path)}, screen_calls=screen_calls
+    )
+    response = server.body_response()
+    response.update(sender_kind="integration", sender_label="Datadog prod")
+    monkeypatch.setattr(server, "body_response", lambda: response)
+    assert _run(owner, tmp_path)["handled"][0]["action"] == "delivered"
+    assert screen_calls == ["bep_a"]
+    card = transcripts["sess_a"][0]["payload"]
+    assert "Datadog prod (app, same tenant)" in card
+    assert "(human" not in card and "(agent" not in card
+
+
 def test_names_come_from_the_authorized_body_not_the_feed(tmp_path, monkeypatch):
     owner = _owner("a", 1)
     _enroll(tmp_path, owner, "sess_a")
@@ -1793,3 +1834,946 @@ def test_the_config_request_rule_reaches_the_model_once_per_hop() -> None:
     assert "tell your operator of real conflicts or new risk, nothing else" in peer
     assert wrapped.count(peer) == 1
     assert wrapped.index(BRIDGE_UNTRUSTED_CLAUSE) < wrapped.index(peer) < wrapped.index(rule)
+
+
+# --- screening-unavailable holds age into the owner's review ------------------
+#
+# Operator report 2026-11-17: ``provider_error``, ``breaker_open``,
+# ``policy_stale``, ``model_identity_unknown`` (and the rest of the
+# screening-unavailable class) re-held on the ladder forever, published as
+# ``delay: transient``; five production messages sat for hours. These cells run
+# the REAL connector iteration (feed ref, composite hold row, bare-row retire,
+# retry pass) over the REAL screening pipeline, with a scripted model, so the
+# durable age, the conversion and the Deliver path are what is under test.
+
+_SENDER_VICTOR = {"account_id": "acc_sender", "kind": "human", "display_label": "Victor"}
+_THRESHOLD_MIN = 30
+
+
+@pytest.fixture
+def review_rig(request: pytest.FixtureRequest):
+    """``test_hold_release``'s enrolled owner + real file-only operator key.
+
+    Taken by name so the signed Deliver path is the real one; requested through
+    ``getfixturevalue`` so this module's tests never shadow the imported name.
+    """
+
+    return request.getfixturevalue("rig")
+
+
+def _review_config(config_dir: Path, *, minutes: int = _THRESHOLD_MIN) -> None:
+    (config_dir / "config.yml").write_text(
+        json.dumps(
+            {
+                "values": {
+                    "team_bridge": {
+                        "enabled": True,
+                        "review_held": True,
+                        "screening_hold_review_after_minutes": minutes,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _escalation_rig(monkeypatch, config_dir: Path, owner: OwnerSnapshot, make_runner, **config):
+    """The conversation replay rig with the real screener behind ``screen_item``.
+
+    ``make_runner(policy)`` builds the pass's runner over a FRESH policy (the
+    connector resolves one per pass), so a runner can move that pass's live
+    policy without poisoning the next one.
+    """
+
+    from local_operator.team_bridge import screening
+    from tests.unit.team_bridge.test_hold_release import Policy
+
+    _review_config(config_dir, **config)
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    server = FakeServer(
+        notify={owner.endpoint_id: "all"}, active={owner.endpoint_id: True}, sender=_SENDER_VICTOR
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"recv": (owner, config_dir)})
+
+    async def real_screen(o: Any, item: Any, *, config_dir: Path, **_kw: Any) -> Any:
+        policy = Policy()
+        return await screening.screen_message_async(
+            o, item, config_dir=config_dir, policy=policy, runner=make_runner(policy)
+        )
+
+    monkeypatch.setattr(conversation_mod, "screen_item", real_screen)
+    return server, transcripts, clock
+
+
+def _handled_code(summary: dict[str, Any]) -> str | None:
+    handled = [row for row in summary.get("handled") or () if row.get("code")]
+    return handled[-1]["code"] if handled else None
+
+
+def _min_created_at(config_dir: Path) -> float:
+    return min(float(row["created_at"]) for row in _hold_rows(config_dir))
+
+
+def _composite_created_at(config_dir: Path) -> list[float]:
+    return [
+        float(row["created_at"])
+        for row in _hold_rows(config_dir)
+        if not str(row["message_id"]).startswith("bcmsg_")
+    ]
+
+
+class _BareRunner:
+    """A bare (unchained) model callback: ``(reply, served_model)`` or a raise."""
+
+    def __init__(
+        self,
+        *,
+        reply: str = "VERDICT: deliver\nREASON: ordinary.",
+        model: Any = None,
+        raises: BaseException | None = None,
+        on_call: Any = None,
+    ) -> None:
+        self.reply, self.model, self.raises, self.on_call, self.calls = (
+            reply,
+            model,
+            raises,
+            on_call,
+            0,
+        )
+
+    def __call__(self, prompt: str, *, default_model: str) -> tuple[str, Any]:
+        self.calls += 1
+        if self.on_call is not None:
+            self.on_call()
+        if self.raises is not None:
+            raise self.raises
+        return self.reply, self.model
+
+
+class _RouteDown(Exception):
+    """What the chain raises when EVERY hop failed on a route failure (S-3)."""
+
+    tb_cascade_exhausted = True
+    tb_chain_exhausted = True
+
+
+def _scenario(code: str, monkeypatch) -> tuple[Any, list[_BareRunner]]:
+    """``make_runner`` for a pass that ends in ``code``; the runners it built.
+
+    ``breaker_open`` is opened by a ROUTE class (``timeout``); its
+    ``breaker_open_sender`` twin by ``other`` (a sender-triggerable stop), and
+    ``provider_error`` is the chain's STOP code — the two must never age (S-3).
+    """
+
+    from tests.unit.team_bridge.test_hold_release import SONNET
+
+    built: list[_BareRunner] = []
+    if code in {"breaker_open", "breaker_open_sender"}:
+        last = "timeout" if code == "breaker_open" else "other"
+        monkeypatch.setattr(
+            Store,
+            "screening_breaker_state",
+            lambda self, owner: {
+                "failures": 5,
+                "open_until": time.time() + 10**6,
+                "last_failure_class": last,
+            },
+        )
+
+    def make(policy: Any) -> _BareRunner:
+        if code == "provider_error":
+            runner = _BareRunner(raises=RuntimeError("stopped: content filter"))
+        elif code == "screening_model_unavailable":
+            runner = _BareRunner(raises=_RouteDown("every hop down"))
+        elif code == "policy_stale":
+
+            def moved() -> None:
+                policy.admission_revision = "rev-moved-mid-dispatch"
+
+            runner = _BareRunner(model=SONNET[1], on_call=moved)
+        elif code == "model_identity_unknown":
+            runner = _BareRunner(model=None)
+        else:  # breaker_open*: never dispatched
+            runner = _BareRunner(model=SONNET[1])
+        built.append(runner)
+        return runner
+
+    return make, built
+
+
+_ESCALATING_CODES = [
+    "screening_model_unavailable",
+    "breaker_open",
+    "policy_stale",
+    "model_identity_unknown",
+]
+
+
+@pytest.mark.parametrize("code", _ESCALATING_CODES)
+def test_a_screening_unavailable_hold_becomes_owner_review_after_the_threshold(
+    review_rig, monkeypatch, code
+) -> None:
+    from local_operator.team_bridge.store import delivery_hold_class
+
+    config_dir, store, owner = review_rig
+    make, built = _scenario(code, monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+
+    first = _run(owner, config_dir)
+    t0 = clock.now
+    assert _handled_code(first) == code
+    assert delivery_hold_class(code) == "screening_unavailable"
+    created = _min_created_at(config_dir)
+    assert created == pytest.approx(t0)
+    composite = _composite_created_at(config_dir)
+    assert composite, "the connector's durable feed-ref row exists"
+
+    # Below the threshold: today's behaviour — still the transient class, no
+    # review row, nothing delivered.
+    clock.now += 15 * 60 + 5
+    below = _run(owner, config_dir)
+    below_code = _handled_code(below)
+    assert below_code != "model_hold" and delivery_hold_class(below_code) == "screening_unavailable"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+    # Past it: the owner's review, published as awaiting_review. An open breaker
+    # never dispatched this message, so the outage it reports must be proved by
+    # the half-open probe's route canary failing too (S-9); stamp that here.
+    if code == "breaker_open":
+        store.record_canary_failure(owner)
+    clock.now = t0 + _THRESHOLD_MIN * 60 + 5
+    aged = _run(owner, config_dir)
+    assert _handled_code(aged) == "model_hold"
+    assert delivery_hold_class("model_hold") == "awaiting_review"
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "model_hold" and decision["eligible"]
+    # S-1: nothing answered, so the record names no screener, verdict or hop —
+    # and so neither will the signed release nor the hub's observation block.
+    assert decision["screener_verdict"] == "" and decision["screener_hop"] == -1
+    assert decision["screener_model"] == "" and decision["screener_provider"] == ""
+    # S-4: the owner's holds list tells it apart from a screener's "unsure".
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    listed = next(
+        i for i in holds.list_holds(config_dir, owner)["items"] if i["message_id"] == MESSAGE_ID
+    )
+    assert listed["unscreened"] is True and listed["can_deliver"] is True
+
+    # Later passes replay the review with no model call; nothing is delivered.
+    calls = sum(r.calls for r in built)
+    clock.now += 2 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert sum(r.calls for r in built) == calls
+    assert transcripts.get("s1", []) == [] and transcripts.get("sess_recv", []) == []
+    assert [row for row in server.admits if row["verdict"] == "allow"] == []
+    # The durable age never moved.
+    assert _composite_created_at(config_dir) == composite
+    assert store.screening_hold_first_held_at(owner, MESSAGE_ID) == pytest.approx(created)
+
+
+def test_escalation_survives_a_restart_that_clears_the_retry_counter(
+    review_rig, monkeypatch
+) -> None:
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("screening_model_unavailable", monkeypatch)
+    _server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+
+    _run(owner, config_dir)
+    t0 = clock.now
+    for minutes in (8, 16, 24):
+        loop_mod._RETRY_ATTEMPTS.clear()  # a connector restart
+        clock.now = t0 + minutes * 60
+        assert _handled_code(_run(owner, config_dir)) != "model_hold"
+    loop_mod._RETRY_ATTEMPTS.clear()
+    clock.now = t0 + _THRESHOLD_MIN * 60 + 1
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is not None
+    assert all(not rows for rows in transcripts.values())
+
+
+def test_a_deliver_decision_on_an_escalated_hold_delivers_it_once(review_rig, monkeypatch) -> None:
+    from tests.unit.team_bridge.test_hold_release import _decide
+
+    config_dir, _store, owner = review_rig
+    make, _built = _scenario("model_identity_unknown", monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+
+    _run(owner, config_dir)
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert server.admits == []
+
+    _decide(config_dir, owner, "deliver", body=BODY)
+    clock.now += 2 * 3600  # every hold row is due again
+    _run(owner, config_dir)
+    _drive_across_leases(owner, config_dir, clock)
+    delivered = [row for rows in transcripts.values() for row in rows]
+    assert len(delivered) == 1, "delivered exactly once, on the owner's word"
+    # The fake hub re-serves the ref every iteration, so the idempotent admit is
+    # re-posted; every one of them is the owner's ``allow``, none before it.
+    assert server.admits and {row["verdict"] for row in server.admits} == {"allow"}
+
+
+def test_a_fallback_hop_that_answers_admits_before_any_escalation(review_rig, monkeypatch) -> None:
+    """The cascade gets its chance first: a pass on which the fallback answers
+    admits even when the hold is already older than the threshold."""
+
+    from local_operator.model.configure import build_model_spec
+    from local_operator.team_bridge.model_boundary import (
+        DefaultSelection,
+        ScreenChainRunner,
+    )
+
+    config_dir, store, owner = review_rig
+    fallback_up = {"flag": False}
+
+    class _Hop:
+        def __init__(self, model: str, primary: bool) -> None:
+            self.model, self.primary = model, primary
+
+        async def acall(self, prompt: str, *, default_model: str, **_: Any) -> Any:
+            if self.primary or not fallback_up["flag"]:
+                raise TimeoutError("route timed out")  # a route failure: advances
+            return "VERDICT: deliver\nREASON: ordinary.", self.model
+
+    def make(policy: Any) -> Any:
+        models = (policy.default_model, "claude-opus-5-5")
+        policy.approved_serving_identities = models
+        hops = [
+            DefaultSelection(policy.provider, m, build_model_spec(policy.provider, m))
+            for m in models
+        ]
+        return ScreenChainRunner(hops, lambda hop: _Hop(hop.model_id, hop.model_id == models[0]))
+
+    _server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    held = _run(owner, config_dir)
+    assert _handled_code(held) in {"provider_error", "screening_model_unavailable"}
+
+    fallback_up["flag"] = True
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    _run(owner, config_dir)
+    delivered = [row for rows in transcripts.values() for row in rows]
+    assert len(delivered) == 1
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+@pytest.mark.parametrize("minutes", [0, 120], ids=["escalation-off", "below-threshold"])
+def test_the_control_keeps_todays_retry_below_the_threshold(
+    review_rig, monkeypatch, minutes
+) -> None:
+    from local_operator.team_bridge.store import delivery_hold_class
+
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("screening_model_unavailable", monkeypatch)
+    _server, transcripts, clock = _escalation_rig(
+        monkeypatch, config_dir, owner, make, minutes=minutes
+    )
+    _run(owner, config_dir)
+    t0 = clock.now
+    for step in range(1, 7):  # 90 minutes of passes
+        clock.now = t0 + step * 15 * 60
+        code = _handled_code(_run(owner, config_dir))
+        assert code != "model_hold" and delivery_hold_class(code) == "screening_unavailable"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    assert all(not rows for rows in transcripts.values())
+
+
+@pytest.mark.parametrize("code", ["provider_error", "breaker_open_sender"])
+def test_a_sender_triggerable_stop_never_ages_into_a_deliver_item(
+    review_rig, monkeypatch, caplog, code
+) -> None:
+    """PR #4212 S-3: a chain STOP (``provider_error``: a content-filter status or
+    a guard refusal) and a breaker opened by one must never become an unscreened
+    Deliver item, however old; past the threshold they are logged once (R1-m2)."""
+
+    config_dir, store, owner = review_rig
+    make, _built = _scenario(code, monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    expected = "breaker_open" if code == "breaker_open_sender" else code
+    from local_operator.team_bridge import screening as screening_mod
+
+    screening_mod._STUCK_LOGGED.clear()
+    with caplog.at_level(logging.WARNING, logger=screening_mod.logger.name):
+        assert _handled_code(_run(owner, config_dir)) == expected
+        t0 = clock.now
+        for step in range(1, 9):  # two hours of passes
+            clock.now = t0 + step * 15 * 60
+            assert _handled_code(_run(owner, config_dir)) in {"provider_error", "breaker_open"}
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+    # R3-2: once per (message, code) — this message may stick under the chain's
+    # stop code AND the breaker it opened, depending on test order, so count the
+    # distinct codes actually logged rather than assume one.
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "screening hold past review threshold without an exit" in r.getMessage()
+    ]
+    codes = {line.split("code=")[1].split()[0] for line in lines}
+    assert lines and len(lines) == len(codes), lines
+
+
+def test_time_held_under_a_non_ageing_code_does_not_count(review_rig, monkeypatch) -> None:
+    """PR #4212 S-5: hours under ``bridge_off`` are not screening delay. The clock
+    starts at the first AGEING hold, so the first transient pass never converts."""
+
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("screening_model_unavailable", monkeypatch)
+    _server, _transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    clock.now -= 3 * 3600
+    store.persist_hold(owner, MESSAGE_ID, "bridge_off")
+    clock.now += 3 * 3600
+    t0 = clock.now
+    assert _handled_code(_run(owner, config_dir)) == "screening_model_unavailable"
+    clock.now = t0 + 15 * 60
+    assert _handled_code(_run(owner, config_dir)) != "model_hold"
+    clock.now = t0 + _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+
+
+def test_a_sender_over_its_budget_never_gets_a_deliver_item(review_rig, monkeypatch) -> None:
+    """PR #4212 S-2: ``budget_exhausted`` is a spend ceiling with its own refill
+    retry, not an outage; it never ages into an unscreened, uncapped Deliver."""
+
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("model_identity_unknown", monkeypatch)
+
+    def spent(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise StoreRefused("sender_exhausted", "sender share spent")
+
+    monkeypatch.setattr(Store, "reserve_screening_attempt", spent)
+    _server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    assert _handled_code(_run(owner, config_dir)) == "budget_exhausted"
+    clock.now += 2 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "budget_exhausted"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    assert all(not rows for rows in transcripts.values())
+
+
+# --- Q1: the hub's AUTHORITY refusal ages by cause ----------------------------
+
+
+def _authority_rig(monkeypatch, config_dir: Path, owner: OwnerSnapshot, cause: str):
+    """The real ``wake.screen_item`` → ``_screening_cycle``, with the cycle's status
+    read refusing authority for ``cause`` (``StoreRefused.cause``)."""
+
+    from local_operator.team_bridge import scheduler as scheduler_mod
+    from local_operator.team_bridge.connector import wake as wake_mod
+
+    make, _built = _scenario("model_identity_unknown", monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    from tests.unit.team_bridge.test_hold_release import Policy
+
+    # A healthy pass before the outage published the policy the hub serves.
+    served = Policy()
+    Store(config_dir).publish_screening_policy(
+        owner,
+        version=served.screening_version,
+        template_sha256=served.template_sha256,
+        default_model=served.default_model,
+        revision=served.admission_revision,
+        create_only=True,
+    )
+
+    async def refused(**_kw: Any) -> Any:
+        raise StoreRefused("policy_stale", "authority withdrawn", cause=cause)
+
+    monkeypatch.setattr(scheduler_mod, "run_screening_cycle", refused)
+    monkeypatch.setattr(conversation_mod, "screen_item", wake_mod.screen_item)
+    return server, transcripts, clock
+
+
+def test_a_hub_that_says_unavailable_ages_into_owner_review(review_rig, monkeypatch) -> None:
+    from local_operator.team_bridge.store import AUTHORITY_CAUSE_HUB_UNAVAILABLE
+
+    config_dir, store, owner = review_rig
+    server, transcripts, clock = _authority_rig(
+        monkeypatch, config_dir, owner, AUTHORITY_CAUSE_HUB_UNAVAILABLE
+    )
+    assert _handled_code(_run(owner, config_dir)) == "policy_stale"
+    t0 = clock.now
+    clock.now = t0 + 15 * 60
+    assert _handled_code(_run(owner, config_dir)) == "policy_stale"
+    clock.now = t0 + _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["eligible"] and decision["screener_model"] == ""
+    clock.now += 2 * 3600  # still unavailable: the review stands, nothing delivered
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+
+    # The owner says Deliver. Once the hub serves again the message is screened
+    # ONCE before that Deliver is honoured (round 2, S-8): the hub's word that it
+    # was unavailable must not let it skip a screener that now answers.
+    from tests.unit.team_bridge.test_hold_release import SONNET, _decide
+
+    _decide(config_dir, owner, "deliver", body=BODY)
+    screener = _hub_back(monkeypatch, _BareRunner(model=SONNET[1]))
+    clock.now += 2 * 3600
+    _run(owner, config_dir)
+    assert screener.calls == 1
+    assert len([row for rows in transcripts.values() for row in rows]) == 1
+    assert {row["verdict"] for row in server.admits} == {"allow"}
+    receipt = store.receipt_for_message(owner, MESSAGE_ID)
+    assert receipt is not None and receipt["model"] == SONNET[1], "the screener's allow"
+
+
+def _hub_back(monkeypatch, runner: "_BareRunner") -> "_BareRunner":
+    """The hub serves again: the connector's screen runs the real pipeline."""
+
+    from local_operator.team_bridge import screening as screening_mod
+    from tests.unit.team_bridge.test_hold_release import Policy
+
+    async def hub_back(o: Any, item: Any, *, config_dir: Path, **_kw: Any) -> Any:
+        return await screening_mod.screen_message_async(
+            o, item, config_dir=config_dir, policy=Policy(), runner=runner
+        )
+
+    monkeypatch.setattr(conversation_mod, "screen_item", hub_back)
+    return runner
+
+
+def _unscreened_review_then_deliver(review_rig, monkeypatch):
+    """A hub-unavailable hold aged into the unscreened review, then Delivered."""
+
+    from local_operator.team_bridge.store import AUTHORITY_CAUSE_HUB_UNAVAILABLE
+    from tests.unit.team_bridge.test_hold_release import _decide
+
+    config_dir, store, owner = review_rig
+    server, transcripts, clock = _authority_rig(
+        monkeypatch, config_dir, owner, AUTHORITY_CAUSE_HUB_UNAVAILABLE
+    )
+    _run(owner, config_dir)
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    _decide(config_dir, owner, "deliver", body=BODY)
+    return config_dir, store, owner, server, transcripts, clock
+
+
+def test_an_unscreened_deliver_yields_to_a_screener_hold(review_rig, monkeypatch) -> None:
+    """S-8: the re-screen ANSWERED hold, so the owner's Deliver is refused and the
+    message stays held — and later passes do not re-screen or deliver it."""
+
+    from tests.unit.team_bridge.test_hold_release import DOUBT, SONNET
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    screener = _hub_back(monkeypatch, _BareRunner(model=SONNET[1], reply=DOUBT))
+    for _ in range(3):
+        clock.now += 2 * 3600
+        _run(owner, config_dir)
+    assert screener.calls == 1
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+    # Q3 (round 3): the screener's own decision REPLACES the unscreened one, and
+    # the refused release goes with it — the owner's next Deliver is a screened
+    # decision, not a dead button.
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "model_hold"
+    assert decision["screener_model"] == SONNET[1] and decision["screener_verdict"] == "hold"
+
+
+def test_an_unscreened_deliver_stands_when_screening_is_still_down(review_rig, monkeypatch) -> None:
+    """S-8: the re-screen is route-failed again and nothing else screened, so the
+    person's Deliver is honoured on that same pass (owner-release provenance)."""
+
+    from local_operator.team_bridge import hold_release as hr
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    screener = _hub_back(monkeypatch, _BareRunner(raises=_RouteDown("every hop down")))
+    clock.now += 2 * 3600
+    _run(owner, config_dir)
+    # The message, then the content-free route canary (S-9), which fails too:
+    # a corroborated outage, so the person's word stands.
+    assert screener.calls == 2
+    assert len([row for rows in transcripts.values() for row in rows]) == 1
+    receipt = store.receipt_for_message(owner, MESSAGE_ID)
+    assert receipt is not None and receipt["template_sha256"] == hr.OWNER_RELEASE_SHA256
+
+
+def test_an_unscreened_deliver_is_refused_when_others_screen_fine(review_rig, monkeypatch) -> None:
+    """S-6 x S-8: the re-screen is route-failed, but the account screened other
+    messages since the item was created — the failure is this message's own,
+    so the Deliver is refused rather than honoured."""
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    clock.now += 60
+    store.record_screening_success(owner)  # another message screened fine
+    screener = _hub_back(monkeypatch, _BareRunner(raises=_RouteDown("every hop down")))
+    clock.now += 2 * 3600
+    _run(owner, config_dir)
+    assert screener.calls == 2, "the message, then the route canary"
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+    # S-13 + Q3: the route works and this message fails every hop — the item
+    # becomes the Discard-only terminal state, and no Deliver remains.
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "screening_failed"
+    assert store.owner_release(owner, MESSAGE_ID) is None
+
+
+def test_an_unscreened_deliver_waits_while_the_breaker_is_open(review_rig, monkeypatch) -> None:
+    """S-11: an open breaker means no model call on this pass, so the Deliver on
+    an unscreened item WAITS — it is never honoured without a dispatch."""
+
+    from tests.unit.team_bridge.test_hold_release import SONNET
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    monkeypatch.setattr(
+        Store,
+        "screening_breaker_state",
+        lambda self, owner: {
+            "failures": 8,
+            "open_until": time.time() + 10**6,
+            "last_failure_class": "chain_exhausted",
+        },
+    )
+    screener = _hub_back(monkeypatch, _BareRunner(model=SONNET[1]))
+    # Even with outage evidence on record, an open breaker means no dispatch.
+    store.record_canary_failure(owner)
+    for _ in range(3):
+        clock.now += 2 * 3600
+        assert _handled_code(_run(owner, config_dir)) != "delivered"
+    assert screener.calls == 0
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert release is not None and release["outcome"] == "pending"
+
+
+def test_a_message_every_hop_fails_while_others_screen_ends_discard_only(
+    review_rig, monkeypatch
+) -> None:
+    """S-13 / R3-1 / Q4: the route works (others screen) and THIS message fails
+    every hop. Past the threshold it is the terminal ``screening_failed``: Discard
+    only, published as awaiting review, never re-dispatched, never a Deliver."""
+
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+    from local_operator.team_bridge.store import delivery_hold_class
+
+    config_dir, store, owner = review_rig
+    make, built = _scenario("screening_model_unavailable", monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    assert _handled_code(_run(owner, config_dir)) == "screening_model_unavailable"
+    clock.now += 60
+    store.record_screening_success(owner)  # another message screened fine
+    clock.now += _THRESHOLD_MIN * 60
+    assert _handled_code(_run(owner, config_dir)) == "screening_failed"
+    assert delivery_hold_class("screening_failed") == "awaiting_review"
+    listed = next(
+        i for i in holds.list_holds(config_dir, owner)["items"] if i["message_id"] == MESSAGE_ID
+    )
+    assert listed["hold_code"] == "screening_failed"
+    assert listed["can_discard"] and not listed["can_deliver"]
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["screener_model"] == ""
+    with pytest.raises(holds.HoldRefused) as refused:
+        holds.decide(
+            config_dir,
+            owner,
+            message_id=MESSAGE_ID,
+            conversation_id=str(decision["conversation_id"]),
+            body_sha256=str(decision["body_sha256"]),
+            word="deliver",
+            account_id=owner.account_id,
+        )
+    assert refused.value.code == "hold_not_releasable"
+    calls = sum(r.calls for r in built)
+    clock.now += 3 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "screening_failed"
+    assert sum(r.calls for r in built) == calls, "terminal: no further dispatch"
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+
+
+def test_owner_action_time_never_counts_toward_the_screening_review(
+    review_rig, monkeypatch
+) -> None:
+    """R2-1: three hours waiting for the owner to sign in are not screening
+    delay. After sign-in, the first transient pass must not convert; the review
+    clock starts on that pass and converts a full threshold later."""
+
+    config_dir, store, owner = review_rig
+    _server, transcripts, clock = _authority_rig(monkeypatch, config_dir, owner, "sign_in")
+    assert _handled_code(_run(owner, config_dir)) == "policy_stale"
+    t0 = clock.now
+    clock.now = t0 + 3 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "sign_in_required"
+
+    # Signed in again: the real pipeline runs, with a transient identity hold.
+    _hub_back(monkeypatch, _BareRunner(model=None))
+    clock.now += 2 * 3600  # due again
+    signed_in = clock.now
+    assert _handled_code(_run(owner, config_dir)) == "model_identity_unknown"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    clock.now = signed_in + _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert all(not rows for rows in transcripts.values())
+
+
+def test_no_screener_configured_is_the_owners_action_not_a_deliver(review_rig, monkeypatch) -> None:
+    """S-8 / Q2: no screening chain at all is the owner's configuration. Past the
+    threshold it is ``screener_required`` — never a Deliver item, and it needs no
+    policy epoch, so a machine that never published one exits too."""
+
+    from local_operator.team_bridge import screening as screening_mod
+    from local_operator.team_bridge.store import (
+        AUTHORITY_CAUSE_NO_SCREENER,
+        delivery_hold_class,
+    )
+
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("model_identity_unknown", monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    assert store.current_screening_policy(owner) is None  # never published
+
+    async def no_chain(o: Any, item: Any, *, config_dir: Path, **_kw: Any) -> Any:
+        return screening_mod.aged_authority_hold(
+            o,
+            item,
+            config_dir=config_dir,
+            cause=AUTHORITY_CAUSE_NO_SCREENER,
+            held_code="screening_model_unavailable",
+        )
+
+    monkeypatch.setattr(conversation_mod, "screen_item", no_chain)
+    assert _handled_code(_run(owner, config_dir)) == "screening_model_unavailable"
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "screener_required"
+    assert delivery_hold_class("screener_required") == "awaiting_review"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+
+
+@pytest.mark.parametrize(
+    ("cause", "code"),
+    [
+        ("sign_in", "sign_in_required"),
+        ("consent", "consent_required"),
+        ("ineligible", "owner_ineligible"),
+    ],
+)
+def test_an_owner_only_authority_fix_never_offers_deliver(
+    review_rig, monkeypatch, cause, code
+) -> None:
+    """Q1: sign-in, consent and eligibility are the OWNER's to fix. Past the
+    threshold the hold names the action and stops reading 'transient', but no
+    Deliver is ever offered: delivery stays fail-closed."""
+
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+    from local_operator.team_bridge.store import delivery_hold_class
+
+    config_dir, store, owner = review_rig
+    server, transcripts, clock = _authority_rig(monkeypatch, config_dir, owner, cause)
+    assert _handled_code(_run(owner, config_dir)) == "policy_stale"
+    assert delivery_hold_class("policy_stale") == "screening_unavailable"
+    clock.now += 15 * 60
+    assert _handled_code(_run(owner, config_dir)) == "policy_stale"
+    clock.now += _THRESHOLD_MIN * 60
+    assert _handled_code(_run(owner, config_dir)) == code
+    assert delivery_hold_class(code) == "awaiting_review"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    listed = next(
+        i for i in holds.list_holds(config_dir, owner)["items"] if i["message_id"] == MESSAGE_ID
+    )
+    assert listed["hold_code"] == code
+    assert not listed["releasable"] and not listed["can_deliver"]
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+
+
+def test_an_unclassified_authority_refusal_keeps_todays_hold(review_rig, monkeypatch) -> None:
+    config_dir, store, owner = review_rig
+    _server, _transcripts, clock = _authority_rig(monkeypatch, config_dir, owner, "")
+    _run(owner, config_dir)
+    clock.now += 3 * 3600
+    _run(owner, config_dir)
+    clock.now += 3 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "policy_stale"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+# -- passive thread replies (agent-server #402) --------------------------------
+#
+# Operator rule (Damian, Team Bridge #general seq 97, 2026-11-17): agents wake on
+# thread replies only when they take part in the thread. The hub marks a reply
+# that reaches a notify=all agent OUTSIDE the thread audience ``ids.passive: true``.
+# The connector must still screen and admit it (so the agent's next
+# channel_thread/channel_history read returns it) but must post no card.
+
+THREAD_ROOT = "bcmsg_root0001"
+
+
+@pytest.mark.parametrize(
+    ("passive", "wakes"),
+    [
+        pytest.param(True, False, id="passive-no-wake"),
+        pytest.param(False, True, id="explicit-false-wakes"),
+        pytest.param(None, True, id="older-hub-absent-wakes"),
+    ],
+)
+def test_a_passive_thread_reply_is_admitted_but_wakes_nobody(
+    tmp_path, monkeypatch, passive, wakes
+) -> None:
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        thread_root=THREAD_ROOT,
+        passive=passive,
+    )
+    transcripts, modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+
+    out = _run(b, config_dir)
+
+    handled = out["handled"]
+    assert len(handled) == 1 and handled[0]["action"] == "delivered"
+    # Recorded and readable either way: screened, admitted, body reserved.
+    assert [(row["endpoint"], row["verdict"]) for row in server.admits] == [("bep_b", "allow")]
+    rows = _reservation_rows(config_dir)
+    assert [row["message_id"] for row in rows] == [MESSAGE_ID]
+    if wakes:
+        assert len(transcripts["sess_b"]) == 1
+        assert f"thread_root_id: {THREAD_ROOT}" in transcripts["sess_b"][0]["payload"]
+        assert modes["sess_b"] == ["mailbox"]
+        assert handled[0]["detail"] != conversation_mod.CARD_PASSIVE
+    else:
+        assert transcripts["sess_b"] == []
+        assert modes["sess_b"] == []
+        assert handled[0]["detail"] == conversation_mod.CARD_PASSIVE
+        # Nothing was buffered for a later flush either: no wake can leak out late.
+        assert not out.get("coalesced_wakes")
+        # The card obligation is settled, so a replayed delivery never wakes later.
+        assert rows[0]["card_posted_at"] is not None
+
+        replay = _run(b, config_dir)
+        assert transcripts["sess_b"] == []
+        # The CARD_POSTED branch, not an empty page: the replay is a duplicate.
+        assert [item["action"] for item in replay["handled"]] == ["duplicate"]
+
+
+@pytest.mark.parametrize(
+    ("conversation_kind", "thread_root", "wakes"),
+    [
+        pytest.param("dm", THREAD_ROOT, True, id="dm-thread-reply-wakes"),
+        pytest.param("dm", None, True, id="dm-top-level-wakes"),
+        pytest.param("group", THREAD_ROOT, False, id="group-honours-passive"),
+        pytest.param("channel", THREAD_ROOT, False, id="channel-honours-passive"),
+        pytest.param(None, THREAD_ROOT, False, id="absent-kind-honours-passive"),
+    ],
+)
+def test_a_passive_bit_never_silences_a_dm(
+    tmp_path, monkeypatch, conversation_kind, thread_root, wakes
+) -> None:
+    """In a DM the agent is always the audience: a passive bit there is a hub bug.
+
+    agent-server #402's first cut marked every thread reply passive regardless of
+    kind (its review M-1); honouring that would drop a direct message for good.
+    """
+
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        thread_root=thread_root,
+        passive=True,
+        conversation_kind=conversation_kind,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+
+    out = _run(b, config_dir)
+
+    handled = out["handled"]
+    assert len(handled) == 1 and handled[0]["action"] == "delivered"
+    assert [(row["endpoint"], row["verdict"]) for row in server.admits] == [("bep_b", "allow")]
+    if wakes:
+        assert handled[0]["detail"] != conversation_mod.CARD_PASSIVE
+        assert len(transcripts["sess_b"]) == 1
+    else:
+        assert handled[0]["detail"] == conversation_mod.CARD_PASSIVE
+        assert transcripts["sess_b"] == []
+
+
+@pytest.mark.parametrize(
+    ("conversation_kind", "wakes"),
+    [
+        pytest.param("channel", False, id="channel-stays-silent"),
+        pytest.param("dm", True, id="dm-wakes"),
+    ],
+)
+def test_a_held_passive_reply_settles_on_the_retry_pass(
+    tmp_path, monkeypatch, conversation_kind, wakes
+) -> None:
+    """A held passive row re-drives through the same hand-off: still no wake.
+
+    The hold stores ``ref.encode()``, so ``/passive=1`` survives the hold; the
+    re-drive returns ``delivered``/``CARD_PASSIVE``, which is terminal, so the hold
+    row is retired rather than retried forever. A DM keeps waking on this path too.
+    """
+
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    store = _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        thread_root=THREAD_ROOT,
+        passive=True,
+        conversation_kind=conversation_kind,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+    ref = _ref(server, "bep_b")
+    assert ref.passive and "/passive=1" in ref.encode()
+    store.persist_hold(b, ref.encode(), "screening_hold", retry_at=0)
+    loop_mod._RETRY_ATTEMPTS.clear()  # a fresh process has no in-memory counter
+
+    out = asyncio.run(
+        loop_mod.retry_due_holds(
+            b,
+            config_dir=config_dir,
+            access=SimpleNamespace(credential_id=b.credential_id),
+            auth_store=None,
+        )
+    )
+
+    outcome = out["outcomes"][0]
+    assert outcome["action"] == "delivered"
+    assert [(row["endpoint"], row["verdict"]) for row in server.admits] == [("bep_b", "allow")]
+    assert Store(config_dir).screening_hold(b, ref.encode()) is None
+    # The retry outcome carries no hand-off ``detail``; the transcript is the wake.
+    assert len(transcripts["sess_b"]) == (1 if wakes else 0)
+    if not wakes:
+        # Settled like the live path, so a later replay of the ref is a duplicate.
+        assert _reservation_rows(config_dir)[0]["card_posted_at"] is not None
+
+
+def test_a_mention_is_never_passive(tmp_path, monkeypatch) -> None:
+    """A malformed hub row carrying both bits still wakes: being named is being named."""
+
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        mentioned={"bep_b"},
+        thread_root=THREAD_ROOT,
+        passive=True,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+    out = _run(b, config_dir)
+    assert out["handled"][0]["action"] == "delivered"
+    assert len(transcripts["sess_b"]) == 1

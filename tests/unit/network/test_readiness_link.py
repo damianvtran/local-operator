@@ -1432,3 +1432,79 @@ def test_ready_names_the_owner_decision_a_remote_model_switch_needs(
     with capsys.disabled():
         print("\nREADY BEFORE:\n" + "\n".join(rendered) + "\nREADY AFTER: no model_switch row")
     server_b.stop()
+
+
+@pytest.mark.parametrize("recorded_version", ["0.90.1", "0.90.18"])
+def test_unproven_record_reaches_the_viewer_with_an_honest_restart_remedy(
+    recorded_version: str,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#3075 Q5/R2-m2 over real framing: an injected RECORD is not a live identity.
+
+    Only the peer's daemon inventory is synthetic. Pairing, net_readiness, the
+    viewer's row composition, and both JSON/human CLI renderers are unchanged.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    try:
+        _settle_the_peer_link(server_a, server_b, record, live)
+        _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+        original = server_b._handlers["net_readiness"]  # noqa: SLF001 — peer fact seam
+
+        def inventory(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+            facts = original(link, frame)
+            assert isinstance(facts, dict), "the real readiness handler must return facts"
+            facts["serve_daemons"] = {
+                "platform": "linux",
+                "install": {"version": "0.90.18", "source_ref": ""},
+                "daemons": [
+                    {
+                        "pid": 10001,
+                        "state": "live",
+                        "identity": "unproven",
+                        "version": recorded_version,
+                        "source_ref": "",
+                        "reloadable": True,
+                        "cgroup": None,
+                    }
+                ],
+            }
+            return facts
+
+        monkeypatch.setitem(server_b._handlers, "net_readiness", inventory)  # noqa: SLF001
+        _rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+        row = _capability(payload, readiness.CAPABILITY_SERVE_DAEMON)
+        _ready("--peer", server_b.identity.name)
+        text = capsys.readouterr().out
+        # Print the disposable serve row before assertions, so the SAME probe
+        # records its genuine base refusal as well as the fixed head response.
+        lines = text.splitlines()
+        index = next(i for i, line in enumerate(lines) if " readiness serve_daemon " in line)
+        shown = [lines[index]]
+        for line in lines[index + 1 :]:
+            if not line.startswith("    - "):
+                break
+            shown.append(line)
+        with capsys.disabled():
+            print("WIRE_RESULT " + json.dumps(row, sort_keys=True))
+            print("CLI_RESULT " + " | ".join(shown))
+        assert row["source"] == readiness.SOURCE_PEER and row["code"] == readiness.CODE_UNKNOWN
+        assert row["observed"]["daemons"][0]["identity"] == "unproven"
+        assert "serving" not in row["observed"]["daemons"][0]
+        assert "no start-time stamp could be compared" in text
+        assert "(identity unproven)" not in text
+        if recorded_version == "0.90.1":
+            assert "the record says build 0.90.1; 0.90.18 is installed" in row["detail"]
+            assert sum(remedy.count("lop services restart") for remedy in row["remedies"]) == 1
+            assert "lop services restart" in text
+        else:
+            assert "lop services restart" not in text
+            assert any("no action is needed" in remedy for remedy in row["remedies"])
+    finally:
+        server_b.stop()

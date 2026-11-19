@@ -45,10 +45,13 @@ from .cutpoint import (
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     PRESERVED_USER_TURN_KEY,
+    RELAUNCH_ELISION_NOTE,
+    RELAUNCH_ID_PREFIX,
     RENDERED_INJECTION_KEY,
     CappedPreservedTurns,
     advance_cut_to_wire_band,
     cap_preserved_user_turns,
+    collapse_relaunch_briefs,
     elision_counts_of,
     elision_notice_text,
     extract_preserved_user_turns,
@@ -139,6 +142,9 @@ __all__ = [
     "CappedPreservedTurns",
     "advance_cut_to_wire_band",
     "cap_preserved_user_turns",
+    "collapse_relaunch_briefs",
+    "RELAUNCH_ELISION_NOTE",
+    "RELAUNCH_ID_PREFIX",
     "elision_counts_of",
     "elision_notice_text",
     "is_rendered_injection",
@@ -154,6 +160,7 @@ __all__ = [
     "IDLE_FLUSH_MS",
     "TOOL_ARGS_MAX_CHARS",
     "TOOL_RESULT_MAX_CHARS",
+    "TOOL_RESULT_TAIL_CHARS",
     "USELESS_NOTICE",
     "build_advisor_prompt",
     "COMPACTION_IDLE_DECLINED_TYPE",
@@ -211,6 +218,12 @@ __all__ = [
 #: characters (``TOOL_RESULT_MAX_CHARS``): the summary model does not
 #: need full outputs, and unbounded results are the main context bloat.
 TOOL_RESULT_MAX_CHARS = 2000
+
+#: How many of those characters the ARCHIVE serializer
+#: (``snapcompact.serialize_for_snapcompact``) takes from the END of a long
+#: tool result rather than the start. A share of the same budget, never an
+#: addition to it.
+TOOL_RESULT_TAIL_CHARS = 500
 
 #: Serialized tool-call arguments are truncated to this many characters.
 TOOL_ARGS_MAX_CHARS = 500

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "relay.transcript",
-  "history_sha256": "8f7bdff2e9fba2d447c8b4b57a205b33d959b68e6ef004b7ca62587efbc7e4c3",
+  "history_sha256": "7daff083fe8542da3add1a6e178a54278a5617a55b2d06b840fcc57b27e1b7c0",
   "entries": [
     {
       "locale": "zh-CN",
@@ -29,6 +29,70 @@
         "relay.transcript.older.start"
       ],
       "note": "3 new keys relay.transcript.older.{load,loading,start} (history slot in the phone transcript). Strings are byte-equal to the desktop's already-audited local-operator-ui origin/main ui.chat.canonical.older_history.{load,loading,conversation_start} (24/24 locale cells compared by the auditor); the desktop's own audit was taken on trust, not re-derived. Independent audit of the 3 keys across es fr hi ru ur vi zh-CN: passed, no blocker/major. The 19 pre-existing keys are unchanged in every locale and carry their prior passed audit (2026-10-26, see i18n/ledger/<locale>.json); this row re-states the namespace against the new en hash. Minors, not blocking: vi `start` can read as imperative; vi `loading` terse; zh-CN uses 对话 where the glossary says 会话 (desktop ships the same)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "c246568bc565afd8bb980eedadae323c21f233785d0b572f94ab7b8f6a60b396",
+      "translator": {
+        "agent": "task subagent i18n-translator (lop job 300c6e90e9f7, session 5049100298d2)",
+        "model": "radient/auto",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "reviewer subagent i18n-audit (independent; lop job f64f319282e9)",
+        "model": "radient/auto",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.message.show_more",
+        "relay.transcript.message.show_less",
+        "relay.transcript.message.show_more_label",
+        "relay.transcript.message.show_less_label"
+      ],
+      "note": "4 new keys relay.transcript.message.{show_more,show_less,show_more_label,show_less_label} (fold control under a long user message in a condensed phone turn). Independent audit: 0 blocker/major. Minor findings adopted before commit: zh-CN dropped the pronoun in both _label keys; ur and hi replaced the reflexive with the polite possessive in both _label keys; ru dropped the possessive (nit). vi nit recorded as a decision, no change. The audited strings are the committed strings except those four adopted edits, which were checked mechanically for label-in-name (visible label is a prefix of the accessible name) and not re-audited by a second pass. The pre-existing keys are unchanged and carry their prior passed audit; this row re-states the namespace against the new en hash."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "ec3caa56a6643b8390581298ca4fef6a37167202b4619b7a0bcc0461890d2b9c",
+      "translator": {
+        "agent": "task subagent translator specialist (lop jobs e2e64deaedb4 round 1; 5ebb122944bf relay.transcript.bridge.offline only)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop session 80746c9094ea, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.provenance",
+        "relay.transcript.bridge.loading",
+        "relay.transcript.bridge.pending",
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.held_transient",
+        "relay.transcript.bridge.refused",
+        "relay.transcript.bridge.not_admitted",
+        "relay.transcript.bridge.unavailable",
+        "relay.transcript.bridge.signed_out",
+        "relay.transcript.bridge.other_account",
+        "relay.transcript.bridge.not_member",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.deleted",
+        "relay.transcript.bridge.more_messages"
+      ],
+      "note": "14 new keys relay.transcript.bridge.* (inbound Team Bridge card body states and untrusted frame on the phone web transcript, PR #4278). 13 keys copied verbatim from the audited tui.bridge_card.* translations. Audit round 1 (translation-auditor session 2d94a2642f45) failed zh-CN on F1, rooted in the English offline string (F2: the phone card has no close action), so en relay.transcript.bridge.offline changed to 'reopen the conversation to retry' and that key was retranslated (job 5ebb122944bf). Audit round 2 passed all 7 locales against this en hash, 0 blocker/major. Pre-existing keys unchanged and carry their prior passed audit; this row re-states the namespace against the new en hash."
     }
   ]
 }

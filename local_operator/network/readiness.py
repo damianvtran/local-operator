@@ -56,7 +56,9 @@ from typing import (
     Sequence,
 )
 
+from local_operator.i18n.keys import cli_serve_readiness
 from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr
 from local_operator.i18n.text import tr as _github_tr
 from local_operator.network import wire
 
@@ -2880,13 +2882,19 @@ def serve_daemons_fact(root: Path) -> dict[str, Any]:
     }
 
 
-#: Why a recorded daemon is not judged — keyed by ``_daemon_identity``'s answer.
-_IDENTITY_UNKNOWN_SENTENCE: dict[str, str] = {
-    "not_reporting": "is recorded but not answering (its heartbeat stopped)",
-    "not_this_daemon": "is recorded, but another process now holds that pid",
-    "unproven": "is recorded, but its process identity cannot be proven "
-    "(the record predates start-time stamps)",
-}
+# Resolve keyed copy at report time: the process language can change while the
+# relay lives. The legacy `state` wire field remains diagnostic; identity is the
+# only evidence used to judge the process (#3075 R2-n2).
+_serve_copy = tr("cli.serve_readiness")
+
+
+def _identity_unknown_sentence(identity: str) -> str:
+    message = {
+        "not_reporting": cli_serve_readiness.not_reporting,
+        "not_this_daemon": cli_serve_readiness.not_this_daemon,
+        "unproven": cli_serve_readiness.unproven,
+    }.get(identity, cli_serve_readiness.unknown_state)
+    return _serve_copy(message())
 
 
 def _serve_unknown_row(member: Any, *, peer_label: str, detail: str) -> dict[str, Any]:
@@ -3010,8 +3018,10 @@ def serve_daemon_row(
     stale_labels: set[str] = set()
     held: list[str] = []
     other: list[str] = []
-    unknown: list[int] = []
-    unknown_reasons: set[str] = set()
+    unknown_reasons: dict[int, list[str]] = {}
+    unproven_current = 0
+    unproven_gap = False
+    unproven_gap_reloadable = True
     fine: list[str] = []
     movable = True
     observed: list[dict[str, Any]] = []
@@ -3023,11 +3033,28 @@ def serve_daemon_row(
         if identity != "proven":
             # NOT A VERDICT ABOUT WHATEVER HOLDS THE PID (R1-M1): only the
             # recorded daemon's own fresh, born-matching process is judged.
-            unknown.append(pid)
-            unknown_reasons.add(
-                _IDENTITY_UNKNOWN_SENTENCE.get(identity, "is recorded in an unknown state")
-            )
-            observed.append({"pid": pid, "identity": _bounded(identity, 16)})
+            # Keep each reason attached to its PID. A set of reasons beside an
+            # aggregate PID list incorrectly assigns every reason to every daemon.
+            unknown_reasons.setdefault(pid, []).append(_identity_unknown_sentence(identity))
+            evidence: dict[str, Any] = {"pid": pid, "identity": _bounded(identity, 16)}
+            if identity == "unproven" and stamp is not None:
+                # A RECORD/install gap is useful during upgrades, but without a
+                # birth match it is never evidence about the process at this PID.
+                # Remain UNKNOWN; services restart performs its own guarded probe.
+                evidence.update(recorded=label, install=services._record_label(stamp))
+                if services._serves_current_build(record, stamp):  # noqa: SLF001
+                    unproven_current += 1
+                else:
+                    unproven_gap = True
+                    unproven_gap_reloadable = unproven_gap_reloadable and item["reloadable"]
+                    unknown_reasons[pid].append(
+                        _serve_copy(
+                            cli_serve_readiness.recorded_gap(
+                                recorded=label, install=services._record_label(stamp)
+                            )
+                        )
+                    )
+            observed.append(evidence)
             continue
         kind, holder = serve_supervision(item["cgroup"]) if linux else ("n/a", "")
         is_current = stamp is not None and services._serves_current_build(  # noqa: SLF001
@@ -3043,8 +3070,9 @@ def serve_daemon_row(
             }
         )
         if stamp is None:
-            unknown.append(pid)
-            unknown_reasons.add("runs a build the install cannot be compared with")
+            unknown_reasons.setdefault(pid, []).append(
+                _serve_copy(cli_serve_readiness.install_unknown())
+            )
         elif not is_current:
             movable = movable and item["reloadable"]
             stale.append(pid)
@@ -3054,8 +3082,9 @@ def serve_daemon_row(
         elif kind == "other_unit":
             other.append(f"pid {pid} under {holder}")
         elif kind == "unknown" and linux:
-            unknown.append(pid)
-            unknown_reasons.add("runs in a cgroup this check cannot place")
+            unknown_reasons.setdefault(pid, []).append(
+                _serve_copy(cli_serve_readiness.cgroup_unknown())
+            )
         if stamp is not None and is_current and kind in ("unit", "n/a"):
             fine.append(
                 f"the `lop serve` daemon on {peer_label} (pid {pid}) runs the installed "
@@ -3064,11 +3093,15 @@ def serve_daemon_row(
     sentences: list[str] = []
     if stale:
         sentences.append(
-            f"the `lop serve` daemon{'s' if len(stale) > 1 else ''} on {peer_label} "
-            f"({_pid_list(stale)}) run{'' if len(stale) > 1 else 's'} "
-            f"{', '.join(sorted(stale_labels)[:SERVE_DAEMONS_RENDERED])} but the install is "
-            f"{services._record_label(stamp)}: "  # noqa: SLF001
-            "the remote sessions it hosts run that other build"
+            _serve_copy(
+                cli_serve_readiness.stale(
+                    count=len(stale),
+                    device=peer_label,
+                    pids=_pid_list(stale),
+                    builds=", ".join(sorted(stale_labels)[:SERVE_DAEMONS_RENDERED]),
+                    install=services._record_label(stamp),  # noqa: SLF001
+                )
+            )
         )
     if held:
         # ONE SENTENCE FOR EVERY DAEMON A LOGIN HOLDS: the consequence is the same
@@ -3097,21 +3130,42 @@ def serve_daemon_row(
         # NAMED NEUTRALLY, NEVER OK (R1-m5): no `lop serve` unit ships, so another
         # unit holding the daemon (sshd from a host without pam_systemd, crond) is
         # not a supervisor that restarts it.
-        sentences.append(
-            f"the `lop serve` daemon on {peer_label} is held by another service "
-            f"({', '.join(other[:SERVE_DAEMONS_RENDERED])}"
-            + (
-                f" and {len(other) - SERVE_DAEMONS_RENDERED} more"
-                if len(other) > SERVE_DAEMONS_RENDERED
-                else ""
-            )
-            + "), not a lop serve unit"
+        holders = ", ".join(other[:SERVE_DAEMONS_RENDERED]) + (
+            f" and {len(other) - SERVE_DAEMONS_RENDERED} more"
+            if len(other) > SERVE_DAEMONS_RENDERED
+            else ""
         )
-    if unknown:
         sentences.append(
-            f"the `lop serve` daemon on {peer_label} ({_pid_list(unknown)}) "
-            + "; ".join(sorted(unknown_reasons))
-            + ", so whether it is current and supervised is not known"
+            _serve_copy(
+                cli_serve_readiness.other_unit(count=len(other), device=peer_label, holders=holders)
+            )
+        )
+    if unknown_reasons:
+        # Cap the displayed reasons with the PIDs, not independently: the full
+        # count still selects the correct grammatical number for a capped list.
+        # Group only identical complete diagnoses: different recorded builds or
+        # identity failures must remain associated with the right PIDs. Cap PIDs
+        # before grouping so coalescing cannot widen the existing output bound.
+        grouped: dict[tuple[str, ...], list[int]] = {}
+        for pid, why in list(unknown_reasons.items())[:SERVE_DAEMONS_RENDERED]:
+            grouped.setdefault(tuple(why), []).append(pid)
+        reasons = "; ".join(
+            _serve_copy(
+                cli_serve_readiness.pid_reason(
+                    count=len(pids), pids=", ".join(map(str, pids)), reason="; ".join(why)
+                )
+            )
+            for why, pids in grouped.items()
+        )
+        extra = len(unknown_reasons) - SERVE_DAEMONS_RENDERED
+        if extra > 0:
+            reasons += " " + _serve_copy(cli_serve_readiness.and_more(count=extra))
+        sentences.append(
+            _serve_copy(
+                cli_serve_readiness.unknown(
+                    count=len(unknown_reasons), device=peer_label, reasons=reasons
+                )
+            )
         )
     if not sentences:
         return _capability_row(
@@ -3147,8 +3201,24 @@ def serve_daemon_row(
             f"until it ships, re-check {peer_label} after any reboot or logout and start "
             "`lop serve` again if it is gone"
         )
-    if unknown and not (stale or held or other):
-        remedies.append(f"on {peer_label}, run `lop services status` to see each daemon")
+    if not stale and unproven_gap:
+        # Match services.reload_serve_daemons: it deliberately skips a record
+        # already on the installed build. Unknown identity alone is not a
+        # restartable fault, and a reload never guarantees a birth-time sample.
+        # A stale neighbour already supplied this command; do not repeat it.
+        remedy = (
+            cli_serve_readiness.identity_restart(device=peer_label)
+            if unproven_gap_reloadable
+            else cli_serve_readiness.identity_restart_manual(device=peer_label)
+        )
+        remedies.append(_serve_copy(remedy))
+    elif unknown_reasons and not (stale or held or other):
+        if unproven_current:
+            remedies.append(
+                _serve_copy(cli_serve_readiness.identity_no_action(count=unproven_current))
+            )
+        else:
+            remedies.append(f"on {peer_label}, run `lop services status` to see each daemon")
     # The code names the first fix a reader can act on now: the in-place reload
     # runs today, the supervision gap waits on the follow-up, and "not known"
     # comes last.
@@ -6178,6 +6248,11 @@ def informational_clause(row: Mapping[str, Any]) -> str:
         return ""
     usable = ", ".join(str(item) for item in observed.get("usable_elsewhere") or ())
     note = _private_address_note(str(row.get("endpoint") or ""))
+    if not usable and observed.get("covered_by_link"):
+        # The link vouches without naming an address (an inbound link records
+        # the dialer's source socket, which is not one the peer can be pointed
+        # at -- R2-1/Q-3), so the clause names the link, never an address.
+        return f"not remote-usable from this device{note}; the peer is reachable over its live link"
     return f"not remote-usable from this device{note}; the peer is reachable at {usable}"
 
 
@@ -6229,6 +6304,101 @@ def mark_informational(rows: list[dict[str, Any]]) -> None:
         observed = row.setdefault("observed", {})
         observed["informational"] = True
         observed["usable_elsewhere"] = list(usable)
+        if "remedies" in row:
+            row["remedies"] = []
+
+
+#: The readiness outcomes that mean SILENCE: the candidate was dialled and
+#: nothing answered before the budget ran out. Narrower than the scope family
+#: (``_SCOPE_OUTCOMES``) on purpose: a bad or unresolvable endpoint, a missing
+#: route and an undialled candidate are not silence a live link can vouch for.
+_SILENT_OUTCOMES: frozenset[str] = frozenset({"no_answer", "no_answer_elsewhere"})
+
+
+def _silent_row(row: Mapping[str, Any]) -> bool:
+    """Whether a reachability row recorded SILENCE, in either dialect.
+
+    The readiness dialect rides ``observed.outcome``; the doctor dialect rides
+    ``detail``, read through the PRODUCER's constants (``_did_not_lead``'s
+    discipline): ``no_answer``, or a connect that TIMED OUT.
+    """
+    observed = row.get("observed")
+    outcome = str(observed.get("outcome") or "") if isinstance(observed, Mapping) else ""
+    if outcome:
+        return outcome in _SILENT_OUTCOMES
+    detail = str(row.get("detail") or "")
+    from local_operator.network import relay as relay_mod
+
+    if detail == relay_mod.DETAIL_NO_ANSWER:
+        return True
+    if detail.startswith(relay_mod.CONNECT_FAILED_PREFIX):
+        return detail.split(":", 1)[1] in ("TimeoutError", "socket.timeout")
+    return False
+
+
+def link_is_live(server: Any, device_id: str) -> bool:
+    """Whether ``device_id`` has a live link NOW, read under the link table's lock.
+
+    ``_link_for`` scans ``server.links`` while ``register_link``/``link_closed``
+    mutate it under ``_links_lock`` (an RLock); an unlocked scan from a control
+    thread can raise "dictionary changed size during iteration" and fail a whole
+    report (#4110 round 1, R1-3). Callers read this AFTER their probe, so a link
+    that began closing during the probe never vouches (R1-4).
+    """
+    lock = getattr(server, "_links_lock", None)
+    if lock is None:
+        return server._link_for(device_id) is not None  # noqa: SLF001 — the one link seam
+    with lock:
+        return server._link_for(device_id) is not None  # noqa: SLF001 — the one link seam
+
+
+def mark_covered_by_link(
+    rows: list[dict[str, Any]], *, link_live: bool, own_addresses: Sequence[str]
+) -> None:
+    """A LIVE LINK vouches for a peer whose declared address gave no answer.
+
+    WHY (live-link false red, 2026-11-16): a peer that DIALS IN while the direct
+    address it advertises is dead -- a NAT'd laptop, a node advertising its
+    VPC-private address -- is demonstrably up: its link is live and carries
+    traffic. Both producers still read the silent address as a fault and named a
+    firewall or a relay restart, so a working pair reported red.
+    :func:`mark_informational` could not help: it needs an IDENTIFIED address to
+    vouch, and an inbound link has none to give.
+
+    CONSTRAINTS, each the honest negative of its neighbour:
+    * only with a live link (``server._link_for``: never one that has begun
+      closing); with none every row keeps its fault and its exact remedy;
+    * only SILENCE (:func:`_silent_row`): a timeout or no answer before the
+      budget ran out. A REFUSAL proves something answered there and refused, so
+      the address really is wrong (its existing "its link is live" advice stays);
+      a malformed or unresolvable address is a config fault a live link does not
+      excuse (#4110 round 1, R1-5); a candidate this run never dialled is unproven
+      and proves nothing either way;
+    * a row another rule already claimed (scope, informational) is left alone;
+    * a PRIVATE address on a /16 this device itself holds keeps its fault (the
+      F9 counter-probe): from the same LAN that address is askable, so silence
+      there while the peer is up IS a path fault worth naming, link or not;
+    * reporting only: no dial, backoff or wire change.
+    The flipped row keeps its observed facts and gains ``informational`` plus
+    ``covered_by_link``; its remedies are cleared, because action items under an
+    ok row misread, and :func:`informational_clause` names the link instead.
+    """
+    if not link_live:
+        return
+    for row in rows:
+        if row["ok"] or str(row.get("check") or "") != "reachability":
+            continue
+        endpoint = str(row.get("endpoint") or "")
+        if not endpoint or not _silent_row(row):
+            continue
+        host = endpoint.rpartition(":")[0] or endpoint
+        if _private_block(host) is not None and not _off_network(host, own_addresses):
+            continue
+        row["ok"] = True
+        observed = row.setdefault("observed", {})
+        observed["informational"] = True
+        observed["covered_by_link"] = True
+        observed.setdefault("usable_elsewhere", [])
         if "remedies" in row:
             row["remedies"] = []
 
@@ -6605,6 +6775,12 @@ def _reachability_rows(
     # askable and did not lead; the two rules must not both claim a row).
     mark_out_of_scope(rows, own_addresses)
     mark_informational(rows)
+    # LAST: an address another answer already vouched for keeps that reading.
+    # Re-read AFTER the probe (R1-4): ``link`` above was taken before it, and a
+    # link that began closing meanwhile must not vouch.
+    mark_covered_by_link(
+        rows, link_live=link_is_live(server, member.device_id), own_addresses=own_addresses
+    )
     return rows, link
 
 

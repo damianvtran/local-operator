@@ -1,0 +1,44 @@
+{
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "audit_date": "2026-11-16",
+  "record_reference": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/record.json",
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "170903662c6e",
+    "also_independent_from_original_translator_session": "acf0a84cd992",
+    "actual_model_source": "Current host session-state explicitly names openai/gpt-6.1-sol; same auditor session resumed for first audit of newly changed source/targets.",
+    "fallback": {
+      "observed": false,
+      "requested_model": null,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/report.md",
+      "sha256": "f15cb8e3fb14cef376e7d4b90cd0c1714c11bd46b378fb846aedbc92eca734e1"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/audit.log",
+      "sha256": "37e8c760bb3b777cc9cc29526da305f8ba3061570e2a65d8e403f9c3706b52fb"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/ledger-receipt.json",
+      "sha256": "40760fdae26eab1223e377014c8eeefcbe04ee3e877f442b5619dcf5e13e1a39"
+    }
+  ],
+  "ledger_append": {
+    "applied": false,
+    "dry_run_exit_code": 0,
+    "expected_history_sha256": "035dad33e63cd7aee747a3dace81bc175470cff6cb435fc7df954eb7b7100513",
+    "receipt_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/ledger-receipt.json"
+  },
+  "evidence_classification": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "ledger-receipt.json": "append-ready proposed passing receipt"
+  }
+}

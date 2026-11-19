@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
@@ -82,6 +82,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
+    is_preserved_replay,
     is_resume_card,
 )
 from local_operator.compaction.marker import (
@@ -433,6 +434,60 @@ def _stamp_remote_prompt(message: Any) -> None:
 def _is_remote_prompt(message: Any) -> bool:
     payload = getattr(message, "provider_payload", None)
     return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
+
+
+#: ``provider_payload`` key on a user row naming the SURFACE its human input came
+#: from (ADR 0009 Decision 1, mobile repo ``docs/adr/0009-*``). Why it exists: the
+#: phone should hear about work it started, and the desktop about everything
+#: else, and no other record says which surface a turn came from (``origin.json``
+#: is the code path that created a directory, ``mesh.json`` the device). The
+#: value is decided by the runtime from the AUTHENTICATED connection
+#: (``server._input_surface_for``), never read off a frame, and defaults to
+#: ``tui`` for the in-process owner. Invisible to the model and to providers,
+#: like the remote-prompt stamp beside it.
+INPUT_SURFACE_KEY = "lop_input_surface"
+
+#: The routing vocabulary. ``unknown`` is the reading for a conversation with no
+#: stamped human input (a legacy row, a channel-only conversation) and routes as
+#: non-mobile, which errs quiet on the phone.
+INPUT_SURFACES = frozenset({"mobile", "remote", "desktop", "tui", "unknown"})
+
+
+def _input_surface(value: object, default: str = "tui") -> str:
+    """Clamp a surface to :data:`INPUT_SURFACES` (anything else is ``default``)."""
+    return value if isinstance(value, str) and value in INPUT_SURFACES else default
+
+
+def _stamp_input_surface(message: Any, surface: str) -> None:
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[INPUT_SURFACE_KEY] = _input_surface(surface)
+    message.provider_payload = payload
+
+
+def spooled_input_surface(line: Any) -> str:
+    """The surface a SPOOLED owner line carries (``serving._owner_sender``).
+
+    A line spooled across a runtime swap keeps the surface it would have had
+    live. A line from a build before the key reads ``unknown`` rather than
+    ``tui``: it may have come from the phone, and ``unknown`` errs quiet.
+    """
+    sender = getattr(line, "sender", None)
+    value = sender.get("input_surface") if isinstance(sender, Mapping) else None
+    return _input_surface(value, default="unknown")
+
+
+def _noop_answer_surface_undo() -> None:
+    """``Session.note_answer_surface``'s undo when the note changed nothing."""
+    return None
+
+
+def _input_surface_of(message: Any) -> str | None:
+    """The stamped surface of one row, or ``None`` when it carries no stamp."""
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(INPUT_SURFACE_KEY)
+    return value if isinstance(value, str) and value in INPUT_SURFACES else None
 
 
 #: Transcript custom entry carrying the PROFILE-TRUST EPISODE bit (host-only,
@@ -1394,6 +1449,19 @@ class _PeerArrival:
         self._event.set()
 
 
+class _DenseTailArgs(TypedDict, total=False):
+    """The dense-tail keywords of :meth:`Session._produce_summary`.
+
+    ``total=False`` because each is passed only when set (see
+    :meth:`Session._dense_tail_kwargs`): a duck-typed ``_produce_summary``
+    that predates them keeps its signature.
+    """
+
+    dense_tail: int
+    dense_previous_chars: int
+    dense_closed: bool
+
+
 @dataclass(frozen=True, slots=True)
 class _CompactionPlan:
     """One compaction pass, decided but not yet committed.
@@ -1433,6 +1501,27 @@ class _CompactionPlan:
     #: commit: ``_run_compaction`` never reads it, so a hint can never reach the
     #: summarizer or permanent history.
     advisor_hint: Any | None = None
+    #: Index into ``llm_history`` where the LIVE TASK carried on the archive's
+    #: tail edge starts, or ``None`` when no span changed carrier. When set,
+    #: ``llm_history[dense_tail_from:cut]`` is the span the task floor would
+    #: have kept raw; the commit hands its length to ``compact_to_archive`` so
+    #: it is replayed as plain text rather than paged (see
+    #: :meth:`Session._dense_tail_cut` for why and for the measurements).
+    #: Carried as an INDEX, not a count, because the byte-aware step may move
+    #: ``cut`` later after the plan decided this, and the span must follow it.
+    dense_tail_from: int | None = None
+    #: Trailing characters of the PREVIOUS archive's text that are the same
+    #: live task, still running (``Archive.live_tail_chars``). Non-zero only
+    #: when this pass continues a task whose opening request an earlier dense
+    #: pass archived, so ``task_boundary_floor`` had nothing to measure from;
+    #: ``dense_tail_from`` is then ``0`` (the whole summarized span continues
+    #: it). See :meth:`Session._dense_tail_cut`.
+    dense_tail_previous_chars: int = 0
+    #: The task floor was CLAMPED at its cap when it chose this pass's span:
+    #: the task is already wider than its protection. The span is carried on
+    #: this pass and not recorded as continuable, which is the horizon the raw
+    #: floor has (its anchor is cut away on exactly this pass).
+    dense_tail_closed: bool = False
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
     memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
@@ -3857,7 +3946,11 @@ class Session:
         #: inventory instead of the factory's gate-less view.
         self._knowledge_hooks: _KnowledgeHooks | None = None
         self._transcript = transcript
+        # Native producer handles only; never populated from retained/replayed
+        # messages. Completed consumers verify disk, not this runtime object.
+        self._file_provenance_state = None
         self._init_bridge_taint(inherited_bridge_taint)
+        self._init_community_taint()
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
         # its own). Anything raising here kills the runtime process before it
@@ -4068,6 +4161,40 @@ class Session:
         #: provenance: the pre-filter's touched-directory sweep only lists files modified
         #: at or after it.
         self._run_started_at: float = 0.0
+        #: ADR 0009 origin: the surface of the most recent HUMAN input admitted
+        #: into the current run (a stamped prompt/steer row, an ask answer, a live
+        #: approval or picker answer), or ``None`` for a run with none so far.
+        #: Reset at every pipeline head beside ``_run_started_at``.
+        self._run_input_surface: str | None = None
+        #: The conversation's LAST DRIVER, which a run with no human input (a
+        #: wake, a job result, a peer or channel message) inherits. ``None`` means
+        #: "not rebuilt yet"; the first run end rebuilds it from the transcript
+        #: (``_reconstruct_input_driver``) so a resumed conversation keeps it.
+        self._conversation_driver: str | None = None
+        #: Surfaces of queued-ask answers, keyed by ask id, noted by the control
+        #: server when the answer op arrives (``note_answer_surface``) and taken
+        #: when the ``ask_response`` row reaches ``_note_run_input``. In memory on
+        #: purpose: the answer and its delivery run happen in one runtime, and a
+        #: lost entry only means the run inherits the last driver (errs quiet).
+        self._ask_answer_surfaces: dict[str, str] = {}
+        #: Epoch ms the next ``needs_user`` window opens: one past the previous
+        #: run END (initialised to construction, so an ask restored from an
+        #: earlier process is never re-announced). It opens there rather than at
+        #: ``_run_started_at``:
+        #: a Team Bridge request ask is raised by the harness BETWEEN runs
+        #: (``_deliver_peer_message``'s idle arm, ``_retry_pending_bridge_issuances``),
+        #: so "opened during this run" would never announce it (ADR 0009 review
+        #: round 3, R3-1, the "opened since the previous run end" remedy). Each ask
+        #: still falls in exactly one window, so it is announced once.
+        #:
+        #: Seeded from the newest durable outcome marker
+        #: (``_seed_needs_user_window``): a runtime swap or resume must not drop
+        #: an ask raised between the previous runtime's last run end and this
+        #: construction (review round 1, m1). Read HERE, at construction, so the
+        #: seed is the PREVIOUS runtime's marker: any marker this runtime appends
+        #: (its own run ends, a republish) comes later and must not move it.
+        self._needs_user_constructed_ms: int = int(time.time() * 1000)
+        self._needs_user_window_ms: int = self._seed_needs_user_window()
         #: The session's last REAL typed request, kept across runs (NOT reset at the
         #: pipeline head, unlike ``_run_user_text``). A turn that resumes after an ANSWERED
         #: ask carries no typed row of its own -- the ``ask_response`` is the only input --
@@ -4306,6 +4433,11 @@ class Session:
         #: disposal that follows it. Released by ``end_drain``'s abandon arm,
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
+        #: One-shot wake fires a leaving runtime handed to its LIVE turn, by
+        #: ``(wake_id, occurrence)``, so a fire left parked past the turn's last
+        #: boundary is re-armed rather than spooled as text
+        #: (``_spool_parked_for_successor``). Empty except while draining.
+        self._live_final_wakes: dict[tuple[str, int], DueWake] = {}
         #: Declared by a ONE-SHOT host at entry
         #: (``Session.declare_one_shot_exit``, called from ``run_print_mode``;
         #: v3, 2026-09-30). The session then arms the departure pair itself in
@@ -5515,6 +5647,7 @@ class Session:
         # behaviour is exactly what it was before this was configurable.
         self.jobs = AsyncJobManager(
             on_job_complete=self._on_job_completed,
+            on_file_completed=self._file_job_completed,
             # One mutation seam persists resumability and publishes the live
             # canonical roster, including progress/cost/status changes.
             on_roster_change=self._schedule_subagent_persist,
@@ -10397,6 +10530,8 @@ class Session:
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
         owner_typed: bool = True,
+        _file_capture: Any = ...,
+        input_surface: str = "tui",
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -10494,6 +10629,10 @@ class Session:
         # FIFO before this acquire, or across the expansion's await) yields
         # instead of running one more body turn ahead of the person. Harness
         # rows (goal continuations) are not a person and are not marked.
+        if _file_capture is ...:
+            _file_capture = (
+                None if harness_injected else self._capture_file_input(text, producer_command_id)
+            )
         with contextlib.nullcontext() if harness_injected else self.person_prompt_waiting():
             if audio:
                 await self._refuse_audio_admission(audio)
@@ -10619,8 +10758,18 @@ class Session:
             elif input_path is not None:
                 extra["input_path"] = input_path
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
+            if not harness_injected:
+                self._file_owner().bind(user.id, _file_capture)
+                if producer_command_id:
+                    self._file_owner().admissions.pop(producer_command_id, None)
             if not owner_typed:
                 _stamp_remote_prompt(user)
+            # ADR 0009: which surface typed this, decided by the runtime from the
+            # connection (``input_surface``; ``tui`` for the in-process owner).
+            # A harness-minted row is not human input, so it carries no stamp and
+            # the run inherits the conversation's last driver.
+            if not harness_injected:
+                _stamp_input_surface(user, input_surface)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -10732,6 +10881,8 @@ class Session:
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        _file_capture: Any = ...,
+        input_surface: str = "tui",
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -10794,9 +10945,21 @@ class Session:
             extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
         elif input_path is not None:
             extra["input_path"] = input_path
+        if _file_capture is ...:
+            _file_capture = (
+                None if harness_injected else self._capture_file_input(text, producer_command_id)
+            )
         message = Message.user(text, images, audio=audio, documents=documents, **extra)
+        if not harness_injected:
+            self._file_owner().bind(message.id, _file_capture)
+            if producer_command_id:
+                self._file_owner().admissions.pop(producer_command_id, None)
         if not owner_typed:
             _stamp_remote_prompt(message)
+        # ADR 0009: a steer is human input, so it flips the run it lands in (a
+        # phone steer into a desk-started run makes that run mobile-origin).
+        if not harness_injected:
+            _stamp_input_surface(message, input_surface)
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -11714,6 +11877,8 @@ class Session:
             # A prompt spooled from a REMOTE connection keeps that provenance
             # (``serving.REMOTE_ORIGIN_SENDER_KEY``): never owner-typed here.
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
+            _file_capture=self._take_file_continuation(command_id),
+            input_surface=spooled_input_surface(line),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -11722,6 +11887,170 @@ class Session:
         if command_id:
             seen.add(command_id)
         return True
+
+    # -- ADR 0009 origin ------------------------------------------------------
+
+    def _note_run_input_surface(self, message: Any) -> None:
+        """Record the surface of one run input, when it is HUMAN input.
+
+        Origin is the surface of the MOST RECENT human input admitted into the
+        run (ADR 0009 Decision 1, option B): a stamped prompt or steer row, or a
+        person's answer to a queued ask whose answer op the control server
+        noted. Everything else (wakes, job results, peer and channel messages,
+        harness injections) leaves the run to inherit the last driver.
+        """
+        stamped = _input_surface_of(message)
+        if stamped is not None and getattr(message, "role", None) == "user":
+            self._run_input_surface = stamped
+            return
+        if ask_answer_is_person(message):
+            details = getattr(message, "details", None) or {}
+            ask_id = details.get("ask_id") if isinstance(details, Mapping) else None
+            surface = self._ask_answer_surfaces.pop(ask_id, None) if ask_id else None
+            if surface is not None:
+                self._run_input_surface = surface
+
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None]:
+        """The control server's record of WHO answered (ADR 0009, R10).
+
+        Returns an UNDO the server runs when the answer is then refused (review
+        round 1, m2), so a refused answer relabels nothing. The note itself
+        must precede the answer (see ``_answer_noting_surface``).
+
+        ``ask_id`` names a QUEUED ask: its answer reaches the run later as an
+        ``ask_response`` row, which picks this up in ``_note_run_input``. ``None``
+        is a live answer (an approval, a blocking picker) inside the run in
+        flight, which flips that run now. ``surface`` is derived by the server
+        from the authenticated connection, never from the frame.
+        """
+        clamped = _input_surface(surface, default="unknown")
+        if ask_id:
+            previous = self._ask_answer_surfaces.get(ask_id)
+            self._ask_answer_surfaces[ask_id] = clamped
+
+            def undo_queued() -> None:
+                # Only this note's own value is retracted: a later note for the
+                # same ask (another surface answering) stays.
+                if self._ask_answer_surfaces.get(ask_id) != clamped:
+                    return
+                if previous is None:
+                    self._ask_answer_surfaces.pop(ask_id, None)
+                else:
+                    self._ask_answer_surfaces[ask_id] = previous
+
+            return undo_queued
+        if self._is_streaming:
+            previous_run = self._run_input_surface
+            self._run_input_surface = clamped
+
+            def undo_live() -> None:
+                if self._run_input_surface == clamped:
+                    self._run_input_surface = previous_run
+
+            return undo_live
+        return _noop_answer_surface_undo
+
+    def _reconstruct_input_driver(self) -> str:
+        """The conversation's last driver, rebuilt from the transcript on resume.
+
+        Newest first: a stamped user row is that surface, and an attention
+        marker carrying ``origin`` is the origin a previous run ended with (that
+        covers runs driven by an ask answer, whose row carries no stamp). No
+        such entry, which is every conversation written before ADR 0009, is
+        ``unknown``. Never raises: unreadable history is ``unknown`` (errs quiet).
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+
+        try:
+            entries = self._transcript.entries()
+            for entry in reversed(entries):
+                if entry.type == ENTRY_CUSTOM:
+                    if entry.payload.get("custom_type") == ATTENTION_CUSTOM_TYPE:
+                        details = entry.payload.get("details")
+                        origin = details.get("origin") if isinstance(details, Mapping) else None
+                        if isinstance(origin, str) and origin in INPUT_SURFACES:
+                            return origin
+                    continue
+                message = _entry_to_message(entry)
+                if getattr(message, "role", None) != "user":
+                    continue
+                stamped = _input_surface_of(message)
+                if stamped is not None:
+                    return stamped
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("origin: could not rebuild the last driver", exc_info=True)
+        return "unknown"
+
+    def _run_origin(self) -> str:
+        """This run's origin: its own human input, else the inherited driver."""
+        if self._run_input_surface is not None:
+            return self._run_input_surface
+        if self._conversation_driver is None:
+            self._conversation_driver = self._reconstruct_input_driver()
+        return self._conversation_driver
+
+    def _run_needs_user(self, now: float | None = None) -> bool:
+        """Whether an ask NEW to this run's window is still open at its end.
+
+        ADR 0009 §3 (R2-1): a queued ask is durable, so every later wake, job
+        or peer run also ends with it open; counting "any open ask" would
+        re-push the same question on every background tick. So only an ask
+        whose ``created_at`` falls inside this run's window counts. The window
+        opens just past the PREVIOUS run's end (R3-1: a Team Bridge request ask
+        is raised by the harness between runs, and would otherwise never be
+        announced) and closes now; calling this CLOSES it, so it is called once
+        per run end. Both clocks are this process's wall clock, which
+        ``AskQueue`` stamps ``created_at`` from.
+        """
+        end_ms = int((now if now is not None else time.time()) * 1000)
+        start_ms = self._needs_user_window_ms
+        # The NEXT window opens one millisecond after this one closes, so the
+        # windows tile with no overlap: an ask whose ``created_at`` ties this
+        # run's end at millisecond resolution is counted here and never again.
+        self._needs_user_window_ms = end_ms + 1
+        records = self._open_ask_records(end_ms)
+        return any(start_ms <= int(record.get("created_at") or 0) <= end_ms for record in records)
+
+    def _seed_needs_user_window(self) -> int:
+        """Where this runtime's FIRST needs-you window opens.
+
+        Just past the newest durable outcome marker, else construction. Every
+        marker is appended after its run's window closed, so an ask counted by
+        an earlier runtime (``created_at`` <= that run end <= the marker) is
+        never counted again, while one raised after it (a Bridge issuance retried
+        by ``reconcile_asks`` on a deadline tick before a swap, with no turn
+        following) still falls in this window (review round 1, m1). Capped at
+        construction so the seed can only widen the old window, never narrow it.
+        A read failure keeps construction: routing must never cost a turn.
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+
+        seed = self._needs_user_constructed_ms
+        try:
+            entry = self._transcript.latest_custom_entry(ATTENTION_CUSTOM_TYPE)
+            if entry is not None and entry.ts:
+                seed = min(seed, int(float(entry.ts) * 1000) + 1)
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the outcome marker", exc_info=True)
+        return seed
+
+    def _open_ask_records(self, now_ms: int) -> list[dict[str, Any]]:
+        """The queue's OPEN asks (``asks.store.open_asks``), or ``[]``.
+
+        ``[]`` while the blocking arm is live (no queue: an ask there blocks the
+        run, which therefore cannot end on it) and on any read failure, which
+        errs quiet. Its own seam so the window rule above is testable apart
+        from the queue's delivery machinery.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        try:
+            return list(queue.open_records(now_ms))
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the ask queue", exc_info=True)
+            return []
 
     def _steer_is_live_queued(self, command_id: str) -> bool:
         """Whether a steer with this producer id is already owed by this process.
@@ -12182,7 +12511,11 @@ class Session:
                 and bool(row_id)
                 and not self._transcript.has_entry(row_id)
             )
-            await self._transcript.append_message(message, producer_command_id=producer_command_id)
+            await self._transcript.append_messages(
+                [message],
+                producer_command_id=producer_command_id,
+                _file_captures=self._file_owner().take([message]),
+            )
             if is_new_bridge_row:
                 try:
                     self._maybe_raise_bridge_ask(message)
@@ -13158,14 +13491,27 @@ class Session:
         from local_operator.team_bridge import ask_issuance as ledger_mod
 
         directory = asks_store.session_dir(self._config_dir, self.session_id)
+        now = _time.time()
         try:
+            # A delivered bridge row is a CustomMessage, persisted as a
+            # ``message`` row (payload kind ``custom``) — never a ``custom``
+            # entry, so ``custom_messages`` is what makes this scan see it at
+            # all. ``min_ts`` is the repair's own 24 h window pushed into the
+            # walk: this runs synchronously on the event loop at every turn
+            # start, ask op and deadline tick, and without the bound its cost
+            # tracked the journal's whole size (1.07 s warm on a 688 MB one,
+            # while matching nothing). With both, it reads back only as far as
+            # the window or the 20th row, whichever comes first.
             rows = transcript_mod.read_custom_entries(
-                directory, TEAM_BRIDGE_MESSAGE_TYPE, max_rows=20
+                directory,
+                TEAM_BRIDGE_MESSAGE_TYPE,
+                max_rows=20,
+                custom_messages=True,
+                min_ts=now - 86400,
             )
         except Exception:  # noqa: BLE001 — repair is best-effort, never a crash
             return
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
-        now = _time.time()
         for entry in rows:
             if now - float(getattr(entry, "ts", 0.0) or 0.0) > 86400:
                 continue
@@ -16354,6 +16700,11 @@ class Session:
         """
         if self._yolo:
             return None
+        from local_operator.harness.bridge_egress import (
+            ApprovalGrant,
+            session_grant_covers,
+        )
+
         base = self._request_approval
         declared = self._declared_tools
         if base is None or declared is None or not self._declared_tools_unattended:
@@ -16367,7 +16718,13 @@ class Session:
             taint_raised: bool = False,
             bridge_latched: bool = False,
         ) -> bool:
-            if tool_name in declared:
+            if tool_name in declared and session_grant_covers(
+                ApprovalGrant(auto=True), title=tool_name
+            ):
+                # A person-only gate is never answered by declaration: its title
+                # holds a space no tool name can, so this is belt and braces for
+                # a future gate whose title could be declared (review R1-2).
+                #
                 # A declared unattended inventory approves by declaration even
                 # in a Team-Bridge-latched session: the S-51 carve-out, left
                 # as is (accepted risk outside ask mode).
@@ -17880,6 +18237,10 @@ class Session:
                         # pre-notify marker (key absent) means notify=1 — its
                         # behaviour, verbatim.
                         notify=bool(saved.get("notify", True)),
+                        # ADR 0009: replayed verbatim too; absent reads as
+                        # ``unknown`` origin and no open ask.
+                        origin=str(saved.get("origin") or ""),
+                        needs_user=bool(saved.get("needs_user", False)),
                     ),
                     timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                 )
@@ -18153,6 +18514,7 @@ class Session:
         # distinguished: they require the approval card rather than granting.
         # The assistant/tool rows a session appends itself never reach here.
         input_class = _profile_input_class(message)
+        self._note_run_input_surface(message)
         if input_class == "untrusted":
             self._run_untrusted_input = True
         elif input_class == "consent":
@@ -19565,6 +19927,9 @@ class Session:
         # errors notify, and interrupted stays suppressed by the readers' kind
         # filters whatever this says.
         notify = bool(getattr(outcome, "notify", True))
+        # ADR 0009: read off the same end event, never re-derived here.
+        origin = str(getattr(outcome, "origin", "") or "")
+        needs_user = bool(getattr(outcome, "needs_user", False))
         token = self._attention_run_token or str(uuid.uuid4())
         # The DURABLE reason. For a cut-off it is the harness-authored cause
         # sentence, never the live notice's longer framing: this string is what
@@ -19600,7 +19965,29 @@ class Session:
             # narration text and ``not messages`` alone would miss it. Errors
             # never reach this branch (``kind == "complete"``), which keeps
             # R3's "always notifies" for a quiet batch whose re-entry fails.
-            if kind == "complete" and (not messages or delegated or self._run_ended_quiet(outcome)):
+            # ADR 0009: a quiet or textless end that leaves an ask opened in its
+            # window still open is NOT quiet for the phone (``needs_user``
+            # bypasses ``notify``), so it publishes its row; ``notify`` is forced
+            # false so the desktop's completion banner stays silent, as the
+            # quiet end asked (the ask keeps its own desktop banner).
+            #
+            # The DELEGATED arm gets the same exception (review round 1, M1): a
+            # run that opens an ask AND leaves a ``task`` job running has already
+            # closed its needs-you window (``_run_needs_user``), so suppressing its
+            # row here would lose the ask for good — the job_result run's window
+            # starts after it. Its desktop completion banner stays silent (the
+            # delegated parent is not finished), so ``notify`` is forced false.
+            if (
+                kind == "complete"
+                and needs_user
+                and (not messages or self._run_ended_quiet(outcome) or delegated)
+            ):
+                notify = False
+            if kind == "complete" and (
+                (not messages and not needs_user)
+                or (delegated and not needs_user)
+                or (self._run_ended_quiet(outcome) and not needs_user)
+            ):
                 await self._transcript.append_custom(
                     ATTENTION_CUSTOM_TYPE,
                     {
@@ -19612,7 +19999,11 @@ class Session:
                 return
             # Failure may precede the first assistant message. Its durable outcome
             # marker, not an unrelated previous answer, is the viewable anchor.
-            anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
+            # A ``needs_user`` run with no text of its own (an ask raised, then
+            # ``no_reply``) anchors on its outcome marker the same way.
+            anchor = (
+                messages[-1].id if kind == "complete" and messages else provisional_anchor(token)
+            )
             # The journal precedes publication: runtime death between these writes
             # is repaired idempotently on resume, without fabricating a new token.
             await self._transcript.append_custom(
@@ -19628,6 +20019,11 @@ class Session:
                     # (bootstrap/republish, both of which replay this marker)
                     # re-lands the same row instead of a defaulted one.
                     "notify": notify,
+                    # ADR 0009: durable for the same reason, and the marker's
+                    # ``origin`` is also how a resumed session rebuilds the
+                    # conversation's last driver (``_reconstruct_input_driver``).
+                    "origin": origin,
+                    "needs_user": needs_user,
                 },
             )
             try:
@@ -19650,6 +20046,8 @@ class Session:
                             reason=reason,
                             cause=cause,
                             notify=notify,
+                            origin=origin,
+                            needs_user=needs_user,
                         ),
                         timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                     )
@@ -20379,6 +20777,17 @@ class Session:
             # ``_publish_attention_outcome`` reads it back rather than
             # re-deriving it. One value, four readers, decided by nobody else.
             event = event.model_copy(update={"notify": self._finalize_attention_notify(event)})
+            # ADR 0009: WHERE the outcome goes is decided by origin, and whether
+            # it needs the user by an ask opened in this run's window. Both are
+            # stamped here, at the same choke point as ``notify`` and computed
+            # independently of it: ``notify`` is false for exactly the runs that
+            # end on an open ask without a typed prompt (a wake), which are the
+            # ones the phone must hear about when the desk is away.
+            origin = self._run_origin()
+            needs_user = self._run_needs_user()
+            if self._run_input_surface is not None:
+                self._conversation_driver = self._run_input_surface
+            event = event.model_copy(update={"origin": origin, "needs_user": needs_user})
             self._attention_outcome = event
             # Turn supplements (§2.1): freeze the facts the runtime subscriber needs, while
             # they still exist -- ``_run_triggers`` and the accumulator are reset at the
@@ -21011,6 +21420,9 @@ class Session:
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()
+        # ADR 0009: origin is per run, so the previous run's human input never
+        # labels this one (a wake after a phone prompt inherits it instead).
+        self._run_input_surface = None
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
@@ -21469,6 +21881,77 @@ class Session:
         ]
         self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
         return stranded
+
+    def _bridge_history_transform(self, messages: list[Any]) -> list[Any]:
+        """Attach bounded replay excerpts to recent Team Bridge journal cards.
+
+        WHY here: the excerpt is a STANDING decision (live owner, consent,
+        designation) and only the session holds the runtime that can prove it.
+        Re-evaluated on every physical provider call, so a revoked owner loses
+        excerpts at the next request (design §5, property C). It never mutates
+        the context: cards get request-local copies (``card_projection``).
+        Any failure is "no excerpts", which is today's ids-only marker.
+        """
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None or not any(
+            getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE
+            for message in messages
+        ):
+            return messages
+        try:
+            from local_operator.team_bridge.authority import authority_fence
+            from local_operator.team_bridge.card_projection import (
+                attach_history_excerpts,
+            )
+            from local_operator.team_bridge.display_bodies import (
+                DisplayBodyStore,
+                purge_if_bridge_off,
+                radient_signed_in,
+            )
+            from local_operator.team_bridge.store import _owner_key
+
+            refusal = authority_fence(runtime)
+            if refusal is not None:
+                code = refusal.get("code")
+                if code == "feature_off":
+                    # A torn config read also answers ``feature_off``; only a
+                    # definite OFF is an opt-out worth a purge.
+                    purge_if_bridge_off(Path(runtime.config_dir))
+                elif code == "consent_revoked":
+                    # The consent-revoke path as THIS process sees
+                    # it: the retained bodies lost their standing, so they go
+                    # now rather than at the next card view (review R3 / QA
+                    # Q1). ``owner_changed`` is deliberately not here: the new
+                    # owner's rows are not this session's to delete, and an
+                    # account switch already purges at enrollment commit.
+                    DisplayBodyStore(Path(runtime.config_dir)).purge()
+                return messages
+            if not radient_signed_in(
+                runtime.config_dir, getattr(runtime.owner, "credential_id", None)
+            ):
+                # Enrollment and consent outlive ``lop logout radient``; the
+                # sign-in itself is part of the standing (QA Q1). The logout
+                # hook purged the rows already; this withholds excerpts even
+                # if a row survived (fail closed: the ids-only marker).
+                return messages
+            return attach_history_excerpts(
+                messages, config_dir=runtime.config_dir, owner_key=_owner_key(runtime.owner)
+            )
+        except Exception:  # noqa: BLE001 — excerpts are optional; never fail a request
+            logger.debug("bridge: history excerpts skipped", exc_info=False)
+            return messages
+
+    def _compose_transform_context(self) -> Any:
+        """The loop's one ``transform_context``: excerpts first, then the live frame."""
+        frame = self._pending_body_turn
+        if getattr(self, "bridge_runtime", None) is None:
+            return frame.transform if frame is not None else None
+
+        def transform(messages: list[Any]) -> list[Any]:
+            shaped = self._bridge_history_transform(messages)
+            return frame.transform(shaped) if frame is not None else shaped
+
+        return transform
 
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
@@ -22018,15 +22501,15 @@ class Session:
                 # calls this once per PHYSICAL request, so a turn that makes
                 # several calls gets the same cached bytes every time (the
                 # per-call invariant lives in ``PendingTurn.for_call``).
-                transform_context=(
-                    self._pending_body_turn.transform
-                    if self._pending_body_turn is not None
-                    else None
-                ),
+                # Replay excerpts for past bridge cards ride the same hook
+                # (``_compose_transform_context``); without a bridge runtime it
+                # is exactly the frame's transform (or None), as before.
+                transform_context=self._compose_transform_context(),
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
                 bind_nested_diff=self._bind_nested_diff,
+                file_provenance=self._file_provenance_hook,
                 divergence_judge=self._divergence_judge,
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
@@ -22438,6 +22921,114 @@ class Session:
             # turn that never reached one again (see ``_flush_parked_deliveries``).
             await self._flush_parked_deliveries()
 
+    async def _spool_parked_for_successor(self, *, disposing: bool = False) -> None:
+        """Hand peer messages and wakes parked past the last boundary to the successor.
+
+        The leaving-runtime twin of the flush below. A turn on a draining
+        runtime still takes peer messages and its own wakes (the node2
+        incident, 2026-11-17: holding them for ~40 min behind one busy turn was
+        the defect), and the busy arms park them on the steering queue for "the
+        next tool boundary". A turn that ends first has no next boundary, and
+        opening a new turn for them is exactly what a leaving runtime must not
+        do — so they go to the inbox the successor drains into its first turn
+        (``process._drain_inbox_into``), with ``wake=True`` because each was a
+        delivery somebody asked to be acted on.
+
+        Only wake and peer ``CustomMessage`` rows are taken; everything else
+        (plain steers, asks, monitors) keeps its place and its pre-existing
+        handling. A peer row carries its own ``message.id`` so the successor's
+        ``receive_peer_message`` duplicate gate answers a second copy instead of
+        appending it twice. Never raises: this runs in the turn's ``finally``.
+
+        EVERY ROW GOES THROUGH ``inbox.append_for_successor`` (review round 1,
+        R1-1), the vehicle the admission-time spool
+        (``ServingSessionHandle._spool_for_successor``) uses: it records the
+        owed turn (``wakes/spooled/<sid>.json``) BEFORE the append and raises
+        the supervisor's reader. A plain ``append_inbox`` wrote a row nothing
+        was obliged to read — on a headless session the runtime exits at idle
+        and no successor is ever started for it (the 2026-09-21 class
+        ``inbox.SPOOL_RECEIPT_WAKE`` documents).
+
+        A ONE-SHOT (``due.final``) wake keeps its re-arm: the live arm of
+        ``_spool_wake_to_inbox`` remembers the ``DueWake`` it handed the turn,
+        and here that occurrence is re-armed through ``_queue_wake_rearm``
+        exactly as an idle fire would have been, so the id the user knows stays
+        cancellable and ``hand_wakes_to_successor`` writes it at the exit.
+        ``disposing=True`` (the call from ``_dispose_impl``) skips the re-arm:
+        a disposal may come after the exit's handover already ran, or with no
+        handover at all (the signal drain), so a hold placed then could be
+        written by nobody — the owed text row is the one durable outcome there.
+        """
+        from local_operator.harness.message_types import PEER_DELIVERABLE_CUSTOM_TYPES
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import InboxLine, append_for_successor
+        from local_operator.wakes.spooled import await_spool_write
+
+        kept: list[AgentMessage] = []
+        taken: list[CustomMessage] = []
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            if isinstance(item, CustomMessage) and (
+                item.custom_type == WAKE_PROMPT_MESSAGE_TYPE
+                or item.custom_type in PEER_DELIVERABLE_CUSTOM_TYPES
+            ):
+                taken.append(item)
+            else:
+                kept.append(item)
+        for item in kept:
+            self._steering_queue.put_nowait(item)
+        # Every live-handed one-shot is settled by this pass or was already
+        # consumed by a boundary; either way the memo must not outlive it.
+        live_finals: dict[tuple[str, int], DueWake] = getattr(self, "_live_final_wakes", {})
+        self._live_final_wakes = {}
+        if not taken:
+            return
+        directory = getattr(self._transcript, "directory", None)
+        for message in taken:
+            try:
+                if message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+                    details = message.details or {}
+                    due = live_finals.get(
+                        (str(details.get("wake_id", "")), int(details.get("occurrence") or 0))
+                    )
+                    if due is not None and not disposing and self._queue_wake_rearm(due):
+                        continue
+                    await self._spool_parked_wake(message, for_successor=True)
+                    continue
+                details = message.details or {}
+                if directory is None:
+                    logger.warning("parked peer message %s could not be spooled", message.id)
+                    continue
+                custom_type = (
+                    message.custom_type if message.custom_type != PEER_MESSAGE_MESSAGE_TYPE else ""
+                )
+                await await_spool_write(
+                    append_for_successor,
+                    config_dir(),
+                    Path(directory),
+                    InboxLine(
+                        text=str(details.get("body") or details.get("text") or ""),
+                        sender=dict(details.get("sender") or {}),
+                        mode="mailbox",
+                        written_at=time.time(),
+                        wake=True,
+                        message_id=str(message.id or ""),
+                        custom_type=custom_type,
+                        # The bridge locator, which the successor cannot
+                        # re-derive (H5 F3; review round 1, R1-5) — the same
+                        # carriage the admission-time spool makes.
+                        bridge_meta=dict(details.get("bridge") or {}),
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — the turn's finally must not die here
+                logger.warning(
+                    "parked delivery %s could not be spooled while draining",
+                    getattr(message, "id", ""),
+                    exc_info=True,
+                )
+        self._courtesy_wake_count = 0
+        self.refresh_frontend_state()
+
     async def _flush_parked_deliveries(self) -> None:
         """Hand over what a busy latch parked, now that the turn has ended.
 
@@ -22514,6 +23105,14 @@ class Session:
         would cost the busy arms one shared sentence. Recorded here so the
         next reader does not re-derive the mismatch as a bug.
         """
+        if self._leaving_deliveries and not self._disposed and not self._one_shot_exit:
+            # A DRAINING RUNTIME NOW PARKS PEER MESSAGES AND WAKES HERE: they are
+            # delivered into its live turn rather than spooled
+            # (``ServingSessionHandle._admits_into_live_turn``,
+            # ``_spool_wake_to_inbox``), so one that lands past the turn's last
+            # boundary would otherwise sit in memory until the exit disposes it.
+            await self._spool_parked_for_successor()
+            return
         if self._disposed or self._leaving_deliveries or self._one_shot_exit:
             return
         drained: list[AgentMessage] = []
@@ -23235,6 +23834,66 @@ class Session:
                 "bridge taint latch row write failed; latch held in memory", exc_info=True
             )
 
+    # -- Community read taint (RFC v2.4 §5.9; community/taint.py) ---------------
+
+    def _init_community_taint(self) -> None:
+        """Own the session's "read community content" flag, fed from durable commits.
+
+        The bridge latch's wiring, one source narrower: every transcript commit
+        is observed so a ``community_read`` result is seen whatever path
+        appended it, and the backstop scan reads the journal from row 0 — which
+        a resume, a fork (it copies ``transcript.jsonl``) and a ``/move``
+        replica all load. Compaction appends a marker and never rewrites rows,
+        so it cannot lift the flag; only ``/new`` or a fresh session starts
+        clean.
+        """
+        from local_operator.community.taint import CommunityTaint
+
+        transcript = self._transcript
+
+        def journal() -> list[tuple[str, dict[str, Any]]]:
+            return [(entry.type, entry.payload) for entry in transcript.entries()]
+
+        self._community_taint = CommunityTaint(entries=journal)
+        self._community_taint_row_task: asyncio.Task[None] | None = None
+        subscribe = getattr(transcript, "subscribe_commits", None)
+        if subscribe is not None:
+            subscribe(self._on_community_taint_commit)
+
+    @property
+    def community_tainted(self) -> bool:
+        """Whether this session has read community content. Fail-closed."""
+        return self._community_taint.tainted
+
+    def _on_community_taint_commit(self, entries: Any, _source: Any = None) -> None:
+        taint = self._community_taint
+        taint.observe_entries((entry.type, entry.payload) for entry in entries)
+        if taint.tainted and not taint.row_present:
+            task = self._community_taint_row_task
+            if task is not None and not task.done():
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("community taint row not written: no running loop")
+                return
+            self._community_taint_row_task = loop.create_task(self._write_community_taint_row())
+
+    async def _write_community_taint_row(self) -> None:
+        from local_operator.community.taint import COMMUNITY_TAINT_ROW_TYPE
+
+        taint = self._community_taint
+        if taint.row_present:
+            return
+        if self._transcript.latest_custom_entry(COMMUNITY_TAINT_ROW_TYPE) is not None:
+            taint.row_present = True
+            return
+        try:
+            # The commit observer sees this row too and sets ``row_present``.
+            await self._transcript.append_custom(COMMUNITY_TAINT_ROW_TYPE, taint.row_details())
+        except Exception:  # noqa: BLE001 - the in-memory flag stays set; warned
+            logger.warning("community taint row write failed; flag held in memory", exc_info=True)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -23284,6 +23943,7 @@ class Session:
             ancestor_session_ids=self._ancestor_session_ids(),
             bridge_taint=self._bridge_taint,
             inherited_bridge_taint=self._bridge_taint.inherited,
+            community_taint=self._community_taint,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             # On a CHILD this resolves to the parent's title (see
@@ -23322,6 +23982,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The BASE gate, kept under --yolo, for person-only cards a tool
+            # raises itself (a community post): yolo skips the tool gate, not
+            # the person (the profile save's route, ``_request_approval``).
+            person_approval=self._request_approval,
             # The host's consent seam for tool-issued ACCOUNT writes. Held on
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
@@ -23614,6 +24278,7 @@ class Session:
         from local_operator.harness.subagent import ChildSurface, run_subagent
         from local_operator.harness.verifier import (
             CANCEL_JOIN_S,
+            COMMAND_BUDGET_REFUSAL,
             REQUEST_BUDGET_REFUSAL,
             VERIFIER_ROLE,
             VerdictStatus,
@@ -23628,6 +24293,8 @@ class Session:
             verifier_profile,
         )
         from local_operator.harness.verifier_evidence import (
+            TYPED_COMMAND_BUDGET_REFUSAL,
+            TYPED_REQUEST_BUDGET_REFUSAL,
             VerifierEvidence,
             assess_completion,
         )
@@ -23640,6 +24307,11 @@ class Session:
             )
         limits = limits or VerifierLimits()
         started = time.monotonic()
+        # The budget cue is the last thing a capped child reads before it
+        # answers, so it must ask for the format ``decode`` below reads.
+        typed = typed_evidence is not None
+        command_cue = TYPED_COMMAND_BUDGET_REFUSAL if typed else COMMAND_BUDGET_REFUSAL
+        request_cue = TYPED_REQUEST_BUDGET_REFUSAL if typed else REQUEST_BUDGET_REFUSAL
 
         def decode(text: str | None) -> tuple[VerdictStatus, str]:
             return (
@@ -23740,7 +24412,7 @@ class Session:
             # the time they run) -- host or the child's own -- are refused
             # with the cue to answer, so the one request past the cap is spent
             # on the verdict.
-            return REQUEST_BUDGET_REFUSAL if state["requests"] >= cap_requests else None
+            return request_cue if state["requests"] >= cap_requests else None
 
         try:
             unsubscribe = self.subscribe_requests(observe)
@@ -23755,6 +24427,7 @@ class Session:
             on_exhausted=lambda: hit("commands"),
             refuse_when=request_budget_spent,
             on_result=typed_evidence.record_result if typed_evidence is not None else None,
+            command_refusal=command_cue,
         )
         # ``readonly_shell`` confines this launch's ``bash`` by the launch
         # itself, never by the ``verifier`` name (an operator's registry role
@@ -23977,6 +24650,182 @@ class Session:
             logger.warning("nested diff binding failed for %s", tool_name)
             return False
         return True
+
+    def _file_owner(self):
+        from local_operator.session.file_provenance import OwnerProvenance
+
+        if self._file_provenance_state is None:
+            self._file_provenance_state = OwnerProvenance(
+                self._transcript,
+                config_root=self._config_dir,
+                cwd=Path(os.path.abspath(self._cwd)),
+                home=Path.home(),
+            )
+        return self._file_provenance_state
+
+    def _capture_file_input(self, text: str, command_id: str | None = None):
+        """Synchronous metadata freeze BEFORE any admission queue/spool.
+
+        Locality is not proof eligibility: an authorized remote drive/phone
+        prompt is a genuine owning-runtime admission too, while owner_typed
+        retains its separate existing account/deletion-protection meaning.
+        """
+        from local_operator.session.file_provenance import text_candidates
+
+        owner = self._file_owner()
+        return (
+            owner.admit(text, command_id)
+            if command_id
+            else owner.capture("user", text_candidates(text))
+        )
+
+    def _take_file_continuation(self, command_id: str):
+        # No in-memory ticket after runtime loss => unknown, never stat-at-drain.
+        return self._file_owner().continuation(command_id)
+
+    async def _file_provenance_hook(self, stage: str, value: Any, facts: Any) -> None:
+        """Awaited native harness producer/binder, not an analytics observer."""
+        from itertools import chain
+
+        from local_operator.session.file_provenance import (
+            argument_candidates,
+            native_result_candidates,
+        )
+
+        try:
+            owner = self._file_owner()
+            if stage == "assistant":
+                owner.capture_message(value)
+            elif stage == "executing":
+                from hashlib import sha256
+
+                candidates = list(argument_candidates(facts["tool"], facts["arguments"]))
+                allowed = owner.call_references.get(value.id)
+                references = [
+                    {"digest": sha256(c.reference.encode()).hexdigest(), "locator": c.locator}
+                    for c in candidates
+                    if allowed is None
+                    or (sha256(c.reference.encode()).hexdigest(), c.locator) in allowed
+                ]
+                call_event = CustomMessage(
+                    custom_type="file_provenance_native_call_v1",
+                    details={
+                        "hidden": True,
+                        "call_id": value.id,
+                        "tool": facts["tool"],
+                        "references": references,
+                    },
+                )
+                input_ticket = owner.capture("tool_call", candidates, cwd=Path(facts["cwd"]))
+                input_ticket.call_id = value.id
+                owner.native_calls[value.id] = (call_event, input_ticket)
+                facts["call_event"] = call_event
+                facts["references"] = references
+            elif stage == "executed":
+                # Capture output arguments immediately after the real executor,
+                # before result copies, post hooks or queued completion events.
+                ticket = owner.capture(
+                    "tool_completion",
+                    chain(
+                        argument_candidates(facts["tool"], facts["arguments"]),
+                        native_result_candidates(facts["tool"], facts["result"].details),
+                    ),
+                    cwd=Path(facts["cwd"]),
+                )
+                native_call = owner.native_calls.get(value.id)
+                ticket.call_id = value.id
+                ticket.origin_id = owner.call_sources.pop(value.id, None) or (
+                    native_call[0].id if native_call else None
+                )
+                owner.calls[value.id] = (facts, ticket)
+                owner.call_references.pop(value.id, None)
+            elif stage == "result":
+                captured = owner.calls.pop(facts.tool_call_id, None)
+                if captured is not None:
+                    owner.bind(value.id, captured[1])
+                owner.native_calls.pop(facts.tool_call_id, None)
+            elif stage == "nested":
+                captured = owner.calls.pop(value.id, None)
+                if captured is None:
+                    return
+                native, ticket = captured
+                # A nested tool has no ordinary tool row. This host-created
+                # source event is awaited before arbitrary cell code sees it;
+                # a cell-returned lookalike has no native capture ticket.
+                message = CustomMessage(
+                    custom_type="file_provenance_native_v1",
+                    details={
+                        "hidden": True,
+                        "tool": native["tool"],
+                        "call_id": value.id,
+                        "outer_call_id": facts["outer_call_id"],
+                        "references": (
+                            [
+                                {"digest": f.reference_digest, "locator": f.locator}
+                                for f in ticket.files
+                            ]
+                            if ticket
+                            else []
+                        ),
+                    },
+                )
+                native_call = owner.native_calls.pop(value.id, None)
+                if native_call is None:
+                    return
+                call_event, input_ticket = native_call
+                input_ticket.outer_call_id = facts["outer_call_id"]
+                owner.bind(call_event.id, input_ticket)
+                if ticket is not None:
+                    ticket.origin_id = call_event.id
+                    ticket.outer_call_id = facts["outer_call_id"]
+                    owner.bind(message.id, ticket)
+                messages = [call_event, message]
+                await self._transcript.append_messages(
+                    messages, _file_captures=owner.take(messages)
+                )
+        except Exception:
+            # Ordinary transcript/tool delivery survives provenance failure.
+            # This is unknown evidence, never a deferred target restat/retry.
+            logger.debug("native file provenance unavailable", exc_info=True)
+
+    async def _file_job_completed(self, job: Any, native: Any) -> None:
+        """Freeze at FIRST native completion, not wait/roster/on-delivery replay."""
+        from local_operator.session.file_provenance import argument_candidates
+
+        owner = self._file_owner()
+        from hashlib import sha256
+
+        allowed = {(r["digest"], r["locator"]) for r in native.get("references", [])}
+        ticket = owner.capture(
+            "job_completion",
+            (
+                c
+                for c in argument_candidates(native["tool"], native["arguments"])
+                if (sha256(c.reference.encode()).hexdigest(), c.locator) in allowed
+            ),
+            cwd=Path(native["cwd"]),
+        )
+        call_event = native.get("call_event")
+        if not isinstance(call_event, CustomMessage):
+            return
+        ticket.origin_id = call_event.id
+        ticket.call_id, ticket.job_id = native["call_id"], job.id
+        message = CustomMessage(
+            custom_type="file_provenance_native_v1",
+            details={
+                "hidden": True,
+                "job_id": job.id,
+                "call_id": native["call_id"],
+                "tool": native["tool"],
+                "references": [
+                    {"digest": f.reference_digest, "locator": f.locator} for f in ticket.files
+                ],
+                "unproven": list(ticket.unknown),
+            },
+        )
+        owner.bind(message.id, ticket)
+        messages = [call_event, message]
+        await self._transcript.append_messages(messages, _file_captures=owner.take(messages))
 
     def _capture_prepared_write(self, call: ToolCall, result: ToolResult) -> None:
         """Private exact executed bytes; never persisted or passed to a provider.
@@ -26974,7 +27823,9 @@ class Session:
         # boundary while avoiding an fsync for every already-paired result.
         # A latched checkpoint rides THIS commit, so the record and its batch
         # are never split (see `_persist_new_messages`).
-        await self._transcript.append_messages(fresh, checkpoint=checkpoint)
+        await self._transcript.append_messages(
+            fresh, checkpoint=checkpoint, _file_captures=self._file_owner().take(fresh)
+        )
         if checkpoint is not None:
             self._checkpoint_pending = False
 
@@ -28417,6 +29268,8 @@ class Session:
         # This changes the CUT, not the TRIGGER: it runs for every pass,
         # advisory or not, and introduces no second gate.
         keep_recent = settings.keep_recent_tokens
+        task_anchor_missing = False
+        task_floor_clamped = False
         boundary_floor: Any = getattr(compaction_api, "task_boundary_floor", None)
         if parked_hint is not None:
             # IDLE PASS. The task floor measures "since the last genuine user
@@ -28439,12 +29292,15 @@ class Session:
                 for message in self._context.messages
                 if isinstance(message, Message) and message.role == "user"
             }
-            floor_value: Any = boundary_floor(
-                llm_history,
-                genuine_user_ids,
-                cap=self._advisor_floor_cap(settings),
-            )
+            floor_cap = self._advisor_floor_cap(settings)
+            floor_value: Any = boundary_floor(llm_history, genuine_user_ids, cap=floor_cap)
             keep_recent = max(keep_recent, int(floor_value))
+            # ``0`` is the floor saying there is NO operator turn left in this
+            # history to measure a task from (a positive cap never clamps a
+            # real span to zero); AT the cap, the task is wider than the floor
+            # protects. Both are read again at (2b').
+            task_anchor_missing = int(floor_value) == 0
+            task_floor_clamped = floor_cap > 0 and int(floor_value) >= floor_cap
         if advisor_hint is not None:
             # Clamped with the SAME cap the local floor uses. Uncapped, a wide
             # but perfectly legal hint turns "keep more" into "never compact":
@@ -28543,6 +29399,50 @@ class Session:
                 tokens_after=local_estimate,
             )
 
+        # (2b') Dense carry of the live task. Only the automatic task floor
+        # moves the CUT: an advisory (live or parked) is a semantic "this
+        # must survive as it is" and keeps its raw window exactly as before, so
+        # the advisor's widen-only guarantee and its reclaim bookkeeping mean
+        # what they meant. Snapcompact only: context-full has no verbatim tail,
+        # and handing the task to an LLM summary would paraphrase it.
+        dense_tail_from: int | None = None
+        dense_tail_previous_chars = 0
+        dense_tail_closed = False
+        if strategy == "snapcompact" and parked_hint is None:
+            if advisor_hint is None and keep_recent > settings.keep_recent_tokens:
+                dense_cut = await self._dense_tail_cut(
+                    compaction_api, llm_history, cut, settings.keep_recent_tokens
+                )
+                if dense_cut is not None:
+                    dense_tail_from, cut = cut, dense_cut
+                    dense_tail_closed = task_floor_clamped
+            elif task_anchor_missing:
+                # THE SAME TASK, ONE PASS LATER. A dense pass archives the
+                # task's opening request with the task, so here the floor has
+                # no operator turn to measure from and the cut is already
+                # plain recency. If the previous archive recorded a protected
+                # live tail, everything this pass summarizes continues it:
+                # keep both on the new tail (bounded by ``_dense_tail_cap``)
+                # instead of letting the earlier steps fall into the paged
+                # middle after a single pass (agent review round 1, F1). A new
+                # operator turn gives the floor an anchor again, takes the
+                # branch above, and releases the earlier task. The record is
+                # absent once the task has outgrown the bound (see
+                # ``Archive.live_tail_chars``), and this pass is then the
+                # plain recency pass it is today.
+                #
+                # An ADVISED pass takes this branch too. The hint decides the
+                # raw window and that is untouched (the cut is not moved
+                # here); what the pass archives is still the same task, and
+                # being advised is no reason to drop its earlier steps into
+                # the paged middle (agent review round 2, N2). An idle pass
+                # (``parked_hint``) does not: its advisor re-anchored on the
+                # still-open work of a parked session, and the floor is not
+                # computed for it.
+                dense_tail_previous_chars = self._previous_live_tail_chars()
+                if dense_tail_previous_chars > 0:
+                    dense_tail_from = 0
+
         # (2c) Byte-aware cut. The cut above is ruled in TOKENS; a screenshot
         # history is over the BYTE trigger long before it is over any token
         # line, so a byte-fired pass would land beside the trigger and re-fire
@@ -28577,6 +29477,9 @@ class Session:
             strategy=strategy,
             llm_history=llm_history,
             cut=cut,
+            dense_tail_from=dense_tail_from,
+            dense_tail_previous_chars=dense_tail_previous_chars,
+            dense_tail_closed=dense_tail_closed,
             context_tokens=context_tokens,
             tokens_before=local_estimate,
             # ATTRIBUTION, not influence. The hint above may have widened the
@@ -28619,6 +29522,117 @@ class Session:
                     else None
                 )
             ),
+        )
+
+    async def _dense_tail_cut(
+        self,
+        compaction_api: Any,
+        llm_history: list[Message],
+        wide_cut: int,
+        keep_recent_tokens: int,
+    ) -> int | None:
+        """The plain-recency cut to use INSTEAD of the task floor's, or ``None``.
+
+        WHY. The task floor keeps the whole live task raw (up to its cap)
+        because a recency-shaped cut used to land inside the task the agent
+        was still executing. That protection is right and the carrier was
+        expensive. Replaying 25 real compaction points through
+        :meth:`compact_now` (``docs/design/compaction-dense-tail.md``),
+        the passes the floor widened landed at 82k / 108k / 134k local tokens
+        (task spans of 20-50k / 50-100k / over the 100k cap) against 57k where
+        it did not bind -- and a local token is roughly 1.4-1.7 provider tokens
+        on an Anthropic model, so those are the passes that leave a 400k
+        context above 250k.
+
+        Narrowing the raw window is not the fix, and that was measured on the
+        same points rather than assumed. Cutting back to plain recency kept
+        49% of the live task's steps and 55% of its result heads in the
+        rebuilt context; capping the floor at 50k kept 77% of each. The
+        archive's fixed-size middle cannot absorb the history a narrower
+        window hands it.
+
+        WHAT. Keep the protection, change the carrier. The pass cuts at plain
+        recency and the span the floor would have kept raw --
+        ``llm_history[wide_cut:returned]`` -- rides the archive's verbatim
+        tail edge as serialized text (``compact_to_archive``'s
+        ``protected_tail_messages``). On those 25 points the passes land at
+        54k / 69k / 87k for the same three groups (median 99k -> 64k overall,
+        worst case 155k -> 108k, none larger), with 1343 of the task's 1345
+        steps, every assistant message, 99% of its result first lines and 97%
+        of its long-result ends still present, at the same CPU cost per pass.
+
+        ACROSS PASSES. This cut archives the task's opening request with the
+        task, so the NEXT pass's floor has nothing to measure from. The
+        archive records what is still live (``Archive.live_tail_chars``) and
+        ``_plan_compaction`` continues it while no operator turn arrives,
+        bounded by :meth:`_dense_tail_cap`, on the horizon the raw floor has
+        (see ``compact_to_archive``). Without that the protection lasted one
+        pass: 127 of 415 steps after a second pass of two real tasks, against
+        279 with it and 284 for today's raw floor.
+
+        WHAT IS GIVEN UP, stated because it is the whole trade: inside the
+        moved span the serializer keeps the first 1,500 and up to the last
+        500 characters of a tool result longer than ``TOOL_RESULT_MAX_CHARS``
+        and cuts the middle, cuts a tool call's arguments past
+        ``TOOL_ARGS_MAX_CHARS``, drops results flagged useless with their
+        calls, turns image and document blocks into placeholders (the raw
+        window kept them as images), and carries no provider reasoning
+        blocks. So the model still sees every step, every assistant message
+        and both ends of every output, but not the middle of a long output,
+        the body of a long write, or a screenshot older than the recent
+        window: it re-reads the file, re-runs the command or looks again if
+        it needs those. The operator's own
+        turns are unaffected (preserved verbatim outside the archive), and
+        the newest ``keep_recent_tokens`` stay raw as they always have.
+
+        ``None`` -- keep the floor's raw window, exactly the pre-existing
+        behaviour -- whenever the change would not be a clean win:
+
+        * recency finds no cut, or none later than the floor's (nothing to
+          move);
+        * the recency cut's first kept message is not a transcript entry: the
+          floor's cut may be replayable where this one is not, and a pass must
+          never be refused as ``cut_not_replayable`` because of an
+          optimisation;
+        * the span is not smaller serialized than raw
+          (``snapcompact.dense_tail_saves``) -- the invariant that makes this
+          change unable to enlarge a pass.
+
+        Runs only once a pass is already going to happen, so the second
+        ``find_cut_point`` and one tokenization of the span are paid per PASS,
+        never per turn; both go off the event loop for the reason
+        :meth:`_offloaded` gives.
+        """
+        narrow = await self._offloaded(
+            compaction_api, "find_cut_point", llm_history, keep_recent_tokens
+        )
+        if narrow is None or narrow <= wide_cut:
+            return None
+        if not self._transcript.has_entry(llm_history[narrow].id):
+            return None
+        span = [m for m in llm_history[wide_cut:narrow] if _is_summarizable(m)]
+        try:
+            from local_operator.compaction import snapcompact
+
+            saves = await asyncio.to_thread(snapcompact.dense_tail_saves, span)
+        except Exception:  # noqa: BLE001 - an optimisation must never fail a pass
+            logger.debug("dense tail check failed; keeping the raw task window", exc_info=True)
+            return None
+        return narrow if saves else None
+
+    @staticmethod
+    def _dense_tail_count(plan: _CompactionPlan) -> int:
+        """How many trailing ``to_summarize`` messages are the dense-carried task.
+
+        Counted with the same filter that builds ``to_summarize``
+        (:func:`_is_summarizable`) over the plan's own slice, so the number is
+        exactly "the last N messages handed to the archive" whatever the
+        byte-aware step did to ``cut`` after the plan chose its span.
+        """
+        if plan.dense_tail_from is None:
+            return 0
+        return sum(
+            1 for m in plan.llm_history[plan.dense_tail_from : plan.cut] if _is_summarizable(m)
         )
 
     def _settle_advisor(self, plan: _CompactionPlan, outcome: CompactionOutcome) -> None:
@@ -28912,7 +29926,27 @@ class Session:
             [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
             settings=plan.settings,
+            **self._dense_tail_kwargs(plan),
         )
+
+    @classmethod
+    def _dense_tail_kwargs(cls, plan: _CompactionPlan) -> _DenseTailArgs:
+        """The dense-tail arguments for :meth:`_produce_summary`, or nothing.
+
+        Passed only when set, so a duck-typed ``_produce_summary`` that
+        predates the parameters (the suite has several) keeps its signature.
+        ``dense_previous_chars`` rides alone when a continuing pass has no new
+        message to archive: the earlier tail is still the live task.
+        """
+        kwargs: _DenseTailArgs = {}
+        count = cls._dense_tail_count(plan)
+        if count:
+            kwargs["dense_tail"] = count
+        if plan.dense_tail_previous_chars > 0:
+            kwargs["dense_previous_chars"] = plan.dense_tail_previous_chars
+        if plan.dense_tail_closed:
+            kwargs["dense_closed"] = True
+        return kwargs
 
     def _carried_tier_live_state(
         self,
@@ -29013,7 +30047,11 @@ class Session:
                 summarized
                 if summarized is not None
                 else await self._produce_summary(
-                    compaction_api, to_summarize, plan.strategy, settings=plan.settings
+                    compaction_api,
+                    to_summarize,
+                    plan.strategy,
+                    settings=plan.settings,
+                    **self._dense_tail_kwargs(plan),
                 )
             )
             # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
@@ -29094,6 +30132,15 @@ class Session:
                     carried_genuine, carried_shed = int(carried[0]), int(carried[1])
                     preserved_turns_dropped = max(preserved_turns_dropped, carried_genuine)
                     preserved_turns_shed = max(preserved_turns_shed, carried_shed)
+            # A resumed subagent's launch brief is re-stamped on every resume
+            # and each copy is a genuine user turn; carry it once so the cap
+            # below budgets distinct content (``collapse_relaunch_briefs``
+            # has the measurements). Resolved by name like its neighbours, so
+            # a partial double degrades to the uncollapsed block.
+            collapse: Any = getattr(compaction_api, "collapse_relaunch_briefs", None)
+            if callable(collapse):
+                collapsed: Any = collapse(preserved_user_turns)
+                preserved_user_turns = list(collapsed)
             if callable(cap):
                 preserved_turns_cap = self._preserved_turns_cap(plan.settings)
                 capped: Any = cap(
@@ -29884,8 +30931,26 @@ class Session:
         strategy: str,
         *,
         settings: Any = None,
+        dense_tail: int = 0,
+        dense_previous_chars: int = 0,
+        dense_closed: bool = False,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
+
+        ``dense_previous_chars`` is the previous archive's still-live tail
+        (:attr:`_CompactionPlan.dense_tail_previous_chars`), kept on the new
+        tail together with this pass's span while the same task runs.
+        ``dense_closed`` says the task had already outgrown the floor when
+        this span was chosen (:attr:`_CompactionPlan.dense_tail_closed`), so
+        the archive carries it without recording it as continuable.
+
+        ``dense_tail`` is how many TRAILING ``to_summarize`` messages are the
+        live task the plan moved out of the raw window
+        (:meth:`_dense_tail_cut`); snapcompact carries them verbatim on the
+        archive's tail edge. Ignored by the context-full fallback below, which
+        has no such edge: the plan only sets it for snapcompact, and if that
+        branch fails the task is summarized with the rest, as any pre-cut
+        history is.
 
         Snapcompact stores ``{"snapcompact": <archive dump>}`` (JSON-safe:
         base64 frames) and renders the frames back into context through the
@@ -29939,6 +31004,20 @@ class Session:
                 # the snapcompact half of the lift-XOR-keep rule used below for
                 # context-full, and by compaction.pass_ for both strategies.
                 _, archive_span = compaction_api.split_leading_marker(to_summarize)
+                if dense_previous_chars > 0:
+                    # CONTINUING a task (see ``_plan_compaction`` 2b'): the
+                    # whole span is protected, and its head is the previous
+                    # pass's preserved operator turns re-rendered from the
+                    # marker, the task's own request among them. They are
+                    # replayed verbatim outside the archive on every request,
+                    # so carrying them here as well put one more copy of each
+                    # on the tail per pass, and on a session with a wide
+                    # preserved block the tail bound then trimmed real task
+                    # steps to make room for the copies (agent review round
+                    # 2, N1). Left out, the span is the task's own new steps
+                    # and sits directly after the previous tail.
+                    archive_span = [m for m in archive_span if not is_preserved_replay(m)]
+                    dense_tail = len(archive_span)
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
                     archive_span,
@@ -29950,6 +31029,12 @@ class Session:
                     threshold_tokens=self._snapcompact_threshold_tokens(
                         compaction_api, effective.context_window, settings
                     ),
+                    # Clamped to the span actually archived: lifting the
+                    # leading marker above can only shorten it from the FRONT.
+                    protected_tail_messages=min(max(0, dense_tail), len(archive_span)),
+                    protected_tail_previous_chars=max(0, dense_previous_chars),
+                    protected_tail_max_tokens=self._dense_tail_cap(settings),
+                    protected_tail_closed=bool(dense_closed),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id
@@ -29996,6 +31081,50 @@ class Session:
         if isinstance(snap, dict) and snap.get("text"):
             return str(snap["text"])
         return entry.payload.get("summary")
+
+    def _previous_live_tail_chars(self) -> int:
+        """``Archive.live_tail_chars`` of the latest pass, or ``0``.
+
+        How many trailing characters of :meth:`_previous_archive_text` the last
+        pass protected as the live task. ``0`` for no prior archive, a
+        context-full prior pass, an archive written before the field existed,
+        or a value that is not a usable count -- each of which means "nothing
+        is still protected", the behaviour before the field existed.
+        """
+        entry = self._transcript.latest_entry("compaction")
+        if entry is None:
+            return 0
+        preserve = entry.payload.get("preserve_data") or {}
+        snap = preserve.get("snapcompact")
+        value = snap.get("live_tail_chars") if isinstance(snap, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+    def _dense_tail_cap(self, settings: Any) -> int:
+        """Token bound on the archive's protected live-task tail.
+
+        Three quarters of the task floor's own cap (:meth:`_advisor_floor_cap`):
+        75,000 on the shipped 1M-window default. Derived from the floor cap
+        because it bounds the same thing in its new carrier (the floor kept at
+        most that many RAW tokens of the live task; the tail holds serialized
+        text, which is denser). The fraction was sized on TWO real pairs of
+        consecutive passes, the only ones in the 14 replayed where today's raw
+        floor still protected the task at the second pass
+        (``docs/design/compaction-dense-tail.md``), so treat it as a starting
+        point with thin support, not a settled constant:
+
+        - at 1.0 the pass lands where today's does (130k against 135k-139k
+          local), which defeats the change;
+        - at 0.75 it keeps about what today's raw floor keeps as text (140
+          of 202 and 139 of 213 steps, against 143 and 141) at 106k-108k,
+          about a fifth smaller;
+        - at 0.6 and 0.5 it keeps clearly fewer (131/122 and 116/111).
+
+        One pass on its own never reaches it on the 25 replayed points (the
+        widest protected span serialized to 73k tokens), so it binds only on a
+        task that runs across passes, where it is also what ends the
+        continuation (see ``Archive.live_tail_chars``).
+        """
+        return self._advisor_floor_cap(settings or self._compaction_settings) * 3 // 4
 
     def _previous_archive_carry(self) -> str | None:
         """The latest archive's carry digest, so a pass MERGES into the retained
@@ -31383,7 +32512,9 @@ class Session:
         if self._transcript.has_entry(messages[-1].id):
             return
         # The synthetic assistant/tool exchange is one fork-visible unit.
-        await self._transcript.append_messages(messages)
+        await self._transcript.append_messages(
+            messages, _file_captures=self._file_owner().take(messages)
+        )
         self._context.messages.extend(messages)
 
     async def _flush_shell_records(self) -> None:
@@ -32270,7 +33401,9 @@ class Session:
             logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
             return False
 
-    async def _spool_parked_wake(self, wake_message: CustomMessage) -> None:
+    async def _spool_parked_wake(
+        self, wake_message: CustomMessage, *, for_successor: bool = False
+    ) -> None:
         """Spool one parked wake for the successor on retire. Never raises.
 
         A parked wake is already a fired occurrence with no schedule left to
@@ -32278,8 +33411,20 @@ class Session:
         the durable handoff — the same vehicle ``_spool_wake_to_inbox`` uses
         for a fire arriving while draining. The text is the delivery text
         the parked row carries, so the successor runs the same occurrence.
+
+        ``for_successor`` writes through ``inbox.append_for_successor`` so the
+        row also records the turn the successor owes and raises its reader —
+        the turn-end spool needs that (review round 1, R1-1): its wake was
+        handed to a live turn, so no schedule row is left to engage a runtime.
+        The retire-time caller keeps its plain append unchanged.
         """
-        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import (
+            InboxLine,
+            append_for_successor,
+            append_inbox,
+        )
+        from local_operator.wakes.spooled import await_spool_write
 
         wake_id = str(wake_message.details.get("wake_id", ""))
         text = str(wake_message.details.get("text", ""))
@@ -32287,19 +33432,21 @@ class Session:
         if directory is None or not text:
             logger.warning("parked wake %s could not be spooled (no session dir)", wake_id)
             return
+        line = InboxLine(
+            text=text,
+            sender={},
+            mode="mailbox",
+            written_at=time.time(),
+            wake=True,
+            wake_id=wake_id,
+        )
         try:
-            written = await asyncio.to_thread(
-                append_inbox,
-                Path(directory),
-                InboxLine(
-                    text=text,
-                    sender={},
-                    mode="mailbox",
-                    written_at=time.time(),
-                    wake=True,
-                    wake_id=wake_id,
-                ),
-            )
+            if for_successor:
+                written = await await_spool_write(
+                    append_for_successor, config_dir(), Path(directory), line
+                )
+            else:
+                written = await asyncio.to_thread(append_inbox, Path(directory), line)
         except Exception:  # noqa: BLE001 — a drain must not die on a spool write
             logger.warning(
                 "parked wake %s could not be spooled while draining", wake_id, exc_info=True
@@ -32333,6 +33480,59 @@ class Session:
         fallback: a wake that ended up in neither place is lost work the user is
         waiting on, and a log line is the only trace it existed
         (``design-runtime-autorefresh`` §5.3).
+        """
+        # A FIRE INTO A LIVE TURN IS DELIVERED, not spooled. The divert is
+        # installed when a drain LATCHES, and a build-replaced drain latches on a
+        # busy runtime by construction — so for the whole rest of that turn the
+        # session's own reminders went to a successor that boots only after the
+        # turn ends (node2, 2026-11-17: 6 own wakes held ~40 min behind one
+        # turn). Riding the running turn opens no new work on the leaving build,
+        # which is the only thing the divert exists to prevent; an idle fire
+        # still spools below. ``_deliver_wake``'s busy arm parks it for the next
+        # tool boundary, and a turn that ends first hands the park to
+        # ``_flush_parked_deliveries``, whose leaving arm spools it.
+        # ``getattr``: the cell harnesses bind this method onto hosts without the
+        # session's turn flags, and those hosts are idle by construction.
+        if getattr(self, "_is_streaming", False) and not getattr(self, "_disposed", False):
+            deliver = getattr(self, "_wake_hook_before_drain", None) or self._deliver_wake
+            if deliver != self._spool_wake_to_inbox:
+                if due.final:
+                    # The fire retired its schedule, so if this delivery ends
+                    # up parked past the last boundary the turn-end spool must
+                    # re-arm it rather than write text only (R1-1). Keyed like
+                    # the parked row's details so that spool can find it.
+                    finals = getattr(self, "_live_final_wakes", None)
+                    if finals is None:
+                        finals = self._live_final_wakes = {}
+                    finals[(due.schedule.id, due.occurrence)] = due
+                if deliver == self._deliver_wake:
+                    # ``_deliver_wake`` awaits before it re-samples ``busy``; a
+                    # turn that ends in that gap would take its idle arm, whose
+                    # turn a leaving runtime holds at admission (transcript
+                    # only, nobody woken — R1-3). Hand that arm back here.
+                    await self._deliver_wake(due, idle_fallback=self._spool_wake_fire)
+                else:
+                    await deliver(due)
+                # The busy arm parks AFTER an awaited emit, so the turn may have
+                # ended (and run its turn-end spool) before the park landed.
+                # Nothing else would ever drain it on a leaving runtime, so
+                # sweep it to the successor now; a no-op when nothing is parked.
+                if (
+                    getattr(self, "_leaving_deliveries", False)
+                    and not getattr(self, "_is_streaming", False)
+                    and not getattr(self, "_disposed", False)
+                    and not getattr(self, "_one_shot_exit", False)
+                ):
+                    await self._spool_parked_for_successor()
+                return
+        await self._spool_wake_fire(due)
+
+    async def _spool_wake_fire(self, due: DueWake) -> None:
+        """Re-arm (one-shot) or spool (recurring) one fire for the successor.
+
+        The idle half of :meth:`_spool_wake_to_inbox`, split out so the live
+        arm can hand a fire back to it when the turn it aimed at ended first
+        (``_deliver_wake``'s ``idle_fallback``). Never raises.
         """
         from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
@@ -34065,7 +35265,12 @@ class Session:
         except Exception:  # noqa: BLE001 — the ledger is observation
             logger.debug("aida: could not re-owe the withheld greeting", exc_info=True)
 
-    async def _deliver_wake(self, due: DueWake) -> None:
+    async def _deliver_wake(
+        self,
+        due: DueWake,
+        *,
+        idle_fallback: Callable[[DueWake], Awaitable[None]] | None = None,
+    ) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
         annotated as missed — the agent must not read it as punctual, and a
@@ -34158,6 +35363,12 @@ class Session:
         if missed_note:
             text = f"{missed_note}\n\n{text}"
         busy = self._is_streaming
+        if not busy and idle_fallback is not None:
+            # The caller aimed this fire at a live turn that has ended since it
+            # looked (only ``_spool_wake_to_inbox``'s live arm passes this): its
+            # idle arm is the one that knows what an idle fire means for it.
+            await idle_fallback(due)
+            return
         if busy:
             # The resume guidance rides the text itself: the wake reached a
             # turn that was already working, and the message is the only
@@ -36414,6 +37625,19 @@ class Session:
         if unsubscribe_state is not None:
             unsubscribe_state()
             self._unsubscribe_subagent_state = None
+        # A LEAVING RUNTIME'S PARKED PEER MESSAGES AND WAKES GO TO THE SUCCESSOR
+        # FIRST (review round 1, R1-2). A leaving runtime delivers them into its
+        # live turn (``ServingSessionHandle._admits_into_live_turn``), and the
+        # sender was told "delivered mid-turn"; the turn's own turn-end spool
+        # skips once ``_disposed`` is set, and the loop below empties the queue.
+        # A disposal that catches the turn still busy — the signal drain's reap,
+        # a SIGTERM during a build drain — would otherwise drop them. Chosen over
+        # narrowing live admission to the build drain: this covers EVERY exit
+        # that disposes mid-turn, including ones no drain cause names today,
+        # while narrowing would still lose a build drain interrupted by a signal.
+        # The one-shot host has no successor and keeps its own semantics.
+        if self._leaving_deliveries and not self._one_shot_exit:
+            await self._spool_parked_for_successor(disposing=True)
         # No later boundary can drain producer steers once disposal starts.
         # Reject them while rejection subscribers and viewers are still attached so
         # capacity is released and the producer can safely reuse the same ID.

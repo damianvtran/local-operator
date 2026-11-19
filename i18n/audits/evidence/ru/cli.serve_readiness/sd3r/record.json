@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "independent-ru-auditor",
+    "session": "b8c027b19533",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7f2b030d2636",
+    "actual_model_source": "Session runtime declaration; no fallback event observed/reported",
+    "fallback": null,
+    "fallback_observation": "No alternate model event is visible in this audit session; no model identity inferred"
+  },
+  "translator": {
+    "agent": "7f2b030d2636",
+    "session": "7f2b030d2636",
+    "model": null,
+    "actual_model_source": "Remediation job identified by manager; its actual model was not supplied"
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "working_copy": "Uncommitted final single-key remediation, not claimed on main",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.serve_readiness.json",
+      "sha256": "ed538d669d98957765074dc1f48e90a0b8486acb677f9f6cebdd7938bd098e07"
+    }
+  },
+  "policy_input_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    }
+  ],
+  "source_implementation_input": {
+    "path": "local_operator/network/readiness.py",
+    "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+  },
+  "retained_coverage": {
+    "initial_record": {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/record.json",
+      "sha256": "a2284239edb2a1361116cc34831de34cc60aacfe757ad8b56a61a438662cd04d"
+    },
+    "initial_report": {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/report.md",
+      "sha256": "4f3f946d5792fcfeda496f87050a0d3ba814d993189d0001b01dba080e8e1094"
+    },
+    "retained_key_count": 14,
+    "changed_keys": [
+      "cli.serve_readiness.not_this_daemon"
+    ],
+    "unchanged_byte_proof": "Reverse only exact accepted key replacement and compare entire catalogue SHA-256 with sd3. Source and context analogous single-key/note proofs.",
+    "direct_neighbors_reassessed": [
+      "pid_reason",
+      "unknown",
+      "and_more",
+      "unproven",
+      "recorded_gap"
+    ],
+    "deferred_scope": "Existing cgroup N1 not reopened"
+  },
+  "finding_dispositions": {
+    "RU-SD3-01": "fixed"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "fixed_finding_ids": [
+      "RU-SD3-01"
+    ],
+    "open_finding_ids": []
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/report.md",
+      "sha256": "3dfce4832e75fd915f8877d1f7c775d6a45b884234c84c53370475c29f67602a"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "37abefa544f368a2d120fe8392c3b094af9f56caf3fb3e1fc119a32bf8e59076"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/mechanical.py.txt",
+      "sha256": "aca116f772f52bc9ac0232af27dc6b168795f9e0e2a4fdde6b688be76f79a73d"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/ledger-receipt.json",
+      "sha256": "6cef9eac0bf1f4b4edccaad52a43b1e1c515979f9498fb379dc7446a9d9f5e05"
+    }
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "audit_notes_not_execution_log": {
+    "scope": "Changed diagnosis and grouped neighbors independently read; retained 15-key coverage and full mechanical checks",
+    "execution_evidence": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/audit.log",
+    "limits": [
+      "Same auditor remediation follow-up, not another independent auditor",
+      "No live readiness/services or rendered-frame/wrapping proof",
+      "No source/translation/history edits, commits, pytest, providers, installs or MT",
+      "Current translator job actual model unknown, not inferred"
+    ]
+  },
+  "ledger_handoff": {
+    "receipt": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/ledger-receipt.json",
+    "dry_run_passed": true,
+    "expected_history_sha_at_dry_run": "24bedcdac7b6d1b26ed1a773b7cb497eaed455dfe45b370bdfc2a5501cf171f2",
+    "history_appended": false,
+    "note_characters": 174
+  }
+}

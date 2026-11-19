@@ -764,6 +764,21 @@ def static_feature_flags() -> dict[str, Any]:
         # condition gets re-checked rather than rediscovered.
         "desktop_feed": 1,
         "desktop_presence": 1,
+        # ADR 0008 desk presence (slice 1): `POST /v1/desktop/presence`
+        # accepts the optional `idle_s`, `locked`, `idle_trusted` and
+        # `away_after_s` fields, and the phone push worker holds/releases on
+        # "a person is at this computer" rather than on window focus.
+        #
+        # A KEY, NOT "ADDITIVE OPTIONAL", and that is forced: `PresenceBeat`
+        # is `extra="forbid"`, so a beat carrying a field an older core does
+        # not declare is a 422. The app swallows that error, the lease then
+        # lapses after 45 s, the banner gate stops suppressing the on-screen
+        # conversation and the phone gets everything. So an app adds the
+        # fields ONLY to a backend advertising this key (read on every feed
+        # connect, local or remote), and sends today's beat byte-for-byte to
+        # one without it. The `notifications.phone_away_after_s` setting and
+        # its relay route ship under the same release.
+        "desk_presence": 1,
         # Stopping a session's CURRENT WORK without ending the session:
         # POST /v1/desktop/sessions/{id}/interrupt.
         #
@@ -964,6 +979,21 @@ def static_feature_flags() -> dict[str, Any]:
         # nothing.
         "peers": 1,
         "session_transfer": 1,
+        # The move's WORKING-SET GATE (docs/design/move-working-set.md §11.1):
+        # ``POST /v1/desktop/sessions/{id}/transfer/preflight`` and the
+        # ``confirm_working_set``/``without_working_set`` transfer fields. Its own
+        # key, per this file's rule: the old dialog keeps working byte for byte and
+        # meets an honest ``working_set_unconfirmed`` refusal (with the manifest)
+        # only for a session that has git worktrees to account for.
+        "session_transfer_working_set": 1,
+        # The preflight's DESTINATION PROBE (move-working-set.md §11.1): each
+        # ``working_set.worktrees[]`` row carries the destination's own
+        # ``clone_check`` answer (``ok``/``destination_cannot_fetch``/``_push``/
+        # ``_clone``/``unknown_destination``/``no_remote``), optional
+        # ``https_rewrite``/``remedy``/``missing_tools``, and the block carries
+        # ``destination_probe``. Additive members of the same mapping; a renderer
+        # without this key simply does not show them.
+        "session_transfer_working_set_probe": 1,
         # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
         # tool and ``/project``). ONE key gating both the affordance and
         # the reads: the Projects tab, its CRUD dialogs and the
@@ -1035,6 +1065,12 @@ def static_feature_flags() -> dict[str, Any]:
         # /v1/desktop/devices`, and the feed's `approvals.pair_request`. Its own key so
         # a renderer that lacks it never posts a pair-ack body an older backend 404s.
         "phone_pairing": 1,
+        # MESH PAIRING FROM THE MESH APPROVALS (design mesh-pairing-approvals §3.3):
+        # `GET /v1/desktop/mesh/pairings`, `POST .../{side}/{invite_id}/answer` (app
+        # attestation required; 403 `pairing_needs_app` otherwise), and the feed's
+        # `approvals.pairing_id`. Its own key so a renderer without it never shows a
+        # card an older backend cannot serve.
+        "mesh_pairing": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
         "profile_proposals": 1,
@@ -1318,6 +1354,13 @@ def static_feature_flags() -> dict[str, Any]:
         # and on/off are NOT on these routes: they stay on `PATCH
         # /v1/settings/{key}`, the one write funnel.
         "notification_sounds": 1,
+        # TEAM BRIDGE CARD BODIES (bridge-body design §4): `GET
+        # /v1/desktop/sessions/{id}/bridge-cards/{entry_id}/body` and the relay's
+        # `/api/sessions/{id}/bridge-cards/{entry_id}/body` answer the admitted
+        # body (or held/refused/pending state) behind one inbound bridge card.
+        # Shared by desktop and relay because both serve the route. Absent, a
+        # client keeps today's "body unavailable" copy.
+        "team_bridge_card_body": 1,
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the
@@ -1347,10 +1390,19 @@ def live_feature_flags() -> dict[str, Any]:
     # precedents the guard names are ``routes.desktop_profiles`` (imports
     # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
     # ``tunnels.report`` per request).
+    from local_operator.community import community_enabled
     from local_operator.references import at_references_enabled
     from local_operator.remote_compute import is_enabled as remote_compute_enabled
 
     return {
+        # LOCAL OPERATOR COMMUNITY (RFC v2.4 §7.2): the `/v1/desktop/community/*`
+        # member door. CONDITIONAL, a live fact like ``remote_compute``: the
+        # routes answer `community_disabled` while ``LOCAL_OPERATOR_COMMUNITY``
+        # is off (``community.community_enabled`` is the one reader, called here
+        # so this map and the routes cannot disagree), and a renderer that saw
+        # the key on a dark install would paint a surface that only refuses.
+        # Absent ⇒ no community surface, the pre-feature state.
+        **({"community": 1} if community_enabled() else {}),
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the

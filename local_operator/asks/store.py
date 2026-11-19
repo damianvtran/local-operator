@@ -586,6 +586,48 @@ def _last(events: Sequence[Mapping[str, Any]], ask_id: str, kind: str) -> dict[s
     return found
 
 
+class _EventIndex:
+    """First and last event per ``(ask_id, kind)``, built in ONE pass.
+
+    WHY. ``fold`` asked :func:`_first`/:func:`_last` up to eight times per ask,
+    each a full linear pass over the log, so a fold cost O(asks x events): about
+    28 ms per fold on a long-lived session's log (266 asks, 522 events), and the
+    fold runs on every queue read and refresh — on the event loop. A watchdog
+    sample of that session put 24 of 117 event-loop samples inside those two
+    helpers. One pass here makes the fold linear.
+
+    THE SEMANTICS ARE THE HELPERS' EXACTLY, which the parity test pins: the key
+    is ``str(event.get("ask_id"))`` (the helpers' coercion — NOT the
+    ``or ""`` spelling :func:`_asks_in_order` uses), "first"/"last" mean log
+    order, and every lookup returns a fresh ``dict`` copy as the helpers do, so a
+    caller mutating its result can never corrupt another lookup.
+    """
+
+    __slots__ = ("_first", "_last")
+
+    def __init__(self, events: Sequence[Mapping[str, Any]]) -> None:
+        self._first: dict[tuple[str, str], Mapping[str, Any]] = {}
+        self._last: dict[tuple[str, str], Mapping[str, Any]] = {}
+        for event in events:
+            kind = event.get("kind")
+            if not isinstance(kind, str):
+                # Lookups are always by a string kind, which nothing else can
+                # equal; skipping also keeps a hand-edited unhashable ``kind``
+                # (a list) from crashing the fold the helpers tolerated.
+                continue
+            key = (str(event.get("ask_id")), kind)
+            self._first.setdefault(key, event)
+            self._last[key] = event
+
+    def first(self, ask_id: str, kind: str) -> dict[str, Any] | None:
+        event = self._first.get((ask_id, kind))
+        return dict(event) if event is not None else None
+
+    def last(self, ask_id: str, kind: str) -> dict[str, Any] | None:
+        event = self._last.get((ask_id, kind))
+        return dict(event) if event is not None else None
+
+
 def _attachment_refs(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """The ``attachments`` map of an ``answered`` event, normalised, or ``{}``.
 
@@ -665,8 +707,9 @@ def fold(
             }
         )
     records: list[dict[str, Any]] = []
+    index = _EventIndex(events)
     for ask_id in _asks_in_order(events):
-        queued = _first(events, ask_id, EVENT_QUEUED)
+        queued = index.first(ask_id, EVENT_QUEUED)
         if queued is None:
             # A relay row has no ``queued`` event by design: the watcher records
             # only the REFERENCE (#2520), because a copy would be a second truth
@@ -674,18 +717,18 @@ def fold(
             # without a ``queued`` row (a truncated log, an answer for an ask
             # whose question is gone) is not reconstructible: skip rather than
             # invent one.
-            relayed = _first(events, ask_id, EVENT_RELAYED)
+            relayed = index.first(ask_id, EVENT_RELAYED)
             if relayed is None:
                 continue
             relay_row = _relay_record(ask_id, relayed, events, session_id=session_id)
             if relay_row is not None:
                 records.append(relay_row)
             continue
-        answered = _first(events, ask_id, EVENT_ANSWERED)
-        declined = _first(events, ask_id, EVENT_DECLINED)
-        dismissed = _first(events, ask_id, EVENT_DISMISSED)
-        withdrawn = _first(events, ask_id, EVENT_WITHDRAWN)
-        revised = _last(events, ask_id, EVENT_REVISED)
+        answered = index.first(ask_id, EVENT_ANSWERED)
+        declined = index.first(ask_id, EVENT_DECLINED)
+        dismissed = index.first(ask_id, EVENT_DISMISSED)
+        withdrawn = index.first(ask_id, EVENT_WITHDRAWN)
+        revised = index.last(ask_id, EVENT_REVISED)
         expires_at = int(queued.get("expires_at") or 0)
         created_at = int(queued.get("at") or 0)
         answered_at = int(answered.get("at") or 0) if answered else 0
@@ -812,7 +855,7 @@ def fold(
         if isinstance(consent, Mapping):
             # ABSENT, never empty: an ordinary ask keeps its exact record shape.
             record["consent"] = dict(consent)
-            record["consent_used"] = _first(events, ask_id, EVENT_CONSENT_USED) is not None
+            record["consent_used"] = index.first(ask_id, EVENT_CONSENT_USED) is not None
         folded = context_by_ask.get(ask_id)
         if folded:
             # ABSENT, never empty (the ``surfaced_in`` rule): an ask with no
@@ -877,18 +920,23 @@ def fold(
                 # for the honest case.
                 if isinstance(by, Mapping):
                     surfaces = [str(by.get("surface") or "")]
+                    proofs = {str(by.get("proof") or "")}
                     for event in events:
                         if (
                             event.get("kind") == EVENT_REVISED
                             and str(event.get("ask_id")) == ask_id
                         ):
                             rev_by = event.get("by")
-                            surfaces.append(
-                                str(rev_by.get("surface") or "")
-                                if isinstance(rev_by, Mapping)
-                                else ""
-                            )
-                    record["answered_by"] = {**dict(by), "surface": weakest_surface(*surfaces)}
+                            rev_map = rev_by if isinstance(rev_by, Mapping) else {}
+                            surfaces.append(str(rev_map.get("surface") or ""))
+                            proofs.add(str(rev_map.get("proof") or ""))
+                    merged = {**dict(by), "surface": weakest_surface(*surfaces)}
+                    # ``proof`` (F2, R1-m3) follows the same laundering rule:
+                    # it is kept only when EVERY write carried the same one,
+                    # so an unproven revision never sits under a signature.
+                    if len(proofs) != 1 or "" in proofs:
+                        merged.pop("proof", None)
+                    record["answered_by"] = merged
         records.append(record)
     return records
 

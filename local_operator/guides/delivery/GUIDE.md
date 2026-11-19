@@ -116,6 +116,11 @@ required surfaces bounded and record them; CI never replaces real-path QA.
 Resource holds forbid hold-class runs, not evidence. Investigate even
 out-of-slice fails.
 
+Heavy work queues for the machine slot (#4104; serial pytest takes none): run it
+through `bash`, or `lop services heavy run -- <cmd>`. To wait for the slot use
+`lop services heavy wait`; `heavy status` names holders. Never hand off the slot
+by message or wait on `pgrep -f` (it matches the waiter's own shell).
+
 ## Converge, do not restart
 
 **Converge the base once, at the merge gate.** Do not merge or rebase the base

@@ -1,0 +1,62 @@
+Record reference: i18n/audits/evidence/es/cli.serve_readiness/sd1r/record.json
+Actual execution log for sd1r, not audit notes.
+
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE=0
+
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python -c 
+from pathlib import Path
+import hashlib,json
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+prior=Path('i18n/audits/evidence/es/cli.serve_readiness/sd1/record.json')
+r=json.loads(prior.read_text())
+def strict(path):
+ def pairs(items):
+  obj={}
+  for k,v in items:
+   assert k not in obj,('duplicate key',k)
+   obj[k]=v
+  return obj
+ return json.loads(Path(path).read_text(),object_pairs_hook=pairs)
+en=strict(r['input_hashes']['en']['path']); es=strict(r['input_hashes']['es']['path']); context=strict(r['input_hashes']['context']['path'])
+assert len(es)==11 and set(es)==set(en)==set(context)
+for name in ('en','context'):
+ p=Path(r['input_hashes'][name]['path'])
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==r['input_hashes'][name]['sha256']
+raw=Path(r['input_hashes']['es']['path']).read_bytes()
+before='está registrado pero no responde (su heartbeat se detuvo)'; after='está registrado pero no responde (dejó de enviar señales de actividad)'
+assert es['cli.serve_readiness.not_reporting']==after
+assert hashlib.sha256(raw.replace(after.encode(),before.encode(),1)).hexdigest()==r['input_hashes']['es']['sha256']
+print('EXACT DELTA PASS: only not_reporting changed, byte-exact accepted replacement; all other target bytes retained.')
+print('INPUTS PASS: English/context/style/glossary unchanged against sd1; strict JSON 11/11 key parity.')
+for k in en:
+ assert rt.message_arguments(en[k])==rt.message_arguments(es[k]),k
+ for cats in rt.plural_selectors(es[k]): assert set(cats)=={'one','many','other'},(k,cats)
+print('MECHANICAL PASS: all 11 argument name/types and all Spanish plural categories retained.')
+params={'device':'node-1','reasons':'pid 123: '+after,'count':1}
+for n in (0,1,2,1000000):
+ params['count']=n
+ rendered=rt.render_message(es['cli.serve_readiness.unknown'],params,'es')
+ assert after in rendered
+ print('COMPOSED UNKNOWN count='+str(n)+' cells='+str(cell_len(rendered))+': '+rendered)
+print('Changed diagnostic cells='+str(cell_len(after))+' chars='+str(len(after)))
+print('No maxCells/maxChars hints on changed key or unknown wrapper:',{k:{h:context[k][h] for h in ('maxCells','maxChars') if h in context[k]} for k in ('cli.serve_readiness.not_reporting','cli.serve_readiness.unknown')})
+
+EXACT DELTA PASS: only not_reporting changed, byte-exact accepted replacement; all other target bytes retained.
+INPUTS PASS: English/context/style/glossary unchanged against sd1; strict JSON 11/11 key parity.
+MECHANICAL PASS: all 11 argument name/types and all Spanish plural categories retained.
+COMPOSED UNKNOWN count=0 cells=190: los daemons `lop serve` en node-1: pid 123: está registrado pero no responde (dejó de enviar señales de actividad), por lo que no se sabe si coinciden con la instalación y están supervisados
+COMPOSED UNKNOWN count=1 cells=185: el daemon `lop serve` en node-1: pid 123: está registrado pero no responde (dejó de enviar señales de actividad), por lo que no se sabe si coincide con la instalación y está supervisado
+COMPOSED UNKNOWN count=2 cells=190: los daemons `lop serve` en node-1: pid 123: está registrado pero no responde (dejó de enviar señales de actividad), por lo que no se sabe si coinciden con la instalación y están supervisados
+COMPOSED UNKNOWN count=1000000 cells=190: los daemons `lop serve` en node-1: pid 123: está registrado pero no responde (dejó de enviar señales de actividad), por lo que no se sabe si coinciden con la instalación y están supervisados
+Changed diagnostic cells=70 chars=70
+No maxCells/maxChars hints on changed key or unknown wrapper: {'cli.serve_readiness.not_reporting': {}, 'cli.serve_readiness.unknown': {}}
+
+STDERR:
+
+EXIT_CODE=0

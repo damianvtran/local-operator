@@ -282,6 +282,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes the fixed team_bridge/connector_runtime.json FILE on exit; never a session path",
     ),
+    # The receiver's jam report and the stale-restart kick marker (PR #4174):
+    # disposable config-dir sidecars beside the runtime record, same pattern.
+    # ``JamTracker._path`` is ``jam_path(config_dir)`` =
+    # ``<config_dir>/team_bridge/connector-jam.json``; ``_write_marker`` writes
+    # ``marker_path(config_dir)`` = ``<config_dir>/team_bridge/connector-restart.json``.
+    # Each temp sibling is that fixed name plus ``.{pid}.tmp``. Every literal
+    # component is a module constant and no caller input reaches either path,
+    # so none can be a session directory or a transcript.
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._clear",
+        "<path>.unlink",
+        "Removes the fixed team_bridge/connector-jam.json FILE on recovery; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ jam report",
+    ),
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the jam report; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ restart marker",
+    ),
+    (
+        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the restart marker; never sessions/",
+    ),
     # The reply guard's per-install digest key (#3377, review round 1 S-3) is
     # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
     # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
@@ -730,6 +763,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # children of the same quarantine directory. Neither can name a session
     # directory, and no path here is derived from a session id beyond the eight
     # characters sanitised into the directory's own label.
+    # The bash tool's `lop` shim (own_launcher_path_injection) lives in the
+    # session scratchpad, i.e. under sessions/<id>/, so these two calls DO sit in
+    # the protected tree. They are safe because both operate only on the two fixed
+    # entry names inside <scratchpad>/bin, and _launcher_shim_dir lstat-checks
+    # each and returns before either call when one is a real directory
+    # (test_shell_env.py::test_a_directory_at_the_shim_names_is_never_touched).
+    (
+        "local_operator/tools/builtin.py::_launcher_shim_dir",
+        "<path>.unlink",
+        "Removes only <scratchpad>/bin/.<launcher>.<pid>.tmp, this process's staged shim "
+        "entry, after an lstat check proved it is not a directory; unlink rejects directories.",
+    ),
+    (
+        "local_operator/tools/builtin.py::_launcher_shim_dir",
+        "os.replace",
+        "Renames the staged shim symlink/copy over <scratchpad>/bin/<launcher>, only after "
+        "an lstat check proved that target is not a directory; never a session directory.",
+    ),
     (
         "local_operator/tools/builtin.py::_unlink_quietly",
         "<path>.unlink",
@@ -1235,6 +1286,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace cannot target a directory",
     ),
     (
+        "local_operator/network/mobility.py::_arrival_resume_note",
+        "os.replace",
+        # The once-per-move arrival-note fence: `staged` is the marker's own
+        # `.tmp` sibling, written by `write_text` (a regular FILE) one line above,
+        # and the target is the fixed FILE name ARRIVAL_NOTE_MARKER inside the
+        # session directory — never the directory itself. os.replace refuses a
+        # directory target, so the session directory cannot be removed through it.
+        "Publishes the just-written move-arrival-note.json.tmp FILE over the fixed "
+        "move-arrival-note.json marker inside the session dir; os.replace rejects a "
+        "directory target.",
+    ),
+    (
         "local_operator/network/store.py::_quarantine",
         "os.replace",
         "Sets an unparsable network record or parked decision aside as <name>.corrupt, "
@@ -1263,6 +1326,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/store.py::clear_pair_decision",
         "<path>.unlink",
         "The human's recorded answer FILE <config>/network/pending/<invite>.decision.json",
+    ),
+    (
+        "local_operator/network/store.py::clear_pre_approval",
+        "<path>.unlink",
+        "Onboarding's one-shot pairing pre-approval FILE "
+        "<config>/network/pending/<invite>.preapproval.json, once consumed, expired, "
+        "released by its run, or purged with its network",
     ),
     (
         "local_operator/network/store.py::clear_pending_join",
@@ -2252,6 +2322,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/asks/store.py::read_index",
         "<path>.unlink",
         "stale asks/<session_id>.json FILE, swept from the same directory scan",
+    ),
+    # -- the app-signature attest listener (asks/app_attest.py) ---------------
+    # Both unlinks target ``socket_path(attest_dir, session_id)``, i.e.
+    # ``<config>/run/attest/<sid>.sock`` — a unix SOCKET file in a 0700 leaf
+    # outside ``sessions/``; unlink refuses directories. ``consume``'s
+    # ``.remove`` is ``deque.remove`` on in-memory pending rows, no filesystem.
+    (
+        "local_operator/asks/app_attest.py::AttestService.start",
+        "<path>.unlink",
+        "stale run/attest/<sid>.sock SOCKET removed before bind; never under sessions/",
+    ),
+    (
+        "local_operator/asks/app_attest.py::AttestService.close",
+        "<path>.unlink",
+        "own run/attest/<sid>.sock SOCKET, only when (st_dev, st_ino) still match our bind",
+    ),
+    (
+        "local_operator/asks/app_attest.py::AttestationTable.consume",
+        "<path>.remove",
+        "deque.remove of an in-memory pending attestation row; touches no filesystem path",
     ),
     (
         "local_operator/skills/index.py::SkillIndex._persist_cache",
@@ -3432,6 +3522,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tui/app.py::OperatorApp._close_subagent_view",
         "<path>.remove",
         "widget.remove()",
+    ),
+    (
+        # The /community page, one mode over from the settings page: `view` is
+        # the mounted CommunityView widget held in `_community_view`.
+        "local_operator/tui/app.py::OperatorApp._close_community_view",
+        "<path>.remove",
+        "Textual CommunityView.remove unmounts the page; no filesystem path",
+    ),
+    (
+        # The /community page remembers the last-viewed org. Both paths are
+        # built from the config dir plus fixed literals
+        # (`<config>/community/org_selection.json` and its `.tmp` sibling); no
+        # caller input reaches either, and `sessions/` is never named.
+        "local_operator/tui/community_backend.py::LiveCommunityBackend.remember_selection",
+        "os.replace",
+        "atomic write of the FILE <config>/community/org_selection.json from its .tmp "
+        "sibling; fixed literal path, never under sessions/",
     ),
     (
         "local_operator/tui/app.py::OperatorApp._recall_queued_steers",

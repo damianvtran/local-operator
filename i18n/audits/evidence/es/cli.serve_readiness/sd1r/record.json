@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1r",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon Spanish",
+    "session": "e68b64992930",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session-state Model: openai/gpt-6.1-sol; no fallback recorded or observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "task acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requester-provided translator identity"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/cli.serve_readiness.json",
+      "sha256": "7eda53e9b96f9c8cae9ac627b9e84f0a6ebc00a1f7a2a08ab584858c292237ed"
+    }
+  },
+  "style_inputs": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1r/report.md",
+      "sha256": "47278ba5684715e231098080d0d3f79ada9f9835fa6753b6f63d67da5a9721d8"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1r/audit.log",
+      "sha256": "30024d989170d40fdf1e2d836c1a17a1ae449a01e1c867c86ec9d1a963aa28ac"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1r/ledger-receipt.json",
+      "sha256": "c8a55ae193df7faf56485999982163c152789cc9352ffa1d6d3f3754f59d8e06"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1r/ledger-dry-run.log",
+      "sha256": "99cc1d2d43c66fdbc85ecd590fb7d92a02638349f5d23ec8ba53b950f55fb073"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "fixed_finding_ids": [
+      "ES-SD1-01"
+    ]
+  },
+  "retained_coverage": {
+    "record": {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/record.json",
+      "sha256": "5414ea119c0998d17c7d825d178324e254533f7bdcb964eae781626bf46e1100"
+    },
+    "report": {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/report.md",
+      "sha256": "afc26d87a5f249748d542cd7e231a723c9de95c7dde105dd654519f4438d402c"
+    },
+    "original_key_count": 11,
+    "changed_keys": [
+      "cli.serve_readiness.not_reporting"
+    ],
+    "unchanged_key_count": 10,
+    "target_delta_proof": "Replacing exactly the accepted current not_reporting value with the prior value in memory reproduces the sd1 whole-file target hash",
+    "prior_target_sha256": "11fe4d85d826ad5206ebbc4c2a379a9daa0ee529f831466ea9e363953cee6fcd",
+    "focused_semantic_neighbors": [
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.not_this_daemon",
+      "cli.serve_readiness.unknown_state",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.identity_restart"
+    ]
+  },
+  "audit_notes_not_execution_log": {
+    "report": "i18n/audits/evidence/es/cli.serve_readiness/sd1r/report.md",
+    "actual_execution_logs": [
+      "i18n/audits/evidence/es/cli.serve_readiness/sd1r/audit.log",
+      "i18n/audits/evidence/es/cli.serve_readiness/sd1r/ledger-dry-run.log"
+    ]
+  },
+  "history_append_applied": false,
+  "translation_edits": false,
+  "coverage": {
+    "all_keys_initially_reviewed": true,
+    "remediation_and_direct_neighbors_reviewed": true,
+    "second_independent_pass_claimed": false,
+    "mt_service_used": false,
+    "live_rendered_frame_claimed": false
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

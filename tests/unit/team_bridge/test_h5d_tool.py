@@ -4,6 +4,7 @@ through the outbox, and NO decide authority."""
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any, cast
 
 import httpx
@@ -45,6 +46,17 @@ def _gate_open(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
+
+
+@pytest.fixture(autouse=True)
+def _empty_directory_cache() -> Iterator[None]:
+    """The directory cache is process-global (``client._DIRECTORY_CACHE``) and
+    every test here signs in as the same account against the same hub, so an
+    earlier test's answer would otherwise warm the next test's resolution."""
+
+    tb_client._DIRECTORY_CACHE.clear()
+    yield
+    tb_client._DIRECTORY_CACHE.clear()
 
 
 def _owner() -> OwnerSnapshot:
@@ -882,8 +894,95 @@ async def test_a_send_name_is_refused_after_the_scope_reads_not_before(
     assert "bridge may not be enabled" in result["error"]
     assert "allowlist may not name them" in result["error"]
     assert records == []
-    # The scope reads happened; nothing was sent.
-    assert [request.method for request in requests] == ["GET", "GET"]
+    # The scope reads happened BEFORE the refusal, and nothing was sent: every
+    # request is a read, the directory is read before the allowlist, and both
+    # were read. How many directory reads a miss costs is pinned separately by
+    # the cold/warm cache tests below, not here.
+    assert requests and all(request.method == "GET" for request in requests)
+    paths = [request.url.path for request in requests]
+    assert paths[0].endswith("/directory")
+    assert any(not path.endswith("/directory") for path in paths)
+
+
+def _name_resolution_handler(requests: list[httpx.Request]):
+    """A hub whose directory and allowlist both name only Bo Chen."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/directory"):
+            return _ok(
+                {
+                    "members": [
+                        {
+                            "account_id": "acc_other",
+                            "display_label": "Bo Chen",
+                            "bridge_enabled": True,
+                        }
+                    ]
+                }
+            )
+        return _ok(
+            {
+                "allowlist": {
+                    "entries": [
+                        {
+                            "direction": "send",
+                            "effect": "allow",
+                            "target": {"account_id": "acc_other"},
+                        }
+                    ]
+                }
+            }
+        )
+
+    return handler
+
+
+def _directory_reads(requests: list[httpx.Request]) -> int:
+    return sum(1 for request in requests if request.url.path.endswith("/directory"))
+
+
+@pytest.mark.asyncio
+async def test_a_name_miss_on_a_cold_cache_reads_the_directory_once(tmp_path) -> None:
+    """The copy was fetched by this call, so it is already as fresh as a forced
+    re-read would be: the miss is believed after ONE directory read."""
+
+    requests: list[httpx.Request] = []
+    runtime = BridgeRuntime(
+        client=_client(_name_resolution_handler(requests)),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    result = await execute_bridge(
+        runtime, {"op": "send", "to": {"name": "Ada Lovelace"}, "text": "synthetic"}
+    )
+    assert result["ok"] is False and result["code"] == "invalid_request"
+    assert _directory_reads(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_name_miss_on_a_warm_cache_forces_exactly_one_refresh(tmp_path) -> None:
+    """A cached copy may predate a teammate joining, so a miss on it re-reads
+    the directory exactly once — and never more."""
+
+    requests: list[httpx.Request] = []
+    client = _client(_name_resolution_handler(requests))
+    await client.directory_cached(TENANT)  # prime the cache
+    requests.clear()
+    runtime = BridgeRuntime(
+        client=client,
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    result = await execute_bridge(
+        runtime, {"op": "send", "to": {"name": "Ada Lovelace"}, "text": "synthetic"}
+    )
+    assert result["ok"] is False and result["code"] == "invalid_request"
+    assert _directory_reads(requests) == 1
 
 
 @pytest.mark.asyncio

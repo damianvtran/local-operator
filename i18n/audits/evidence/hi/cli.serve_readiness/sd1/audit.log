@@ -1,0 +1,134 @@
+UTC: 2026-11-16T04:39:06.290639+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:39:06.341363+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --help
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:39:57.505686+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python -c 'import json, hashlib, re, unicodedata
+from pathlib import Path
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+root=Path.cwd()
+base=root/'"'"'local_operator/i18n/catalogues'"'"'
+namespace='"'"'cli.serve_readiness'"'"'
+def pairs(items):
+    out={}
+    for key,value in items:
+        assert key not in out, f'"'"'duplicate JSON member: {key}'"'"'
+        out[key]=value
+    return out
+def load(path):
+    return json.loads(path.read_text(),object_pairs_hook=pairs)
+en=load(base/'"'"'en'"'"'/f'"'"'{namespace}.json'"'"')
+hi=load(base/'"'"'hi'"'"'/f'"'"'{namespace}.json'"'"')
+context=load(base/'"'"'en'"'"'/f'"'"'{namespace}.context.json'"'"')
+assert len(en)==len(hi)==len(context)==11
+assert en.keys()==hi.keys()==context.keys()
+rules=load(root/'"'"'local_operator/i18n/data/plural_rules.json'"'"')['"'"'locales'"'"']['"'"'hi'"'"']
+print('"'"'CLDR Hindi categories:'"'"', rules['"'"'categories'"'"'])
+def structure(nodes):
+    return [(node.name,node.kind,node.skeleton,[(selector,structure(body)) for selector,body in node.parts]) for node in nodes if isinstance(node,rt._Arg)]
+params={'"'"'device'"'"':'"'"'node-a'"'"','"'"'pids'"'"':'"'"'21, 22'"'"','"'"'builds'"'"':'"'"'v0.90.0'"'"','"'"'install'"'"':'"'"'v0.91.0'"'"','"'"'recorded'"'"':'"'"'v0.89.0'"'"','"'"'holders'"'"':'"'"'example.service'"'"','"'"'reasons'"'"':'"'"'pid 21: नमूना कारण'"'"'}
+for key in en:
+    assert structure(rt.parse_message(en[key]))==structure(rt.parse_message(hi[key])), key
+    assert rt.message_arguments(en[key])==rt.message_arguments(hi[key]), key
+    for selectors in rt.plural_selectors(hi[key]):
+        assert set(selectors)==set(rules['"'"'categories'"'"']), (key,selectors)
+    assert re.findall(r'"'"'`[^`]*`'"'"',en[key])==re.findall(r'"'"'`[^`]*`'"'"',hi[key]), key
+    assert re.findall(r'"'"'</?[A-Za-z][^>]*>'"'"',en[key])==re.findall(r'"'"'</?[A-Za-z][^>]*>'"'"',hi[key]), key
+    assert not any(unicodedata.bidirectional(c) in ('"'"'RLE'"'"','"'"'RLO'"'"','"'"'LRE'"'"','"'"'LRO'"'"','"'"'PDF'"'"','"'"'RLI'"'"','"'"'LRI'"'"','"'"'FSI'"'"','"'"'PDI'"'"') for c in hi[key]), key
+    assert not re.search('"'"'[०-९]'"'"',hi[key]), key
+    assert '"'"'\u200c'"'"' not in hi[key] and '"'"'\u200d'"'"' not in hi[key], key
+    hints={k:v for k,v in context[key].items() if k in ('"'"'maxCells'"'"','"'"'maxChars'"'"')}
+    print('"'"'PASS'"'"',key,'"'"'arguments='"'"'+repr(rt.message_arguments(hi[key])),'"'"'selectors='"'"'+repr(rt.plural_selectors(hi[key])),'"'"'hints='"'"'+repr(hints))
+    counts=(0,1,2,5,21) if rt.plural_selectors(hi[key]) else (1,)
+    for count in counts:
+        text=rt.render_message(hi[key],dict(params,count=count),'"'"'hi'"'"')
+        print(f'"'"'  count={count}, chars={len(text)}, rich_cells={cell_len(text)}: {text}'"'"')
+print('"'"'PASS: 11/11 keys; valid duplicate-free JSON; exact AST argument/type/selector structure; exact backticks/tags; Hindi one/other complete; no native digits/bidi controls/ZWJ/ZWNJ.'"'"')
+print('"'"'Text renders only; no browser/terminal frame or actual diagnostic/service action executed; no maxCells/maxChars hints supplied.'"'"')
+for rel in ('"'"'local_operator/i18n/catalogues/en/cli.serve_readiness.json'"'"','"'"'local_operator/i18n/catalogues/en/cli.serve_readiness.context.json'"'"','"'"'local_operator/i18n/catalogues/hi/cli.serve_readiness.json'"'"','"'"'i18n/glossary.md'"'"','"'"'i18n/style-guides/hi.md'"'"'):
+    print('"'"'SHA256'"'"',rel,hashlib.sha256((root/rel).read_bytes()).hexdigest())
+'
+CLDR Hindi categories: ['one', 'other']
+PASS cli.serve_readiness.unproven arguments=() selectors=() hints={}
+  count=1, chars=126, rich_cells=87: दर्ज है, लेकिन इसकी प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)
+PASS cli.serve_readiness.not_reporting arguments=() selectors=() hints={}
+  count=1, chars=56, rich_cells=41: दर्ज है लेकिन जवाब नहीं दे रहा (इसकी हार्टबीट रुक गई है)
+PASS cli.serve_readiness.not_this_daemon arguments=() selectors=() hints={}
+  count=1, chars=63, rich_cells=48: दर्ज है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है
+PASS cli.serve_readiness.unknown_state arguments=() selectors=() hints={}
+  count=1, chars=25, rich_cells=16: अज्ञात स्थिति में दर्ज है
+PASS cli.serve_readiness.install_unknown arguments=() selectors=() hints={}
+  count=1, chars=72, rich_cells=51: ऐसे बिल्ड पर चलता है जिसकी तुलना इंस्टॉल किए गए बिल्ड से नहीं की जा सकती
+PASS cli.serve_readiness.cgroup_unknown arguments=() selectors=() hints={}
+  count=1, chars=58, rich_cells=44: ऐसे cgroup में चलता है जिसका स्थान यह जाँच तय नहीं कर सकती
+PASS cli.serve_readiness.recorded_gap arguments=(('recorded', 'simple'), ('install', 'simple')) selectors=() hints={}
+  count=1, chars=81, rich_cells=61: दर्ज बिल्ड v0.89.0, इंस्टॉल किया गया बिल्ड v0.91.0 (प्रक्रिया की पहचान अप्रमाणित)
+PASS cli.serve_readiness.unknown arguments=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) selectors=(('one', 'other'),) hints={}
+  count=0, chars=134, rich_cells=107: node-a पर `lop serve` डेमन: pid 21: नमूना कारण, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+  count=1, chars=134, rich_cells=107: node-a पर `lop serve` डेमन: pid 21: नमूना कारण, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+  count=2, chars=136, rich_cells=106: node-a पर `lop serve` डेमन: pid 21: नमूना कारण, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+  count=5, chars=136, rich_cells=106: node-a पर `lop serve` डेमन: pid 21: नमूना कारण, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+  count=21, chars=136, rich_cells=106: node-a पर `lop serve` डेमन: pid 21: नमूना कारण, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+PASS cli.serve_readiness.stale arguments=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) selectors=(('one', 'other'),) hints={}
+  count=0, chars=150, rich_cells=123: node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+  count=1, chars=150, rich_cells=123: node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+  count=2, chars=153, rich_cells=123: node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+  count=5, chars=153, rich_cells=123: node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+  count=21, chars=153, rich_cells=123: node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+PASS cli.serve_readiness.other_unit arguments=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) selectors=(('one', 'other'),) hints={}
+  count=0, chars=96, rich_cells=81: node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+  count=1, chars=96, rich_cells=81: node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+  count=2, chars=94, rich_cells=79: node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+  count=5, chars=94, rich_cells=79: node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+  count=21, chars=94, rich_cells=79: node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+PASS cli.serve_readiness.identity_restart arguments=(('device', 'simple'),) selectors=() hints={}
+  count=1, chars=192, rich_cells=150: node-a पर, रिकॉर्ड देखने के लिए `lop services status` चलाएँ, फिर प्रक्रियाओं की पहचान दर्ज करने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है
+PASS: 11/11 keys; valid duplicate-free JSON; exact AST argument/type/selector structure; exact backticks/tags; Hindi one/other complete; no native digits/bidi controls/ZWJ/ZWNJ.
+Text renders only; no browser/terminal frame or actual diagnostic/service action executed; no maxCells/maxChars hints supplied.
+SHA256 local_operator/i18n/catalogues/en/cli.serve_readiness.json 6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e
+SHA256 local_operator/i18n/catalogues/en/cli.serve_readiness.context.json e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693
+SHA256 local_operator/i18n/catalogues/hi/cli.serve_readiness.json 44980d359b70259062ec915d495235869e62996247beaa7e851e05b8a65ab439
+SHA256 i18n/glossary.md 5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7
+SHA256 i18n/style-guides/hi.md 82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:42:21.055640+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace cli.serve_readiness
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:42:21.370106+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/hi/cli.serve_readiness/sd1/ledger-receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run
+i18n/audit-history/hi/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE: 0
+

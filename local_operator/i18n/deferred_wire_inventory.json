@@ -11,7 +11,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 864
+        "settings_io.py": 872
       }
     },
     "wire.settings.hub_defaults": {
@@ -264,7 +264,7 @@
         }
       ],
       "references": {
-        "harness/bridge_copy.py": 91
+        "harness/bridge_copy.py": 95
       }
     },
     "wire.notification_sound": {

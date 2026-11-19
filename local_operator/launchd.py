@@ -108,6 +108,13 @@ PlistRefreshKind = Literal[
     "revived",
     "left-stopped",
     "failed",
+    # The running process is provably on a superseded generation and a rule
+    # forbade moving it (``detail`` says which). Reported, never silent: see
+    # ``update._systemd_restart_if_build_moved``.
+    "stale",
+    # Restarted, but the new process's generation could not be read, so the
+    # move is reported as unverified rather than claimed (review R1-2).
+    "unverified",
 ]
 
 ReloadOutcome = Literal["reloaded", "not-addressable", "failed"]
@@ -311,6 +318,13 @@ class PlistRefresh:
         """
         if self.kind == "failed":
             return f"warning: {self.name} daemon was not refreshed: {self.detail}"
+        if self.kind == "stale":
+            # A LEFT-ON-PURPOSE daemon is still a daemon on an old build, so it
+            # is a warning: silence here is what let three Linux daemons sit
+            # one to two releases behind a "complete" update (2026-11-17).
+            return f"warning: {self.name} daemon is still on an older build: {self.detail}"
+        if self.kind == "unverified":
+            return f"warning: {self.name} daemon move is unverified: {self.detail}"
         return ""
 
 
@@ -1653,6 +1667,109 @@ def restart_if_build_moved(
             ),
         )
     return PlistRefresh(name=name, kind="restarted", detail=stale.name, consequence=consequence)
+
+
+InstallBuildKind = Literal["current", "restarted", "restarted-unconfirmed", "failed", "unconfirmed"]
+
+
+@dataclass(frozen=True)
+class InstallBuildCheck:
+    """What an installer's "already current and serving" branch found about the BUILD.
+
+    ``current`` — the running pid's generation was read and IS ``current``: the
+    install's existing "already current" line is true and stands alone.
+    ``restarted`` — proven stale, kicked, and a new pid came up; ``generation``
+    names the build it was still running. ``restarted-unconfirmed`` — the build
+    could not be read and the caller chose to restart rather than guess.
+    ``failed`` — a restart was needed and launchd refused it or nothing came back.
+    ``unconfirmed`` — the build could not be read and the caller chose NOT to
+    restart: the line says so and names ``recovery`` instead of claiming current.
+    """
+
+    kind: InstallBuildKind
+    recovery: str
+    generation: str = ""
+
+    def step(self) -> str:
+        """The install step line for this outcome, or ``""`` for ``current``.
+
+        Keyed copy (AGENTS.md "Internationalization is mandatory"); imported
+        here rather than at module top because this module sits on every
+        installer's startup path and only a non-current outcome needs it.
+        """
+        if self.kind == "current":
+            return ""
+        from local_operator.i18n.keys import cli_daemon_build as _k
+        from local_operator.i18n.text import tr
+
+        t = tr("cli.daemon_build")
+        if self.kind == "restarted":
+            return t(_k.install_restarted(generation=self.generation))
+        if self.kind == "restarted-unconfirmed":
+            return t(_k.install_restarted_unconfirmed())
+        if self.kind == "failed":
+            return t(_k.install_restart_failed(command=self.recovery))
+        return t(_k.install_unconfirmed(command=self.recovery))
+
+
+def check_running_build_on_install(
+    *,
+    label: str,
+    path: Path,
+    pid: int | None,
+    recovery: str,
+    run: Callable[..., object],
+    restart_when_unproven: bool,
+) -> InstallBuildCheck:
+    """Ask the RUNNING daemon's build before an installer says "already current".
+
+    WHY THIS EXISTS (field finding, 2026-11-18): after upgrading 0.96.5 →
+    0.106.7, ``lop mobile install`` and ``lop tunnel install`` both answered
+    "LaunchAgent already current" and left processes started days earlier
+    serving the OLD code; only ``lop mobile restart`` / ``lop tunnel restart``
+    picked up the new build. The plist under the generation layout names the
+    stable shim, so it is byte-identical across builds (see
+    :func:`restart_if_build_moved`) — "the plist is current and the daemon
+    answers" says nothing about which build is answering. The update path has
+    its own movers; an explicit install must not be the one command that keeps
+    old code running while claiming everything is current.
+
+    ``pid`` is the launchd pid the caller already read (:func:`job_pid`), so
+    the liveness check and this one cost one ``launchctl print`` between them.
+
+    THE TRI-STATE, read as :func:`local_operator.update.generation_staleness_of_process`
+    documents it: ``False`` (both sides read, they match) is the only answer that
+    leaves the daemon alone silently; ``True`` always restarts; ``None`` (a pip/uv
+    in-place install with no generation layout, an argv without a generation, a
+    pointer mid-rename) restarts only when the caller says that daemon can take
+    an unrequested bounce (``restart_when_unproven``) — otherwise the outcome is
+    ``unconfirmed`` and the step names the restart command, never "current".
+
+    At most ONE kick, confirmed by a NEW pid (:func:`_await_new_pid`) exactly as
+    :func:`restart_if_build_moved` confirms its own; never raises.
+    """
+    from local_operator import update
+
+    # The repair's two-state reader first, so a proven move always carries the
+    # generation it names; only when it declines is the surface's tri-state
+    # asked to tell "proven current" from "could not tell". A True there (a
+    # pointer that moved between the two reads) is treated as unproven.
+    stale = update.stale_generation_of_process(pid) if pid is not None else None
+    if stale is None:
+        verdict = update.generation_staleness_of_process(pid) if pid is not None else None
+        if verdict is False:
+            return InstallBuildCheck(kind="current", recovery=recovery)
+        if not restart_when_unproven:
+            return InstallBuildCheck(kind="unconfirmed", recovery=recovery)
+    # ``pid is None`` lands here on purpose: no pid means no build could be
+    # read, which is "unproven", so a ``restart_when_unproven`` caller kicks.
+    if not kickstart(label=label, path=path, run=run):
+        return InstallBuildCheck(kind="failed", recovery=recovery)
+    if _await_new_pid(label=label, path=path, previous=pid, run=run) is None:
+        return InstallBuildCheck(kind="failed", recovery=recovery)
+    if stale is not None:
+        return InstallBuildCheck(kind="restarted", recovery=recovery, generation=stale.name)
+    return InstallBuildCheck(kind="restarted-unconfirmed", recovery=recovery)
 
 
 def start_if_stopped(

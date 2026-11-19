@@ -419,6 +419,8 @@ def _conn(*, surface: str = "desktop", kind: str = "attach") -> Any:
         kind=kind,
         operator_nonce=operator_nonce(),
         operator_salt=operator_nonce(),
+        # ADR 0009: ``_ClientConn.origin``, the auth-time declared origin.
+        origin="",
     )
 
 
@@ -599,6 +601,9 @@ async def _serve_asks(tmp_path: Path, cap: bytes, queue: AskQueue) -> Any:
             return None
 
     session = _AskSession()
+    # The production invariant the minted-here rule reads (F2 Part C): a session
+    # owns the ask queue for its OWN id, so its ``session_id`` is the queue's.
+    session.session_id = queue._session_id
     handle = ServingSessionHandle(
         session, asyncio.get_running_loop(), cwd=str(tmp_path), auto_approve=False
     )
@@ -649,6 +654,8 @@ async def test_the_real_socket_stamps_desktop_only_for_a_proved_frame(
             frame["operator_cap"] = conn.proof(cap)
         reply = await _send(conn, None, frame)
         assert reply["op"] == "ack", reply
+        # F2: the ack names the label the runtime stamped, on the real wire.
+        assert reply.get("surface") == ("desktop" if present_proof else "unverified"), reply
         conn.close()
     finally:
         await live.close(config)
@@ -1092,3 +1099,35 @@ async def test_a_send_refused_mid_reconnect_reports_no_proof() -> None:
     with pytest.raises(RuntimeError):
         await facade._ask_client_method("ask_respond", "a-3", {"q": ["Yes"]}, by="desktop")
     assert facade.ask_consent_bearing() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bearing", [True, False], ids=["desktop-started", "terminal-started"])
+async def test_the_signature_free_probe_matches_when_the_real_client_would_sign(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bearing: bool
+) -> None:
+    """PR #4208 S-1 (decision a-856f): ``bridge_decide_signature_free`` is False
+    EXACTLY when the real ``AttachClient`` would sign a ``bridge_decide`` frame
+    (the Touch ID path), so the desktop route reroutes precisely those cards."""
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    client._operator_cap = mint_operator_cap()
+    client._operator_nonce = operator_nonce()
+    client._operator_salt = operator_nonce()
+    client._authority_bearing = bearing
+    client._operator_signature_supported = True
+    monkeypatch.setattr(type(client), "connected", property(lambda _self: True))
+    signed: list[tuple[str, str]] = []
+
+    async def signer(action: str, request_id: str) -> Any:
+        signed.append((action, request_id))
+        return None
+
+    client._operator_signature = signer  # type: ignore[method-assign]
+    facade = _facade_with(client)
+    frame = {"op": "bridge_decide", "ask_id": "a-1", "question_id": "bmsg_x", "word": "approve"}
+    await client._present_operator_signature(frame)
+    assert await facade.bridge_decide_signature_free() is bearing
+    assert signed == ([] if bearing else [("decide", "a-1#bmsg_x#approve")])

@@ -8,6 +8,45 @@ Python legs on 2026-11-14) projects every shard
 under 38/1.15 = 33.0 minutes of job wall; that projection is the margin claim,
 and the PR gate run of the refresh is its first post-change observation.
 
+## 2026-11-19 regeneration: 165 unmeasured files had eaten the serial budget
+
+`test_the_serial_budget_is_accounted_in_full_and_fits_the_unchanged_job_ceiling`
+models shard 0 as its weight / 4 workers + the whole 420 s serial step, against
+38 × 60 − 60 = 2,220 s. On `main` at `493959c41` it projected **2,205.3 s**
+(14.7 s headroom), and #4245 (21 new unit test files) tipped it to 2,233.1 s.
+The cause was not slower tests: 165 of 2,477 files postdated the 2026-11-13
+sample and each weighed the p90 fallback (31.6 s), 87 test-minutes of mostly
+fictitious work. The measured files' own total barely moved (627.2 → 630.4
+test-min).
+
+Regenerated with the unchanged generator and method (max over both legs' p75)
+from the three most recent `main` full-suite runs whose twelve shard jobs all
+ran and passed — most successful `main` runs skip the matrix by path filter,
+which the generator rejects ("no unit shard jobs"):
+
+| Run | Attempt | Event | Head |
+|---|---:|---|---|
+| 44338010689 | 1 | push | `f56c724f82315fe9ab7563e05af381a5d2c3cb90` |
+| 44258386320 | 1 | schedule | `a11a61da4698459bab10f4957555dcecd5f9057b` |
+| 44227734056 | 1 | push | `4f558effd1281ddb5e06aec0c68461639003d425` |
+
+Nothing was hand-edited; a second regeneration was byte-identical (`cmp`). The
+job ceiling (38 min) and the fallback method are unchanged; the derived p90
+fallback moved 31.628 → 30.724 s (pinning it at 31.628 shifts the projections
+below by ≤ 1.2 s). 2,468 files are measured (2,450 with all 6 run×leg
+samples), 9 remain unmeasured.
+
+| Tree | Files (unmeasured) | Per-shard test-min | Shard 0 + serial | Headroom vs 2,220 s |
+|---|---|--:|--:|--:|
+| `main`, old manifest | 2,477 (165) | 119.0 | 2,205.3 s | 14.7 s |
+| `main` + #4245's 21 files, old manifest | 2,498 (186) | 120.9 | 2,233.1 s | −13.1 s |
+| `main`, this manifest | 2,477 (9) | 105.8 | 2,007.6 s | 212.4 s |
+| `main` + #4245's 21 files, this manifest | 2,498 (30) | 107.6 | 2,034.3 s | 185.7 s |
+
+Largest weight moves: `test_attach_frame_size.py` 2,337.1 → 1,769.3 s,
+`test_ask_picker.py` 1,257.0 → 1,022.8 s, `test_settings_view.py`
+1,194.5 → 1,305.5 s.
+
 ## 2026-11-14 regeneration: #3941's runs, max over both Python legs
 
 Two changes landed in parallel: #3941 (2026-11-13, below) refreshed the weights
@@ -142,7 +181,7 @@ leg, so point it outside a size-capped session scratchpad:
 ```sh
 .venv/bin/python scripts/gen_test_durations.py --cache-dir /path/outside/scratchpad/timing-cache \
   --python 3.12 --python 3.13 \
-  --ci-run 43461090162:1 --ci-run 43426228826:1 --ci-run 43329220708:1
+  --ci-run 44338010689:1 --ci-run 44258386320:1 --ci-run 44227734056:1
 ```
 
 The generator fetches attempt-specific jobs and downloads artifacts by immutable

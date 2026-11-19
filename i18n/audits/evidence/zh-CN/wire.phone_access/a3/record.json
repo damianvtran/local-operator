@@ -1,0 +1,80 @@
+{
+ "schema": 1,
+ "audit_id": "a3",
+ "audit_kind": "independent_translation_audit",
+ "locale": "zh-CN",
+ "namespace": "wire.phone_access",
+ "round": 3,
+ "audit_date": "2026-11-17",
+ "key_count": 10,
+ "keys_audited": 10,
+ "keys_changed_in_scope": 4,
+ "changed_keys": [
+  "wire.phone_access.away_after.choice.1m.label",
+  "wire.phone_access.away_after.choice.2m.label",
+  "wire.phone_access.away_after.choice.5m.label",
+  "wire.phone_access.away_after.choice.10m.label"
+ ],
+ "source_audit_revision": "d30d1fb1ee99567900586e510c99162b13c9856d",
+ "scope": "294e5923..d30d1fb1 (a2 audit commit -> current PR head; zh-CN catalogue delta from remediation commit 904cf8e9..d30d1fb1)",
+ "prior_audits_on_disk": [
+  "a1",
+  "a2"
+ ],
+ "pr": "https://github.com/damianvtran/local-operator/pull/4145",
+ "translator": {
+  "agent": "remediation coder subagent of team lopdev that authored commit d30d1fb1 (ZH-M1 fix to the four minute labels, applying the a2 auditor's suggested values verbatim); other six values by the coder of 9134015c; session ids not disclosed in the brief or PR #4145",
+  "model": null,
+  "date": "2026-11-17"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent of team lopdev, Local Operator session cee2e3bacd71; not the translator (the remediation coder that authored d30d1fb1 with the ZH-M1 value change, nor the coder that authored 9134015c) nor the English-drafting coder; did not edit any catalogue value",
+  "session": "cee2e3bacd71",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session cee2e3bacd71 (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.phone_access.json",
+   "sha256": "1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/wire.phone_access.context.json",
+   "sha256": "95c0c4b8d5f82cef978c751326ba6c214c1c8bf8152717f608eaeee943071c07"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/zh-CN/wire.phone_access.json",
+   "sha256": "91e8bf24126ab3f36601f25cbfa526d7626f810a27aa17bc955511fdcfd45b9d"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/zh-CN.md",
+   "sha256": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  }
+ },
+ "artifacts": {
+  "report.md": "9430f18aaddff2e5dda575692e0fdbcfa6fbefde10aa39a5908f5172a7416ff5",
+  "audit.log": "3ee951f1eacab4065a1fc6d9fe25ce9f8df341341ffd4cdf06830ddee404d0d3"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse, sha256sum, git diff vs a2 commit, corpus grep, check.py --catalogues-only, ledger.py history-sha, mech.py). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "ZH-M1",
+   "ZH-N2"
+  ],
+  "finding_severities": {
+   "ZH-M1": "minor",
+   "ZH-N2": "nit"
+  },
+  "finding_status": {
+   "ZH-M1": "resolved in d30d1fb1",
+   "ZH-N2": "carried, advisory"
+  }
+ }
+}

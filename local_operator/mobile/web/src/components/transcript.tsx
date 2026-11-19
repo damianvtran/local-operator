@@ -12,6 +12,7 @@ import { useScrollCues } from "../lib/use-scroll-cues";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
 import { AskRow } from "./ask-row";
+import { BridgeCardBodyPanel, isBridgeCardNotice } from "./bridge-card-body";
 import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
 import { SupplementBlock } from "./supplement-block";
@@ -19,6 +20,7 @@ import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
 import { Disclosure } from "./ui/disclosure";
 import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
+import { MESSAGE_PRESSED_EVENT } from "../lib/message-fold";
 import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { messageRuntime } from "../store";
@@ -36,7 +38,7 @@ import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 import { rowKey } from "../lib/condense-records";
-import { splitFirstLine } from "../lib/condense-rows";
+import { UserText } from "./user-text";
 import { composeCondensedEntries, type CondenseEntry } from "../lib/condense-view";
 import { FoldBar, TurnBar } from "./condense-rows";
 
@@ -154,19 +156,21 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 	switch (entry.kind) {
 		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
-			   but the marker of identity is the accent edge on the leading
-			   side: a user turn is the one thing in the transcript the human
-			   said, and the accent is reserved for exactly that kind of "this
-			   is what the turn is on" signal (branding §7). Surface ground +
-			   hairline keeps it quiet next to the answer that follows. */
+			   and edged like it: `border-control`, the 3:1-floor token. The agent
+			   side has no bubble at all, and the surface ground is only 1.07:1 off
+			   the canvas in both Local Operator themes, so this edge is the whole
+			   visual difference between the two speakers (the desktop's
+			   `UserRow` argues the same). A hairline is 1.25-1.41:1 and would not
+			   be seen. */
 			const images = entry.images ?? [];
-			/* A condensed turn keeps the user's opening line beside its outcome.
-			   Opening the turn removes `condensed`, restoring the identical full
-			   bubble and attachments rather than a separately reconstructed row. */
-			const firstLine = condensed ? splitFirstLine(entry.text).headline : entry.text;
+			/* A condensed turn shows the first lines of the message beside its
+			   outcome, with a chevron control when the text is very long (8+
+			   wrapped lines; `UserText`). Opening the turn removes `condensed`, restoring
+			   the identical full bubble and attachments rather than a separately
+			   reconstructed row. */
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md bg-surface px-3 py-1.5">
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-control bg-surface px-3 py-1.5">
 						{/* Attachments render inline like the TUI's image block: the
 						   picture the user sent is part of the turn, not a stripped
 						   "[image attached]" note. AttachmentImage owns the loading
@@ -185,11 +189,7 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 								))}
 							</div>
 						) : null}
-						{firstLine ? (
-							<div className={cn("text-body leading-normal break-words", condensed ? "truncate" : "whitespace-pre-wrap")}>
-								{firstLine}
-							</div>
-						) : null}
+						{entry.text ? <UserText entryId={entry.id} text={entry.text} folded={condensed} /> : null}
 					</div>
 				</div>
 			);
@@ -197,7 +197,7 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 		case "steer":
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words">
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-control px-3 py-1 text-body-sm text-ink-muted break-words">
 						{/* A steer can carry images exactly like a prompt (the composer
 						   sends them on the steer op while a turn runs). Rendering only
 						   the text left an image-only steer as an EMPTY bordered pill
@@ -220,7 +220,7 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 			// The child launch/user task also uses this kind during loading/error.
 			// Without producer facts it is a visible request boundary, not hub traffic.
 			if (!isHubReceipt(entry)) return entry.kind === "parent_message" ? (
-				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
+				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md border border-control bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
 			) : (
 				<div className="min-w-0 rounded-sm border-s-2 border-s-hairline ps-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
 			);
@@ -281,6 +281,18 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 				<ToolRow entry={entry} />
 			);
 		case "notice":
+			/* An inbound Team Bridge card keeps its receipt line and, on a relay
+			   that can answer bodies, gains the body panel under it. The panel
+			   renders nothing on an older relay, so that card is unchanged. */
+			if (isBridgeCardNotice(entry)) {
+				return (
+					<div className="flex min-w-0 flex-col">
+						<NoticeRow entry={entry} />
+						<BridgeCardBodyPanel pid={pid} entryId={entry.id} />
+					</div>
+				);
+			}
+			return <NoticeRow entry={entry} />;
 		case "compaction":
 			return <NoticeRow entry={entry} />;
 		/* THE QUEUED ASK SETTLING (design §4/§5). Both kinds carry structured
@@ -309,9 +321,9 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
  * pending row was the prompt bubble (surface ground, 14px, 77.4px tall) settling
  * into the steer row (no ground, 13px, 49.0px), which the design round measured
  * and refused (D2). The two deliberate departures from a settled row are the
- * same in both variants and both are the pending signal itself: no accent
- * leading edge for a prompt (the accent means "this is what the turn is on", and
- * an unadmitted message is not that yet) and dimmer ink.
+ * same in both variants and both are the pending signal itself: dimmer ink and
+ * the caption. The edge is the settled row's own, so reconciliation is the
+ * caption leaving, not a box changing.
  *
  * It carries NO spinner and no shimmer. `WorkingLine` is this surface's ONE
  * in-progress animation (D25), and a second one per row is exactly the
@@ -366,7 +378,7 @@ function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boo
 		<div className="flex min-w-0 justify-end" data-pending-echo={echo.commandId}>
 			{echo.op === "steer" ? (
 				/* The steer row's own box: `transcript.tsx`'s `case "steer"`. */
-				<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted">
+				<div className="max-w-[85%] rounded-md border border-control px-3 py-1 text-body-sm text-ink-muted">
 					{/* Attachments ride as a count, like the TUI's own prompt receipt. The
 					   BYTES are never duplicated here: the composer keeps its previews and
 					   revokes them on acknowledgement, so a second holder of those object
@@ -378,11 +390,11 @@ function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boo
 					<span className="text-meta text-ink-dim">{caption}</span>
 				</div>
 			) : (
-				/* The user bubble's own box: `transcript.tsx`'s `case "user"`, minus the
-				   accent leading edge and with `text-ink-muted` in place of the settled
-				   row's full ink. Its `gap-1.5` is the settled bubble's gap, matched
+				/* The user bubble's own box: `transcript.tsx`'s `case "user"`, edge
+				   included (the same `border-control`, so settling never moves the
+				   box), with `text-ink-muted` in place of the settled row's full ink. Its `gap-1.5` is the settled bubble's gap, matched
 				   rather than harmonised to the 4px ramp, so the two agree (design D5). */
-				<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md bg-surface px-3 py-1.5 text-body">
+				<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-control bg-surface px-3 py-1.5 text-body">
 					{attachments}
 					{echo.text ? (
 						<div className="leading-normal break-words whitespace-pre-wrap text-ink-muted">
@@ -661,7 +673,7 @@ export function Transcript({
 	const latchSeenRef = useRef<{ seen: boolean; tailId: string | null }>({ seen: false, tailId: null });
 	const headCompletionRef = useRef(0);
 	const userPagedRef = useRef(false);
-	const pressedHeaderRef = useRef<{ id: string; top: number } | null>(null);
+	const pressedHeaderRef = useRef<{ id: string; top: number; sel?: string } | null>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const scrollCue = useScrollCues();
 	const pinnedRef = useRef(true);
@@ -928,9 +940,44 @@ export function Transcript({
 			else setContentResized((n) => n + 1);
 		};
 		el.addEventListener(CONTENT_RESIZED_EVENT, onContentResized);
+		/* A message's own "Show more / Show less" is about to change that message's
+		   height. Hold the PRESSED CONTROL, the way a condensed bar is held: read
+		   its top now (the event's target is the control, still where the finger
+		   is), unpin the tail so the resize signal that follows is not answered by
+		   a jump to the bottom, and let the layout effect below move the scroller by
+		   however far the control went. */
+		const onMessagePressed = (event: Event) => {
+			const control = event.target as HTMLElement | null;
+			const id = (event as CustomEvent<{ id?: string }>).detail?.id;
+			if (!control || !id) return;
+			/* WHICH THING STAYS PUT depends on the direction. Opening ("Show more",
+			   `aria-expanded` still false) grows the text DOWNWARD from its own top,
+			   so holding the control (which sits at the foot) would push the new
+			   lines UP under the header and hide the start of the message the
+			   reader just asked to read (design review D1). Hold the message's own
+			   top instead and the new lines fall below it. Closing ("Show less")
+			   shrinks the text, so hold the control and it lands under the thumb. */
+			const opening = control.getAttribute("aria-expanded") === "false";
+			const sel = opening
+				/* Any folding body that names itself: a user bubble
+				   (`user-text.tsx`) or a Team Bridge card body
+				   (`bridge-card-body.tsx`), which share this recipe. */
+				? `[data-message-id="${CSS.escape(id)}"]`
+				: `[data-message-toggle="${CSS.escape(id)}"]`;
+			const anchor = opening ? el.querySelector(sel) : control;
+			if (!anchor) return;
+			pressedHeaderRef.current = {
+				id,
+				sel,
+				top: anchor.getBoundingClientRect().top - el.getBoundingClientRect().top,
+			};
+			pinnedRef.current = false;
+		};
+		el.addEventListener(MESSAGE_PRESSED_EVENT, onMessagePressed);
 		return () => {
 			ro.disconnect();
 			el.removeEventListener(CONTENT_RESIZED_EVENT, onContentResized);
+			el.removeEventListener(MESSAGE_PRESSED_EVENT, onMessagePressed);
 		};
 	}, []);
 
@@ -1137,7 +1184,9 @@ export function Transcript({
 		const pressed = pressedHeaderRef.current;
 		if (pressed) {
 			pressedHeaderRef.current = null;
-			const header = el.querySelector(`[data-condense-header="${CSS.escape(pressed.id)}"]`);
+			/* A bar answers to `data-condense-header`; a message's own control answers
+			   with the exact selector it stored when pressed (`sel`). */
+			const header = el.querySelector(pressed.sel ?? `[data-condense-header="${CSS.escape(pressed.id)}"]`);
 			if (header) {
 				const delta = header.getBoundingClientRect().top - box.top - pressed.top;
 				if (Math.abs(delta) > 0) el.scrollTop = Math.max(0, Math.min(max, scrollTop + delta));

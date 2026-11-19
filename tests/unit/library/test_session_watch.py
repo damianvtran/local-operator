@@ -1,0 +1,518 @@
+"""The Library's journal watch must stay shallow on Linux.
+
+Regression for node2, 2026-11-17: a recursive watchdog watch of ``sessions/``
+held 126,757 of the user's 126,814 inotify watches (one per scratchpad
+directory) and every other inotify user on the host failed with ENOSPC. These
+tests pin the replacement's contract: ``sessions/`` plus one watch per session
+root, never a scratchpad, a new session picked up after start, and a spent
+budget falling back to the timed reconcile with one warning.
+
+The fake syscalls hand the watch a real pipe as its "inotify fd", so the
+reader thread's ``poll``/``read`` loop is the production one and events are
+fed as genuine ``struct inotify_event`` bytes.
+"""
+
+from __future__ import annotations
+
+import errno
+import logging
+import os
+import struct
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.library import indexer, session_watch
+
+SESSIONS = ("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc")
+
+
+def _deep_sessions(root: Path, names: tuple[str, ...] = SESSIONS, depth: int = 6) -> Path:
+    sessions = root / "sessions"
+    for name in names:
+        directory = sessions / name
+        directory.mkdir(parents=True)
+        (directory / "transcript.jsonl").write_text("")
+        deep = directory / "scratchpad"
+        for level in range(depth):
+            deep = deep / f"rig{level}"
+            (deep / "evidence").mkdir(parents=True)
+    # A plain file at the sessions root is not a session and is never watched.
+    (sessions / "index.json").write_text("{}")
+    return sessions
+
+
+def _event(wd: int, mask: int, name: str = "") -> bytes:
+    raw = name.encode()
+    if raw:
+        raw += b"\0" * (16 - len(raw) % 16)
+    return struct.pack("iIII", wd, mask, 0, len(raw)) + raw
+
+
+class FakeSyscalls:
+    """Records every watch; ``fail_after`` makes the Nth add raise ``ENOSPC``.
+
+    Like the kernel, re-adding a watch on an inode already watched returns its
+    existing wd (counted in ``readded``, not ``added``); a directory removed
+    and recreated under the same name is a new inode and gets a new wd.
+
+    Identity is ``(path, st_ino)`` only while the inode lives: a filesystem
+    may hand a freed inode NUMBER straight to the next ``mkdir`` (the likely
+    cause of this test's CI flake; ext4 can), yet the kernel's mark died with
+    the old inode object,
+    so the recreated directory still gets a new wd. ``watch_died`` models that
+    death — the kernel dropping the watch whether or not its IN_IGNORED ever
+    reaches the reader — and ``pinned_inodes`` forces the reuse for one path
+    so a test does not depend on what the filesystem happens to do.
+    """
+
+    def __init__(self, fail_after: int | None = None) -> None:
+        self.added: list[tuple[str, int]] = []
+        self.readded: list[str] = []
+        self.removed: list[int] = []
+        self.closed: list[int] = []
+        self.fail_after = fail_after
+        self.pinned_inodes: dict[str, int] = {}
+        self.read_fd, self.write_fd = os.pipe()
+        self._wds: dict[tuple[str, int | None], int] = {}
+
+    def init(self) -> int:
+        return self.read_fd
+
+    def add_watch(self, fd: int, path: str, mask: int) -> int:
+        if self.fail_after is not None and len(self.added) >= self.fail_after:
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), path)
+        try:
+            inode: int | None = self.pinned_inodes.get(path) or os.stat(path).st_ino
+        except OSError:
+            inode = None
+        existing = self._wds.get((path, inode))
+        if existing is not None:
+            self.readded.append(path)
+            return existing
+        self.added.append((path, mask))
+        self._wds[(path, inode)] = len(self.added)
+        return len(self.added)  # wd 1 is sessions/, then one per session
+
+    def watch_died(self, path: Path) -> None:
+        """The inode at ``path`` was deleted: the kernel freed its watch."""
+        for key in [key for key in self._wds if key[0] == str(path)]:
+            del self._wds[key]
+
+    def wd_of(self, path: Path) -> int:
+        return [p for p, _ in self.added].index(str(path)) + 1
+
+    def rm_watch(self, fd: int, wd: int) -> None:
+        self.removed.append(wd)
+
+    def read(self, fd: int) -> bytes:
+        return os.read(fd, 65536)
+
+    def close(self, fd: int) -> None:
+        self.closed.append(fd)
+        os.close(fd)
+
+    def feed(self, *events: bytes) -> None:
+        os.write(self.write_fd, b"".join(events))
+
+
+@pytest.fixture
+def fake(monkeypatch) -> FakeSyscalls:
+    syscalls = FakeSyscalls()
+    monkeypatch.setattr(session_watch, "supported", lambda: True)
+    monkeypatch.setattr(session_watch, "_Syscalls", lambda: syscalls)
+    return syscalls
+
+
+@pytest.fixture(autouse=True)
+def _no_recursive_watchdog(monkeypatch):
+    """Any watchdog schedule on the Linux path is the regression itself."""
+
+    class RecordingObserver:
+        def schedule(self, handler: Any, path: str, recursive: bool = False) -> None:
+            raise AssertionError(f"watchdog scheduled {path!r} recursive={recursive}")
+
+    try:
+        import watchdog.observers as observers
+    except ImportError:  # pragma: no cover - watchdog is a runtime dependency
+        return
+    monkeypatch.setattr(observers, "Observer", RecordingObserver)
+
+
+def _until(predicate: Any, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def _drain_until_quiet(seen: list[str], quiet: float = 0.2, bound: float = 3.0) -> None:
+    """Clear ``seen`` until no event has arrived for ``quiet`` seconds.
+
+    Bounded overall so a watch that never goes quiet fails the test rather
+    than hanging it.
+    """
+    deadline = time.monotonic() + bound
+    while True:
+        seen.clear()
+        time.sleep(quiet)
+        if not seen:
+            return
+        assert time.monotonic() < deadline, f"events never went quiet: {seen!r}"
+
+
+def _indexer(tmp_path: Path) -> tuple[indexer.LibraryIndexer, list[str]]:
+    index = indexer.LibraryIndexer(tmp_path)
+    dirty: list[str] = []
+    index._mark_dirty = dirty.append  # type: ignore[method-assign]
+    return index, dirty
+
+
+def test_linux_watches_sessions_and_each_session_root_never_a_scratchpad(tmp_path, fake) -> None:
+    sessions = _deep_sessions(tmp_path)
+    index, _dirty = _indexer(tmp_path)
+    index._start_observer()
+    try:
+        assert index.observer_failed is False
+        paths = [path for path, _mask in fake.added]
+        assert paths == [str(sessions)] + [str(sessions / name) for name in SESSIONS]
+        assert not any("scratchpad" in path for path in paths)
+        # The session watches are directory-only and carry no recursion of any
+        # kind: inotify has none, so the set above IS the watch set.
+        assert all(mask & session_watch.IN_ONLYDIR for _path, mask in fake.added)
+        assert index._observer.watch_count() == 1 + len(SESSIONS)
+    finally:
+        index._stop_observer()
+    assert fake.closed == [fake.read_fd]
+
+
+def test_a_session_created_after_start_gets_its_watch_and_is_indexed(tmp_path, fake) -> None:
+    sessions = _deep_sessions(tmp_path)
+    index, dirty = _indexer(tmp_path)
+    index._start_observer()
+    try:
+        late = "dddddddddddd"
+        (sessions / late).mkdir()
+        fake.feed(_event(1, session_watch.IN_CREATE | session_watch.IN_ISDIR, late))
+        assert _until(lambda: late in dirty)
+        assert (str(sessions / late), session_watch.SESSION_MASK) in fake.added
+
+        # An append inside it now arrives through its own watch, as its id.
+        dirty.clear()
+        fake.feed(_event(fake.wd_of(sessions / late), session_watch.IN_MODIFY, "transcript.jsonl"))
+        assert _until(lambda: dirty == [late])
+
+        # A file landing at the sessions root is not a session.
+        dirty.clear()
+        fake.feed(_event(1, session_watch.IN_CREATE, "index.json.tmp"))
+        fake.feed(_event(fake.wd_of(sessions / late), session_watch.IN_CLOSE_WRITE, "x"))
+        assert _until(lambda: dirty == [late])
+
+        # Removal: the session is still queued (its assets must leave), and a
+        # moved-out directory's watch is handed back explicitly.
+        dirty.clear()
+        moved = SESSIONS[0]
+        fake.feed(_event(1, session_watch.IN_MOVED_FROM | session_watch.IN_ISDIR, moved))
+        assert _until(lambda: moved in dirty)
+        assert fake.wd_of(sessions / moved) in fake.removed
+        assert index._observer.watch_count() == 1 + len(SESSIONS)  # +late, -moved
+    finally:
+        index._stop_observer()
+
+
+def test_enospc_at_start_falls_back_once_and_releases_the_fd(tmp_path, monkeypatch, caplog) -> None:
+    _deep_sessions(tmp_path)
+    syscalls = FakeSyscalls(fail_after=2)  # sessions/ and one session, then ENOSPC
+    monkeypatch.setattr(session_watch, "supported", lambda: True)
+    monkeypatch.setattr(session_watch, "_Syscalls", lambda: syscalls)
+    index, _dirty = _indexer(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+        index._start_observer()
+        index._start_observer()  # a second failure must not warn again
+    assert index.observer_failed is True
+    assert index._observer is None
+    # Closing the fd is what hands the watches it did take back to the user.
+    assert syscalls.closed == [syscalls.read_fd] * 2  # one close per failed start
+    warnings = [r for r in caplog.records if "inotify limit reached" in r.getMessage()]
+    assert len(warnings) == 1
+    os.close(syscalls.write_fd)
+
+
+def test_enospc_on_a_later_session_tears_down_with_one_warning(tmp_path, fake, caplog) -> None:
+    sessions = _deep_sessions(tmp_path)
+    index, _dirty = _indexer(tmp_path)
+    index._start_observer()
+    try:
+        fake.fail_after = len(fake.added)
+        with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+            # Two new sessions in ONE read: the second must not warn again.
+            events = []
+            for name in ("eeeeeeeeeeee", "ffffffffffff"):
+                (sessions / name).mkdir()
+                events.append(_event(1, session_watch.IN_CREATE | session_watch.IN_ISDIR, name))
+            fake.feed(*events)
+            assert _until(lambda: index.observer_failed)
+            assert _until(lambda: fake.closed == [fake.read_fd])
+        warnings = [r for r in caplog.records if "inotify limit reached" in r.getMessage()]
+        assert len(warnings) == 1
+        assert index._observer.watch_count() == 0
+    finally:
+        index._stop_observer()
+
+
+def test_the_failed_flag_is_set_only_after_the_warning_is_logged(
+    tmp_path, fake, caplog, monkeypatch
+) -> None:
+    """CI flake on #4261/#4246 (``assert 0 == 1``): the flag used to be set
+    before the warning, so a reader waiting on ``observer_failed`` could read
+    the log in between. Slowing the warning's own argument (``budget_limit``)
+    widens that window from a race into a certainty on the old order."""
+    real_budget_limit = session_watch.budget_limit
+
+    def slow_budget_limit(code: int) -> str:
+        time.sleep(0.1)
+        return real_budget_limit(code)
+
+    monkeypatch.setattr(session_watch, "budget_limit", slow_budget_limit)
+    sessions = _deep_sessions(tmp_path)
+    index, _dirty = _indexer(tmp_path)
+    index._start_observer()
+    try:
+        fake.fail_after = len(fake.added)
+        with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+            (sessions / "eeeeeeeeeeee").mkdir()
+            fake.feed(_event(1, session_watch.IN_CREATE | session_watch.IN_ISDIR, "eeeeeeeeeeee"))
+            assert _until(lambda: index.observer_failed)
+            # Read at once, as a status reader would: no sleep, no second wait.
+            warnings = [r for r in caplog.records if "inotify limit reached" in r.getMessage()]
+            assert len(warnings) == 1
+    finally:
+        index._stop_observer()
+
+
+def test_an_already_warned_failure_still_sets_the_flag(tmp_path) -> None:
+    """The early return for a second failure sits inside ``try``/``finally``."""
+    index, _dirty = _indexer(tmp_path)
+    index._watch_warned = True
+    index.observer_failed = False
+    index._session_watch_failed(OSError(errno.ENOSPC, os.strerror(errno.ENOSPC)))
+    assert index.observer_failed is True
+
+
+def test_a_kernel_queue_overflow_asks_for_a_reconcile(tmp_path, fake) -> None:
+    _deep_sessions(tmp_path)
+    index, _dirty = _indexer(tmp_path)
+    woke = threading.Event()
+    index.wake = woke.set  # type: ignore[method-assign]
+    index._start_observer()
+    try:
+        fake.feed(_event(-1, session_watch.IN_Q_OVERFLOW))
+        assert woke.wait(2.0)
+    finally:
+        index._stop_observer()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux-only")
+def test_real_inotify_holds_one_watch_per_session_on_a_cloexec_fd(tmp_path) -> None:
+    """The kernel's own count, read back from ``/proc/self/fdinfo``."""
+    sessions = _deep_sessions(tmp_path)
+    seen: list[str] = []
+    watch = session_watch.SessionDirWatch(sessions, seen.append)
+    watch.start()
+    try:
+        fd = watch._fd
+        assert fd is not None
+        info = Path(f"/proc/self/fdinfo/{fd}").read_text()
+        assert sum(1 for line in info.splitlines() if line.startswith("inotify")) == 1 + len(
+            SESSIONS
+        )
+        # Close-on-exec: an in-place re-exec of serve must not inherit it.
+        flags = int(next(x for x in info.splitlines() if x.startswith("flags:")).split()[1], 8)
+        assert flags & os.O_CLOEXEC
+
+        late = sessions / "dddddddddddd"
+        late.mkdir()
+        assert _until(lambda: "dddddddddddd" in seen)
+        seen.clear()
+        (late / "transcript.jsonl").write_text("{}\n")
+        assert _until(lambda: "dddddddddddd" in seen)
+        # QA Q1: one write is several events (CREATE, MODIFY, CLOSE_WRITE) and
+        # the reader may still be delivering the tail; clearing after the
+        # first one let that tail land in the assertion below. Drain to quiet.
+        _drain_until_quiet(seen)
+        # Deep writes are invisible by design: nothing below a session root.
+        owner = SESSIONS[0]
+        (sessions / owner / "scratchpad" / "rig0" / "deep.txt").write_text("x")
+        time.sleep(0.2)
+        assert seen == []
+        assert watch.watch_count() == 2 + len(SESSIONS)
+    finally:
+        watch.stop()
+    assert watch.watch_count() == 0
+
+
+def test_an_overflow_rescans_and_watches_sessions_whose_create_was_lost(tmp_path, fake) -> None:
+    """Review M1: IN_Q_OVERFLOW may have swallowed a session's IN_CREATE.
+
+    The directory exists but has no watch; the overflow must add it (and
+    queue it once) besides asking for the reconcile.
+    """
+    sessions = _deep_sessions(tmp_path)
+    index, dirty = _indexer(tmp_path)
+    woke = threading.Event()
+    index.wake = woke.set  # type: ignore[method-assign]
+    index._start_observer()
+    try:
+        lost = "dddddddddddd"
+        (sessions / lost).mkdir()  # its IN_CREATE never reaches the reader
+        assert (str(sessions / lost), session_watch.SESSION_MASK) not in fake.added
+        fake.feed(_event(-1, session_watch.IN_Q_OVERFLOW))
+        assert woke.wait(2.0)
+        assert (str(sessions / lost), session_watch.SESSION_MASK) in fake.added
+        assert index._observer.watch_count() == 2 + len(SESSIONS)
+        assert _until(lambda: dirty == [lost])
+        # Already-watched sessions keep their wd (re-armed, not re-queued).
+        assert len(fake.added) == 2 + len(SESSIONS)
+    finally:
+        index._stop_observer()
+
+
+@pytest.mark.parametrize("reused_inode", [False, True], ids=["new-inode", "reused-inode"])
+def test_an_overflow_rewatches_a_session_recreated_after_its_removal_was_lost(
+    tmp_path, fake, reused_inode
+) -> None:
+    """Review R2-m2: the overflow ate a session's IN_DELETE and IN_IGNORED.
+
+    The map still holds the old directory's dead wd when the same id is
+    recreated. The rescan must re-arm it (new inode, new wd), forget the dead
+    wd, queue the session, and route the new wd's events to it.
+
+    ``reused-inode`` pins the case that flaked on CI: the recreated directory
+    got the freed inode number back, and a fake that ignored the watch's death
+    handed back the dead wd, so the rescan saw nothing change.
+    """
+    import shutil
+
+    sessions = _deep_sessions(tmp_path)
+    index, dirty = _indexer(tmp_path)
+    woke = threading.Event()
+    index.wake = woke.set  # type: ignore[method-assign]
+    index._start_observer()
+    watch = index._observer
+    try:
+        name = SESSIONS[0]
+        old_wd = fake.wd_of(sessions / name)
+        if reused_inode:
+            fake.pinned_inodes[str(sessions / name)] = (sessions / name).stat().st_ino
+        shutil.rmtree(sessions / name)
+        fake.watch_died(sessions / name)
+        (sessions / name).mkdir()  # same id, new inode object; no event reaches the reader
+        fake.feed(_event(-1, session_watch.IN_Q_OVERFLOW))
+        assert woke.wait(2.0)
+        assert _until(lambda: dirty == [name])
+        new_wd = len(fake.added)
+        assert fake.added[-1] == (str(sessions / name), session_watch.SESSION_MASK)
+        assert watch._session_wd[name] == new_wd != old_wd
+        assert old_wd not in watch._wd_session
+        assert watch.watch_count() == 1 + len(SESSIONS)
+        dirty.clear()
+        fake.feed(_event(new_wd, session_watch.IN_CLOSE_WRITE, "transcript.jsonl"))
+        assert _until(lambda: dirty == [name])
+    finally:
+        index._stop_observer()
+
+
+@pytest.mark.parametrize("step", ["pipe", "thread"])
+def test_a_late_start_failure_releases_the_inotify_fd_and_the_pipe(
+    tmp_path, fake, monkeypatch, step
+) -> None:
+    """Review R2-m1: the wake pipe (EMFILE) or the reader thread (RuntimeError)
+    failing AFTER the watches are armed must still close the inotify fd, or
+    every watch on it stays held for the life of the process."""
+    _deep_sessions(tmp_path)
+    opened: list[int] = []
+    real_pipe = os.pipe
+
+    def pipe() -> tuple[int, int]:
+        if step == "pipe":
+            raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+        pair = real_pipe()
+        opened.extend(pair)
+        return pair
+
+    def start(self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(session_watch.os, "pipe", pipe)
+    if step == "thread":
+        monkeypatch.setattr(session_watch.threading.Thread, "start", start)
+    index, _dirty = _indexer(tmp_path)
+    index._start_observer()  # falls back, must not raise
+    assert index.observer_failed is True
+    assert fake.closed == [fake.read_fd]
+    for pipe_fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(pipe_fd)
+
+
+@pytest.mark.parametrize(
+    "code,names,not_names",
+    [
+        (errno.ENOSPC, "fs.inotify.max_user_watches", "max_user_instances"),
+        (errno.EMFILE, "fs.inotify.max_user_instances", "max_user_watches"),
+    ],
+)
+def test_the_budget_warning_names_the_limit_that_ran_out(
+    tmp_path, caplog, code, names, not_names
+) -> None:
+    """Review M3 / design D1: ENOSPC is the watch limit, EMFILE the instance
+    limit; naming both sent operators to raise the wrong one."""
+    index, _dirty = _indexer(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+        index._session_watch_failed(OSError(code, os.strerror(code)))
+    (message,) = [r.getMessage() for r in caplog.records]
+    assert names in message
+    assert not_names not in message
+
+
+def test_a_watch_constructor_failure_falls_back_and_keeps_the_worker(tmp_path, monkeypatch, caplog):
+    """Review M2: a libc/ctypes failure at construction is a fallback, not a crash.
+
+    ``_start_observer`` runs on the worker thread with no handler above it,
+    so it must not raise; the worker then carries on with the reconcile.
+    """
+    _deep_sessions(tmp_path)
+    monkeypatch.setattr(session_watch, "supported", lambda: True)
+
+    def broken_libc() -> Any:
+        raise AttributeError("undefined symbol: inotify_init1")
+
+    monkeypatch.setattr(session_watch, "_Syscalls", broken_libc)
+    index, _dirty = _indexer(tmp_path)
+    reconciles = threading.Event()
+    monkeypatch.setattr(index, "reconcile", lambda *a, **k: reconciles.set())
+    with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+        index._start_observer()  # must not raise
+        index._start_observer()  # nor warn twice
+        assert index.observer_failed is True
+        assert index._observer is None
+        index.observer_failed = False
+        index.start()
+        try:
+            assert reconciles.wait(5.0)
+            # The worker reached its own _start_observer and fell back...
+            assert _until(lambda: index.observer_failed, timeout=5.0)
+            # ...and is still serving its loop afterwards.
+            time.sleep(0.1)
+            assert index.running
+        finally:
+            index.stop()
+    warnings = [r for r in caplog.records if "journal watch stopped" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None  # a non-OSError keeps its traceback

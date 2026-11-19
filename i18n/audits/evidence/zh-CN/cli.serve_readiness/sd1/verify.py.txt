@@ -1,0 +1,77 @@
+"""Read-only catalogue audit reproduction, not a UI or provider test.
+
+Run from checkout root with .venv/bin/python. Width estimates deliberately
+exclude terminal markup interpretation; variable-length tokens have no bound
+in the context sidecar, so these are samples, not overflow guarantees.
+"""
+import hashlib
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+from local_operator.i18n import runtime
+
+BASE = Path('local_operator/i18n/catalogues')
+NS = 'cli.serve_readiness'
+
+def strict_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        assert key not in obj, f'duplicate JSON member: {key}'
+        obj[key] = value
+    return obj
+
+def load(path):
+    raw = path.read_bytes()
+    value = json.loads(raw, object_pairs_hook=strict_object)
+    print('INPUT', path.as_posix(), hashlib.sha256(raw).hexdigest())
+    return value
+
+source = load(BASE/'en'/f'{NS}.json')
+context = load(BASE/'en'/f'{NS}.context.json')
+target = load(BASE/'zh-CN'/f'{NS}.json')
+assert len(source) == len(target) == 11
+assert set(source) == set(target) == set(context)
+
+params = dict(device='node-a', pids='pid 123, pid 456', builds='build-old',
+              install='build-new', holders='pid 123 under example.service',
+              recorded='build-old', reasons='pid 123：已有记录，但无法证实其进程身份')
+
+def arguments(nodes, output=None):
+    output = [] if output is None else output
+    for node in nodes:
+        if hasattr(node, 'kind'):
+            if node.kind in ('plural', 'select'):
+                output.append((node.name, node.kind, [key for key, _ in node.parts]))
+            for _, body in node.parts:
+                arguments(body, output)
+    return output
+
+def cells(text):
+    return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in 'WF' else 1 for ch in text)
+
+for key in source:
+    en = source[key]
+    zh = target[key]
+    en_args = runtime.message_arguments(en)
+    zh_args = runtime.message_arguments(zh)
+    assert en_args == zh_args, (key, en_args, zh_args)
+    ast = runtime.parse_message(zh)
+    structures = arguments(ast)
+    for name, kind, selectors in structures:
+        assert kind != 'plural' or selectors == ['other'], (key, selectors)
+    # English repeats these once per plural arm; Chinese correctly has only other.
+    assert set(re.findall(r'`[^`]*`', en)) == set(re.findall(r'`[^`]*`', zh)), key
+    assert set(re.findall(r'</?[A-Za-z][^>]*>', en)) == set(re.findall(r'</?[A-Za-z][^>]*>', zh)), key
+    assert not any(unicodedata.category(ch) == 'Cf' for ch in zh), key
+    budget = {k:v for k,v in context[key].items() if k in ('maxCells','maxChars')}
+    print('KEY', key, 'arguments=', en_args, 'structures=', structures, 'width_hints=', budget)
+    counts = (0, 1, 2, 5, 21) if any(name == 'count' for name, _ in en_args) else (1,)
+    for count in counts:
+        rendered = runtime.render_message(zh, dict(params, count=count), locale='zh-CN')
+        assert all(token in rendered for token in ('lop services status', 'lop services restart')) if key.endswith('.identity_restart') else True
+        print(json.dumps({'count':count if len(counts)>1 else None, 'text':rendered, 'sample_plain_cells':cells(rendered), 'sample_chars':len(rendered)}, ensure_ascii=False))
+print('PASS: all 11 keys; strict JSON/key/argument-kind parity; Chinese other-only plural; code/tag literals; no bidi format controls; all sample renders. No maxCells/maxChars hints. Width values are not rendered-frame or bounded-token proofs.')

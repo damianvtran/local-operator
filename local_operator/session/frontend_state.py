@@ -3742,6 +3742,34 @@ def effort_displacement(selected: Any, effective: Any, chosen: str | None = None
     }
 
 
+#: ``AttentionStore`` state keys that never ride the attach frame: ADR 0009's
+#: per-run routing facts, read only by surfaces that query ``attention.db``
+#: themselves. See ``FrontendSessionState._attention_wire``.
+ATTACH_FRAME_ATTENTION_OMITTED_KEYS: frozenset[str] = frozenset({"origin", "needs_user"})
+
+
+def attach_frame_attention(value: Any) -> Any:
+    """``value`` minus :data:`ATTACH_FRAME_ATTENTION_OMITTED_KEYS` — the attach projection.
+
+    ONE function every attach write path calls, because no single pydantic hook
+    covers them all: construction and the follower ``apply`` run the
+    ``FrontendSessionState`` field validator, but the publisher's live refresh
+    (``FrontendStateStore.mutate``) validates per field through a bare
+    ``TypeAdapter`` and installs with ``model_copy`` — neither runs the model
+    validator — and the desktop bridge builds its local frames from raw
+    ``AttentionStore.state`` (review round 3, R3-1/R3-2). Why the keys stay off:
+    ``FrontendSessionState._attention_wire``. Non-dicts and dicts without the
+    keys come back as the same object, so the common path allocates nothing.
+    """
+    if isinstance(value, dict) and any(key in value for key in ATTACH_FRAME_ATTENTION_OMITTED_KEYS):
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in ATTACH_FRAME_ATTENTION_OMITTED_KEYS
+        }
+    return value
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 
@@ -4029,6 +4057,8 @@ class FrontendSessionState(BaseModel):
     history_generation: int = 0
     attachment_root: str | None = None
     # Durable receipts are independent of the runtime epoch and pending action gates.
+    #: The store's state MINUS :data:`ATTACH_FRAME_ATTENTION_OMITTED_KEYS` —
+    #: see :meth:`_attention_wire` for why the routing facts stay off the frame.
     attention: dict[str, Any] = Field(default_factory=dict)
 
     @model_serializer(mode="wrap")
@@ -4073,6 +4103,32 @@ class FrontendSessionState(BaseModel):
     @classmethod
     def _model_wire(cls, value: Any) -> Any:
         return value.model_dump(mode="json") if isinstance(value, ModelSpec) else value
+
+    @field_validator("attention", mode="before")
+    @classmethod
+    def _attention_wire(cls, value: Any) -> Any:
+        """Drop the ADR 0009 routing facts from the attach frame's attention copy.
+
+        WHY: ``AttentionStore.state`` grew ``origin``/``needs_user`` so the
+        surfaces that ROUTE a completion (push worker, desktop feed banner,
+        ``serving._announce_completion``) can decide who hears about a run.
+        Every one of those reads ``attention.db`` directly; no attach reader
+        (the phone, the desktop app, the attached TUI) renders or routes on
+        them. Carrying them anyway would put an UNCAPPED string on every frame
+        — ``origin`` is replayed verbatim from the transcript's outcome marker
+        (``_import_transcript_outcome``), with no wire cap like ``reason``'s —
+        on a frame whose released arm already sits at its measured ceiling
+        (``test_attach_frame_size``). So the frame projection stays the
+        pre-ADR-0009 shape; a future surface that needs them over attach must
+        add them back here, with a cap and a size-policy review.
+
+        This validator covers construction, ``model_validate`` (the initial
+        refresh) and the follower ``apply``. Paths that bypass model validation
+        — ``FrontendStateStore.mutate`` (the publisher's live refresh) and the
+        desktop bridge's local attention frames — call
+        :func:`attach_frame_attention` themselves; see its docstring.
+        """
+        return attach_frame_attention(value)
 
     @field_validator("last_usage", mode="before")
     @classmethod
@@ -7955,6 +8011,13 @@ class FrontendStateStore:
                     wire_changes[key] = candidate_jobs
                 continue
             candidate = _json_value(value)
+            if key == "attention":
+                # ``_validate_state_field`` and ``model_copy`` below never run the
+                # model's attention validator, so the attach projection is applied
+                # HERE — before the equality check, so a change confined to the
+                # omitted keys is no change at all, and before ``wire_changes``,
+                # so the update frame matches the installed state (R3-1).
+                candidate = attach_frame_attention(candidate)
             # Serialize only fields the caller proposes changing. Dumping the
             # complete state here cloned every retained trajectory even for a
             # one-bit streaming update, turning unrelated UI reads into stalls.

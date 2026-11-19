@@ -1,0 +1,32 @@
+{
+  "network.pairing.refusal.answered": {
+    "note": "Deliberately says nothing about the outcome: an earlier answer may already have approved the device, or declined it.",
+    "role": "Desktop Mesh approvals: a second answer to a pairing that already has one (a double click, or another surface answered first)",
+    "tone": "Plain, calm"
+  },
+  "network.pairing.refusal.expired": {
+    "note": "Nothing changed on either device.",
+    "role": "Desktop Mesh approvals: the pairing window closed or the card is out of date",
+    "tone": "Plain, calm"
+  },
+  "network.pairing.refusal.mismatch": {
+    "note": "{count} is the number of tries left before the invitation is used up (0-3). Preserve the ICU plural arms, the =0 arm and # substitution; use the locale's CLDR plural forms.",
+    "role": "Desktop Mesh approvals: the typed six-digit code was wrong",
+    "tone": "Plain, helpful"
+  },
+  "network.pairing.refusal.needs_app": {
+    "note": "Shown when the answer could not be verified as coming from the signed desktop app (e.g. on Linux, or from a script). 'a terminal' refers to the command-line fallback; keep it generic, do not name commands.",
+    "role": "Desktop Mesh approvals: refusal when a pairing card is answered without the signed app",
+    "tone": "Plain, calm, non-technical"
+  },
+  "network.pairing.refusal.no_pending": {
+    "note": "'invitation' is the pairing invite token minted on the other device.",
+    "role": "Desktop Mesh approvals: no pairing is waiting",
+    "tone": "Plain"
+  },
+  "network.pairing.refusal.not_ready": {
+    "note": "Pairing has two devices: the other device must first type the code this device shows.",
+    "role": "Desktop Mesh approvals: refusal while the other device has not typed the code",
+    "tone": "Plain, calm"
+  }
+}

@@ -10,7 +10,7 @@ import logging
 import pathlib
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import aclosing, asynccontextmanager
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, NamedTuple, cast
 
@@ -31,6 +31,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    StrictInt,
     field_validator,
     model_serializer,
     model_validator,
@@ -38,6 +39,7 @@ from pydantic import (
 from starlette.background import BackgroundTask
 from starlette.types import Receive, Scope, Send
 
+from local_operator.asks import surfaces
 from local_operator.harness.types import ModelSpec
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -863,6 +865,50 @@ class PresenceBeat(Input):
     #: "nothing is on screen".
     session_id: str = Field(default="", pattern=r"^$|^[a-f0-9]{12}$")
     window: PresenceWindow = Field(default_factory=PresenceWindow)
+    # -- ADR 0008 desk presence (slice 1) --------------------------------------
+    # "Is a PERSON at this computer", as opposed to the window state above,
+    # which answers "is this card on screen". All four are OPTIONAL so today's
+    # beat stays valid byte-for-byte; the model is still `extra="forbid"`,
+    # which is exactly why an app may only send them to a backend advertising
+    # `features.desk_presence` (an undeclared field is a 422 the app swallows,
+    # and the lease then lapses). Raw relative facts only: the receiver turns
+    # them into wall-clock deadlines on its own clock (`presence.DeskReport`).
+    #: Seconds since the last OS input, from Electron `getSystemIdleTime()`.
+    idle_s: StrictInt | None = Field(default=None, ge=0)
+    #: Screen locked (or a lock/suspend/resign event since the last unlock).
+    locked: StrictBool | None = None
+    #: False when the app cannot vouch for `idle_s` (e.g. Wayland, ADR R2).
+    idle_trusted: StrictBool | None = None
+    #: The operator's threshold, one of `presence.AWAY_AFTER_CHOICES_S`. A
+    #: Literal rather than a range so no receiver ever computes a deadline
+    #: from a value no settings surface can show.
+    away_after_s: Literal[60, 120, 300, 600] | None = None
+
+    @field_validator("away_after_s", mode="before")
+    @classmethod
+    def _strict_threshold(cls, value: Any) -> Any:
+        # `Literal[60, ...]` would accept `True`/`60.0` in lax mode; a
+        # threshold is an integer the app read from the setting, nothing else.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("away_after_s must be an integer")
+        return value
+
+    def desk_fields(self) -> dict[str, Any]:
+        """The desk fields as publisher kwargs, or ``{}`` for a legacy beat.
+
+        Empty when the app sent none of them, which is what keeps a legacy
+        beat's published record free of any `desk` entry (version skew row
+        "old app, new core" falls back to the focus rule).
+        """
+        fields = {
+            "idle_s": self.idle_s,
+            "locked": self.locked,
+            "idle_trusted": self.idle_trusted,
+            "away_after_s": self.away_after_s,
+        }
+        if all(value is None for value in fields.values()):
+            return {}
+        return fields
 
 
 class SessionTarget(Input):
@@ -4282,6 +4328,43 @@ async def child_attachment_waveform(
 
 
 @router.get(
+    "/v1/desktop/sessions/{session_id}/bridge-cards/{entry_id}/body",
+    response_model=CRUDResponse[Any],
+)
+async def bridge_card_body(
+    session_id: str,
+    request: Request,
+    response: Response,
+    entry_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")],
+):
+    """What one inbound Team Bridge card's messages are to THIS viewer.
+
+    ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
+    reason?}], more}`` (bridge-body design §4; feature key
+    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
+    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
+    markdown, present only when admitted. A READ: keyed by the transcript row
+    the caller can already page, so it cannot be used to probe message ids.
+    The display store and the hub's admitted-only history read are the only
+    sources; the screener's classification fetch (``/messages/{id}/body``) is
+    never used. Caching, SET vs SERVED (the same split as the owner-audit and
+    owner-invitation routes in ``desktop_team_bridge.py``): the route SETS
+    ``private, no-store`` (design §4) so it carries the body's contract
+    wherever the router is mounted, but the running core's app-wide
+    ``managed_desktop_boundary`` (server/app.py) rewrites every
+    ``/v1/desktop/`` answer to plain ``no-store``, which is what is SERVED.
+    That is no weaker -- ``no-store`` keeps third-party text out of every
+    cache, shared or private. The boundary is deliberately not taught to keep
+    a route's own value: that would change the served header of every
+    existing route that sets ``private, no-store``.
+    """
+    async with errors(request):
+        answer = reply(await host(request).bridge_card_body(session_id, entry_id))
+    response.headers["Cache-Control"] = "private, no-store"
+    return answer
+
+
+@router.get(
     "/v1/desktop/sessions/{session_id}/attachments/{digest}",
     # The image's own mime type is the response type, so the published contract
     # must not claim the CRUD JSON envelope its neighbours return. Declaring the
@@ -4974,6 +5057,61 @@ def _verified_decision_target(bridge: Any, body: Answer) -> tuple[str, str, str]
     return None
 
 
+async def _decide_card_without_prompt(
+    request: Request, bridge: Any, target: tuple[str, str, str]
+) -> str | None:
+    """Decide a Team Bridge request card with no OS prompt, or ``None`` to keep the runtime door.
+
+    WHY (decision a-856f; PR #4208 security round 1, S-1). The runtime door's
+    ``bridge_decide`` is signed by the attach client with the operator key — a
+    Touch ID sheet, and a refusal on hosts without a presence key — whenever
+    this backend did not start the session's runtime (a terminal-started
+    designated session). For a Team Bridge request that prompt guards nothing:
+    the bearer-only Approvals decide already reaches the same ask. So, only in
+    that case, the card is decided by
+    ``desktop_team_bridge.decide_request_from_card`` (same bearer, same intent
+    ledger and hub audit as the list).
+
+    ``None`` — the runtime door stays — for: a ``site:v1:`` card (a node's
+    browser extension re-verifies that signature; it is real authority there),
+    a peer's conversation (its ask lives on the other device), a holder with no
+    probe (the in-process serving handle, which never signs), and a facade
+    that reports the decision would go unsigned anyway (that path also injects
+    the answer into the agent's turn, which the bearer path does not). Once the
+    probe says the decision would be signed, a card whose ask is not one of
+    this machine's Team Bridge asks is REFUSED (``no_open_ask``) rather than
+    sent to the signing door (R2-1).
+    """
+    from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+    ask_id, question_id, word = target
+    if question_id.startswith(SITE_QUESTION_PREFIX):
+        return None
+    if getattr(bridge, "remote_row", None) is not None:
+        return None
+    probe = getattr(bridge.remote, "bridge_decide_signature_free", None)
+    if not callable(probe) or await cast(Callable[[], Awaitable[bool]], probe)():
+        return None
+    # Imported here: desktop_team_bridge imports this module (``reply``).
+    from local_operator.server.routes.desktop_team_bridge import (
+        _CARD_REFUSALS,
+        decide_request_from_card,
+    )
+
+    decided = await decide_request_from_card(
+        store_root(request), ask_id=ask_id, message_id=question_id, word=word
+    )
+    if decided is None:
+        # NEVER FALL THROUGH TO THE SIGNING DOOR HERE (PR #4208 review round 2,
+        # R2-1). The probe already said this backend would sign, and the
+        # runtime mints a ``decide`` challenge without checking the ask is
+        # pending, so a stale card (a lapsed ask beside a re-raised one, or an
+        # ask this machine no longer indexes) would raise Touch ID only to be
+        # refused. No matching ask means the card is not waiting: say so.
+        raise ValueError(_CARD_REFUSALS["no_open_ask"])
+    return decided
+
+
 async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:
     """Put a queued ask away from the desktop — the NO-BOOT door (SA-D5, §14).
 
@@ -5115,6 +5253,15 @@ async def answer(session_id: str, body: Answer, request: Request):
                     # a ``{"ok", "error"}`` verdict, a serving handle raises
                     # ``ValueError`` (caught below with the plain door's). Both
                     # reach the user as the same 409 sentence.
+                    #
+                    # EXCEPT a Team Bridge request this backend would have to
+                    # SIGN for (decision a-856f; PR #4208 security round 1,
+                    # S-1): ordinary approve/deny never raises Touch ID, so it
+                    # is decided through the bearer-authorised single-item path
+                    # instead (``_decide_card_without_prompt``).
+                    decided = await _decide_card_without_prompt(request, bridge, target)
+                    if decided is not None:
+                        return reply({"detail": decided})
                     verdict = await bridge.remote.bridge_decide(*target)
                     if isinstance(verdict, Mapping) and not verdict.get("ok", True):
                         raise ValueError(str(verdict.get("error") or "the decision was refused"))
@@ -5141,28 +5288,40 @@ async def answer(session_id: str, body: Answer, request: Request):
                 message = str(error) or "the answer was refused"
                 raise HTTPException(409, message) from None
             # ``consent_bearing`` (feature ``ask_consent_bearing``): whether
-            # THIS backend presented operator proof with the answer, i.e. holds
-            # the capability of the runtime it answered (it started that
-            # runtime). False means the runtime stamped the answer
-            # ``unverified``: recorded, but never delete/move consent (incident
-            # a-48e3, 2026-11-16). Computed from the facade's handshake state,
-            # never from the body (``Answer`` is ``extra="forbid"``, so a body
-            # field of that name is a 422). A peer's conversation is always
+            # the runtime stamped this answer with a guard-trusted surface.
+            # False means it stamped ``unverified`` (or ``remote``): recorded,
+            # but never delete/move consent (incident a-48e3, 2026-11-16).
+            # Computed from the runtime's reply, never from the body
+            # (``Answer`` is ``extra="forbid"``, so a body field of that name is
+            # a 422). A peer's conversation is always
             # False: its answer is relayed and stamped ``remote`` whatever this
             # process holds for a same-numbered local pid. Absent probe (an
             # older facade or a test double) reads False: fail closed. A
             # DECLINE reads null: a decline is never consent, so "this answer
             # can authorise" must not be claimable for one, whatever proof the
             # connection held (PR #4127 QA Q2).
-            probe = getattr(bridge.remote, "ask_consent_bearing", None)
-            consent_bearing: bool | None = (
-                None
-                if body.decline
-                else bool(
-                    getattr(bridge, "remote_row", None) is None and callable(probe) and probe()
-                )
-            )
-            return reply({"detail": detail, "consent_bearing": consent_bearing})
+            #
+            # PR #4132 convergence: the flag is the runtime's STAMP, read off the
+            # ``StampedReceipt`` the client returns (``asks.surfaces``). After F2
+            # the cap probe disagrees with the stamp both ways: an app-signature
+            # attested answer is consent with no cap, and a cap answer to an ask
+            # this runtime did not mint (Part C) is stamped ``unverified``. The
+            # guard reads only the stamp, so the receipt must too. The cap probe
+            # survives ONLY as the fallback for a runtime that predates the ack's
+            # ``surface`` field (``surface is None``): such a runtime has neither
+            # attestation nor Part C, so its stamp is exactly the cap decision.
+            consent_bearing: bool | None
+            if body.decline:
+                consent_bearing = None
+            elif getattr(bridge, "remote_row", None) is not None:
+                consent_bearing = False
+            else:
+                stamped = surfaces.consent_bearing(getattr(detail, "surface", None))
+                if stamped is None:
+                    probe = getattr(bridge.remote, "ask_consent_bearing", None)
+                    stamped = bool(callable(probe) and probe())
+                consent_bearing = stamped
+            return reply({"detail": str(detail), "consent_bearing": consent_bearing})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         if body.request_id.startswith("prv_"):
@@ -6826,5 +6985,6 @@ async def desktop_presence(
         can_notify_kinds=list(body.can_notify_kinds),
         session_id=body.session_id,
         window=body.window.model_dump(),
+        **body.desk_fields(),
     )
     return reply(PresenceReceipt(lease_seconds=int(PRESENCE_TTL_S)))

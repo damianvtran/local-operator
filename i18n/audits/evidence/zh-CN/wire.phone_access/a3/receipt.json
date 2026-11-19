@@ -1,0 +1,23 @@
+{
+ "schema": 1,
+ "audit_id": "a3",
+ "locale": "zh-CN",
+ "namespace": "wire.phone_access",
+ "record": "i18n/audits/evidence/zh-CN/wire.phone_access/a3/record.json",
+ "source_sha256": "1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a",
+ "target_sha256": "91e8bf24126ab3f36601f25cbfa526d7626f810a27aa17bc955511fdcfd45b9d",
+ "verdict": "passed",
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent of team lopdev, Local Operator session cee2e3bacd71; not the translator (the remediation coder that authored d30d1fb1 with the ZH-M1 value change, nor the coder that authored 9134015c) nor the English-drafting coder; did not edit any catalogue value",
+  "model": "anthropic/claude-opus-5-5"
+ },
+ "hashes": {
+  "record.json": "a16844ce5f099c73db138dfdf39915dc5c5f81444755ecd07bdc45f8df4c9385",
+  "report.md": "9430f18aaddff2e5dda575692e0fdbcfa6fbefde10aa39a5908f5172a7416ff5",
+  "audit.log": "3ee951f1eacab4065a1fc6d9fe25ce9f8df341341ffd4cdf06830ddee404d0d3",
+  "dryrun.log": "a66152541cfb14633792e7aa24da2518e7fd3289356f3c85e87bc48b7f5c8141"
+ },
+ "ledger_receipt_staged": "$SCRATCH/i18n-a3/zh-CN.wire.phone_access.json",
+ "ledger_receipt_sha256": "fc6f1e945cf2ee9c8a329ce0b9e5469b2c9c883d6c213139c3c9ffaee7f73ea1",
+ "ledger_expected_history_sha": "93866ce4e7a4d102b01cee31fbb4ee51afac3e158dd0d9537f39b09b5c365100"
+}

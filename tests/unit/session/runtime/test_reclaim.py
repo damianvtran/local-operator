@@ -55,6 +55,7 @@ from local_operator.session.runtime.reclaim import (
     Sightings,
     SocketEvidence,
     ancestor_pids,
+    config_root_matches,
     config_root_of,
     etime_seconds,
     parse_process_row,
@@ -368,6 +369,24 @@ def test_config_root_comes_from_the_process_itself() -> None:
     assert config_root_of(env_text("/tmp/iso/cfg")) == "/tmp/iso/cfg"
     assert config_root_of("python -P -m x HOME=/tmp/iso") == "/tmp/iso/.local-operator"
     assert config_root_of("python -P -m x") == ""
+
+
+def test_config_root_of_reads_a_spaced_or_slashed_value_whole() -> None:
+    """#4222 QA Q2: a value runs to the next ``NAME=`` entry, normalised like ``Path``."""
+    spaced = "x LOCAL_OPERATOR_CONFIG_DIR=/s/My Store/cfg HOME=/h"
+    assert config_root_of(spaced) == "/s/My Store/cfg"
+    assert config_root_of("x LOCAL_OPERATOR_CONFIG_DIR=/s/cfg/ HOME=/h") == "/s/cfg"
+    assert config_root_of("x HOME=/Users/a b") == "/Users/a b/.local-operator"
+
+
+def test_config_root_matches_is_tri_state() -> None:
+    """True when proven, False when another store, None when it cannot be decided."""
+    assert config_root_matches("LOCAL_OPERATOR_CONFIG_DIR=/s/cfg/ HOME=/h", "/s/cfg") is True
+    assert config_root_matches("LOCAL_OPERATOR_CONFIG_DIR=/s/other HOME=/h", "/s/cfg") is False
+    assert config_root_matches("python -m x", "/s/cfg") is None
+    assert config_root_matches("LOCAL_OPERATOR_CONFIG_DIR=/s/a X=b", "/s/a X=b") is None
+    assert config_root_matches("HOME=/h/a X=b", "/h/a X=b/.local-operator") is None
+    assert config_root_matches("HOME=/h/a X=b", "/h/z/.local-operator") is False
     assert session_id_of(env_text("/tmp/iso/cfg", session="abc123")) == "abc123"
     assert session_id_of(env_text("/tmp/iso/cfg")) == ""
 

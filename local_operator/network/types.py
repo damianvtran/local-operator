@@ -221,6 +221,14 @@ ROLES: tuple[str, ...] = ("read", "drive", "admin")
 #: makes the grant deliberate.
 INVITE_ROLES: tuple[str, ...] = ("read", "drive", "admin")
 
+#: The one non-default invite credential-offer policy (``--no-credential-offers``).
+#: A string rather than a bool so the token/record field can grow a value later
+#: without a second field, and so an UNKNOWN value is refusable by name instead
+#: of coercing to truthy/falsy.
+CREDENTIAL_OFFERS_NONE = "none"
+#: Every policy this build understands; ``""`` is the default (legacy) ceremony.
+CREDENTIAL_OFFER_POLICIES: tuple[str, ...] = ("", CREDENTIAL_OFFERS_NONE)
+
 
 def capabilities_for_role(role: str) -> frozenset[str]:
     """The capability set a role grants, or :class:`KeyError` for an unknown role.
@@ -471,6 +479,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "net_rename",
     "net_rm",
     "net_invite",
+    # The policy-carrying mint (``lop network invite --no-credential-offers``).
+    # A SEPARATE NAME rather than a field on ``net_invite`` so a relay that
+    # predates the policy refuses it unserved instead of ignoring the field and
+    # minting a credential-offering invite (PR #4233 review round 1, S2).
+    "net_invite_policy",
     "net_join",
     "net_member_rm",
     "net_peer_ls",
@@ -1402,6 +1415,22 @@ class ControlRequestTimeout(TimeoutError):
         super().__init__("the local control reply did not arrive within its existing deadline")
 
 
+class ControlRequestUnsent(ConnectionError):
+    """The op frame never left this device, so the relay cannot have acted on it.
+
+    WHY A SEPARATE SIGNAL (security review round 3, S-R3-1). ``control_request``
+    answers ``None`` both when no relay took the connection and when the reply was
+    lost AFTER the op was written — and those two mean opposite things to a caller
+    reporting a terminal answer: the first is "nothing was recorded", the second is
+    "the relay may well have recorded it". Only a caller that opts in
+    (``report_unsent=True``) gets this raised, so every existing ``None`` reader is
+    unchanged. Local-only: never a wire refusal, never carries a payload.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("no relay accepted the control request, so it was never sent")
+
+
 class MeshRefusal(Exception):
     """A refusal that carries a machine ``code`` and a sentence for the operator.
 
@@ -1561,6 +1590,32 @@ class MemberRecord:
         return MemberRecord(**fields)
 
 
+#: The two stages of an INVITER's pairing record (the Mesh approvals card, design §3.1).
+#: ``awaiting_joiner``: the ceremony is parked but the joiner's person has not yet
+#: typed this device's code there, so the inviter's person has nothing to answer
+#: (the card shows the code; every answer to it is refused ``pairing_not_ready``
+#: and expiry ends it). ``awaiting_confirmation``: the
+#: joiner's transcription arrived and matched; this side's person may now answer.
+#: A record written before stages existed reads as ``awaiting_confirmation``, which
+#: is exactly what it was.
+PAIR_STAGE_AWAITING_JOINER = "awaiting_joiner"
+PAIR_STAGE_AWAITING_CONFIRMATION = "awaiting_confirmation"
+
+
+def new_pairing_nonce() -> str:
+    """A fresh per-ceremony (and per-stage) nonce for a pairing card.
+
+    WHY. An app attestation for a pairing answer binds this value (see
+    ``network.pairing_attest``), so an attestation made for one ceremony — or for
+    the stage-1 card of this one — can never answer another: a retry of the same
+    invite parks a new record with a new nonce. It is not a secret; it is a
+    freshness tag the desktop API exposes on the card row.
+    """
+    import secrets
+
+    return secrets.token_hex(16)
+
+
 @dataclass
 class PendingPairing:
     """An inbound pairing waiting for the INVITER's human to confirm the code.
@@ -1608,7 +1663,23 @@ class PendingPairing:
     #: or ``""`` for a record from before this field — read as "no list to show".
     offer: list[dict[str, Any]] = field(default_factory=list)
     offer_state: str = ""
-    schema: int = 2
+    #: Which card stage this is (``PAIR_STAGE_*`` above). Schema 3; ``_known`` keeps
+    #: an older reader tolerant of the new keys, and an older record (no key) is
+    #: stage 2, which is what every pre-stage record was.
+    stage: str = PAIR_STAGE_AWAITING_CONFIRMATION
+    #: The invite's role, so the card can say "as <role>" without a second read.
+    role: str = ""
+    #: Per-ceremony, per-stage freshness tag an app attestation binds
+    #: (:func:`new_pairing_nonce`). ``""`` on a pre-schema-3 record.
+    nonce: str = ""
+    #: WHICH CEREMONY wrote this record: one value for both stages, minted once by the
+    #: pair listener (security review round 1, S-R1-3). The record is keyed by invite
+    #: only, and a retryable refusal releases the invite BEFORE the refusing thread's
+    #: cleanup runs, so a second ceremony can park the same key in between; cleanup
+    #: removes a record (and a :class:`PairDecision`) only when this matches its own.
+    #: ``""`` on a record from before this field.
+    ceremony: str = ""
+    schema: int = 3
 
     def seconds_left(self, now: float | None = None) -> float:
         return max(0.0, self.expires_at - (time.time() if now is None else now))
@@ -1648,6 +1719,12 @@ class PairDecision:
     #: this and INTERSECTS it with the offer actually sent, so an out-of-band write
     #: cannot widen the ceremony either.
     shares: list[str] = field(default_factory=list)
+    #: The :attr:`PendingPairing.ceremony` this answers, stamped by the relay from
+    #: the live record it answered under the record lock. The decision poll ignores a
+    #: decision for ANOTHER ceremony, the terminal-decision latch refuses a second
+    #: answer to the same one, and cleanup removes only its own. ``""`` = an
+    #: out-of-band or pre-field write, read as "the ceremony parked now".
+    ceremony: str = ""
     schema: int = 2
 
     def to_json(self) -> dict[str, Any]:
@@ -1656,6 +1733,71 @@ class PairDecision:
     @staticmethod
     def from_json(data: dict[str, Any]) -> PairDecision:
         return PairDecision(**_known(PairDecision, data))
+
+
+@dataclass
+class PairPreApproval:
+    """An onboarding approval answering ONE future pairing in advance (§3.3).
+
+    WHY A SEPARATE RECORD AND NOT AN UNSTAMPED :class:`PairDecision` (security
+    review round 2, S-R2-1). ``lop network approvals run`` mints an invite and
+    must pre-answer the inviter's confirm, because nobody watches that ceremony.
+    It used to write a generic, unstamped decision, and the relay had to keep
+    "an unstamped decision written before the ceremony started" at the stage-2
+    flip to let it through. That rule could not tell the approval apart from any
+    other unstamped write (a terminal ``lop network confirm`` with no relay
+    running, a decision left over from an earlier ceremony on the same invite),
+    and it leaned on a wall-clock comparison. A distinct record kind, in a
+    distinct file, removes the ambiguity: the flip clears EVERY generic decision
+    it finds, and only this record may stand in for a person.
+
+    THE BINDING. It names the invite, the network and the device that is meant
+    to redeem it. The relay consumes it at the stage-2 flip, under the record
+    lock that every park, flip and answer of the invite holds, and only when the
+    authenticated joiner IS ``joiner_device_id``. Consuming means deleting it and
+    writing a :class:`PairDecision` stamped with the live ceremony, so it is
+    honoured once and through the one decision path. Onboarding writes it only
+    when it knows the joiner's mesh id (from the card, or the node's own
+    ``identity show`` before the join). A brand-new host mints its identity
+    inside ``lop network join``, so no pre-approval is written for it and its
+    ceremony parks a card for a person instead (fail closed).
+
+    The wire code compare still runs before the flip, so a pre-approval never
+    admits a device whose transcription did not match. It expires with the
+    invite (``expires_at``) and is otherwise removed only by the onboarding run
+    that wrote it, never by a relay ceremony's stage-1 cleanup: a stage-1 failure
+    leaves it for the invite's automated retry.
+    """
+
+    invite_id: str
+    network_id: str
+    joiner_device_id: str
+    answered_by: str
+    expires_at: float
+    issued_at: float = field(default_factory=time.time)
+    schema: int = 1
+
+    def is_open(self, now: float | None = None) -> bool:
+        return (time.time() if now is None else now) < self.expires_at
+
+    def matches(self, *, invite_id: str, network_id: str, joiner_device_id: str) -> bool:
+        """Whether this approval answers THAT joiner on THAT invite, and nothing else.
+
+        An empty ``joiner_device_id`` never matches: an approval that does not name
+        its device would admit whoever redeems the token first.
+        """
+        return bool(self.joiner_device_id) and (
+            self.invite_id == invite_id
+            and self.network_id == network_id
+            and self.joiner_device_id == joiner_device_id
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> PairPreApproval:
+        return PairPreApproval(**_known(PairPreApproval, data))
 
 
 @dataclass
@@ -1728,6 +1870,13 @@ class PendingJoin:
     offer_state: str = ""
     error_code: str = ""
     message: str = ""
+    #: Per-ceremony freshness tag an app attestation for this card binds
+    #: (:func:`new_pairing_nonce`); ``""`` on a record parked by an older build,
+    #: which the Mesh approvals card then shows but cannot answer.
+    nonce: str = ""
+    #: The invite's role, from the token's envelope, so the joiner's card can say
+    #: "as <role>" (QA round 1, Q1). ``""`` on a record parked by an older build.
+    role: str = ""
     schema: int = 2
 
     def seconds_left(self, now: float | None = None) -> float:
@@ -1819,6 +1968,22 @@ class InviteRecord:
     #: :data:`local_operator.network.invite.PAIRING_MAX_FORGIVEN_FAILURES`, and it lives
     #: on the record so a relay restart cannot hand the same token a fresh budget.
     attempts: int = 0
+    #: The invite-level credential-offer policy (``lop network invite
+    #: --no-credential-offers``): ``""`` is the default ceremony (the owner builds
+    #: and sends its share list), :data:`CREDENTIAL_OFFERS_NONE` means the owner
+    #: never enumerates its store for this pairing, sends an explicit EMPTY list,
+    #: and grants nothing. THIS ROW IS THE AUTHORITY, not the token: the token's
+    #: tag is keyed by the network secret it carries, so any holder can re-tag an
+    #: edited payload, and the owner therefore enforces what it SAVED at mint. A
+    #: row written before the field existed loads as ``""`` — legacy invites keep
+    #: their old meaning. Independent of ``role``: a read invite still offers by
+    #: default, and read-only rigs are told (docs) to pass the flag.
+    credential_offers: str = ""
+
+    @property
+    def offers_credentials(self) -> bool:
+        """Whether this invite's ceremony may build, send or grant credentials."""
+        return self.credential_offers != CREDENTIAL_OFFERS_NONE
 
     @property
     def expires_at(self) -> float:

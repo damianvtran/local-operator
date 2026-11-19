@@ -150,6 +150,12 @@ class PromptErrand:
     command_id: str = ""
     input_mode: str = ""
     input_path: str = ""
+    #: ADR 0009: ``"mobile"`` when the phone sent this prompt (the cold-wake
+    #: path), else ``""``. Rides beside ``input_mode`` for the same reason:
+    #: ``_deliver`` dials its own ``AttachClient``, which would otherwise read
+    #: as a local terminal, and the completion of a conversation woken from the
+    #: phone must route back to the phone. Empty keeps every other producer.
+    origin: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1240,7 +1246,12 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
     # would be answered by the runtime's own refusal, and `AttachClient`'s fallback
     # logs the effect sentence rather than losing it (UX round 6, U3 = design round
     # 6, D3, which is about the surfaces a human is actually looking at).
-    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    client = AttachClient(
+        lambda _projection: None,
+        lambda _reason: None,
+        # ADR 0009: the cold-wake prompt keeps the phone's origin.
+        origin=work.origin if isinstance(work, PromptErrand) else "",
+    )
     try:
         await client.connect(record, session_id)
         op = "prompt" if isinstance(work, PromptErrand) else "steer"

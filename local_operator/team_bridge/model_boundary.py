@@ -683,11 +683,18 @@ def resolve_screening_selection(config_dir: Path) -> DefaultSelection | None:
 SCREENING_FAILURE_CLASSES = _STORE_FAILURE_CLASSES
 
 
-#: HTTP statuses that mean "this route is unavailable right now", which no
-#: submission can produce: gateway/overload responses. 500 is deliberately
-#: absent — providers report an output-side content filter as a 5xx, and a
-#: body crafted to trip it must not buy a different screener (S-1).
-_ADVANCE_STATUSES = frozenset({502, 503, 504, 529})
+#: HTTP statuses that mean "this route is unavailable right now": EVERY 5xx.
+#:
+#: OPERATOR RULE (2026-11-17, PR #4212): a 5xx from the preferred hop moves on to
+#: the fallback hops exactly as a 429 does, before any hold — a preferred model
+#: that is down must not block Team Bridge. Before this, 500 (and every 5xx but
+#: 502/503/504/529) STOPPED the walk, so a 500 outage on hop 0 never reached a
+#: healthy fallback (QA round 1 lead on #4212). The S-1 concern that kept 500 out
+#: — a provider reporting an output-side content filter as a 5xx — is still
+#: answered ONE-WAY by ``failover.names_content_verdict``: a 5xx whose text
+#: names a content verdict keeps stopping and holds. The fallback is always
+#: another hop of the operator's own approved chain, never an unvetted model.
+_ADVANCE_STATUSES = frozenset(range(500, 600))
 #: Rate limit / out of quota, and out of CREDIT (402: an empty Radient balance
 #: on a preferred hop). Floodable in principle, but bounded by the per-account
 #: HTTP budget and accepted by the operator (PR #3194 decisions). 402 joined on
@@ -727,17 +734,12 @@ _NOT_FOUND_STATUSES = frozenset({404})
 #: Content-verdict wording a provider can relay on an otherwise-advancing
 #: gateway status — Alibaba's "Output data may contain inappropriate content"
 #: arrives as a relayed 502 (``failover.py`` ``is_input_refusal`` docstring).
-#: Matched case-insensitively on the RAW message. ONE-WAY by construction: it
-#: can only turn an advance into a hold, never the reverse, so a provider
-#: phrasing an outage this way costs a held message, not a weaker screener.
-_CONTENT_VERDICT_MARKERS = (
-    "inappropriate content",
-    "moderation",
-    "flagged",
-    "content_policy",
-    "content policy",
-    "guardrail",
-)
+#: Matched case-insensitively on the RAW message, and also read from the
+#: client's uncapped stamp (``content_verdict_seen``). ONE-WAY by construction:
+#: it can only turn an advance into a hold, never the reverse. The list itself is
+#: ``failover.names_content_verdict``, shared so the two cannot drift (S-7);
+#: imported lazily in :func:`_sender_cannot_cause`, like ``ProviderError``, so
+#: this module stays cheap to import.
 
 #: Typed flag the guard sets on a scrubbed wire failure. ``True`` only when
 #: the RAW failure was on the allow-list below; the walk reads nothing else.
@@ -770,7 +772,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     OAuth refresh that failed — never 403, see ``_AUTH_STATUSES``), quota
     (429), a route that does not serve the pair at all (404 — see
     ``_NOT_FOUND_STATUSES`` for why that advances while a 403 does not), a
-    timeout, a gateway/overload status (502/503/504/529) whose raw text names
+    timeout, a 5xx status (operator rule 2026-11-17) whose raw text names
     no content verdict, or a transport error our own client raised before the
     body was sent.
 
@@ -800,7 +802,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
             return True  # credential resolution / OAuth refresh failed
     except ImportError:  # pragma: no cover
         pass
-    from local_operator.providers.failover import ProviderError
+    from local_operator.providers.failover import ProviderError, names_content_verdict
 
     if not isinstance(failure, ProviderError):
         return False
@@ -813,8 +815,9 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
             return True
         if status not in _ADVANCE_STATUSES and status not in _NOT_FOUND_STATUSES:
             return False
-        raw = str(getattr(failure, "message", "") or "").lower()
-        return not any(marker in raw for marker in _CONTENT_VERDICT_MARKERS)
+        if getattr(failure, "content_verdict_seen", False) is True:
+            return False  # matched on the full body, past the message cap (S-7)
+        return not names_content_verdict(str(getattr(failure, "message", "") or ""))
     # No status: a status-less ``kind`` is classified from PROVIDER TEXT (an
     # in-band error chunk on a 200 stream), which a crafted body can steer — so
     # it never advances on its own. Only typed provenance does: a failure OUR
@@ -925,6 +928,11 @@ def screening_failure_class(failure: BaseException) -> str:
         if kind == "timeout":
             return "timeout"
         if kind == "transient" or (isinstance(status, int) and 500 <= status <= 599):
+            # R2-2: a single-hop chain whose only hop failed on the ROUTE is a
+            # whole-chain failure too (``tb_chain_exhausted`` is set only when
+            # more than one hop ran), so its breaker must record route evidence.
+            if getattr(failure, "tb_cascade_exhausted", False):
+                return "chain_exhausted"
             return "provider_5xx"
     return "other"
 
@@ -1608,7 +1616,7 @@ class ScreenChainRunner:
       check and the hop's own (provider, model) tuple check all still apply.
     * Advance ONLY on a failure a sender cannot cause (:func:`_sender_cannot_cause`:
       credential unusable, quota, a route that does not serve the pair (404),
-      timeout, 502/503/504/529, a pre-send transport error), or on the
+      timeout, any 5xx without a content verdict, a pre-send transport error), or on the
       unevidenced ``("", None)`` signal (serving identity is request-local
       provenance, not something a body controls).
       EVERYTHING ELSE STOPS AND HOLDS (S-1/S-2): any other 4xx (content-filter

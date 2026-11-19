@@ -1,0 +1,14 @@
+{
+  "locale": "es",
+  "namespace": "wire.settings",
+  "round": "m4135",
+  "source_sha256": "8202b3fda884e4e0c4b492d1cfabab21cb3b0e14db6aae25fa04c53309bd680f",
+  "target_sha256": "f394a67feba0500e0d83023938451c9355fbd6d57781fd0aea4137eb4eb42957",
+  "auditor_session": "1164c8450503",
+  "auditor_model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-17",
+  "method": "Merge of PR #4135 (HEAD 1853bde32, wire.settings cd1ea9e66f6e, last receipt passed vs en d1f1d715f520) with main (MERGE_HEAD eb872993c, wire.settings f179113a0302, last receipt passed vs en beb522ed3593); merge-base 23398503e. Mechanical, whole namespace (883 keys): key set equals en and the union of both parents minus deletions; every non-patched value is byte-identical to the side that changed it (no both-sides conflicts, no reverts); placeholder parity, backtick code-span parity, NFC and no bidi/control chars all pass; the source has no ICU plural/select, so there are no plural categories to check. Key order differs from en only in the session_cleanup_temporary_idle_minutes choices, which is pre-existing at the merge base and not a translation issue. Semantic: all 14 merge keys (update_auto_prune.*, update_keep_generations.{label,help}, updates.{title,description}, bash_heavy_jobs_enabled.*, heavy_jobs.{title,description}) checked against en and the en context sidecar for meaning, prune/keep safety, glossary and fit. Safety holds: every rendering deletes only unused/old installs, and keep_generations.help leads with the complete always-kept clause (current, previous, running, registered) within the 146-cell budget. The other 869 keys were not re-scored: they are value-identical to bytes that already carry passed receipts on a parent.",
+  "patch_check": null,
+  "findings": [],
+  "verdict": "CLEAN"
+}

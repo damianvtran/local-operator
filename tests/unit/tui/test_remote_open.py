@@ -79,8 +79,8 @@ def test_the_phase_order_is_the_contracts() -> None:
             "--to x --force",
             MoveTo(
                 error=(
-                    "/move --to takes only --keep, --queue and --drop-session-roles, "
-                    "not '--force'"
+                    "/move --to takes only --keep, --queue, --drop-session-roles and "
+                    "--without-working-set, not '--force'"
                 )
             ),
         ),
@@ -157,6 +157,44 @@ async def _booted(pilot: Any, app: OperatorApp) -> None:
         await pilot.pause()
         if app._session is not None:
             return
+
+
+def _empty_working_set_preflight(session_id: str, to: str) -> dict[str, Any]:
+    """The ``--dry-run`` answer for a conversation with no working set: proceed, no card.
+
+    Same shape as ``mobility._workset_preflight_local`` (a ``WorkingSetManifest`` with
+    no worktrees has ``state: "preflight"``), so the move path under test runs exactly
+    as it did before the working-set gate existed.
+    """
+    return {
+        "ok": True,
+        "dry_run": True,
+        "session_id": session_id,
+        "confirmation_required": False,
+        "working_set": {"state": "preflight", "worktrees": []},
+    }
+
+
+@pytest.fixture(autouse=True)
+def _no_working_set_preflight(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Keep every ``/move --to`` in this file off the real ``lop sessions move --dry-run``.
+
+    WHY AUTOUSE (review M2, round 4): the working-set gate added a preflight that runs
+    BEFORE the leave. Unstubbed it spawns a real CLI subprocess per test, and its
+    answer — not the fake ``run_session_move`` the test installed — decides whether
+    the move proceeds, so the tests stopped measuring what they name. Tests that need
+    a different preflight answer (stale relay, a non-empty working set) still patch
+    the same attribute and win, since their ``monkeypatch.setattr`` runs after this.
+    Returns the calls so a test can prove the gate was consulted.
+    """
+    calls: list[tuple[str, str]] = []
+
+    def preflight(session_id: str, to: str) -> dict[str, Any]:
+        calls.append((session_id, to))
+        return _empty_working_set_preflight(session_id, to)
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move_preflight", preflight)
+    return calls
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +384,8 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         order.append(f"move {session_id} {to} keep={keep}")
         return dict(_COMMITTED)
@@ -478,6 +518,8 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -531,6 +573,8 @@ async def test_a_refused_move_says_so_and_reopens_nothing(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -580,6 +624,8 @@ async def test_a_non_left_reached_failure_gets_no_nothing_changed_tail(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -630,6 +676,8 @@ async def test_a_busy_refusal_names_the_shell_route_its_wait_belongs_to(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -675,6 +723,8 @@ async def test_a_move_of_a_session_this_tui_holds_in_the_sidebar_is_refused(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         ran.append(session_id)
         return {**_COMMITTED, "session_id": session_id, "new_session_id": session_id}
@@ -736,6 +786,8 @@ async def test_a_recall_from_an_unreachable_peer_never_leaves_the_session(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         ran.append(f"move {session_id} {to}")
         return dict(_COMMITTED)
@@ -802,6 +854,8 @@ async def test_a_recall_where_a_device_stayed_silent_names_it_and_changes_nothin
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         ran.append(f"move {session_id} {to}")
         return dict(_COMMITTED)
@@ -859,6 +913,8 @@ async def test_a_recall_from_a_peer_that_answers_still_leaves_and_runs(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         order.append(f"move {session_id} {to}")
         return dict(_COMMITTED)
@@ -1008,6 +1064,8 @@ async def test_only_a_completed_move_says_moved_and_reopens(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": True,
@@ -1069,6 +1127,8 @@ class _QueuedFake:
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -2049,6 +2109,223 @@ async def test_an_unconfirmed_recall_keeps_the_local_copy_and_says_so(
 
 
 @pytest.mark.asyncio
+async def test_a_stale_relay_stops_the_move_before_the_leave(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9 (review round 2): the preflight's ``relay_restart_required`` was discarded and
+    a plain move sent anyway. On an offload the stale relay IS the owner and has no
+    gate, so the conversation left its worktrees with no card and no warning."""
+
+    moved: list[dict[str, Any]] = []
+
+    def stale(session_id: str, to: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "relay_restart_required",
+            "session_id": session_id,
+            "changed": False,
+            "message": (
+                "this device's relay is older than this lop and cannot check working "
+                "files safely, so nothing was moved; restart it with `lop network restart`, "
+                "then try again"
+            ),
+        }
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        moved.append({"session_id": session_id, "to": to, **kwargs})
+        return {"ok": True, "session_id": session_id}
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move_preflight", stale)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(60):
+            await pilot.pause()
+            if any("restart" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        # THE REFUSAL IS SHOWN, WITH THE RELAY REMEDY — not "update lop", which is the
+        # wrong action for a relay that is a long-lived process on THIS device.
+        assert "restart it with `lop network restart`" in shown, shown
+        assert "update lop" not in shown, shown
+        # AND NOTHING HAPPENED: no move was asked, and the user was not moved off the
+        # conversation to watch it fail from somewhere else.
+        assert moved == [], moved
+        assert reopened == [], reopened
+
+
+@pytest.mark.parametrize("queue", [False, True], ids=["recall", "queued_recall"])
+@pytest.mark.asyncio
+async def test_a_stale_relay_still_lets_a_plain_recall_through(
+    monkeypatch: pytest.MonkeyPatch, queue: bool
+) -> None:
+    """M1 (review round 9): ``request_move`` refuses a recall's DRY RUN through a stale
+    relay (that relay would run it as a real recall) but forwards the plain recall,
+    which the remote owner gates itself. The TUI stopped on the dry run's refusal, so a
+    chat-only ``/move --to local`` that moved before the gate was newly refused. A
+    QUEUED recall is still refused by ``request_move``, so it still stops here."""
+
+    moved: list[dict[str, Any]] = []
+    left: list[bool] = []
+
+    def stale(session_id: str, to: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "relay_restart_required",
+            "session_id": session_id,
+            "changed": False,
+            "message": mobility_restart_message(),
+        }
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        moved.append({"session_id": session_id, "to": to, **kwargs})
+        return dict(_COMMITTED)
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_leave() -> None:
+        left.append(True)
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move_preflight", stale)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        monkeypatch.setattr(app, "_leave_for_move", fake_leave)
+        app._run_slash_command("/move --to local" + (" --queue" if queue else ""))
+        for _ in range(60):
+            await pilot.pause()
+            if moved or any("restart" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        if queue:
+            assert "restart it with `lop network restart`" in shown, shown
+            assert moved == [] and left == [], (moved, left)
+        else:
+            assert [(row["to"], row["confirm_working_set"]) for row in moved] == [("local", "")]
+            assert moved[0]["without_working_set"] is False, moved
+            assert "restart" not in shown, shown
+
+
+def mobility_restart_message() -> str:
+    from local_operator.network import mobility
+
+    return mobility.RELAY_RESTART_MESSAGE
+
+
+@pytest.mark.parametrize("keep", [False, True], ids=["move", "keep"])
+@pytest.mark.parametrize("stale", [True, False], ids=["stale_relay", "current_relay"])
+@pytest.mark.asyncio
+async def test_a_stale_relay_stops_a_move_without_the_working_set_before_the_leave(
+    monkeypatch: pytest.MonkeyPatch, stale: bool, keep: bool
+) -> None:
+    """M1 (review round 3): ``--without-working-set`` runs no preflight, so the R9 stop
+    never fired on it — the user was moved off the conversation and only then shown
+    ``request_move``'s "restart the relay" refusal. The relay is now asked first on
+    that path too; a current relay still moves (the negative control). The ``keep``
+    rows are review m1 (round 4): ``--keep`` leaves the current conversation too, and
+    the stale-relay check was skipped for it."""
+    from local_operator.network import mobility
+
+    moved: list[dict[str, Any]] = []
+    left: list[bool] = []
+    preflights: list[str] = []
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        moved.append({"session_id": session_id, "to": to, **kwargs})
+        return {"ok": True, "session_id": session_id}
+
+    def no_preflight(session_id: str, to: str) -> dict[str, Any]:
+        preflights.append(session_id)
+        return {"ok": True}
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_leave() -> None:
+        left.append(True)
+
+    message = mobility.RELAY_RESTART_MESSAGE if stale else ""
+    monkeypatch.setattr("local_operator.tui.app.stale_relay_message", lambda: message)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move_preflight", no_preflight)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        monkeypatch.setattr(app, "_leave_for_move", fake_leave)
+        app._run_slash_command(
+            "/move --to pixel-8 --without-working-set" + (" --keep" if keep else "")
+        )
+        for _ in range(60):
+            await pilot.pause()
+            if moved or any("restart" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert preflights == [], "--without-working-set must not run the preflight"
+        if stale:
+            assert "restart it with `lop network restart`" in shown, shown
+            assert moved == [], moved
+            assert left == [], "the conversation was left before the refusal"
+        else:
+            assert len(moved) == 1 and moved[0]["without_working_set"] is True, moved
+            assert moved[0]["keep"] is keep, moved
+            assert left == [True], left
+
+
+@pytest.mark.asyncio
+async def test_a_move_to_a_peer_consults_the_working_set_preflight_before_the_leave(
+    monkeypatch: pytest.MonkeyPatch, _no_working_set_preflight: list[tuple[str, str]]
+) -> None:
+    """M2 (review round 4): the autouse stub must stand in for a preflight the move
+    actually runs — otherwise this file would pass with the gate deleted. A plain
+    ``/move --to`` asks it once, for the right id and device, before the leave."""
+    calls = _no_working_set_preflight
+    order: list[str] = []
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        order.append(f"move after {len(calls)} preflight(s)")
+        return dict(_COMMITTED)
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_leave() -> None:
+        order.append(f"leave after {len(calls)} preflight(s)")
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        monkeypatch.setattr(app, "_leave_for_move", fake_leave)
+        app._select_sidebar_session = lambda *_a, **_k: None  # type: ignore[method-assign]
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(60):
+            await pilot.pause()
+            if any(step.startswith("move") for step in order):
+                break
+    # The autouse stub itself recorded the call: no re-patch here, so this is the
+    # stand-in every other test in the file relies on.
+    assert calls == [("sess1", "pixel-8")], calls
+    assert order[:2] == ["leave after 1 preflight(s)", "move after 1 preflight(s)"], order
+
+
+@pytest.mark.asyncio
 async def test_an_in_progress_move_after_the_leave_says_where_the_composer_points(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2139,6 +2416,8 @@ async def test_a_viewed_refusal_offers_the_queue_spelling_this_surface_runs(
         keep: bool = False,
         queue: bool = False,
         drop_session_roles: bool = False,
+        confirm_working_set: str = "",
+        without_working_set: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,

@@ -1,0 +1,7 @@
+{
+  "cli.daemon_build.install_restarted": "چلتی ہوئی سروس کو نئے بِلڈ پر دوبارہ شروع کیا گیا (وہ ابھی تک {generation} چلا رہی تھی)",
+  "cli.daemon_build.install_restarted_unconfirmed": "چلتی ہوئی سروس کو دوبارہ شروع کیا گیا، کیونکہ اس کے بِلڈ کے موجودہ ہونے کی تصدیق نہیں ہو سکی",
+  "cli.daemon_build.install_restart_failed": "چلتی ہوئی سروس کو نئے بِلڈ پر دوبارہ شروع نہیں کیا جا سکا؛ اسے وہاں منتقل کرنے کے لیے `{command}` چلائیں",
+  "cli.daemon_build.install_unconfirmed": "تصدیق نہیں ہو سکی کہ چلتی ہوئی سروس نئے بِلڈ پر ہے؛ اگر وہ اب بھی پرانے جیسا برتاؤ کرے تو `{command}` چلائیں",
+  "cli.daemon_build.status_stale": "پرانا بِلڈ ({generation}) چل رہا ہے؛ اسے نئے بِلڈ پر دوبارہ شروع کرنے کے لیے `{command}` چلائیں"
+}

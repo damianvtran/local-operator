@@ -449,7 +449,12 @@ async def list_models(
                         client = OpenRouterClient(api_key=SecretStr(raw_key))
 
                         # Get the list of models
-                        openrouter_models = client.list_models()
+                        # Off the event loop: list_models() is a blocking
+                        # requests.get, and on the loop one unanswered upstream froze
+                        # every route -- /health included -- so the desktop app showed
+                        # "Server is offline" after sign-in. Same reason as the
+                        # to_thread calls above.
+                        openrouter_models = await asyncio.to_thread(client.list_models)
 
                         # Add OpenRouter models
                         for model in openrouter_models.data:
@@ -521,7 +526,8 @@ async def list_models(
                         )
 
                         # Get the list of models
-                        radient_models = client.list_models()
+                        # Off the event loop, as for OpenRouter above.
+                        radient_models = await asyncio.to_thread(client.list_models)
 
                         # Add Radient models
                         for model in radient_models.data:

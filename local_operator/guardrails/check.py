@@ -1422,6 +1422,44 @@ def lapsed_refusal_reason(case: DeleteCase) -> str:
     )
 
 
+def operator_of(ctx: CallContext) -> Any:
+    """The trusted operator brief for a judge call (``provenance.OperatorBrief``).
+
+    ``ctx.operator`` when the caller built one (the loop does for bash): it is
+    the authority and ``ctx.user_request`` is never added to it.
+
+    Otherwise (non-bash tools, older callers) ``ctx.user_request`` — the
+    latest unstamped user row — counts as the operator's words ONLY in a
+    session the operator opened (``provenance.session_lineage``). In a
+    subagent or an agent-opened workstream that row is the DELEGATING agent's
+    brief (a hub resume or steer is an unstamped user row), and it may relay
+    anything — a peer, a Team Bridge request, a remote ask answer the store
+    refuses as consent. It is then counted as excluded, exactly as
+    ``operator_brief`` counts it, and never quoted.
+
+    A context with no session id (library callers, unit fixtures) keeps the
+    legacy reading: there is no lineage to consult, and the loop always sets
+    one for a live session.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    if ctx.operator is not None:
+        return ctx.operator
+    brief = prov.OperatorBrief()
+    if not ctx.user_request:
+        return brief
+    if ctx.session_id:
+        try:
+            _, opened = prov.session_lineage(ctx.session_id)
+        except Exception:  # noqa: BLE001 — unknown lineage is not operator-opened
+            opened = False
+        if not opened:
+            brief.excluded["delegating-agent message"] = 1
+            return brief
+    brief.words.append(prov.OperatorWords("operator, direct", ctx.user_request))
+    return brief
+
+
 def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     """Extract operator words, evidence and per-target facts for a HIGH delete."""
     import glob as _glob
@@ -1482,11 +1520,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
                 destroying.add(paths[-1])
     paths = list(dict.fromkeys(paths))
     operator_only = [p for p in dict.fromkeys(operator_only) if p not in paths]
-    operator = ctx.operator
-    if operator is None:
-        operator = prov.OperatorBrief()
-        if ctx.user_request:
-            operator.words.append(prov.OperatorWords("operator, direct", ctx.user_request))
+    operator = operator_of(ctx)
     if ctx.session_id and paths:
         # One task tree, one owner: an ask the operator answered higher in
         # this session's lineage counts even when no brief carried its id.
@@ -1874,7 +1908,12 @@ async def _dangerous_delete(
             flagged=targets,
             policy=rule.body if rule else "",
             question=rule.question if rule else "",
-            user_request=ctx.user_request,
+            # Never ``ctx.user_request``: the trusted words are already in
+            # ``case.operator_words`` (``operator_of``). In a subagent the
+            # latest user row is the DELEGATING agent's brief, and passing it
+            # let ``render_brief`` show it as the operator's own words (field
+            # incident: child feac6b2db7a4, a parent's resume quoting a
+            # remote-answered ask turned into an ALLOW).
             intent=ctx.intent,
             operator_words=case.operator_words,
             excluded=case.excluded,
@@ -2079,6 +2118,9 @@ async def _check_tool_call(
                 risk="rule",
                 destructive=bool(outcome and outcome.destructive),
             )
+        # The rule judge sees the same trusted brief as the delete judge,
+        # never the raw latest user row (see ``operator_of``).
+        rule_operator = operator_of(ctx)
         result = await run_judge(
             JudgeBrief(
                 tool=tool_name,
@@ -2086,8 +2128,11 @@ async def _check_tool_call(
                 flagged=f"matched user rule {rule.name}",
                 policy=rule.body,
                 question=rule.question,
-                user_request=ctx.user_request,
                 intent=ctx.intent,
+                operator_words=tuple((w.label, w.text) for w in rule_operator.words),
+                excluded=", ".join(
+                    f"{n} {kind}" for kind, n in sorted(rule_operator.excluded.items())
+                ),
             ),
             judge,
             timeout=settings.judge_timeout_s,

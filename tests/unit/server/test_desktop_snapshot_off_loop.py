@@ -43,6 +43,7 @@ from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUsage,
     JobState,
+    attach_frame_attention,
     sync_wire_payload,
 )
 
@@ -272,7 +273,15 @@ async def test_the_off_loop_frame_is_the_frame_the_cloning_build_served(tmp_path
 
     # Built AFTER the snapshot, from the attention that snapshot refreshed, the
     # way the pre-fix ``state()`` built it: the clone, then the dump.
-    clone = bridge.remote.frontend_state.model_copy(update={"attention": bridge.attention})
+    # ``bridge.attention`` is the raw ``AttentionStore.state`` and ``model_copy``
+    # skips the model validator, so the reconstruction passes it through the same
+    # ``attach_frame_attention`` projection the real capture applies (R3-2):
+    # ADR 0009 routing facts (origin, needs_user) never reach an attach frame, on
+    # either build. This keeps the check about clone-vs-reference serialization,
+    # not about a projection the old build predates.
+    clone = bridge.remote.frontend_state.model_copy(
+        update={"attention": attach_frame_attention(bridge.attention)}
+    )
     expected = sync_wire_payload(
         FrontendSync(
             epoch=clone.epoch,
@@ -287,6 +296,12 @@ async def test_the_off_loop_frame_is_the_frame_the_cloning_build_served(tmp_path
     module.slim_desktop_job_rows_in_place(expected["snapshot"])
     assert snapshot["payload"]["frontend"] == expected
     assert bridge.state() == expected
+    # The routing keys stay off the served frame, not merely off the expectation.
+    served_attention = snapshot["payload"]["frontend"]["snapshot"]["attention"]
+    assert "origin" not in served_attention
+    assert "needs_user" not in served_attention
+    # Guard against a vacuous pass: the raw store state does carry them.
+    assert {"origin", "needs_user"} <= set(bridge.attention)
 
 
 class _HeldBuild:

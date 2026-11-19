@@ -29,6 +29,7 @@ _ALWAYS = {
     "OSWORLD_INPUTS_ROOT",  # optional: the durable root the assets live in
     "OSWORLD_TTL_SECONDS",  # optional: lease-length override
     "OSWORLD_ACTION_SETTLE_POLICY",  # optional: explicit throughput/paper pacing policy
+    "EVALUATOR_TOOL_PATH",  # optional: declared host dirs for evaluator tools
 }
 
 _JUDGE = {

@@ -49,11 +49,21 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The community pilot switch (``community.community_enabled``). Inherited
+    # from a pilot machine's shell it would light ``/v1/desktop/community/*``,
+    # the relay door and ``features.community`` in every cell, so the dark-by-
+    # default assertions would pass the lit path; tests that need it on set it.
+    "LOCAL_OPERATOR_COMMUNITY",
     # The remote-compute API override names the host that receives the
     # operator's Radient bearer. Inheriting a developer's staging value would
     # point the suite's remote-compute client at a real host; tests that cover
     # the override set their own loopback value.
     "LOP_REMOTE_COMPUTE_API_URL",
+    # The working-set probe's host allowlist (``network/workset_probe.py``)
+    # names REAL machines the probe may ssh into. A developer's value leaking
+    # in would widen the allowlist the host-policy tests assert on and could
+    # aim a probe at a real host; tests that cover the override set their own.
+    "LOCAL_OPERATOR_MOVE_PROBE_HOSTS",
     # The per-build runtime image root (``procname.runtime_root``) is resolved
     # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.

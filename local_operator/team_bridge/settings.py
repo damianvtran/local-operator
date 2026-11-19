@@ -184,18 +184,33 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: category is surfaced to the receiving person per message, with Deliver and
 #: Discard, instead of sitting cached forever behind a count-only alert.
 #:
-#: OFF BY DEFAULT (B4b DESIGN §8.1 slice S1). With it off, screening, the
-#: connector and every notice are byte-identical to the build before B4b; the
-#: desktop routes still exist so QA can drive them, and they refuse every
-#: write with ``hold_release_off``. Turning it on by default is slice S3a,
-#: which waits for the S2 UI and for B5's receiver-adherence results.
+#: ON BY DEFAULT (slice S3a, operator ask relayed 2026-11-18). The screening
+#: templates (v2-v5) define ``new_work_request`` as a bid to start, build,
+#: schedule, spend on or DECIDE new work, so a teammate's agent asking the
+#: operator to decide on access, spend or a prod change was answered with a hub
+#: REJECT: the sender was refused a decision that was never the screener's to
+#: make. An operator-decision request must be HELD for the person, not
+#: rejected. With this on, such a bounce becomes a ``work_scope_hold`` and the
+#: per-message Deliver/Discard notice reaches the designated session's inbox.
+#: The narrowing that made the conversion safe is unchanged and lives in code,
+#: not here: ONLY exactly ``("new_work_request",)`` from a preferred, allowlisted
+#: screener converts (``hold_release.converts``/``preferred_answer``);
+#: injection, social engineering, ``out_of_scope_work``,
+#: ``personal_info_request`` and every multi-category answer still reject.
 #:
-#: Read from the config file like ``hold_alert_after_minutes`` and for the same
-#: reason has NO ``/settings`` registry row: a row would change
-#: ``wire.settings`` copy and un-ship every locale's audited ledger row. Only a
-#: real ``true`` turns it on; anything else (absent, ``null``, a string) reads
-#: OFF, because a release path must never open on a value nobody wrote.
-DEFAULT_HOLD_RELEASE = False
+#: ``false`` restores the pre-B4b behaviour exactly (the bounce is a reject;
+#: the desktop routes refuse every write with ``hold_release_off``). Like
+#: ``review_held``, only a real ``false`` turns it off; absent/garbled reads ON,
+#: because the outcome it opens is a HOLD a person controls, never an admit:
+#: nothing is delivered without the operator's signed Deliver.
+#:
+#: Still read from the config file with NO ``/settings`` registry row, like
+#: ``hold_alert_after_minutes``: a row adds ``wire.settings`` copy, and measured
+#: on 2026-11-18 that drops ``i18n/data/shipped.json`` to ``["en"]`` until all
+#: seven locales are translated and independently audited. The off switch is
+#: documented in the Team Bridge guide (``hold_release: false`` under
+#: ``values:`` > ``team_bridge:``); the row is a separately-translated change.
+DEFAULT_HOLD_RELEASE = True
 
 #: ``team_bridge.review_held`` — the owner-review EXIT for a cached screening
 #: ANSWER hold (``hold_release.REVIEW_HOLD_CODES``: ``model_hold``,
@@ -216,6 +231,32 @@ DEFAULT_HOLD_RELEASE = False
 #: because the safe default for a hold is an exit a person controls. No
 #: ``/settings`` row, for the same i18n-ledger reason as ``hold_release``.
 DEFAULT_REVIEW_HELD = True
+
+#: ``team_bridge.screening_hold_review_after_minutes`` — how long a message may
+#: sit in a SCREENING-UNAVAILABLE hold (``provider_error``, ``breaker_open``,
+#: ``policy_stale``, ``model_identity_unknown`` and the rest of
+#: ``store._HOLD_CLASS_SCREENING_UNAVAILABLE``) before it becomes the owner's
+#: review (``model_hold`` + a review decision row: Deliver/Discard). ``0`` turns
+#: the escalation off (the old retry-forever ladder); valid range 0..10080.
+#:
+#: WHY (operator report 2026-11-17). Those holds had no age limit and no exit:
+#: only an empty/unparsable reply escalated (``UNUSABLE_PASSES_BEFORE_REVIEW``),
+#: every other code re-held on the connector's ladder (gap capped at 1 h)
+#: forever while the sender read "temporarily unavailable" — five production
+#: messages sat for hours and were later admitted ``allow``. The age is the
+#: hold row's DURABLE ``created_at`` (``Store.screening_hold_first_held_at``),
+#: never the loop's in-memory ``_RETRY_ATTEMPTS``, so a restart cannot reset it.
+#:
+#: WHY 30. The ladder (``connector/loop.py``: 60 s doubling) re-screens at
+#: ~+1, +3, +7, +15 and +31 min, and the account breaker's longest rung is
+#: 900 s (``Store.BREAKER_BACKOFF_S``), so 30 minutes gives the full screening
+#: chain (preferred model, then every fallback hop) four to five complete passes
+#: and outlasts any single breaker window before a person is asked. It never
+#: delivers anything: escalation only hands the decision to the owner, so
+#: moderation stays fail-closed. Gated by ``review_held`` like every review
+#: hold. No ``/settings`` row, for the same i18n-ledger reason as
+#: ``hold_alert_after_minutes``.
+DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES = 30
 
 #: ``team_bridge.share_typing`` — whether this person's composers tell the other
 #: members of a conversation "X is typing" (typing-indicators design §7).
@@ -285,6 +326,7 @@ SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
 REVIEW_HELD_PATH = ("team_bridge", "review_held")
+SCREENING_HOLD_REVIEW_AFTER_PATH = ("team_bridge", "screening_hold_review_after_minutes")
 SHARE_TYPING_PATH = ("team_bridge", "share_typing")
 #: The SUBTREE the four screening ceilings live under. Readers take this tuple,
 #: so no consumer re-spells "where screening lives" and drifts from the writer.
@@ -497,6 +539,16 @@ def _hold_alert_after_minutes(value: Any) -> int:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
     if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
+    return value
+
+
+def _screening_hold_review_after_minutes(value: Any) -> int:
+    """Whole minutes in 0..10080, else the default (same rule as the alert)."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
+    if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
+        return DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
     return value
 
 
@@ -721,7 +773,7 @@ class TeamBridgeSettings:
     default_enrollment: Mapping[str, str] = field(default_factory=dict)
     #: Minutes a held conversation message ages before the owner is told; 0 = off.
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
-    #: B4b owner release (``hold_release.py``); OFF unless a real ``true``.
+    #: B4b owner release (``hold_release.py``); ON unless a real ``false``.
     hold_release: bool = DEFAULT_HOLD_RELEASE
     #: The stored "Screening model" preference as a ``(provider, model_id)``
     #: pair, or ``None`` for "no preference" (the shipped default). Shape-parsed
@@ -731,6 +783,9 @@ class TeamBridgeSettings:
     #: Owner review of cached answer holds (``hold_release.REVIEW_HOLD_CODES``);
     #: ON unless the file says a real ``false``.
     review_held: bool = DEFAULT_REVIEW_HELD
+    #: Minutes a screening-unavailable hold may age before it becomes the
+    #: owner's review; ``0`` = never (see the constant).
+    screening_hold_review_after_minutes: int = DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
     #: Whether this person's composers report "is typing" (sender-side only).
     share_typing: bool = DEFAULT_TEAM_BRIDGE_SHARE_TYPING
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
@@ -790,12 +845,16 @@ class TeamBridgeSettings:
             hold_alert_after_minutes=_hold_alert_after_minutes(
                 get(HOLD_ALERT_AFTER_PATH, DEFAULT_HOLD_ALERT_AFTER_MINUTES)
             ),
-            # ``is True``: a release path opens on an explicit boolean only.
-            hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is True,
+            # ``is not False``: only an explicit ``false`` closes it (S3a). The
+            # path it opens is a person-controlled hold, never an admit.
+            hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is not False,
             screening_model=_screening_model(
                 get(SCREENING_MODEL_PATH, DEFAULT_TEAM_BRIDGE_SCREENING_MODEL)
             ),
             review_held=get(REVIEW_HELD_PATH, DEFAULT_REVIEW_HELD) is not False,
+            screening_hold_review_after_minutes=_screening_hold_review_after_minutes(
+                get(SCREENING_HOLD_REVIEW_AFTER_PATH, DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES)
+            ),
             share_typing=_share_typing(get(SHARE_TYPING_PATH, _MISSING)),
         )
 

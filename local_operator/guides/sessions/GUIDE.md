@@ -22,7 +22,7 @@ the message protocol.
 | --- | --- | --- |
 | `list` | live sessions as lean rows; `include_stored=true` adds stored conversations, and `query` searches names and recent content | read |
 | `info` | one session: state, directory, transcript path, origin, opener, sidebar visibility | read |
-| `spawn` | open a parallel session — a listed workstream by default | write |
+| `spawn` | open a parallel session — a listed workstream by default; takes `prompt`, `name`, `tags`, `team`, `profile`, `model`, `visibility`, `background`, `peer` | write |
 | `resume` | reopen a stored or stopped session headlessly | write |
 | `stop` | end a running session gracefully (no force in this version); its wakes and monitors go DORMANT until it is reopened | exec |
 | `park` | end an idle session's runtime to free memory while its wakes and monitors stay ARMED; no address parks THIS session once the current turn ends | exec |
@@ -32,6 +32,26 @@ the message protocol.
 Address a session with exactly one of `session` (exact id), `target`
 (name/cwd substring), or `pid` — the same resolver `send` uses, so an
 ambiguous target comes back with the candidate rows rather than a guess.
+
+### Spawn inputs
+
+| field | what it does |
+| --- | --- |
+| `prompt` | the task the new session runs as its first turn (required) |
+| `name` | the conversation name it is listed under |
+| `tags` | existing tag CATEGORIES to file it under; an unknown name is refused before anything launches |
+| `team` | the team whose manager, roster and briefs it runs under; omit it and the session has NO team |
+| `profile` | a reusable role/specialist (the `/agent` counterpart); it shares the one agent slot with `team`, so the two are exclusive |
+| `model` | `provider/model-id`, or a bare id that keeps the configured hosting |
+| `visibility` | `workstream` (the listed default) or `ephemeral` (hidden everywhere) |
+| `background` | run it detached; the receipt then names the job to follow |
+| `peer` | mint the session on another device instead of this one |
+
+**A session opened for a domain with a standing team carries that team at
+spawn.** `team=<name>` is what puts the team's collaboration and project briefs
+in front of its manager on the first turn: a spawn does NOT inherit the caller's
+team, and a `send` afterwards cannot carry a brief. The receipt echoes
+`team: <name>` or `team: none`, and `op='info'` keeps reporting the binding.
 
 ## Remote sessions (mesh)
 
@@ -85,6 +105,7 @@ OOMed one on 2026-11-16), up to four on larger ones. Switch:
 checks, JS test runners and `pytest -n` queue for a slot and say whom they wait
 behind; watchers and dev servers never queue; `lop services status` names the
 holder.
+Quick iterations: pass `-n 0` to stay off the slot.
 Wait or retry; never escape the queue by backgrounding a build with
 `nohup`/`setsid` or splitting it across sessions. `systemd-run --user --scope
 -p MemoryMax=…` caps a job in addition to the queue, never instead of it.
@@ -251,6 +272,25 @@ every list.
 - **No project linkage** — use the `project` tool.
 - **No interactive launch** — the interactive path (`lop`, `lop --resume`)
   stays refused for every agent shell; resume here is headless.
+- **No team or profile setter beyond `spawn`** — two setters live outside this
+  tool: `/team <name> <request>` inside a RUNNING session (`guide://teams`,
+  "Running a team"), and for a stopped one
+  `lop exec --resume <session-id> --team <name> -- "<request>"`. The prompt
+  there is a required POSITIONAL (exec's `command` argument), not a `--prompt`
+  flag: `lop exec` has no such option — passing one exits 2 with
+  `lop: error: unrecognized arguments: --prompt` — and a run with no prompt
+  refuses with `exec failed:` and the no-prompt sentence. Consequence: a `send`
+  cannot carry a team's brief, so a session asked to apply a team's standards
+  must ALREADY carry that team — read the `team:` line from `op='info'` first.
+- **No hand-editing under `~/.local-operator/sessions/<id>/`** —
+  `attachment.json` there is the RESUME SIDECAR. Its only writer is
+  `resume.write_session_attachment(session_dir, *, team, agent, goal)`: three
+  keyword-only arguments, all three always written. A hand-written file holding
+  only `team` therefore CLEARS `agent` and `goal` (they read back as `""`), and
+  keys you invent are silently ignored. It is read back when the session is
+  next constructed (the runtime restores the attachment) and by listings that
+  paint the team badge. Change the binding through the real setters — spawn's
+  `team=`, `/team`, `/agent`, `/goal` — so the record stays consistent.
 
 ## Fallback (CLI)
 

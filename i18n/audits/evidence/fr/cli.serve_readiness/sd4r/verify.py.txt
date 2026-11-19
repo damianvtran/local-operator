@@ -1,0 +1,119 @@
+"""Bounded catalogue-only sd4r evidence emitter. Run from root: python3 -B <file>.
+No source/translation/history edits, tests, services, installs or commits.
+"""
+from __future__ import annotations
+import datetime,hashlib,json,re,subprocess,sys,unicodedata
+from pathlib import Path
+R=Path.cwd().resolve();sys.path.insert(0,str(R))
+from local_operator.i18n import runtime
+from local_operator.i18n.format import plural_category,format_number
+NS='cli.serve_readiness';KEY=NS+'.not_this_daemon';LS=['fr','es','ru','vi','hi','ur','zh-CN'];B=R/'i18n/audits/evidence';C=R/'local_operator/i18n/catalogues';SH=B/'fr'/NS/'sd4r'
+NOW=datetime.datetime.now(datetime.timezone.utc).isoformat();HEAD=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip();COUNTS=[0,1,2,3,4,5,11,21,22,25,1.5,1000000,1500000]
+CATS={'fr':{'one','many','other'},'es':{'one','many','other'},'ru':{'one','few','many','other'},'vi':{'other'},'hi':{'one','other'},'ur':{'one','other'},'zh-CN':{'other'}}
+CONTROL=set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+def h(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def rel(p):return str(p.relative_to(R))
+def load(p):return json.loads(p.read_text(encoding='utf-8'))
+def put(p,s):
+ p.parent.mkdir(parents=True,exist_ok=True)
+ with p.open('x',encoding='utf-8') as f:f.write(s)
+def dump(p,o):put(p,json.dumps(o,ensure_ascii=False,indent=2)+'\n')
+source=C/'en'/(NS+'.json');context=C/'en'/(NS+'.context.json');en=load(source);ctx=load(context);assert len(en)==15 and set(en)==set(ctx)
+assert en[KEY]=='recorded, but PID reuse was detected'
+assert h(source)=='cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a'
+assert h(context)=='e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629'
+inputs=[source,context,R/'i18n/glossary.md',R/'local_operator/network/readiness.py']+[C/l/(NS+'.json') for l in LS]+[R/'i18n/style-guides'/(l+'.md') for l in LS]
+manifest={rel(p):h(p) for p in inputs};oldfiles={rel(p):h(p) for l in LS for p in (B/l/NS/'sd4').glob('*') if p.is_file()}
+auditor={'agent':'Local Operator independent SECOND i18n auditor sd4r','session':'85af124f4a9f','model':'openai/gpt-6.1-sol','actual_model_source':'Host session runtime declaration, same resumed independent auditor session.','fallback':{'observed':False,'reported':False,'statement':'No fallback observed or reported; not inferred from another agent.'},'independent_from_translator_session':True,'translator_session':'7f2b030d2636','independence':'No translation or source authorship; current seven replacements independently inspected. No first-auditor remediation reports consulted; original accepted finding ID supplied by parent.'}
+translator={'agent':'i18n-translator','session':'7f2b030d2636','model':'openai/gpt-6.1-sol','fallback':'none per parent-provided provenance; not independently inferred','provenance_source':'Current requesting parent message.'}
+reason={
+'fr':'réutilisation de PID détectée is a concise, number-neutral nominal diagnosis. No ce PID singular demonstrative survives; enregistrement présent is neutral. French professional register and curly apostrophe/spacing conventions remain intact in adjacent copy.',
+'es':'se detectó reutilización de PID is idiomatic impersonal Spanish, with no ese PID or singular affected-process claim. hay registro stays a neutral fragment; existing tú remedies are unchanged.',
+'ru':'обнаружено повторное использование PID is an impersonal Russian nominal event, not этот PID. It works after both идентификатор and идентификаторы and makes no claim about the other process or its build.',
+'vi':'đã phát hiện việc tái sử dụng PID states the detected reuse event without PID đó. It is invariant in number, natural technical Vietnamese, NFC and pronoun-free.',
+'hi':'PID का दोबारा उपयोग पाया गया describes the detected reuse event, not उस PID or a singular process. PID stays technical Latin; the sentence combines naturally with प्रक्रिया ID / प्रक्रियाओं के ID.',
+'ur':'PID کا دوبارہ استعمال پایا گیا describes reuse as an event without وہ PID or singular-process possession. Respectful neutral Urdu register remains; Latin PID and numeric lists preserve logical order without embedded bidi controls.',
+'zh-CN':'检测到PID复用 is natural concise technical Chinese and avoids 该PID. It is number-neutral and composes with one or multiple 进程ID values; no claim about another process build appears.'}
+log=['$ python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd4r/verify.py.txt','cwd='+str(R),'python='+sys.version,'date='+NOW,'HEAD='+HEAD,'Scope: one PID-reuse key plus direct grouped neighbors freshly checked; 14 exact prior values retain sd4 semantic coverage; 15-key mechanics.'];done=[]
+for l in LS:
+ d=B/l/NS/'sd4r';target=C/l/(NS+'.json');t=load(target);assert set(t)==set(en)
+ previous=load(B/l/NS/'sd4/record.json');delta=load(B/l/NS/'sd4/delta.json');oldvalue=delta['before_after'][KEY]['after'];restored=dict(t);restored[KEY]=oldvalue
+ raw=(json.dumps(restored,ensure_ascii=False,indent=2)+'\n').encode();assert hashlib.sha256(raw).hexdigest()==previous['input_hashes']['target']
+ assert (json.dumps(t,ensure_ascii=False,indent=2)+'\n').encode()==target.read_bytes();assert t[KEY]!=oldvalue
+ evidence=['# Current sd4r catalogue renders — '+l,'','Offline production ICU rendering only, not terminal shaping/service execution.',''];n=0;pseudo=0;seen=set()
+ params={'device':'host-sd4r','pids':'4102, 4103','reason':t[KEY],'reasons':t[KEY],'holders':'worker.service','builds':'v0.99.1+running','recorded':'v0.99.0+recorded','install':'v0.99.2+installed'}
+ for k,s in en.items():
+  text=t[k];args=runtime.message_arguments(text);assert args==runtime.message_arguments(s)
+  assert not(set(text)&CONTROL) and not any(unicodedata.category(c)=='Cc' for c in text)
+  if l=='vi':assert unicodedata.normalize('NFC',text)==text
+  literals=set(re.findall(r'`([^`]+)`',s));assert set(re.findall(r'`([^`]+)`',text))==literals
+  plurals=runtime.plural_selectors(text)
+  for selectors in plurals:assert set(selectors)==CATS[l]
+  for node in runtime.parse_message(text):
+   if getattr(node,'kind',None)=='plural':
+    for sel,body in node.parts:
+     assert {v.name for v in body if hasattr(v,'name')}=={name for name,kind in args if kind!='plural'}
+     assert set(re.findall(r'`([^`]+)`',''.join(getattr(v,'value','') for v in body)))==literals
+  for count in COUNTS if plurals else [1]:
+   p=dict(params,count=count);out=runtime.render_message(text,p,l)
+   for name,kind in args:
+    if kind=='simple':assert p[name] in out
+   if k==NS+'.and_more':assert format_number(count,l) in out
+   if plurals:seen.add(plural_category(l,count))
+   evidence += ['## '+k+' count='+str(count),'',out,''];n+=1
+   q={name:('[!!opaque-'+name+'-α!!]' if kind=='simple' else count) for name,kind in args};stress=runtime.render_message(text,q,l)
+   for name,kind in args:
+    if kind=='simple':assert q[name] in stress
+   pseudo+=1
+ assert seen==CATS[l]
+ def tr(short,**kw):return runtime.render_message(t[NS+'.'+short],dict(params,**kw),l)
+ for count,pids in [(1,'4101'),(2,'4102, 4103'),(3,'4104, 4105, 4106'),(21,'4110, 4111')]:
+  grouped=tr('pid_reason',count=count,pids=pids,reason=t[KEY]);out=tr('unknown',count=count,reasons=grouped)
+  assert out.count(t[KEY])==1 and out.count(pids)==1
+  evidence += ['## COMPOSED PID reuse count='+str(count),'',out,'']
+ mixed=tr('pid_reason',count=1,pids='4101',reason=tr('unproven'))+'; '+tr('pid_reason',count=2,pids='4102, 4103',reason=t[KEY])+' '+tr('and_more',count=22)
+ evidence += ['## COMPOSED disjoint diagnoses plus overflow','',tr('unknown',count=25,reasons=mixed),'']
+ put(d/'rendered.txt','\n'.join(evidence)+'\n')
+ log.append(f'PASS {l}: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; {n} renders; {pseudo} opaque; 5 grouped samples; CLDR={sorted(seen)}; PID-reuse fragment once/group')
+ dump(d/'delta.json',{'key':KEY,'before':oldvalue,'after':t[KEY],'previous_target_sha256':previous['input_hashes']['target'],'retained_keys':[k for k in t if k!=KEY]})
+ report=f'''# sd4r independent SECOND audit — {l}
+
+Verdict: **PASSED**, 15/15 coverage; no new findings.
+
+Auditor session `85af124f4a9f`, actual model `openai/gpt-6.1-sol` from host runtime declaration. No fallback observed/reported; no inference from translator identity. Translator `7f2b030d2636` is distinct and supplied by parent; no own-copy approval.
+
+## Fresh semantic reassessment
+
+{reason[l]}
+
+**RU-SD3-01: fixed** for this locale’s current target: number-neutral detected-PID-reuse event; no singular demonstrative, other-process build inference, or identity proof. The diagnosis occurs once per homogeneous group, and direct `pid_reason`, `unknown`, `and_more` neighbors remain sound. Group count selects CLDR number even when display is capped. Existing conservative record/build, no-action/non-required-only, and guarded automatic/manual restart semantics are retained from sd4; no new identity guarantee. Existing cgroup jargon N1 stays deferred, not closed.
+
+## Retention proof and coverage
+
+Only `{KEY}` changes. Substituting its prior sd4 value in memory reconstructs the entire prior target SHA256 exactly; current serialization also matches the file bytes. **Other 14 values and formatting are byte-identical** and retain prior sd4 independent semantic coverage. All 15 keys are re-parsed/rendered, every CLDR category and per-branch placeholder/command checked, opaque parameters preserved. {n} ordinary + {pseudo} pseudo renders and five composed grouped samples. Urdu logical order/control absence checked, not visual bidi/shaping. No fixtures, tests, services, installs, history edits, commits, translation/source edits, or eligibility claim.
+
+## Current byte binding
+
+English SHA256 `{h(source)}`
+
+Context SHA256 `{h(context)}`
+
+Target SHA256 `{h(target)}`
+
+All-key coverage: {', '.join('`'+k+'`' for k in t)}.
+
+Shared actual command log and input manifest: `i18n/audits/evidence/fr/cli.serve_readiness/sd4r/`. `receipt.json` hashes companions; `ledger-receipt.json` is append-ready, not applied. Parent owns ledger append.
+'''
+ put(d/'report.md',report)
+ disposition={'id':'RU-SD3-01','status':'fixed','key':KEY,'assessment':reason[l]}
+ record={'locale':l,'namespace':NS,'audit_date':NOW,'key_count':15,'auditor':auditor,'translator':translator,'source_audit_revision':HEAD,'input_hashes':{'en':h(source),'context':h(context),'target':h(target)},'input_paths':{'en':rel(source),'context':rel(context),'target':rel(target)},'current_report_verdict':'passed','unresolved_blocker_major_count':0,'findings':[],'finding_dispositions':[disposition],'deferred_findings':[{'id':'N1','status':'preexisting deferred cgroup jargon'}],'all_keys_audited':list(t),'fresh_semantic_keys':[KEY],'retained_byte_identical_keys':[k for k in t if k!=KEY],'prior_second_pass_record':rel(B/l/NS/'sd4/record.json'),'current_bytes_match_audited_hashes':True,'validation':{'renders':n,'opaque_renders':pseudo,'composed_samples':5,'exit_code':0},'artifacts':{'report':rel(d/'report.md'),'rendered':rel(d/'rendered.txt'),'delta':rel(d/'delta.json'),'shared_log':rel(SH/'audit.log'),'manifest':rel(SH/'input-manifest.json')}}
+ dump(d/'record.json',record);done.append((l,d,record))
+assert all(h(R/p)==v for p,v in manifest.items());assert all(h(R/p)==v for p,v in oldfiles.items())
+dump(SH/'input-manifest.json',{'timestamp':NOW,'input_sha256':manifest,'preserved_sd4_sha256':oldfiles})
+log+=['PASS 7 current targets; 15/15 per locale; 1 fresh +14 exact retained; all inputs stable and sd4 preserved.','EXIT_CODE=0'];put(SH/'audit.log','\n'.join(log)+'\n')
+for l,d,record in done:
+ companions=[d/'report.md',d/'rendered.txt',d/'delta.json',SH/'audit.log',SH/'input-manifest.json',SH/'verify.py.txt']
+ ledger={'locale':l,'namespace':NS,'source_sha256':h(source),'status':'passed','audit_date':NOW[:10],'auditor':auditor,'translator':translator,'key_count':15,'key_coverage':list(en),'note':rel(d/'record.json')+'; sd4r SECOND: PID-reuse fixed; 14 exact retained; 15-key checked; N1 deferred','record_reference':rel(d/'record.json'),'current_report_verdict':{'status':'passed','unresolved_blocker_major_count':0,'finding_ids':[],'open_finding_ids':[],'findings_report':rel(d/'report.md')},'bundle_companions':[{'path':rel(p),'sha256':h(p)} for p in companions]}
+ assert len(ledger['note'])<=280;dump(d/'ledger-receipt.json',ledger)
+ dump(d/'receipt.json',{'schema':1,'locale':l,'namespace':NS,'audit_id':'sd4r','record_reference':rel(d/'record.json'),'ledger_receipt':rel(d/'ledger-receipt.json'),'purpose':'Companion hash manifest; separate ledger receipt append-ready, not applied.','sha256':{rel(p):h(p) for p in companions+[d/'record.json',d/'ledger-receipt.json']}})
+for line in log:print(line)

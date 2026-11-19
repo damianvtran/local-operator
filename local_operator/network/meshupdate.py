@@ -378,23 +378,42 @@ def _flatten_output(*chunks: str) -> str:
 
 
 def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
-    """Install a generation and capture failures, without automatic collection.
+    """Install a generation, capture failures, then run the shared post-promotion prune.
 
-    Match the PyPI/snapshot promotion freeze: discovery is a census, not a
-    lifetime lease. An absent record cannot prove that a live process will
-    never read another resource from its loaded generation, so promotion must
-    not trigger destructive collection. Retention is an explicit
-    ``lop install prune``, not a tail of this install.
+    The same tail as the PyPI and snapshot paths (``update.reclaim_after_promotion``,
+    since 2026-11-16): ``lop install prune``'s guarded policy — current, the
+    relay's own running tree, every record-named root and the
+    ``update.keep_generations`` newest unreferenced generations survive, and an
+    incomplete census keeps everything. A mesh member is exactly the machine
+    nobody runs ``lop install prune`` on by hand, which is how a fleet node
+    reached 113 generations under the old freeze. Best-effort: a reclaim failure
+    is logged and never turns an installed build into a failed receipt.
+
+    The build ``current`` named before the flip is kept too (R2), and the
+    removals are LOGGED at INFO (R3): this runs inside the relay, where no one
+    watches stdout, so the log is the only place a deletion can be read back.
     """
+    previous = update_mod.previous_generation_for_reclaim()
     capture = _CapturedInstall()
     try:
-        update_mod.install_into_generation(source=None, version=version, runner=runner or capture)
+        promoted = update_mod.install_into_generation(
+            source=None, version=version, runner=runner or capture
+        )
     except Exception as exc:  # noqa: BLE001 — re-raised with the installer's own tail
         if capture.output:
             raise update_mod.UpdateError(
                 f"{' '.join(str(exc).split())} — installer output: {capture.output}"
             ) from exc
         raise
+    update_mod.reclaim_after_promotion(
+        promoted, previous=previous, on_prune=lambda plan: _log_prune(plan, update_mod)
+    )
+
+
+def _log_prune(plan: Any, update_mod: Any) -> None:
+    """One INFO line per ``prune_notice_lines`` entry — the mesh path's reporter."""
+    for line in update_mod.prune_notice_lines(plan):
+        logger.info("%s", line)
 
 
 def _install_classic(

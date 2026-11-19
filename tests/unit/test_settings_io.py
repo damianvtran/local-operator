@@ -85,6 +85,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_CHECK_INTERVAL_MIN,
     )
     from local_operator.i18n.resolve import DEFAULT_LANGUAGE
+    from local_operator.install_defaults import (
+        DEFAULT_AUTO_PRUNE_GENERATIONS,
+        DEFAULT_KEEP_GENERATIONS,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -161,6 +165,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_ENABLED as DEFAULT_COMPRESSION_ENABLED,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
+    from local_operator.session.runtime.presence import DEFAULT_AWAY_AFTER_S
     from local_operator.session.runtime.process import (
         DEFAULT_KEEP_ALIVE_MAX,
         DEFAULT_KEEP_ALIVE_SECONDS,
@@ -324,6 +329,10 @@ def _consumer_defaults() -> dict[str, object]:
         # default and the code default cannot drift.
         "subagents.slim_child_knowledge": DEFAULT_SLIM_CHILD_KNOWLEDGE,
         "subagents.max_team_depth": DEFAULT_MAX_TEAM_DEPTH,
+        # The post-update prune: ``update.auto_prune_policy`` falls back to these
+        # when the keys are absent; the registry carries literals.
+        "update.auto_prune": DEFAULT_AUTO_PRUNE_GENERATIONS,
+        "update.keep_generations": DEFAULT_KEEP_GENERATIONS,
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
@@ -341,6 +350,9 @@ def _consumer_defaults() -> dict[str, object]:
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
         "tunnel.auto_setup_after_login": AUTO_SETUP_DEFAULT,
+        # ADR 0008: the reader's own default, which is also what a desk report
+        # omitting `away_after_s` is evaluated with.
+        "notifications.phone_away_after_s": DEFAULT_AWAY_AFTER_S,
         "memory.capture": MEMORY_DEFAULT_ENABLED,
         "memory.capture.locators": LOCATORS_DEFAULT_ENABLED,
         "memory.suggest": MEMORY_DEFAULT_ENABLED,

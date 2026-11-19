@@ -66,7 +66,9 @@ from ..client import (
     SCREENING_TEMPLATE_V3_SHA256,
     SCREENING_TEMPLATE_V4_SHA256,
     SCREENING_TEMPLATE_V5_PIN,
+    SCREENING_TEMPLATE_V6_PIN,
     SCREENING_VERSION_V5,
+    SCREENING_VERSION_V6,
     BridgeRefusal,
     agent_file_reads_capability,
     screening_template_v4_usable,
@@ -95,6 +97,10 @@ logger = logging.getLogger(__name__)
 #: course-correct / ask, no new work, scope) live in that served text; the card
 #: deliberately does not duplicate them. Bump WITH the served version (§11.3).
 GUIDANCE_VERSION = "bridge-guidance-v2"
+
+#: ``detail`` of a hand-off that deliberately posted NO card because the hub marked
+#: the delivery passive (see ``_hand_off_card``). Terminal, never buffered.
+CARD_PASSIVE = "passive_no_wake"
 
 
 @dataclass(frozen=True)
@@ -387,13 +393,23 @@ def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
     # char account used to pass here and then hold ``envelope_malformed``
     # downstream (round 1 S-5).
     from ..screening import _ENVELOPE_LABEL_MAX
+    from ..types import INTEGRATION_SENDER_KIND, MEMBER_KINDS
 
     if (
         not isinstance(account, str)
         or len(account) > _ENVELOPE_LABEL_MAX
-        or kind not in ("", "human", "agent")
+        or kind not in ("", *MEMBER_KINDS, INTEGRATION_SENDER_KIND)
     ):
         raise ValueError("invalid classification sender")
+    if kind == INTEGRATION_SENDER_KIND:
+        # An app post (Team Integrations): screen it with NO member class rather
+        # than hold it as malformed. The class is what the owner and tier rules
+        # key on, so an empty class can never be the owner or a person's line;
+        # the account stays the charged attribution (the app's own ``iap_`` id).
+        # Any OTHER unstated word still holds as ``sender_malformed``: on this
+        # per-message lane a kind the client was not built for is a contract
+        # change, and holding one message costs nothing else on the page.
+        kind = ""
     return {
         "account_id": account,
         "kind": kind if account else "",
@@ -684,8 +700,14 @@ def _card_metadata(
             raise ValueError("invalid conversation display field")
         labels.append(value)
     name, sender, kind = labels
-    if kind not in ("", "human", "agent"):
+    from ..types import INTEGRATION_SENDER_KIND, MEMBER_KINDS, sender_class
+
+    if kind not in ("", *MEMBER_KINDS, INTEGRATION_SENDER_KIND):
         raise ValueError("invalid conversation sender kind")
+    # The card names the sender's CLASS, never the raw wire kind: an app post
+    # reads "(app, same tenant)", so it can never be taken for a member. Only
+    # ``human``/``agent`` ever reach the receipt (its own closed check below).
+    kind = sender_class(kind) if kind else ""
     # The two routing facts the card needs come from THIS read, never from the
     # durable ref: a value of the wrong shape is a malformed row (refused like
     # every other display field), an absent one is an older server.
@@ -849,6 +871,30 @@ async def _hand_off_card(
 
     from ..reply_guard import record_trigger
     from .coalesce import active_coalescer
+
+    if ref.passive and metadata.conversation_kind != "dm":
+        # NON-WAKING DELIVERY (agent-server #402; operator rule, Team Bridge #general
+        # seq 97, 2026-11-17: agents wake on thread replies only when they take part,
+        # "unless the thread is relevant to their work"). The hub marked this reply as
+        # reaching a notify=all agent OUTSIDE the thread's audience. Everything up to
+        # here still ran — screened, admitted, body reserved — so the reply is readable
+        # on the agent's next channel_thread/channel_history read or catch-up, which is
+        # how the agent judges relevance. Only the wake is withheld: no card, no
+        # coalescer entry, and no reply-guard trigger (nothing woke the agent). The
+        # detail is NOT a buffered one, so the caller settles the card obligation and a
+        # replay of this ref never wakes later either.
+        #
+        # NEVER IN A DM (review r1 M-1 / QA r1 Q1): in a 1:1 DM the agent is always
+        # the audience, so a passive bit there can only be a hub bug (agent-server
+        # #402's first cut set it on any thread reply), and honouring it would drop a
+        # direct message for good — the settled card obligation means no replay
+        # recovers the wake. The kind comes from THIS body read (hub-verified, set
+        # unconditionally in agent-server's body response since before #402), not
+        # the durable ref; an absent kind (an older body route) keeps honouring the
+        # bit, since such a hub predates #402 and never sends ``passive`` anyway. The hold
+        # re-drive and recovery paths reach the wake only through this function, so
+        # the guard covers them too.
+        return CARD_PASSIVE
 
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
     # kind + mention bit, never a body or name). Per message, oldest → newest
@@ -1378,11 +1424,19 @@ def _text_admit_template(result: Any) -> str | None:
     renders nothing) keeps the omitted shape.
     """
 
+    rendered = getattr(result, "rendered_template_sha256", None)
     if (
         getattr(result, "rendered_version", None) == SCREENING_VERSION_V5
-        and getattr(result, "rendered_template_sha256", None) == SCREENING_TEMPLATE_V5_PIN
+        and rendered == SCREENING_TEMPLATE_V5_PIN
     ):
         return SCREENING_TEMPLATE_V5_PIN
+    # v6 is v5's successor in the hub's ``screening_addressed`` slot (holds triage
+    # 2026-11-18); the hub accepts its pinned hash on a text-only admit the same way.
+    if (
+        getattr(result, "rendered_version", None) == SCREENING_VERSION_V6
+        and rendered == SCREENING_TEMPLATE_V6_PIN
+    ):
+        return SCREENING_TEMPLATE_V6_PIN
     return None
 
 
@@ -2063,6 +2117,7 @@ async def handle_conversation_available(
 
 __all__ = [
     "CARD_COALESCED",
+    "CARD_PASSIVE",
     "GUIDANCE_VERSION",
     "ConversationCardMetadata",
     "build_conversation_card",

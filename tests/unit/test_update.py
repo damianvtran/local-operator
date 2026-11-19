@@ -430,6 +430,140 @@ def test_check_latest_500_and_timeout_are_silent(tmp_path: Path) -> None:
         assert timed.behind is False
 
 
+# THE CDN-LAG CROSS-CHECK (2026-11-17, fix/update-live-index). Right after a
+# release goes live, PyPI's Fastly edge can keep serving the previous
+# ``/pypi/local-operator/json`` object for minutes (``lop update --check`` said
+# 0.106.6 was the latest ~4 min after 0.106.7 went 200). The stubs below route by
+# URL so each source can be stale independently, which is the failure shape.
+
+
+def _simple_index(*versions: str, yanked: tuple[str, ...] = ()) -> dict[str, Any]:
+    """A PEP 691 JSON simple-index page listing one pure wheel per version."""
+    return {
+        "meta": {"api-version": "1.1"},
+        "name": "local-operator",
+        "versions": list(versions),
+        "files": [
+            {
+                "filename": f"local_operator-{v}-py3-none-any.whl",
+                "url": (
+                    f"https://files.pythonhosted.org/packages/local_operator-{v}-py3-none-any.whl"
+                ),
+                "hashes": {"sha256": "a" * 64},
+                "yanked": v in yanked,
+            }
+            for v in versions
+        ],
+    }
+
+
+def _routed_transport(
+    routes: dict[str, httpx.Response | dict[str, Any]], seen: list[httpx.Request] | None = None
+) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(request)
+        hit = routes.get(str(request.url))
+        if hit is None:
+            return httpx.Response(404, text="not found")
+        return hit if isinstance(hit, httpx.Response) else httpx.Response(200, json=hit)
+
+    return httpx.MockTransport(handler)
+
+
+def _ready_files(version: str) -> list[dict[str, object]]:
+    return [_wheel(version), _mac_wheel(version)]
+
+
+def test_stale_info_version_with_newer_release_key_resolves_newer(tmp_path: Path) -> None:
+    """``info.version`` lags ``releases`` in one document: the newest final key wins."""
+    stale = {
+        "info": {"version": "0.28.0"},
+        "urls": _ready_files("0.28.0"),
+        "releases": {
+            "0.28.0": _ready_files("0.28.0"),
+            "0.29.0": _ready_files("0.29.0"),
+            # Never advertised: a pre-release, and a release whose only file is yanked.
+            "0.30.0rc1": _ready_files("0.30.0rc1"),
+            "0.31.0": [_wheel("0.31.0", yanked=True), _mac_wheel("0.31.0", yanked=True)],
+        },
+    }
+    client = _client(_routed_transport({update_mod.PYPI_JSON_URL: stale}))
+    with patch.object(update_mod, "installed_version", return_value="0.28.0"):
+        result = check_latest(force=True, cache_dir=tmp_path, client=client)
+    assert result.latest == "0.29.0"
+    assert result.behind is True
+
+
+def test_stale_project_json_is_cross_checked_against_the_simple_index(tmp_path: Path) -> None:
+    """The whole project document is the stale CDN object: the simple index and
+    the new version's own (never-cached) document carry the release."""
+    seen: list[httpx.Request] = []
+    routes: dict[str, httpx.Response | dict[str, Any]] = {
+        update_mod.PYPI_JSON_URL: _pypi_payload("0.28.0", _ready_files("0.28.0")),
+        update_mod.PYPI_SIMPLE_URL: _simple_index("0.27.0", "0.28.0", "0.29.0"),
+        update_mod.PYPI_VERSION_JSON_URL.format(version="0.29.0"): _pypi_payload(
+            "0.29.0", _ready_files("0.29.0")
+        ),
+    }
+    client = _client(_routed_transport(routes, seen))
+    with patch.object(update_mod, "installed_version", return_value="0.28.0"):
+        result = check_latest(force=True, cache_dir=tmp_path, client=client)
+    assert result.latest == "0.29.0"
+    assert result.behind is True
+    simple = [r for r in seen if str(r.url) == update_mod.PYPI_SIMPLE_URL]
+    assert simple and simple[0].headers["accept"].startswith("application/vnd.pypi.simple.v1+json")
+    # The fresh answer is what later TTL reads (the splash) are served.
+    cached = json.loads((tmp_path / "pypi-local-operator.json").read_text(encoding="utf-8"))
+    assert cached["payload"] == {"version": "0.29.0", "ready": True}
+
+
+def test_simple_index_newer_but_unconfirmed_keeps_the_project_answer(tmp_path: Path) -> None:
+    """A newer simple-index entry whose own document is not served yet (or names
+    another version) is not proof: the project document's ready answer stands."""
+    routes: dict[str, httpx.Response | dict[str, Any]] = {
+        update_mod.PYPI_JSON_URL: _pypi_payload("0.28.0", _ready_files("0.28.0")),
+        update_mod.PYPI_SIMPLE_URL: _simple_index("0.28.0", "0.29.0"),
+    }
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True, cache_dir=tmp_path, client=_client(_routed_transport(routes))
+        )
+    assert result.latest == "0.28.0"
+
+
+def test_simple_index_newer_still_uploading_reports_pending(tmp_path: Path) -> None:
+    """The new version's document exists but has no installable wheel yet: the
+    same "still publishing" refusal the project document gives, not the old version."""
+    routes: dict[str, httpx.Response | dict[str, Any]] = {
+        update_mod.PYPI_JSON_URL: _pypi_payload("0.28.0", _ready_files("0.28.0")),
+        update_mod.PYPI_SIMPLE_URL: _simple_index("0.28.0", "0.29.0"),
+        update_mod.PYPI_VERSION_JSON_URL.format(version="0.29.0"): _pypi_payload("0.29.0", []),
+    }
+    with patch.object(update_mod, "installed_version", return_value="0.28.0"):
+        result = check_latest(
+            force=True, cache_dir=tmp_path, client=_client(_routed_transport(routes))
+        )
+    assert result.latest is None
+    assert result.pending_version == "0.29.0"
+
+
+def test_simple_index_ignores_yanked_prerelease_and_unreachable(tmp_path: Path) -> None:
+    project = _pypi_payload("0.28.0", _ready_files("0.28.0"))
+    for simple in (
+        _simple_index("0.28.0", "0.29.0", yanked=("0.29.0",)),
+        _simple_index("0.28.0", "0.29.0rc1"),
+        httpx.Response(500, text="nope"),
+        httpx.Response(200, text="<html>not json</html>"),
+    ):
+        routes = {update_mod.PYPI_JSON_URL: project, update_mod.PYPI_SIMPLE_URL: simple}
+        with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+            result = check_latest(
+                force=True, cache_dir=tmp_path, client=_client(_routed_transport(routes))
+            )
+        assert result.latest == "0.28.0", simple
+
+
 def test_corrupt_cache_is_missing(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text("not-json", encoding="utf-8")
@@ -489,6 +623,10 @@ def test_unready_cache_entry_does_not_skip_get(tmp_path: Path) -> None:
     hits = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        # Count the project document only: every live read also probes the
+        # simple index (the CDN-lag cross-check), which this stub 404s.
+        if str(request.url) != update_mod.PYPI_JSON_URL:
+            return httpx.Response(404)
         hits["n"] += 1
         return httpx.Response(200, json=_pypi_payload("0.28.0", []))
 
@@ -1297,7 +1435,14 @@ def test_services_stage_on_a_generation_install_moves_the_supervised_units(
     report = update._services_stage()
 
     assert order == ["daemons", "serve"], "the supervised units must move on this path"
-    assert calls == [{"wait_s": services.RELOAD_WAIT_S, "rolling": True}]
+    # The update also hands the serve move its bounded background retry (fix B).
+    assert calls == [
+        {
+            "wait_s": services.RELOAD_WAIT_S,
+            "rolling": True,
+            "schedule_retry": update.schedule_serve_move_retry,
+        }
+    ]
     assert report.daemons == (update.DaemonStatus("mobile", "refreshed"),)
 
 
@@ -1332,7 +1477,14 @@ def test_services_stage_on_a_mutable_install_keeps_the_non_rolling_reload(
     report = update._services_stage()
 
     assert order == ["daemons", "serve"]
-    assert calls == [{"wait_s": services.RELOAD_WAIT_S, "rolling": False}]
+    # The update also hands the serve move its bounded background retry (fix B).
+    assert calls == [
+        {
+            "wait_s": services.RELOAD_WAIT_S,
+            "rolling": False,
+            "schedule_retry": update.schedule_serve_move_retry,
+        }
+    ]
     assert report.daemons == statuses
 
 
@@ -1610,6 +1762,9 @@ def test_rolling_receipt_measures_the_runtime_census_within_its_namespaces(
     assert runtimes["known_old_busy"] == 1, "the live busy session on the old generation"
     assert runtimes["known_old_idle"] == 1, "the pre-heartbeat runtime, deduped from the mobile row"
     assert runtimes["unknown"] == 0
+    # Idle old-generation runtimes leave on their own soft refresh, so the
+    # receipt calls them retiring; the busy one is not (update-parity item 4).
+    assert runtimes["retiring"] == 1
 
 
 def test_rolling_receipt_names_each_unreadable_runtime_namespace(
@@ -1642,6 +1797,7 @@ def test_rolling_receipt_names_each_unreadable_runtime_namespace(
 
     assert rolling["runtimes"]["measured"] is False
     assert rolling["runtimes"]["known_old_busy"] is None
+    assert rolling["runtimes"]["retiring"] is None, "an unmeasured census claims no retiring"
     reason = rolling["central_services_incomplete_reason"]
     assert "runtime census unreadable" in reason
     assert "run/mobile" in reason, "the reason names the namespace to look at"
@@ -1966,12 +2122,26 @@ def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, 
     subcommand of this one group. 2 keeps a usage error distinct from the 1 the
     sibling ``install`` group returns for its own, which this deliberately mirrors.
     """
-    from local_operator.cli import main
+    import argparse
+
+    from local_operator.cli import build_cli_parser, main
+
+    # The synopsis is a hand-written string in ``main``; derive the expected verb
+    # list from the parser itself so adding a verb (``heavy`` did) fails here only
+    # when the synopsis forgot it, not every time the group grows.
+    def _subparsers(
+        parser: argparse.ArgumentParser,
+    ) -> argparse._SubParsersAction[argparse.ArgumentParser]:
+        return next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+
+    services = _subparsers(build_cli_parser()).choices["services"]
+    verbs = ", ".join(_subparsers(services).choices)
 
     monkeypatch.setattr("sys.argv", ["lop", "services"])
     assert main() == 2
     err = capsys.readouterr().err
-    assert err.strip() == "usage: lop services {status, restart, reclaim}"
+    assert "heavy" in verbs, "the derivation must still see the verb this PR added"
+    assert err.strip() == f"usage: lop services {{{verbs}}}"
     assert "{credential,config,agents" not in err, "the whole program's verb list"
 
 
@@ -5587,15 +5757,23 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     all (the wheel ships the built bundle), the announcement is printed, and
     the temporary extract is still reclaimed."""
     repo, commit = _release_repo(tmp_path)
+    previous = tmp_path / "generations" / "previous"
     snapshot = tmp_path / "extract"
     snapshot.mkdir()
     document = _release_document(
         "1.2.3", _wheel_entry("local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl")
     )
     calls: list[tuple[Any, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: Any, **kwargs: Any) -> None:
+        order.append("install")
         calls.append((source, kwargs))
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return previous
 
     monkeypatch.chdir(repo)  # ``resolve_snapshot`` archived the ref out of here
     with (
@@ -5612,10 +5790,16 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         # tail assertion below is deterministic rather than a fact about the
         # machine the suite runs on (S3b).
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="1.2.2")),
+        # The pre-flip ``current`` the snapshot path reads for the prune (R2),
+        # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
+        # host's: this fixture's pointer names ``previous``.
+        patch.object(update_mod, "previous_generation_for_reclaim", side_effect=read_previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
         assert update_mod._snapshot_command("v1.2.3") == 0
+
+    assert order == ["previous", "install"], order
 
     # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
     # terminal and may answer the signing dialog (review round 1, R2).
@@ -5636,6 +5820,7 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         before_version="1.2.2",
         via="snapshot",
         promoted_generation=None,
+        previous_generation=previous,
     )
 
 
@@ -5813,15 +5998,23 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
     """The override path on the wheel route: it installs, loudly, and the marker
     note records the deliberate downgrade rather than the silent one."""
     repo, commit = _release_repo(tmp_path, tag="v0.9.8", version="0.9.8")
+    previous = tmp_path / "generations" / "previous"
     snapshot = tmp_path / "extract"
     snapshot.mkdir()
     document = _release_document(
         "0.9.8", _wheel_entry("local_operator-0.9.8-py3-none-macosx_11_0_universal2.whl")
     )
     calls: list[tuple[Any, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: Any, **kwargs: Any) -> None:
+        order.append("install")
         calls.append((source, kwargs))
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return previous
 
     monkeypatch.chdir(repo)
     with (
@@ -5834,10 +6027,16 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         ),
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
         patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        # The pre-flip ``current`` the snapshot path reads for the prune (R2),
+        # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
+        # host's: this fixture's pointer names ``previous``.
+        patch.object(update_mod, "previous_generation_for_reclaim", side_effect=read_previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
         assert update_mod._snapshot_command("v0.9.8", allow_downgrade=True) == 0
+
+    assert order == ["previous", "install"], order
 
     # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
     # terminal and may answer the signing dialog (review round 1, R2).
@@ -5856,6 +6055,7 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         before_version="0.9.9",
         via="snapshot",
         promoted_generation=None,
+        previous_generation=previous,
     )
     captured = capsys.readouterr()
     assert (
@@ -6201,26 +6401,49 @@ def test_the_nothing_to_install_exit_queues_no_roll(
     assert rollouts.latest_active(root=root) is None
 
 
-def test_perform_upgrade_never_collects_previous_generations(
+def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The PyPI tail, like the shared snapshot tail, must never collect A."""
-    collections: list[dict[str, Any]] = []
+    """The PyPI tail hands the promoted build to the ONE reclaim step (2026-11-16).
+
+    Automatic collection replaced the frozen tail after a fleet node reached 113
+    generations; it must go through ``reclaim_after_promotion`` (the guarded
+    ``lop install prune`` policy) with the caller's ``on_prune`` reporter, and
+    never call ``prune_generations`` directly from this tail.
+    """
+    # (promoted, previous, on_prune): the stub records all three reclaim inputs.
+    reclaims: list[tuple[Path | None, Path | None, Any]] = []
+    direct: list[dict[str, Any]] = []
     notices: list[Any] = []
     generation = tmp_path / "owned-generation"
     generation.mkdir()
     # Match the real positional-source call, while observing the tail's intent;
     # this is not installer/publication/signature proof.
     installs: list[tuple[str | Path | None, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: str | Path | None, **kwargs: Any) -> Path:
+        order.append("install")
         installs.append((source, kwargs))
         return generation
 
+    before = tmp_path / "before-generation"
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return before
+
+    monkeypatch.setattr(update_mod, "previous_generation_for_reclaim", read_previous)
     monkeypatch.setattr(update_mod, "install_into_generation", install)
     monkeypatch.setattr(
-        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+        update_mod,
+        "reclaim_after_promotion",
+        lambda promoted, *, previous=None, on_prune=None: reclaims.append(
+            (promoted, previous, on_prune)
+        ),
     )
+    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: direct.append(kwargs))
     assert (
         update_mod.perform_upgrade(
             target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
@@ -6241,7 +6464,10 @@ def test_perform_upgrade_never_collects_previous_generations(
             },
         )
     ]
-    assert collections == [] and notices == []
+    # R2: the pointer's target read BEFORE the install travels as ``previous``.
+    assert reclaims == [(generation, before, notices.append)]
+    assert order == ["previous", "install"], order
+    assert direct == []
 
 
 def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
@@ -6249,9 +6475,9 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
 ) -> None:
     order: list[Any] = []
     monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
-    # Automatic collection is frozen: promotion does not retire loaded A roots.
-    # Recording calls (rather than raising in a best-effort prune) detects even
-    # a swallowed GC failure being attempted by this snapshot/shared tail.
+    # No ``promoted_generation`` means this run promoted nothing, so the shared
+    # reclaim must not prune. Recording calls (rather than raising in a
+    # best-effort prune) detects even a swallowed attempt.
     collections: list[dict[str, Any]] = []
     monkeypatch.setattr(
         update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
@@ -6290,6 +6516,55 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
         "via": "snapshot",
         "roll": False,
     }, order
+
+
+def test_the_snapshot_tail_reclaims_the_promoted_build_before_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``lop-update`` lands on this tail; it must prune like the PyPI path (2026-11-16).
+
+    The reclaim gets THIS run's promoted generation and the CLI printer, and runs
+    right after the ``current`` line — before services, the roll and the report —
+    so the removals print where the PyPI path prints them (design review D4).
+    """
+    order: list[Any] = []
+    promoted = tmp_path / "promoted"
+    previous = tmp_path / "previous"
+    monkeypatch.setattr(update_mod, "_print_current_generation", lambda: order.append("current"))
+    monkeypatch.setattr(
+        update_mod,
+        "reclaim_after_promotion",
+        lambda generation, *, previous=None, on_prune=None: order.append(
+            ("reclaim", generation, previous, on_prune)
+        ),
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "_run_services_tail",
+        lambda services: order.append("services") or update_mod.StageReport(),
+    )
+    monkeypatch.setattr(update_mod, "_roll_after_update", lambda **kwargs: order.append("roll"))
+    monkeypatch.setattr(update_mod, "_emit_update_report", lambda **kwargs: order.append("report"))
+    assert (
+        update_mod._generation_upgrade(
+            0,
+            install_version="0.28.0",
+            target="0.28.0",
+            roll=False,
+            before_version="0.27.0",
+            via="snapshot",
+            promoted_generation=promoted,
+            previous_generation=previous,
+        )
+        == 0
+    )
+    assert order == [
+        "current",
+        ("reclaim", promoted, previous, update_mod._print_prune_notice),
+        "services",
+        "roll",
+        "report",
+    ], order
 
 
 def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(

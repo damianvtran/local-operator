@@ -1,0 +1,17 @@
+{
+  "cli.serve_readiness.unproven": "रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)",
+  "cli.serve_readiness.not_reporting": "रिकॉर्ड मौजूद है, लेकिन कोई जवाब नहीं मिल रहा (हार्टबीट रुक गई है)",
+  "cli.serve_readiness.not_this_daemon": "रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया",
+  "cli.serve_readiness.unknown_state": "अज्ञात स्थिति वाला रिकॉर्ड",
+  "cli.serve_readiness.install_unknown": "ऐसे बिल्ड पर चलता है जिसकी तुलना इंस्टॉल किए गए बिल्ड से नहीं की जा सकती",
+  "cli.serve_readiness.cgroup_unknown": "ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है",
+  "cli.serve_readiness.recorded_gap": "रिकॉर्ड में बिल्ड {recorded} दर्ज है; इंस्टॉल किया गया बिल्ड {install} है",
+  "cli.serve_readiness.unknown": "{count, plural, one {{device} पर `lop serve` डेमन — {reasons}, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं} other {{device} पर `lop serve` डेमन — {reasons}, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं}}",
+  "cli.serve_readiness.stale": "{count, plural, one {{device} पर `lop serve` डेमन ({pids}) {builds} पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड {install} है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं} other {{device} पर `lop serve` डेमन ({pids}) {builds} पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड {install} है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं}}",
+  "cli.serve_readiness.other_unit": "{count, plural, one {{device} पर `lop serve` डेमन किसी दूसरी सेवा ({holders}) के अधीन है, lop serve यूनिट के नहीं} other {{device} पर `lop serve` डेमन दूसरी सेवाओं ({holders}) के अधीन हैं, lop serve यूनिट के नहीं}}",
+  "cli.serve_readiness.identity_restart": "{device} पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है",
+  "cli.serve_readiness.pid_reason": "{count, plural, one {प्रक्रिया ID {pids} — {reason}} other {प्रक्रियाओं के ID {pids} — {reason}}}",
+  "cli.serve_readiness.and_more": "{count, plural, one {और # अन्य} other {और # अन्य}}",
+  "cli.serve_readiness.identity_no_action": "{count, plural, one {जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है} other {जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है}}",
+  "cli.serve_readiness.identity_restart_manual": "{device} पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop serve` को मैन्युअल रूप से फिर शुरू करें; यह मौजूदा प्रक्रिया में खुद को फिर से लोड नहीं कर सकता"
+}

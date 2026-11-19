@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "audit_id": "community-round-3-ru-wire.community-08c6dfffd961",
+  "audit_kind": "bounded_independent_second_safety_audit",
+  "repository": "damianvtran/local-operator",
+  "pr": 4221,
+  "locale": "ru",
+  "namespace": "wire.community",
+  "audit_date": "2026-11-18",
+  "audited_revision": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+  "candidate_tree": "13010a25c61439070020148c7f01d0a6261a9f09",
+  "combined_patch_sha256": "7a520bb614cd7694422cd7d955c3b400b830a5e3d2f1bb7b6ae0d74a291db17f",
+  "scope": "Approval-card keys only. The card describes audience, moderation, attribution and per-post consent, not the TUI keyboard gate. None of the five strings asserts approval or publication has already happened.",
+  "auditor": {
+    "agent": "reviewer",
+    "model": "openai/gpt-6.2-sol",
+    "date": "2026-11-18",
+    "session": "08c6dfffd961",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "first_auditors": [
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "c739715f0519",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/ru/community-primary/record.json",
+      "sha256": "d3658ce0de9edec87b713b5ebe88c1b5833b4ad99a75387dc044ffd13f64f7b3"
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.json",
+      "sha256": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.context.json",
+      "sha256": "b0c568ca3380d372c4f2ca43f2046ccc9dd8bf19e4c22014e037dcb63518e769"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/wire.community.json",
+      "sha256": "879664a71081504f5b4e8fe5e8ca8d631777cad3627518ebba31aa939380cc09"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "deferred_non_gating_finding_ids": []
+  },
+  "keys_semantically_audited": [
+    "wire.community.post_card_audience",
+    "wire.community.post_card_each_time",
+    "wire.community.post_card_label",
+    "wire.community.post_card_tainted",
+    "wire.community.post_card_title"
+  ],
+  "per_key": {
+    "wire.community.post_card_audience": {
+      "en": "Audience: all members of {channel} · checked by the community's moderator before anyone sees it.",
+      "target": "Аудитория: все участники {channel} · модератор сообщества проверит до того, как это кто-либо увидит.",
+      "verdict": "pass",
+      "reason": "Все участники is the entire channel audience; moderation comes before anyone sees it."
+    },
+    "wire.community.post_card_each_time": {
+      "en": "Each post asks you; there are no standing permissions yet.",
+      "target": "Каждая публикация требует вашего ответа; постоянных разрешений пока нет.",
+      "verdict": "pass",
+      "reason": "Каждая публикация требует вашего ответа and пока нет retain per-post decision and no standing permission."
+    },
+    "wire.community.post_card_label": {
+      "en": "Shown as your own post: this server can't label agent posts yet, so others won't see it came from your agent.",
+      "target": "Будет показано как ваша собственная публикация: этот сервер пока не умеет помечать публикации агентов, поэтому другие не увидят, что её написал ваш агент.",
+      "verdict": "pass",
+      "reason": "Ваша собственная публикация and не увидят preserve the user's attribution and hidden agent authorship."
+    },
+    "wire.community.post_card_tainted": {
+      "en": "Your agent read community posts in this session, so no standing permission applies until a new session; only your answer posts this.",
+      "target": "В этой сессии ваш агент читал публикации сообщества, поэтому до новой сессии постоянные разрешения не действуют; опубликует это только ваш ответ.",
+      "verdict": "pass",
+      "reason": "До новой сессии … не действуют suspends existing grants; только ваш ответ retains the exclusive human decision."
+    },
+    "wire.community.post_card_title": {
+      "en": "Post to {channel} in {community}, as you?",
+      "target": "Опубликовать в {channel} сообщества {community} от вашего имени?",
+      "verdict": "pass",
+      "reason": "От вашего имени? is an explicit posting question with channel and community."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/community-r3-safety-wire/report.md",
+      "sha256": "a4a06b817c5e5f21a1824a0a88106d8630137431798b264e52edccc1bf1c3607"
+    }
+  ]
+}

@@ -38,6 +38,8 @@ import fnmatch
 import itertools
 import os
 import re
+import shutil
+import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
@@ -115,6 +117,34 @@ TEMP_MARK = "\x02"
 #: the setter invalidation below (``unset``, ``read``, arithmetic) leaves them
 #: alone rather than storing a marker where a raw path is expected.
 _RAW_PATH_VARS = frozenset({"HOME", "OLDPWD"})
+#: A symbolic fresh DIRECTORY below a pinned parent. Unlike TEMP_MARK this
+#: retains that parent in the value; it must never be anchored to cwd or /tmp.
+#: The byte alone proves NOTHING: a command can write it (``$'\x03'``, a raw
+#: U+0003), and trusting it let ``R="$PAD/q"$'\x03'`` through a planted link
+#: drop a state-root write from CRITICAL to LOW (PR #4116 review B1). Only a
+#: value of type :class:`_FreshDirValue` carries the mark; see there.
+FRESH_DIR_MARK = "\x03"
+
+
+class _FreshDirValue(str):
+    """An env value whose FRESH_DIR_MARK the walker itself minted.
+
+    Out-of-band provenance (PR #4116 review B1): command text and inherited
+    env can only ever produce plain ``str``, so they cannot forge this type.
+    Only ``_Walker._assign`` constructs it, from a ``_stored_assignment`` that
+    proved a fail-closed scratch mktemp directory. Any string operation
+    returns a plain ``str`` again, so a derived value loses the proof unless
+    the walker re-mints it. Everywhere else a ``\\x03`` byte is ordinary
+    literal text, exactly as on main, so a forged mark never changes a rank.
+    """
+
+    __slots__ = ()
+
+
+def _is_fresh_binding(value: object) -> bool:
+    return isinstance(value, _FreshDirValue) and FRESH_DIR_MARK in value
+
+
 #: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
 #: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
 #: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
@@ -392,9 +422,12 @@ def _ansi_c_end(text: str, i: int) -> int:
 
 
 def scan(
-    segment: str, *, heredoc: bool = False
+    segment: str, *, heredoc: bool = False, spans: list[tuple[int, int]] | None = None
 ) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
     """Split a segment, or tokenize expansion-active heredoc data.
+
+    When requested, spans also expose bare parentheses to the case walker.
+    Quote, escape and substitution handling must agree with word expansion.
 
     Heredoc data has literal quotes/operators/comments but the SAME dollar,
     backtick and escape rules below. Reuse those readers, not another shell
@@ -407,10 +440,14 @@ def scan(
     i = 0
     n = len(segment)
 
+    start = 0
+
     def finish() -> None:
         nonlocal cur, pending_redirect
         if cur is None:
             return
+        if spans is not None:
+            spans.append((start, i))
         if pending_redirect is not None:
             redirects.append((pending_redirect, cur))
             pending_redirect = None
@@ -430,11 +467,17 @@ def scan(
             finish()
             i += 1
             continue
+        if spans is not None and ch in "()":
+            finish()
+            spans.append((i, i + 1))
+            i += 1
+            continue
         if ch in "<>" and segment[i + 1 : i + 2] == "(":
             # Process substitution ``<(…)``/``>(…)``: the body RUNS as a command
             # and the word becomes a /dev/fd path, never a file we write.
             body, j, ok = _read_sub(segment, i + 2)
             if cur is None:
+                start = i
                 cur = _RawWord()
             cur.parts.append(_Part("proc", body))
             cur.broken |= not ok
@@ -467,6 +510,7 @@ def scan(
             i += 2
             continue
         if cur is None:
+            start = i
             cur = _RawWord()
         if ch == "'":
             end = segment.find("'", i + 1)
@@ -579,6 +623,9 @@ class Expanded:
     vanished: bool = False
     #: The opaque part is a ``$(mktemp …)`` path: a fresh temp entry (R6).
     temp: bool = False
+    #: One proven-successful mktemp directory; assignment copies preserve the
+    #: symbolic component without claiming its random pathname already exists.
+    fresh_dir: bool = False
     #: Where each ``$NAME``/``${NAME}`` value landed in ``text`` (and in
     #: ``pattern``): ``(name, text_start, text_end, pattern_start, pattern_end,
     #: quoted)``. A ``for`` list fans a target out by rewriting exactly these
@@ -733,9 +780,16 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
         if TEMP_MARK in value:
             out.temp = True
             value = value.replace(TEMP_MARK, OPAQUE_MARK)
+        # B1: only a walker-minted binding is fresh; a plain value's \x03 is a
+        # literal byte (main's reading), never containment.
+        authentic = _is_fresh_binding(value)
+        fresh = authentic and value.count(FRESH_DIR_MARK) == 1 and OPAQUE_MARK not in value
+        if authentic:
+            out.fresh_dir = True
+            value = value.replace(FRESH_DIR_MARK, OPAQUE_MARK)
         if OPAQUE_MARK in value:
             out.opaque = True
-            out.opaque_contained = False
+            out.opaque_contained = out.opaque_contained and fresh
         return value
     dm = _BRACE_DEFAULT_RE.match(inner)
     if dm is not None and depth < 4:
@@ -936,6 +990,7 @@ def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
         opaque=exp.opaque,
         opaque_contained=exp.opaque_contained,
         temp=exp.temp,
+        fresh_dir=exp.fresh_dir,
     )
 
 
@@ -1025,13 +1080,65 @@ def _date_format_contained(fmt: str) -> bool:
     return True
 
 
+def _fresh_errexit_scope(command: str) -> bool:
+    """Recognize only a straight-line, top-level errexit shell, with for lists.
+
+    `set -e` is NOT effective inside an if/while test, an AND/OR list, a
+    negated command or a pipeline. Refuse those shapes rather than pretending
+    a failed substitution cannot leave an empty ROOT. This is a containment
+    proof, not a general shell-success interpreter.
+    """
+    parsed = lex(command)
+    if parsed.open or any(parsed.bodies) or not parsed.segments:
+        return False
+    if parsed.segments[0][0].strip() != "set -euo pipefail" or parsed.segments[0][2] not in (
+        ";",
+        "\n",
+    ):
+        return False
+    forbidden = {
+        "set",
+        "if",
+        "elif",
+        "then",
+        "else",
+        "while",
+        "until",
+        "case",
+        "function",
+        "!",
+        "trap",
+        "return",
+        "exit",
+        "break",
+        "continue",
+    }
+    for text, _, op in parsed.segments[1:]:
+        if op not in ("", ";", "\n"):
+            return False
+        words, redirects = scan(text)
+        if any(op not in (">", ">|", ">>") for op, _ in redirects):
+            return False
+        for word in words:
+            if word.broken:
+                return False
+            if all(p.kind in ("bare", "sq", "dq") for p in word.parts):
+                if "".join(p.text for p in word.parts) in forbidden:
+                    return False
+            for part in word.parts:
+                if part.kind == "bare" and (
+                    part.text in forbidden or any(c in part.text for c in "(){}!&|\\")
+                ):
+                    return False
+    return True
+
+
 def _is_mktemp(body: str) -> bool:
-    words = body.split()
-    return (
-        bool(words)
-        and os.path.basename(words[0]) == "mktemp"
-        and not any("/" in w or ".." in w for w in words[1:] if not w.startswith("-"))
-    )
+    # Only the default temp-root forms have this legacy anchor. Flags such as
+    # -p/-t/-u change the parent or remove freshness entirely; a variable-bearing
+    # template cannot be decided by looking for literal slashes in body.split().
+    # Explicit session-scratch templates have a separate fail-closed proof.
+    return body.strip() in ("mktemp", "mktemp -d", "/usr/bin/mktemp", "/usr/bin/mktemp -d")
 
 
 # ---------------------------------------------------------------------------
@@ -1554,6 +1661,16 @@ def _plain_target(exp: Expanded, op: str, program: str, state: _State) -> Target
     pattern = exp.pattern
     opaque = exp.opaque
     contained = opaque and exp.opaque_contained
+    if exp.fresh_dir:
+        # Freshness belongs to ONE whole path component, not to a prefix:
+        # `${ROOT}old` may name a pre-existing symlink beside the fresh tree.
+        tail = text.partition(OPAQUE_MARK)[2]
+        contained = (
+            contained
+            and text.count(OPAQUE_MARK) == 1
+            and text.startswith("/")
+            and (not tail or tail.startswith("/"))
+        )
     climbs = False
     unpinned = False
     if opaque and OPAQUE_MARK in text:
@@ -1634,8 +1751,8 @@ class Resolution:
     #: The parser met a construct it cannot follow that MAY delete (``eval`` of a
     #: deleting word, an unbalanced quote around one): reasons, for the judge.
     opaque_reasons: list[str] = field(default_factory=list)
-    #: Directories the command may create (see :class:`Creation`). Never used
-    #: to rank THIS command; the loop records them after it runs.
+    #: Creation candidates from the primary walk. Also checked as protected
+    #: writes; only this list is available to the provenance ledger.
     created: list[Creation] = field(default_factory=list)
     #: Paths checked against the guard's own evidence (``<state>/sessions/``,
     #: ``<state>/guardrails/``) by ``classify._touch_reason``. Two shapes, by
@@ -3404,9 +3521,521 @@ def credential_path(value: str, home: str) -> str | None:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Shell functions: walk a body where it is CALLED, never where it is defined
+# ---------------------------------------------------------------------------
+#
+# WHY (follow-up to PR #4147, QA Q5 / security R4): main read ``f(){`` as a
+# program and the body's first command as its arguments, so
+# ``f(){ rm -rf ~; }; f`` ranked LOW — any destructive command hid behind a
+# function name. #4147 tried walking bodies at their DEFINITION inside the
+# one ranking pass and was reverted: a body's assignments (even a ``local``,
+# even in a function never called) overwrote outer bindings and dropped a
+# CRITICAL ``rm -rf "$L"`` to LOW (Q5), and a home-made body-end scan blind to
+# comments/heredocs ended bodies at a ``}`` inside them (R4).
+#
+# This design closes both by construction:
+# * Body extents come from the shared :func:`lex` segments, which already
+#   drop comments, blank heredoc bodies and keep quoted ``}`` inside a word —
+#   no second scanner. A ``}`` closes a body only in command position.
+# * Bodies are walked only in a SEPARATE pass (``inline_functions``) whose
+#   ranked facts are UNIONED into main's (``resolve_command``): ranking is a
+#   maximum, so nothing main ranks can drop, whatever this pass gets wrong.
+# * In that pass a definition only REGISTERS the body (a defined-only
+#   function runs nothing: LOW); a call walks the body at the call site in
+#   definition order, so the last definition before the call wins and a call
+#   before any definition inlines nothing (bash: "command not found").
+# * ``local``/``declare``/``typeset`` names get their pre-call value back
+#   after the call; a ``f() ( … )`` body runs in a subshell (full snapshot).
+#   ``$1``/``$@`` already expand opaque (see :func:`_param`), which fails
+#   closed until a call site pins them.
+# * Calls the walker cannot pin (a ``$fn`` command word, ``eval``,
+#   ``source``/``.``, ``trap``, ``alias``, or a shell after ``export -f``)
+#   walk EVERY registered body; if any of them touches anything, an opaque
+#   reason keeps the command at HIGH at least (CRITICAL targets stay CRITICAL).
+# * Recursion (re-entering a definition already on the call stack), call
+#   depth past ``_MAX_FUNCTION_DEPTH`` and total inlined calls past
+#   ``_MAX_FUNCTION_CALLS`` are not followed: each adds an opaque reason, so
+#   they fail closed to HIGH, never LOW.
+#
+# Review round 1 (PR #4188) refinements, each failing closed:
+# * A definition may start mid-piece (``{ f(){``, ``then f(){``, ``x=$(f(){``;
+#   :func:`_definition_start`), R1.
+# * A redefinition replaces earlier bodies only when it certainly runs in
+#   this shell (top level, unconditional, not piped/backgrounded/nested);
+#   otherwise every candidate body is walked at each call, R2. A loop body's
+#   calls also see definitions made later in that body (next iteration), R6.
+# * A call from a walker state already walked, whose walk changed no state,
+#   is skipped without spending budget (``_call_memo_key``), and a definition
+#   never walked is walked even past the budget, R3/R5.
+# * ``trap NAME``/``alias g=NAME`` with a literal one-word action call NAME
+#   pinned (a trap again at the end, with the final definitions); a
+#   non-literal action still reaches every body, R4.
+#
+# Review round 2 (PR #4188):
+# * "Certain" is sticky, not a nesting count: once any piece may open a
+#   compound or group (``_may_nest``), no later redefinition replaces (N1).
+#   A loop's calls see EVERY later definition (N6); ``if``/``while``/``until``
+#   are definition lead words (N2); alias chains, an alias shadowing a
+#   function and a trailing-blank alias are followed (N5).
+#
+# #4116 proves freshness only in its original inline scope. Template-based
+# function and EXIT-trap cleanup gets no freshness exception: the main pass
+# can miss function bodies, so the function walker must rank them itself.
+#
+# Known over-approximation (fail-closed, documented): a function defined
+# inside ``( … )`` or ``$( … )`` stays registered after that subshell ends.
+
+#: ``name() …`` / ``function name …`` / ``function name() …``. Bash accepts
+#: most non-metacharacters in a function name (``-``, ``.``, ``:``, ``@``).
+_FUNCTION_HEADER_RE = re.compile(
+    r"^(?:function\s+([^\s()<>;&|'\"$`=]+)(?:\s*\(\s*\))?|([^\s()<>;&|'\"$`=]+)\s*\(\s*\))\s*(.*)$",
+    re.DOTALL,
+)
+#: Cheap prefilter for ``resolve_command``: may the text define a function?
+#: Over-matching only costs a second walk whose facts are unioned.
+_MAY_DEFINE_FUNCTION_RE = re.compile(r"\(\s*\)|(?:^|[\s;&|({])function\s")
+#: Call-stack depth before a call is no longer followed (fails closed). The
+#: cap never lowers a rank — past it the call adds an opaque reason — so its
+#: value trades precision only; real scripts nest helpers a few levels deep.
+_MAX_FUNCTION_DEPTH = 16
+#: Total body walks per command (``f(){ g; g; }; g(){ h; h; }`` doubles per
+#: level). Same fail-closed invariant as ``_MAX_FUNCTION_DEPTH``.
+_MAX_FUNCTION_CALLS = 64
+#: Words whose argument text may call a registered function the walker
+#: cannot pin: it walks every body (``_reach_functions``).
+_OPAQUE_FUNCTION_CALLERS = frozenset({"eval", "source", ".", "trap", "alias"})
+#: Programs that import functions exported with ``export -f``.
+_FUNCTION_IMPORTING_SHELLS = frozenset({"bash", "sh"})
+#: Lead words that keep a piece's command in command position.
+_FUNCTION_LEAD_WORDS = frozenset(_PREFIX_WORDS | {"time", "-p"})
+
+
+@dataclass(eq=False)
+class _FunctionDef:
+    """One registered function body, as :func:`lex` pieces (identity = definition)."""
+
+    name: str
+    pieces: list[tuple[str, bool, str]]
+    owned: list[list[str]]
+    subshell: bool
+    #: Names the body declares ``local``/``declare``/``typeset``: restored
+    #: to their pre-call values after the call (bash dynamic scoping).
+    locals: frozenset[str]
+    #: The definition did not start its lex piece (``{ f(){``, ``then f(){``,
+    #: ``x=$(f(){``): it sits in a group, branch or substitution, so it may
+    #: not take effect in this shell and never REPLACES an earlier body
+    #: (review R1/R2, PR #4188).
+    nested: bool = False
+
+
+def _function_header(text: str) -> tuple[str, str] | None:
+    """``(name, rest)`` when a piece opens a function definition, else ``None``.
+
+    ``rest`` is what follows the header: ``{ …``/``( …``, or ``""`` when the
+    opener is on the next piece (``f()⏎{``). Anything else (``f() rm x``) is
+    not a definition bash accepts, so it is not one here either.
+    """
+    m = _FUNCTION_HEADER_RE.match(text.strip())
+    if m is None:
+        return None
+    name = m.group(1) or m.group(2)
+    rest = m.group(3).strip()
+    if name in _PREFIX_WORDS or name.startswith("-"):
+        return None
+    if rest and not (rest[0] == "{" or (rest[0] == "(" and not rest.startswith("(("))):
+        return None
+    if rest[:1] == "{" and len(rest) > 1 and not rest[1].isspace():
+        # ``{x`` is a word, not the ``{`` reserved word.
+        return None
+    return name, rest
+
+
+#: A literal function name as ``trap``/``alias`` may give it (same character
+#: set as ``_FUNCTION_HEADER_RE``'s name).
+_NAME_WORD_RE = re.compile(r"[^\s()<>;&|'\"$`=]+")
+
+
+def _memo_canon(value: object) -> object:
+    """A hashable, order-independent rendering of walker state (call memo key)."""
+    if isinstance(value, dict):
+        return tuple(sorted(((repr(k), _memo_canon(v)) for k, v in value.items()), key=repr))
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted((repr(_memo_canon(v)) for v in value)))
+    if isinstance(value, (list, tuple)):
+        return tuple(_memo_canon(v) for v in value)
+    if hasattr(value, "__dataclass_fields__"):
+        return (type(value).__name__, _memo_canon(vars(value)))
+    return value
+
+
+def _blank_quoted(text: str) -> str:
+    """``text`` with quoted spans blanked, same length (offsets stay valid)."""
+    return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", lambda m: " " * len(m.group()), text)
+
+
+def _definition_start(text: str) -> tuple[str, tuple[str, str]] | None:
+    """``(prefix, (name, rest))`` when a function definition starts in a piece.
+
+    WHY (review R1, PR #4188): :func:`lex` splits on ``;``/newlines only, so
+    ``{ f(){ rm -rf ~; }; f; }`` yields the piece ``{ f(){ rm -rf ~`` and an
+    anchored header match never registered the body: the call inlined nothing
+    and ranked LOW. The definition may follow lead words (``{``, ``(``,
+    ``then``, ``do``, ``else``, ``elif``, ``!``, ``time``) or open an unquoted
+    substitution (``x=$(f(){``, ``<(f(){``). ``prefix`` is the text before the
+    header (``""`` when the piece starts with it). A ``$(`` inside quotes is
+    not tried here: that piece is walked whole, and its substitution body is
+    walked (and its definitions found) by the nested walk.
+    """
+    stripped = text.strip()
+    blanked = _blank_quoted(stripped)
+    starts = [0] + [
+        m.end() for m in re.finditer(r"[$<>]\(", blanked) if blanked[m.end() :][:1] != "("
+    ]
+    for start in starts:
+        rest = stripped[start:]
+        while True:
+            rest = rest.lstrip()
+            if (
+                rest[:1] in ("{", "(")
+                and rest[:2] != "(("
+                and (rest[:1] == "(" or rest[1:2].isspace())
+            ):
+                rest = rest[1:]
+                continue
+            word = rest.split(None, 1)[0] if rest else ""
+            if word in _DEFINITION_LEAD_WORDS:
+                rest = rest[len(word) :]
+                continue
+            break
+        header = _function_header(rest)
+        if header is not None:
+            return stripped[: len(stripped) - len(rest)], header
+    return None
+
+
+#: Words a command (and so a definition) may follow inside one lex piece.
+_COMMAND_LEAD_WORDS = frozenset({"then", "do", "else", "elif", "!", "time", "-p"})
+#: Words a definition may follow inside one lex piece (``then f(){ …``).
+#: ``if``/``while``/``until`` too (review round 2 N2, PR #4188): their test
+#: list runs, so ``if f(){ rm -rf ~; }; then f; fi`` defines ``f`` and runs
+#: it. Kept apart from ``_COMMAND_LEAD_WORDS`` because ``_loop_opener`` must
+#: not peel ``while`` off ``while x`` and miss the loop it opens.
+_DEFINITION_LEAD_WORDS = _COMMAND_LEAD_WORDS | {"if", "while", "until"}
+#: Compound openers that repeat their body: a call there can see a definition
+#: made LATER in the same body, on the next iteration (review R6, PR #4188).
+_LOOP_OPENERS = frozenset({"for", "while", "until", "select"})
+
+
+#: Words that open, continue or close a compound command or group.
+_STRUCTURE_WORDS = frozenset(
+    {*_COMPOUND_OPENERS, *_COMPOUND_CLOSERS, "then", "do", "else", "elif", "{", "}"}
+)
+
+
+def _may_nest(text: str) -> bool:
+    """Could this piece open, continue or close a compound command or group?
+
+    WHY (review round 2 N1, PR #4188): round 1 counted nesting levels, and
+    the counter missed an opener after a lead word (``then if …``) yet
+    counted its ``fi``, and read a ``case`` pattern ``b)`` or ``echo a\\)`` as
+    a closer. Either put a conditional redefinition at "level 0" and let it
+    REPLACE a destructive body. This answers a weaker question that has no
+    such miscount: a structure word anywhere (quotes blanked, escapes
+    dropped) or unbalanced parentheses. Over-matching (``echo done``) only
+    keeps an extra candidate body, which ranking unions (max), so it fails
+    closed.
+    """
+    blanked = re.sub(r"\\.", "", _blank_quoted(text))
+    if blanked.count("(") != blanked.count(")"):
+        return True
+    return any(word in _STRUCTURE_WORDS for word in re.split(r"[\s;&|()<>]+", blanked))
+
+
+_CASE_WORD_RE = re.compile(r"\bcase\s")
+_CASE_END_RE = re.compile(r"^esac(?:[\s)}<>]|$)")
+
+
+def _case_header_end(text: str) -> int | None:
+    """End of ``case WORD in`` at command position, not in another command's data."""
+    if not _CASE_WORD_RE.search(text):
+        return None
+    definition = _definition_start(text)
+    rest = definition[1][1] if definition else text
+    spans: list[tuple[int, int]] = []
+    scan(rest, spans=spans)
+    at = 0
+    for lo, hi in spans:
+        if rest[lo:hi] not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+            break
+        at += 1
+    head = spans[at : at + 3]
+    if len(head) != 3:
+        return None
+    (a, b), (c, d), (e, f) = head
+    if rest[a:b] == "case" and rest[e:f] == "in" and rest[c:d] not in {"(", ")"}:
+        return len(text) - len(rest) + f
+    return None
+
+
+def _case_pattern(text: str) -> tuple[str, str] | None:
+    """Pattern and body after the bare ``)``, or no complete pattern here."""
+    spans: list[tuple[int, int]] = []
+    scan(text, spans=spans)
+    nesting = 0
+    for index, (lo, hi) in enumerate(spans):
+        token = text[lo:hi]
+        if token == "(":
+            nesting += index != 0
+        elif token == ")":
+            if nesting == 0:
+                return text[:lo].lstrip().removeprefix("("), text[hi:].lstrip()
+            nesting -= 1
+    return None
+
+
+def _case_arm_pieces(
+    pieces: list[tuple[str, bool, str]], owned: list[list[str]]
+) -> tuple[list[tuple[str, bool, str]], list[list[str]]]:
+    """Separate patterns from commands before looking for bare function headers.
+
+    The shared lexer gives pattern alternatives the same ``|`` as pipelines,
+    and leaves the closing ``)`` glued to the first command. Only consume that
+    syntax in case-pattern position; neither the literal pattern words nor
+    their ``|`` should go through command dispatch. Keep their expansions.
+    """
+
+    def legacy_pieces() -> tuple[list[tuple[str, bool, str]], list[list[str]]]:
+        # Standalone terminators are private to this consumer, even on fallback.
+        kept = [(piece, bodies) for piece, bodies in zip(pieces, owned) if piece[0]]
+        return [piece for piece, _ in kept], [bodies for _, bodies in kept]
+
+    if not any(_CASE_WORD_RE.search(text) for text, _, _ in pieces):
+        return legacy_pieces()
+    result: list[tuple[str, bool, str]] = []
+    bodies: list[list[str]] = []
+    waiting: list[bool] = []
+    alternatives: list[str] = []
+
+    def add(
+        text: str, piped: bool = False, op: str = ";", heredocs: list[str] | None = None
+    ) -> None:
+        result.append((text, piped, op))
+        bodies.append(heredocs if heredocs is not None else [])
+
+    for (text, piped, op), heredocs in zip(pieces, owned):
+        while text:
+            if waiting and not alternatives and _CASE_END_RE.match(text):
+                waiting.pop()
+                break
+            if waiting and waiting[-1]:
+                # A closing delimiter must be in this piece. Do not repeatedly
+                # scan all the prior alternatives in a long pattern list.
+                pattern = None
+                if ")" in text:
+                    pattern = _case_pattern(" | ".join([*alternatives, text]))
+                if pattern is None:
+                    if op in ("|", "\n") and not heredocs:
+                        alternatives.append(text)
+                        break
+                    # Unrecognised shape: do not discard the original pieces.
+                    return legacy_pieces()
+                pat, text = pattern
+                alternatives.clear()
+                add(pat, op="case-arm")
+                waiting[-1] = False
+                piped = False
+                continue
+            end = _case_header_end(text)
+            if end is not None:
+                add(text[:end], piped)
+                waiting.append(True)
+                text = text[end:].lstrip()
+                piped = False
+                continue
+            break
+        if text:
+            add(text, piped, op, heredocs)
+        if waiting and op == ";;":
+            waiting[-1] = True
+    if alternatives:
+        return legacy_pieces()
+    return result, bodies
+
+
+def _loop_opener(text: str) -> bool:
+    words = text.split()
+    while words and words[0] in (_COMMAND_LEAD_WORDS | {"{", "("}):
+        words = words[1:]
+    return bool(words) and words[0].lstrip("(") in _LOOP_OPENERS
+
+
+def _is_brace_closer(text: str) -> bool:
+    """A ``}`` in command position: lex splits on ``;``/newline, so it leads."""
+    head = text.strip()
+    return head == "}" or (head[:1] == "}" and head[1:2] in (" ", "\t", ")", "|", "&", "<", ">"))
+
+
+def _brace_opens(text: str) -> int:
+    """``{`` reserved words (and nested brace-bodied headers) opening a piece."""
+    count = 0
+    head = text.strip()
+    while head:
+        word = head.split(None, 1)[0]
+        if word in _FUNCTION_LEAD_WORDS and word != "{":
+            head = head[len(word) :].lstrip()
+            continue
+        if head[:1] == "(" and head[:2] != "((":
+            head = head[1:].lstrip()
+            continue
+        if head[:1] == "{" and (len(head) == 1 or head[1].isspace()):
+            count += 1
+            head = head[1:].lstrip()
+            continue
+        header = _function_header(head)
+        if header is not None and header[1][:1] == "{":
+            count += 1
+            head = header[1][1:].lstrip()
+            continue
+        break
+    return count
+
+
+def _paren_balance(text: str) -> int:
+    """Unquoted ``(`` minus ``)`` in a piece (heredoc bodies are already blanked)."""
+    bare = _strip_quoted(text)
+    return bare.count("(") - bare.count(")")
+
+
+def _declared_locals(pieces: Sequence[tuple[str, bool, str]]) -> frozenset[str]:
+    names: set[str] = set()
+    for text, _piped, _op in pieces:
+        words = text.split()
+        while words and words[0] in _FUNCTION_LEAD_WORDS:
+            words = words[1:]
+        if not words or words[0] not in ("local", "declare", "typeset"):
+            continue
+        for word in words[1:]:
+            m = _NAME_RE.match(word.strip("'\""))
+            if m is not None and not word.startswith("-"):
+                names.add(m.group())
+    return frozenset(names)
+
+
+def _collapse_definitions(
+    pieces: Sequence[tuple[str, bool, str]], owned: Sequence[list[str]]
+) -> tuple[list[tuple[str, bool, str]], list[list[str]], dict[int, _FunctionDef]]:
+    """Replace each function definition's pieces by one empty placeholder piece.
+
+    Returns the new pieces/bodies and ``{placeholder index: definition}``, so
+    the walk registers each definition at its own position (order matters).
+    A definition whose body never closes is left as ordinary pieces.
+    """
+    out_p: list[tuple[str, bool, str]] = []
+    out_o: list[list[str]] = []
+    defs: dict[int, _FunctionDef] = {}
+    i, n = 0, len(pieces)
+    while i < n:
+        start = _definition_start(pieces[i][0])
+        if start is None:
+            out_p.append(pieces[i])
+            out_o.append(owned[i])
+            i += 1
+            continue
+        prefix, (name, rest) = start
+        j = i
+        if not rest:
+            nxt = pieces[j + 1][0].strip() if j + 1 < n else ""
+            if not (nxt[:1] == "{" or (nxt[:1] == "(" and nxt[:2] != "((")):
+                out_p.append(pieces[i])
+                out_o.append(owned[i])
+                i += 1
+                continue
+            j += 1
+            rest = nxt
+        subshell = rest[0] == "("
+        body: list[tuple[str, bool, str]] = []
+        body_owned: list[list[str]] = []
+        closed_at: int | None = None
+        depth = 1
+        k = j
+        text = rest[1:]
+        while True:
+            op = pieces[k][2]
+            if subshell:
+                depth += _paren_balance(text)
+                if depth <= 0:
+                    # Drop the closing ``)`` and anything after it (redirects).
+                    cut = text.rstrip()
+                    end = cut.rfind(")")
+                    inner = cut[:end] if end >= 0 else cut
+                    if inner.strip():
+                        body.append((inner, False, ""))
+                        body_owned.append(owned[k])
+                    closed_at = k
+                    break
+            else:
+                if _is_brace_closer(text):
+                    depth -= 1
+                    if depth == 0:
+                        remainder = text.strip()[1:].strip()
+                        if remainder and remainder[0] not in ")|&":
+                            # ``f(){ …; } > log``: every call writes ``log``.
+                            body.append((": " + remainder, False, ""))
+                            body_owned.append(owned[k])
+                        closed_at = k
+                        break
+                depth += _brace_opens(text)
+            if text.strip():
+                body.append((text, False, op))
+                body_owned.append(owned[k])
+            k += 1
+            if k >= n:
+                break
+            text = pieces[k][0]
+        if closed_at is None:
+            out_p.append(pieces[i])
+            out_o.append(owned[i])
+            i += 1
+            continue
+        if body:
+            last_text, last_flag, _ = body[-1]
+            body[-1] = (last_text, last_flag, "")
+        if prefix and "$(" not in prefix and "<(" not in prefix and ">(" not in prefix:
+            # Keep the lead words as their own piece: a ``(`` must still open
+            # the subshell scope its closing ``)`` restores, and a ``{``/``if``
+            # still counts toward the nesting ``_walk_pieces`` tracks. A
+            # substitution prefix (``x=$(``) is dropped: its words are walked
+            # by the main pass, whose facts are unioned anyway.
+            out_p.append((prefix.strip(), False, ";"))
+            out_o.append([])
+        defs[len(out_p)] = _FunctionDef(
+            name=name,
+            pieces=body,
+            owned=body_owned,
+            subshell=subshell,
+            locals=_declared_locals(body),
+            nested=bool(prefix),
+        )
+        out_p.append(("", pieces[i][1], pieces[closed_at][2]))
+        out_o.append([])
+        i = closed_at + 1
+    return out_p, out_o, defs
+
+
 class _Walker:
-    def __init__(self, env: Mapping[str, str], cwd: str | None, home: str) -> None:
+    def __init__(
+        self,
+        env: Mapping[str, str],
+        cwd: str | None,
+        home: str,
+        *,
+        inline_functions: bool = False,
+        case_arms: bool = False,
+    ) -> None:
         from local_operator.tools.shell_env import is_credential_shaped
+
+        self.case_arms = case_arms
 
         # S1: inherited credentials are unknown paths, never empty expansions.
         # This analysis-only copy must not alter the actual child's grants. An
@@ -3435,6 +4064,8 @@ class _Walker:
         self.inherited_path = env.get("PATH")
         #: Why the last ``_inline_read_only`` refused its proof (``Target.proof_gap``).
         self.read_only_gap: str | None = None
+        self.fresh_scope = False
+        self.scratch_parent = env.get("LOCAL_OPERATOR_SCRATCHPAD", "")
         self.result = Resolution()
         #: Non-read-only programs an earlier part of THIS command runs (each
         #: reaches ``_backstop``). Any of them could plant a module in the cwd
@@ -3491,6 +4122,34 @@ class _Walker:
         self.for_fan_scope: dict[str, tuple[bool, str | None, int]] = {}
         #: ``( … )`` subshells currently open across this walk.
         self.subshell_depth = 0
+        #: Shell functions registered so far (see "Shell functions" above).
+        #: ``None`` outside the ``inline_functions`` pass, so main's walk —
+        #: the ranking every other guard test pins — is byte-for-byte unchanged.
+        #: Every body a name may hold when called. More than one when a
+        #: redefinition might not take effect (``false && f(){ :; }``, a
+        #: definition in a branch, loop, group, pipe, ``&`` or substitution):
+        #: a call walks them all (review R2, PR #4188).
+        self.functions: dict[str, list[_FunctionDef]] | None = {} if inline_functions else None
+        #: Bumped on every registration: part of the call memo's key, since a
+        #: body calling another function behaves differently once it changes.
+        self.functions_version = 0
+        self.call_stack: list[_FunctionDef] = []
+        self.function_calls = 0
+        #: Definitions walked at least once: one never walked is walked even
+        #: past ``_MAX_FUNCTION_CALLS``, so padding the command with cheap
+        #: calls cannot hide a destructive body (review R3, PR #4188).
+        self.walked_functions: set[int] = set()
+        #: Call memo keys (see ``_call_function``) whose walk changed no walker
+        #: state: walking again from the same state adds nothing new.
+        self.settled_calls: set[str] = set()
+        #: ``alias name=word`` with a literal one-word value (``_function_call``).
+        self.function_aliases: dict[str, str] = {}
+        #: ``trap NAME …`` with a literal function name: run again at the end
+        #: with the definitions then current, as an EXIT trap is.
+        self.trapped_functions: list[str] = []
+        #: ``export -f``/``declare -fx`` ran: a child bash may call any body.
+        self.functions_exported = False
+        self.reaching_functions = False
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -3515,6 +4174,11 @@ class _Walker:
         self.state.cwd_later_unknown = snap.cwd_later_unknown
         self.state.oldpwd_later_unknown = snap.oldpwd_later_unknown
         self.state.oldpwd_fan = snap.oldpwd_fan
+        if not self.fresh_scope:
+            # A child shell cannot change parent variables, but CAN replace
+            # their filesystem targets. Do not restore stale freshness after
+            # an unknown writer in a substitution/subshell/pipeline.
+            self._forget_fresh_directories()
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -3538,7 +4202,7 @@ class _Walker:
         # S2-4: each heredoc body belongs to the segment whose ``<<`` opened it.
         # ``_split`` blanks the bodies but keeps the openers, in order, so the
         # bodies are dealt out to segments by counting the openers in each.
-        lexed = lex(command)
+        lexed = lex(command, keep_empty_case_terminators=self.case_arms)
         owned_bodies = [list(bodies) for bodies in lexed.bodies]
         if not lexed.open:
             for index, (text, _piped, _op) in enumerate(lexed.segments):
@@ -3567,6 +4231,14 @@ class _Walker:
                         for body, nested in zip(owned_bodies[index], lexed.nested_bodies[index])
                         if not nested
                     ]
+        if depth == 0:
+            # Bash startup files and imported functions can shadow builtins or
+            # mktemp before the first visible segment. PATH inspection cannot
+            # prove executable identity in such a shell.
+            self.fresh_scope = _fresh_errexit_scope(command) and not any(
+                value and (key in ("BASH_ENV", "ENV") or key.startswith("BASH_FUNC_"))
+                for key, value in self.state.env.items()
+            )
         pieces, owned_bodies = _fd_redirect_merge(lexed.segments, owned_bodies)
         # R7-1/R8, structural: if the text ends inside a construct the ONE
         # shared scanner tracks (quote, ``$(``, ``${``, backtick, heredoc), its
@@ -3576,6 +4248,20 @@ class _Walker:
             self.result.opaque_reasons.append(
                 "command ends inside an unterminated quote, substitution or heredoc"
             )
+        if self.case_arms:
+            pieces, owned_bodies = _case_arm_pieces(pieces, owned_bodies)
+        self._walk_pieces(pieces, owned_bodies, depth)
+
+    def _walk_pieces(
+        self,
+        pieces: list[tuple[str, bool, str]],
+        owned_bodies: list[list[str]],
+        depth: int,
+    ) -> None:
+        """Walk lexed pieces in order: a whole command, or a called function's body."""
+        definitions: dict[int, _FunctionDef] = {}
+        if self.functions is not None:
+            pieces, owned_bodies, definitions = _collapse_definitions(pieces, owned_bodies)
         # R3-1: what each pipeline stage writes to its stdout is the NEXT
         # stage's stdin. A heredoc/herestring bound to an upstream stage
         # (``cat <<EOF | bash``) is therefore the script a pipe-fed shell runs.
@@ -3597,7 +4283,53 @@ class _Walker:
         # defeated it, so a pipe-fed shell also walks every earlier body not
         # provably sunk elsewhere (fails toward scrutiny).
         produced_so_far: list[_Produced] = []
+        # Whether any compound or group may be open before each piece: a
+        # definition inside one may not run (``if``/loop/``case``) or not
+        # persist (``(``). Sticky, not a level count (review round 2 N1): once
+        # anything has opened, no later redefinition is certain (fail closed).
+        nest_at: list[bool] = []
+        opened = False
+        for at, (piece_text, _f, _o) in enumerate(pieces if definitions else ()):
+            prior = definitions.get(at)
+            opened = opened or (prior.nested if prior is not None else _may_nest(piece_text))
+            nest_at.append(opened)
         for index, (text, _flag, op) in enumerate(pieces):
+            if op == "case-arm":
+                # Patterns may expand substitutions, but their literal words
+                # are never commands (even when they name a defined function).
+                words, _ = scan(text)
+                for raw in words:
+                    for body in expand(raw, self.state.env, self.state.home).substitutions:
+                        if body.strip() and body.strip() not in _EMPTY_BODIES:
+                            self._isolated_walk(body, depth + 1)
+                continue
+            definition = definitions.get(index)
+            if definition is not None and self.functions is not None:
+                # Defining runs nothing; the body is walked at each call.
+                # It REPLACES earlier bodies only when it certainly runs in
+                # this shell: unconditional, top level, outside any call,
+                # group, pipeline or job (review R2, PR #4188).
+                certain = (
+                    depth == 0
+                    and not self.call_stack
+                    and not definition.nested
+                    and not nest_at[index]
+                    and not piped_in[index]
+                    and op not in ("|", "|&", "&")
+                    and (index == 0 or pieces[index - 1][2] not in ("&&", "||"))
+                )
+                self._register_function(definition, certain=certain)
+                continue
+            if self.functions is not None and definitions and _loop_opener(text):
+                # R6: the body repeats, so a call early in it can run a
+                # definition made later in it (on the next iteration). Every
+                # later definition, not just those before the loop's close
+                # (review round 2 N6): finding the close needs the nesting
+                # count N1 retired, and missed ``for ((…))`` and inner loops.
+                # A definition after the loop only adds a candidate (union).
+                for later in range(index + 1, len(pieces)):
+                    if later in definitions:
+                        self._register_function(definitions[later], certain=False)
             piped = piped_in[index]
             if not piped:
                 # A new pipeline starts: earlier pipelines have ENDED, so their
@@ -3676,6 +4408,338 @@ class _Walker:
         # close) must not leak its depth into the caller's walk.
         self.subshell_depth -= len(groups)
 
+    # -- shell functions (inline pass only) -----------------------------------
+    def _register_function(self, definition: _FunctionDef, *, certain: bool) -> None:
+        """Make ``definition`` callable by its name.
+
+        ``certain``: it surely runs in this shell, so it replaces earlier
+        bodies. Otherwise it is ADDED to them (review R2, PR #4188):
+        ``f(){ rm -rf ~; }; false && f(){ :; }; f`` runs the first body, and
+        a replace-always registry ranked that LOW.
+        """
+        assert self.functions is not None
+        bodies = self.functions.get(definition.name)
+        if certain or not bodies:
+            self.functions[definition.name] = [definition]
+        elif definition not in bodies:
+            bodies.append(definition)
+        else:
+            return
+        self.functions_version += 1
+
+    def _function_call(self, raw_words: list[_RawWord], words: list[Expanded], depth: int) -> bool:
+        """Walk a called function's body here; ``True`` when the segment WAS a call.
+
+        Also notes ``export -f`` and walks every body for calls it cannot pin
+        (``_opaque_function_call``); those return ``False`` so the segment's
+        own effects are still walked as main walks them.
+        """
+        assert self.functions is not None
+        head = list(words)
+        while head and head[0].text in _FUNCTION_LEAD_WORDS and not head[0].opaque:
+            head = head[1:]
+        name = head[0].text if head and not head[0].opaque else None
+        if name in _DECLARE_WORDS and any(
+            w.text.startswith("-") and "f" in w.text and (name == "export" or "x" in w.text)
+            for w in head[1:]
+        ):
+            self.functions_exported = True
+        targets = self._alias_targets(head)
+        if targets:
+            # ``alias g=f; g`` (with ``expand_aliases``) runs ``f``: pinned,
+            # not "any body" (review R4, PR #4188).
+            self._call_names(targets, depth)
+            return True
+        if name is not None and name in self.functions:
+            self._call_candidates(name, depth)
+            return True
+        self._opaque_function_call(raw_words, head, depth)
+        return False
+
+    def _alias_targets(self, head: list[Expanded]) -> list[str]:
+        """Registered functions an aliased command word may run (``[]``: none).
+
+        WHY (review round 2 N5, PR #4188): round 1 followed one alias hop and
+        only when no function had the word's own name, so ``alias g=f; alias
+        h=g; h``, ``alias f=g; f`` (bash expands an alias BEFORE function
+        lookup) and ``alias s='sudo ' g=f; s g`` (a value ending in a blank
+        alias-expands the NEXT word too) ran a body the walk never saw. Here
+        the whole chain is followed, the next word joins after a
+        trailing-blank value, and the word's OWN function stays a candidate:
+        ``expand_aliases`` is off in a non-interactive bash, so either may
+        run, and walking both only over-approximates.
+        """
+        if not self.function_aliases or not head or head[0].opaque:
+            return []
+        assert self.functions is not None
+        found: list[str] = []
+        words = [w.text for w in head]
+        position = 0
+        while position < len(words):
+            name, chained = words[position], False
+            seen: set[str] = set()
+            # No hop cap: ``seen`` ends a cycle, so a chain is at most as long
+            # as the alias table this one command built.
+            while name in self.function_aliases and name not in seen:
+                seen.add(name)
+                value = self.function_aliases[name]
+                chained = chained or value[-1:].isspace()
+                name = value.split(None, 1)[0] if value.strip() else ""
+                if name in self.functions:
+                    found.append(name)
+            if not seen:
+                break
+            if position == 0 and words[0] in self.functions:
+                found.append(words[0])
+            if not chained or position + 1 >= len(words) or head[position + 1].opaque:
+                break
+            position += 1
+            if words[position] in self.functions and words[position] not in self.function_aliases:
+                found.append(words[position])
+        return list(dict.fromkeys(found))
+
+    def _call_names(self, names: list[str], depth: int) -> None:
+        """Walk each of several functions one call may run, as ``_call_candidates``."""
+        if len(names) == 1:
+            self._call_candidates(names[0], depth)
+            return
+        start = self._save()
+        outcomes: list[_Snapshot] = []
+        for number, name in enumerate(names):
+            if number:
+                self._restore(_Snapshot(**{**vars(start), "env": dict(start.env)}))
+            self._call_candidates(name, depth)
+            outcomes.append(self._save())
+        if any(o != outcomes[-1] for o in outcomes):
+            self.result.opaque_reasons.append(
+                "an aliased command may run one of several shell functions that "
+                "leave different state; which one ran is not known"
+            )
+
+    def _call_candidates(self, name: str, depth: int) -> None:
+        """Walk every body ``name`` may hold (one, unless a redefinition was unsure).
+
+        Each candidate is walked from the same pre-call state. The last one's
+        effects carry on; if the candidates leave different variables or cwd,
+        what follows cannot know which ran, so an opaque reason keeps the
+        command at HIGH at least (fail closed, review R2, PR #4188).
+        """
+        assert self.functions is not None
+        bodies = list(self.functions.get(name, ()))
+        if len(bodies) == 1:
+            self._call_function(bodies[0], depth)
+            return
+        start = self._save()
+        outcomes: list[_Snapshot] = []
+        for number, definition in enumerate(bodies):
+            if number:
+                self._restore(_Snapshot(**{**vars(start), "env": dict(start.env)}))
+            self._call_function(definition, depth)
+            outcomes.append(self._save())
+        if any(o != outcomes[-1] for o in outcomes):
+            self.result.opaque_reasons.append(
+                f"shell function {name} has several possible definitions that "
+                "leave different state; which one ran is not known"
+            )
+
+    def _trap_or_alias_call(self, name: str, args: list[Expanded], depth: int) -> bool:
+        """``trap``/``alias`` naming one registered function: ``True`` when handled.
+
+        WHY (review R4, PR #4188): ``cleanup(){ rm -rf "$tmp"; }; trap cleanup
+        EXIT`` is the canonical own-scratch cleanup; walking EVERY body with
+        an opaque reason ranked it HIGH. A literal one-word action names its
+        function exactly, so it is walked as a pinned call. A non-literal
+        action (``trap "$x" EXIT``, ``trap 'a; b' EXIT``) is not handled here
+        and still reaches every body (fail closed).
+        """
+        assert self.functions is not None
+        # The caller passes only segments whose RAW words are literal: an
+        # unset ``$a`` expands to "" here, which must not read as ``trap ''``.
+        if any(a.opaque for a in args):
+            return False
+        if name == "trap":
+            rest = args[1:] if args[:1] and args[0].text == "--" else args
+            if not rest or (rest[0].text.startswith("-") and rest[0].text != "-"):
+                return True  # ``trap``, ``trap -p``/``-l``: lists, runs nothing.
+            action = rest[0].text.strip()
+            if action in ("", "-"):
+                return True  # ignore/reset the signal: runs nothing.
+            if not _NAME_WORD_RE.fullmatch(action):
+                return False
+            if action in self.functions:
+                self._call_candidates(action, depth)
+            # An EXIT trap runs the definition current when the shell ends,
+            # which may be a later one: ``_run_trapped_functions``.
+            self.trapped_functions.append(action)
+            return True
+        # alias: every ``name=value`` must have a literal one-word value.
+        pairs: list[tuple[str, str]] = []
+        for arg in args:
+            if arg.text.startswith("-"):
+                continue
+            alias, eq, value = arg.text.partition("=")
+            if not eq:
+                continue  # ``alias g`` prints a definition.
+            if not _NAME_WORD_RE.fullmatch(value.strip()):
+                return False
+            # Unstripped: a trailing blank (``'sudo '``) makes bash
+            # alias-expand the next word too (``_alias_targets``, N5).
+            pairs.append((alias, value))
+        for alias, value in pairs:
+            self.function_aliases[alias] = value
+        return True
+
+    def _run_trapped_functions(self, depth: int) -> None:
+        """Walk ``trap NAME`` functions once more with the final definitions."""
+        if self.functions is None:
+            return
+        for name in dict.fromkeys(self.trapped_functions):
+            if name in self.functions:
+                self._call_candidates(name, depth)
+
+    def _opaque_function_call(
+        self, raw_words: list[_RawWord], head: list[Expanded], depth: int
+    ) -> None:
+        """Walk every body when this segment could call one the walker can't name."""
+        name = head[0].text if head and not head[0].opaque else ""
+        literal = not any(
+            raw.broken or any(p.kind in ("pbare", "pdq", "sub") for p in raw.parts)
+            for raw in raw_words
+        )
+        if name in ("trap", "alias") and literal and self.functions is not None:
+            # Before the "no functions yet" return: ``trap cleanup EXIT`` and
+            # ``alias g=f`` usually come BEFORE the definition they name.
+            if self._trap_or_alias_call(name, head[1:], depth):
+                return
+        if not self.functions:
+            return
+        command = next(
+            (
+                raw
+                for raw in raw_words
+                if not (
+                    raw.parts
+                    and raw.parts[0].kind == "bare"
+                    and (
+                        (len(raw.parts) == 1 and raw.parts[0].text in _FUNCTION_LEAD_WORDS)
+                        # ``x=$(…)`` is an assignment, not a dynamic command word.
+                        or _ASSIGN_RE.match(raw.parts[0].text)
+                        or _APPEND_RE.match(raw.parts[0].text)
+                    )
+                )
+            ),
+            None,
+        )
+        dynamic = command is not None and (
+            command.broken or any(p.kind in ("pbare", "pdq", "sub") for p in command.parts)
+        )
+        why: str | None = None
+        if dynamic:
+            why = "a command word only known at run time"
+        elif name in _OPAQUE_FUNCTION_CALLERS:
+            why = f"`{name}`"
+        elif self.functions_exported and any(
+            os.path.basename(w.text) in _FUNCTION_IMPORTING_SHELLS for w in head
+        ):
+            why = "a shell started after `export -f`"
+        if why is not None:
+            self._reach_functions(why, depth)
+
+    def _reach_functions(self, why: str, depth: int) -> None:
+        assert self.functions is not None
+        if self.reaching_functions:
+            return
+        res = self.result
+        before = (len(res.targets), len(res.touched), len(res.opaque_reasons), len(res.blind))
+        self.reaching_functions = True
+        try:
+            for bodies in list(self.functions.values()):
+                for definition in list(bodies):
+                    self._call_function(definition, depth)
+        finally:
+            self.reaching_functions = False
+        after = (len(res.targets), len(res.touched), len(res.opaque_reasons), len(res.blind))
+        if after != before:
+            # Fail closed: the call may run any of these bodies, or none —
+            # the walker cannot tell which, so a judge (or the operator) must.
+            names = ", ".join(sorted(self.functions))
+            res.opaque_reasons.append(
+                f"{why} may run a shell function this command defines ({names})"
+            )
+
+    def _call_memo_key(self, definition: _FunctionDef) -> str:
+        """Everything a body's walk can depend on, except the facts it adds.
+
+        WHY (review R3/R5, PR #4188): a 65x-called ``log`` helper spent the
+        call budget and ranked HIGH, and 64 calls of a 1,500-statement body
+        took 18.8 s. A walk is deterministic in the walker's state, so a call
+        from a state already walked, whose walk changed no state, can only
+        add the same facts again: it is skipped and spends no budget. The key
+        is the whole walker state (generic, so a field added later is
+        covered), plus the few ``Resolution`` facts the walker READS back
+        (``programs_run`` counts, but is only read as a truth value).
+        """
+        res = self.result
+        skip = {
+            "result",
+            "functions",
+            "call_stack",
+            "function_calls",
+            "walked_functions",
+            "settled_calls",
+            "_landing_memo",
+            "programs_run",
+        }
+        state = [(k, _memo_canon(v)) for k, v in vars(self).items() if k not in skip]
+        reads = (
+            bool(self.programs_run),
+            bool(res.targets),
+            bool(res.created),
+            any(t.op != "touch" for t in res.touched),
+            _UNSEEN_SCRIPT_REASON in res.opaque_reasons,
+            res.globstar,
+        )
+        stack = tuple(id(d) for d in self.call_stack)
+        return repr((id(definition), stack, reads, state))
+
+    def _call_function(self, definition: _FunctionDef, depth: int) -> None:
+        res = self.result
+        if definition in self.call_stack or len(self.call_stack) >= _MAX_FUNCTION_DEPTH:
+            res.opaque_reasons.append(
+                f"shell function {definition.name} recurses; the recursion is not followed"
+            )
+            return
+        key = self._call_memo_key(definition)
+        if key in self.settled_calls:
+            return
+        if self.function_calls >= _MAX_FUNCTION_CALLS and id(definition) in self.walked_functions:
+            # Only a body already walked once is skipped: a never-walked one
+            # is walked below whatever the budget, so cheap padding calls
+            # cannot hide ``rm -rf ~`` (review R3). The skipped call starts
+            # from a state no walk has seen, so it may touch something.
+            res.opaque_reasons.append("too many shell function calls to follow")
+            return
+        self.function_calls += 1
+        self.walked_functions.add(id(definition))
+        snap = self._save() if definition.subshell else None
+        before = {name: self.state.env.get(name) for name in definition.locals}
+        self.call_stack.append(definition)
+        try:
+            self._walk_pieces(list(definition.pieces), [list(b) for b in definition.owned], depth)
+        finally:
+            self.call_stack.pop()
+            if snap is not None:
+                self._restore(snap)
+            else:
+                env = self.state.env
+                for name, value in before.items():
+                    if value is None:
+                        env.pop(name, None)
+                    else:
+                        env[name] = value
+        if self._call_memo_key(definition) == key:
+            self.settled_calls.add(key)
+
     # -- one segment ---------------------------------------------------------
     def _splice_env_split(
         self,
@@ -3753,10 +4817,25 @@ class _Walker:
             for var in _arith_assigned(body):
                 self._invalidate(var)
         raw_words, redirects = scan(text)
+        # Arithmetic and parameter-assignment expansion can mutate bindings even
+        # inside otherwise harmless words. We do not model their shell lvalues.
+        # Bash's legacy $[...] form has the same assignment side effects as
+        # $((...)); neither may leave a fresh-directory proof on a stale value.
+        if "((" in text or "$[" in text or re.search(r"\$\{[^}]*[:+?=-]", text):
+            self._forget_fresh_directories()
         st = self.state
         words: list[Expanded] = []
         for w in raw_words:
-            words.extend(expand_all(w, st.env, st.home))
+            expanded = expand_all(w, st.env, st.home)
+            if (
+                depth == 0
+                and self.fresh_scope
+                and len(expanded) == 1
+                and len(raw_words) == 1
+                and not redirects
+            ):
+                self._fresh_directory_assignment(w, expanded[0])
+            words.extend(expanded)
         for w in words:
             for body in w.substitutions:
                 if body.strip() and body.strip() not in _EMPTY_BODIES:
@@ -3768,9 +4847,15 @@ class _Walker:
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self.result.touched.append(_target(exp, "write", op, st))
+                    target = _target(exp, "write", op, st)
+                    self.result.touched.append(target)
                     if op in (">", ">|", ">>"):
                         self._add(exp, "append" if op == ">>" else "overwrite", op)
+                    # A prior write may plant a PATH executable or shell input.
+                    # Only writes already confined to a proved fresh directory
+                    # preserve the proof; do not bless a later mktemp after it.
+                    if not target.opaque_contained:
+                        self._forget_fresh_directories()
             elif op == "<<<":
                 # R3-1: the body is re-parsed by the consuming shell, which
                 # loses the refs span; mask a referenced credential value now.
@@ -3791,9 +4876,17 @@ class _Walker:
             # A bare assignment segment sets a shell variable for what follows.
             for w in assign_words:
                 self._assign_word(w)
+            if self.functions:
+                self._opaque_function_call(raw_words, words, depth)
+            return
+        if self.functions is not None and self._function_call(raw_words, words, depth):
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
+            # Declarations can install namerefs, integer attributes and aliases
+            # for future assignments; ordinary assignment tracking cannot prove
+            # their effects. Invalidate all copies before accepting any binding.
+            self._forget_fresh_directories()
             nameref = any(
                 w.text.startswith("-") and "n" in w.text and not w.text.startswith("--")
                 for w in words[1:]
@@ -3820,6 +4913,8 @@ class _Walker:
             self._cd(words[1:])
             return
         if name == "set":
+            if [w.text for w in words] != ["set", "-euo", "pipefail"]:
+                self._forget_fresh_directories()
             self._set_options(words[1:])
             return
         if name == "popd":
@@ -3829,7 +4924,17 @@ class _Walker:
         if name == "for" and len(words) >= 2:
             self._for(words[1:])
             return
+        if name == "unset":
+            # An unset fresh binding must not survive in the resolver's env.
+            # Unsupported forms conservatively drop every symbolic binding.
+            for w in words[1:]:
+                if _NAME_RE.fullmatch(w.text) and not w.opaque:
+                    st.env.pop(w.text, None)
+                elif w.text not in ("-v", "--"):
+                    self._forget_fresh_directories()
+            return
         if name == "read":
+            self._forget_fresh_directories()
             for w in words[1:]:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
@@ -3885,7 +4990,48 @@ class _Walker:
         # An inline assignment of a pager/git variable can run a program even
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
-        if not read_only_argv(name, [w.text for w in args], assigned=assigned):
+        readonly = read_only_argv(name, [w.text for w in args], assigned=assigned)
+        # A move, link, arbitrary interpreter, or unmodelled writer can replace
+        # the fresh directory or its parent. Never carry containment past it.
+        # mkdir only creates directories; mktemp's substitution is walked in a
+        # child scope. No exemption is added for the unknown program itself.
+        # PR #4116 review M1: ``:``/echo/pwd/printf are bash builtins, so PATH
+        # never picks them; mkdir/mktemp ARE looked up on PATH and must pass
+        # the same root-owned identity check mktemp's provenance uses. git is
+        # deliberately absent: even read-only git runs repo-configured
+        # programs (core.fsmonitor, textconv), which could swap the fresh
+        # directory for a link. Its own redirections were already ranked
+        # above, while the proof still held; only LATER segments lose it.
+        preserves_fresh = (
+            words[0].text == name
+            and not raw_assigns
+            and st.env.get("PATH") == self.inherited_path
+            # Read-only *filesystem* classification is not a shell-state
+            # proof: printf -v/%n, let, eval and declaration builtins mutate
+            # variables. Preserve only the small forms this proof understands.
+            and (
+                name in (":", "echo", "pwd")
+                or (name in ("mkdir", "mktemp") and self._trusted_system_program(name))
+                or (
+                    name == "printf"
+                    and bool(args)
+                    and len(raw_words) == len(words)
+                    and "".join(p.text for p in raw_words[0].parts) == "printf"
+                    and len(raw_words) > 1
+                    and not args[0].text.startswith("-")
+                    and "n" not in args[0].text
+                    and all(
+                        p.kind != "sub" and "$" not in p.text and "`" not in p.text
+                        for p in raw_words[1].parts
+                    )
+                )
+            )
+        )
+        if not preserves_fresh or (
+            name == "set" and [w.text for w in args] != ["-euo", "pipefail"]
+        ):
+            self._forget_fresh_directories()
+        if not readonly:
             exempt = self._touch(name, args) | _read_inputs(name, args)
             # The program word too: after ``env``/``xargs`` peeling a path can
             # BE the program (``xargs -Q <path>``).
@@ -4129,6 +5275,109 @@ class _Walker:
                 target.critical_only = True
         return
 
+    def _forget_fresh_directories(self) -> None:
+        """Unmodelled effects end the proof, including for copied bindings."""
+        self.fresh_scope = False
+        for key, value in list(self.state.env.items()):
+            # A plain value's \x03 is literal text (B1): opaquing it would turn
+            # main's CRITICAL through a planted link into HIGH.
+            if _is_fresh_binding(value):
+                self.state.env[key] = OPAQUE_MARK
+
+    def _trusted_mktemp(self) -> bool:
+        return self._trusted_system_program("mktemp")
+
+    def _trusted_system_program(self, program: str) -> bool:
+        """Inspect, never execute, PATH's winner before granting fresh provenance.
+
+        An unchanged inherited PATH may start with a user-controlled executable.
+        Only the root-owned system mktemp, reached through root-owned unwritable
+        parents, proves the expected creator semantics. Other installations stay
+        opaque rather than running a candidate to ask whether it is trustworthy.
+        Earlier unmodelled shell/filesystem effects already end fresh_scope.
+        """
+        path = self.state.env.get("PATH")
+        if path is None:
+            return False
+        # PATH's empty/relative entries use the modeled shell cwd, not the
+        # resolver process's cwd. If it is unknown, identity is unknown too.
+        entries = path.split(os.pathsep)
+        if any(not os.path.isabs(p) for p in entries):
+            if self.state.cwd is None:
+                return False
+            entries = [p if os.path.isabs(p) else os.path.join(self.state.cwd, p) for p in entries]
+        selected = shutil.which(program, path=os.pathsep.join(entries))
+        if selected not in (f"/usr/bin/{program}", f"/bin/{program}"):
+            return False
+        selected = os.path.realpath(selected)
+        try:
+            info = os.stat(selected)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            current = selected
+            while True:
+                info = os.stat(current)
+                if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return False
+                parent = os.path.dirname(current)
+                if parent == current:
+                    return True
+                current = parent
+        except OSError:
+            return False
+
+    def _fresh_directory_assignment(self, raw: _RawWord, word: Expanded) -> None:
+        """Pin only the parent of `R=$(mktemp -d TEMPLATE)`; R stays symbolic.
+
+        The mac-proof capture wrote into its own scratch directory, but dropping
+        the template's parent made its redirections look like opaque cwd writes.
+        Never synthesize a random dirname or bless a template below an existing
+        symlink: the freshness proof begins at a fully pinned existing parent.
+        """
+        if (
+            self.state.env.get("PATH") != self.inherited_path
+            or raw.broken
+            or len(raw.parts) != 2
+            or raw.parts[0].kind != "bare"
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=", raw.parts[0].text)
+            or raw.parts[1].kind != "sub"
+        ):
+            return
+        body_words, redirects = scan(raw.parts[1].text)
+        if (
+            redirects
+            or len(body_words) != 3
+            or lex(raw.parts[1].text).segments != [(raw.parts[1].text, False, "")]
+        ):
+            return
+        args = [expand(w, self.state.env, self.state.home) for w in body_words]
+        if any(w.opaque or w.empty or w.pattern or w.substitutions for w in args):
+            return
+        if [w.text for w in args[:2]] != ["mktemp", "-d"]:
+            return
+        if not self._trusted_mktemp():
+            return
+        template = args[2].text
+        parent, leaf = os.path.split(template)
+        scratch = self.scratch_parent
+        if (
+            not scratch
+            or self.state.env.get("LOCAL_OPERATOR_SCRATCHPAD") != scratch
+            or not os.path.isabs(parent)
+            or ".." in template.split("/")
+            or not re.fullmatch(r"[A-Za-z0-9_.-]*X{6,}", leaf)
+            or not os.path.isdir(parent)
+            or os.path.realpath(parent) != parent
+            or not os.path.isdir(scratch)
+            or os.path.realpath(scratch) != scratch
+            or not (parent == scratch or parent.startswith(scratch.rstrip("/") + "/"))
+            or any(parent == p or parent.startswith(p.rstrip("/") + "/") for p in self.linked)
+        ):
+            return
+        word.text = raw.parts[0].text + parent + "/" + OPAQUE_MARK
+        word.opaque = word.opaque_contained = word.fresh_dir = True
+        word.temp = False
+
     # -- program handlers ------------------------------------------------------
     def _invalidate(self, name: str) -> None:
         """Forget ``name``'s value: a builtin or construct the walker does not
@@ -4167,7 +5416,28 @@ class _Walker:
         text_value = word.text
         append = _APPEND_RE.match(text_value)
         name = append.group(1) if append else text_value.partition("=")[0]
-        if temp and word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
+        if (
+            temp
+            and not append
+            and word.fresh_dir
+            and word.opaque_contained
+            and text_value.count(OPAQUE_MARK) == 1
+            # A literal \x03/\x02 already in the word would be read back as a
+            # second mark; keep such a value plain and opaque, as on main (B1).
+            and FRESH_DIR_MARK not in text_value
+            and TEMP_MARK not in text_value
+        ):
+            # PR #4116: a fail-closed ``$(mktemp -d "$SCRATCH/x.XXXXXXXX")``
+            # keeps its pinned parent as FRESH_DIR_MARK. This is NOT the
+            # withdrawn #4147 contained-variable proof: only a fresh mktemp
+            # directory under an existing pinned scratch parent qualifies, and
+            # every mutator below drops it again.
+            text_value = text_value.replace(OPAQUE_MARK, FRESH_DIR_MARK)
+            if append is None:
+                return Expanded(
+                    text=text_value, refs=list(word.refs), pattern=word.pattern, fresh_dir=True
+                )
+        elif temp and word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
             text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
         if append is None:
             # Same length (one marker char for another): the refs still line up.
@@ -4178,6 +5448,7 @@ class _Walker:
             word.refs
             or name in self.for_lists
             or TEMP_MARK in old
+            or _is_fresh_binding(old)
             or FOR_GLOB_MARK in old
             or TEMP_MARK in suffix
         ):
@@ -4185,15 +5456,48 @@ class _Walker:
             return Expanded(text=f"{name}=" + (CREDENTIAL_MARK if credential else OPAQUE_MARK))
         return Expanded(text=f"{name}={old}{suffix}")
 
-    def _assign(self, text: str) -> None:
+    def _assign(self, text: str, *, fresh: bool = False) -> None:
         name, _, value = text.partition("=")
         value = _tilde_value(value, self.state.home)
+        if fresh and FRESH_DIR_MARK in value:
+            # The ONLY place fresh provenance is minted (B1): ``fresh`` comes
+            # from ``_stored_assignment``'s proof, never from the text.
+            value = _FreshDirValue(value)
         self.state.env[name] = value
+        if name in ("PATH", "SHELLOPTS", "BASH_ENV", "ENV"):
+            self._forget_fresh_directories()
         if name == "HOME":
             # S7: a later ``~`` resolves against the NEW home, as bash does.
             self.state.home = value or self.state.home
 
     def _shell(
+        self,
+        args: list[Expanded],
+        depth: int,
+        segment: str,
+        heredocs: list[str],
+        herestrings: list[str],
+        stdin_piped: bool,
+        pipeline: str = "",
+        feed: _Feed | None = None,
+    ) -> None:
+        """A shell word; see :meth:`_shell_body`.
+
+        A child shell inherits this shell's functions only when exported
+        (``export -f``): otherwise ``f(){ …; }; bash -c f`` runs no body, so
+        the inline-functions pass hides the registered ones while it walks.
+        """
+        visible = self.functions
+        if visible is not None and not self.functions_exported:
+            self.functions = {}
+        try:
+            self._shell_body(
+                args, depth, segment, heredocs, herestrings, stdin_piped, pipeline, feed
+            )
+        finally:
+            self.functions = visible
+
+    def _shell_body(
         self,
         args: list[Expanded],
         depth: int,
@@ -5000,6 +6304,14 @@ class _Walker:
         for w in dests:
             if w.text and not w.vanished:
                 self.result.touched.append(_target(w, "write", name, st))
+                if name == "curl" and not w.text.startswith("/dev/"):
+                    # PR #4116 Q1: ``curl -o F`` truncates F exactly like
+                    # ``> F``, but as a touch alone only session-state paths
+                    # ranked, so ``-o <state>/config.yml`` was LOW while
+                    # ``printf > config.yml`` was CRITICAL. Rank it as the
+                    # same overwrite target a redirection records (``/dev/``
+                    # skipped there too), with no per-path special case.
+                    self._add(w, "overwrite", name)
         if (
             fully
             and dests
@@ -5779,7 +7091,7 @@ class _Walker:
         ``D=$S/x-$l`` inside a loop body binds D once per iteration, so a
         later ``$D`` target fans out with the loop like a direct ``$l`` one.
         """
-        self._assign(word.text)
+        self._assign(word.text, fresh=word.fresh_dir)
         name = word.text.partition("=")[0]
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
@@ -6632,6 +7944,11 @@ def _write_surface(
         return _copy_dest(args, _MV_FLAGS), _flags_known(args, _MV_FLAGS)
     if name in ("tee",):
         return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
+    if name == "curl":
+        # Name the common explicit output destination without declaring curl
+        # read-only/fully modelled: config, remote-name and many other options
+        # have additional writes. Unknown argv still reaches the backstop.
+        return _cluster_value(args, "o", "--output"), False
     if name == "sort":
         # ``sort -o FILE`` writes FILE (it may also be an input: ``sort -o x x``).
         # Never fully modelled, so its other path words reach the backstop too.
@@ -6984,10 +8301,42 @@ def resolve_command(
     ``tests/unit/guardrails/test_loop_cd_never_lowers.py`` pins the
     invariant against base ``3bb7023``.
     """
-    result = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel())
+    result = _walk_ranked(command, cwd=cwd, env=env, home=home, case_arms=False)
+    if _CASE_WORD_RE.search(command):
+        # Re-segmentation can change inferred assignments, directories and
+        # definition positions. Preserve legacy rank facts (and its creation
+        # evidence) rather than letting a newly seen arm lower the rank.
+        arms = _walk_ranked(command, cwd=cwd, env=env, home=home, case_arms=True)
+        _union_ranked(result, arms, rank_creations=True)
+    return result
+
+
+def _walk_ranked(
+    command: str, *, cwd: str | None, env: Mapping[str, str], home: str, case_arms: bool
+) -> Resolution:
+    result = _walk_once(
+        command, cwd=cwd, env=env, home=home, model=_CwdModel(), case_arms=case_arms
+    )
     if result.engaged:
-        base = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel(base=True))
-        _union_ranked(result.resolution, base.resolution)
+        base = _walk_once(
+            command, cwd=cwd, env=env, home=home, model=_CwdModel(base=True), case_arms=case_arms
+        )
+        _union_ranked(result.resolution, base.resolution, rank_creations=case_arms)
+    if _MAY_DEFINE_FUNCTION_RE.search(command):
+        # Shell functions (see "Shell functions" above): bodies are walked
+        # where they are CALLED in a separate pass whose ranked facts are
+        # UNIONED in, so this pass can only raise what main ranked (PR #4147
+        # Q5: walking bodies inside the main pass dropped CRITICAL to LOW).
+        called = _walk_once(
+            command,
+            cwd=cwd,
+            env=env,
+            home=home,
+            model=_CwdModel(),
+            inline_functions=True,
+            case_arms=case_arms,
+        )
+        _union_ranked(result.resolution, called.resolution, rank_creations=case_arms)
     return result.resolution
 
 
@@ -6998,9 +8347,16 @@ class _Pass:
 
 
 def _walk_once(
-    command: str, *, cwd: str | None, env: Mapping[str, str], home: str, model: _CwdModel
+    command: str,
+    *,
+    cwd: str | None,
+    env: Mapping[str, str],
+    home: str,
+    model: _CwdModel,
+    inline_functions: bool = False,
+    case_arms: bool = False,
 ) -> _Pass:
-    walker = _Walker(env, cwd, home)
+    walker = _Walker(env, cwd, home, inline_functions=inline_functions, case_arms=case_arms)
     # Raw text, not parsed words, so a nested ``bash -c``/``zsh -c`` string
     # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
     # because a wider walk only errs safe (review round 9, NIT-1).
@@ -7008,6 +8364,9 @@ def _walk_once(
     token = _CWD_MODEL.set(model)
     try:
         walker.walk(command)
+        if inline_functions:
+            # ``trap NAME EXIT`` runs NAME's definition current at exit.
+            walker._run_trapped_functions(0)
     except Exception as exc:  # noqa: BLE001 — a parser fault must not wave a call through
         walker.result.opaque_reasons.append(f"resolver error: {type(exc).__name__}")
     finally:
@@ -7015,8 +8374,16 @@ def _walk_once(
     return _Pass(walker.result, model.engaged)
 
 
-def _union_ranked(into: Resolution, extra: Resolution) -> None:
-    """Add every ranked fact of ``extra`` missing from ``into`` (not ``created``)."""
+def _union_ranked(into: Resolution, extra: Resolution, *, rank_creations: bool = False) -> None:
+    """Union rank facts without appending any provenance candidates."""
+    if rank_creations:
+        # Concrete supplementary creations can write protected evidence, but
+        # only the primary walk is allowed to nominate ledger candidates.
+        for creation in extra.created:
+            if creation.path is not None:
+                write = Target(path=creation.path, op="write", program=creation.kind)
+                if write not in into.touched:
+                    into.touched.append(write)
     # Two loops, one per element type, rather than one tuple of mixed pairs:
     # a heterogeneous tuple widens each pair to ``list[Target] | list[str]`` and
     # pyright then rejects the append. Same pairs, same order, same dedupe.

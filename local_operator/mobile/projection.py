@@ -27,7 +27,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
@@ -395,6 +395,13 @@ def _message_text(message: AgentMessage) -> str:
             if isinstance(value, str):
                 return value
     return ""
+
+
+def _bridge_receipt_line(details: Mapping[str, Any] | None) -> str:
+    """Human text of an inbound Team Bridge delivery, shared by live and replay."""
+    from local_operator.harness.bridge_copy import bridge_delivery_receipt_line
+
+    return bridge_delivery_receipt_line(details)
 
 
 def _bridge_summary(
@@ -1826,6 +1833,12 @@ def fold_messages_to_entries(
                     )
                     continue
             text = _message_text(message)
+            if message.custom_type == "team_bridge_message" and text:
+                # View projection only: the stored row keeps the model envelope
+                # and card. The phone's live arm (``note_nonpeer_delivery``)
+                # builds the same line, so replay cannot disagree with it or leak
+                # tenant/conversation ids and receiver rules.
+                text = _bridge_receipt_line(message.details)
             if text:
                 entries.append(
                     TranscriptEntry(
@@ -2391,6 +2404,44 @@ class ProjectionFold:
             call_id: args for call_id, args in self._tool_args.items() if call_id in live_call_ids
         }
         self._bump()
+
+    def fold_supplement_rows(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        """Seed ``projection.supplements`` from journalled ``supplement_v1`` rows.
+
+        An owner that did NOT run the turn (a resumed or restarted session) folds
+        its history from messages only, which carry no supplement, so every pin and
+        card journalled before this process started would be absent from the live
+        projection the relay serves. ``rows`` are the journal's newest row per
+        anchor (``contract.newest_per_anchor``), the same rule a cold open applies.
+
+        Keep-newest against what the live fold already holds, with the LIVE beat
+        winning a tie: a seeded row replaces nothing at an equal version, because a
+        beat that arrived first carries the generator's progress fields the durable
+        row lacks. Only anchors that are rows of the current tail are taken, which
+        bounds the seed at ``PROJECTION_TRANSCRIPT_LIMIT`` rows: an old turn's row
+        never rides every frame for a window the phone cannot show. A seed that
+        changes nothing does not bump the version, which keeps a supplement-free
+        projection byte-identical.
+        """
+        p = self.projection
+        visible = {entry.id for entry in p.transcript}
+        changed = False
+        for row in rows:
+            anchor, version = row.get("anchor"), row.get("version")
+            if (
+                not isinstance(anchor, str)
+                or anchor not in visible
+                or not isinstance(version, int)
+                or isinstance(version, bool)
+            ):
+                continue
+            held = p.supplements.get(anchor)
+            if held is not None and version <= int(held.get("version") or 0):
+                continue
+            p.supplements[anchor] = dict(row)
+            changed = True
+        if changed:
+            self._bump()
 
     # -- events ------------------------------------------------------------
 
@@ -3153,6 +3204,10 @@ class ProjectionFold:
             }
         if custom_type == "team_bridge_message" and display_details:
             details.update(projected_display_receipt(display_details))
+        if custom_type == "team_bridge_message":
+            # The card/envelope the model reads is not the row's human text; the
+            # history fold builds the same line, so live and replay agree.
+            text = _bridge_receipt_line(display_details)
         if custom_type:
             details["custom_kind"] = _compact(custom_type, _NOTICE_CHARS)
         self._append(

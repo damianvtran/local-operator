@@ -682,6 +682,23 @@ and quoting one total with the other's percentage is how a number stops being
 evidence.) Prefer the scoped inner loop above, and remember that the scoped `test`
 job narrows for nothing on this tree today.
 
+**To wait for heavy work, take the heavy-job slot (#4104); never loop on
+`pgrep -f <pattern>`, which matches its own command line** (twice on 2026-11-17 a
+waiter matched itself forever and read as a heavy job in another lane's check). No CLI
+waiter exists yet: the `bash` tool takes the slot itself for a heavy command
+(`pytest -n N`, JS builds, `tsc`/`vue-tsc` and `typecheck` scripts; not
+mypy/pyright), queues up to 15 min and names the holder. A serial `python -m
+pytest` of targeted FILES or node ids takes no slot while its effective xdist
+workers (command line over `PYTEST_ADDOPTS` over addopts) are 0-2, so it never
+queues behind a held one; this repo's addopts say `-n auto`, so pass `-n 0`.
+More workers, a directory or whole-suite pytest (`-k` or not: collection
+imports the tree) and `affected_tests.py --run/--evidence` take the slot.
+Otherwise check `lop services status` once (it names the holder without
+waiting), or take a specific run's exact pid once and wait with a bounded `kill -0 <pid>` loop. Never wait on any
+`pgrep -f` pattern for test or heavy names: the waiter's shell, its `timeout`
+wrapper and the parent `bash -c` all carry the text, and `[p]ytest` still matches
+a later literal in that same command line.
+
 **A local run now reports on itself, so silence is no longer ambiguous.** With
 `LOCAL_OPERATOR_SHARD_STALL_SECONDS` absent (i.e. anywhere but the CI shard job),
 `tests/shard_stall_watchdog.py` falls back to `LOCAL_DEFAULT_SECONDS` = 900 s on a
@@ -1365,13 +1382,14 @@ changes the `version =` line fails unless its title starts with
 `chore(release):`. Dependency and metadata edits to `pyproject.toml` are
 unaffected — the guard reads the version line, not the file.
 
-It makes the violation loud; it does not make it impossible. `main`'s ruleset
-requires one approving review and one required status check, `CI Gate` (plus
-`Merge gate (full suite)` once that context is added — see "Who may merge: two
-tiers"), and admins hold a configured bypass, so an `--admin` merge lands over a
-red guard. Treat a failing `version-bump-guard` as a stop signal rather than an
-obstacle to route around:
-the job is the reviewer's missing memory, not a lock.
+It blocks the merge, even an `--admin` one. `main` carries two rulesets (see
+"Who may merge: two tiers"): ruleset 3622629 requires one approving review,
+and the admin bypass covers only that rule; ruleset 26808267 requires two
+status checks, `CI Gate` and `Merge gate (full suite)`, and has no bypass
+actors. `CI Gate` fails closed on a red `version-bump-guard`, so a red guard
+turns `CI Gate` red and the ruleset refuses the merge. Treat a failing guard as
+a finding to fix, not an obstacle to route around: drop the bump, or retitle a
+genuine release PR `chore(release):`.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
@@ -1380,9 +1398,11 @@ bump runs seven checks, not the matrix: `changes`, `version-bump-guard` and
 artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
 triggers, a push to `release-next`/`release-next-*`, the runbook's bump
 branch). Every other `ci.yml` job reports skipping. The second required check,
-`Merge gate (full suite)`, is deliberately not armed on a bump PR — no
-`ready-to-merge` label is added, and a version-only diff classifies the matrix
-out anyway — so neither a missing nor a skipped gate is a defect here. The classifier keys on
+`Merge gate (full suite)`, is still required on a bump PR — the ruleset refuses
+even an `--admin` merge without it — so arm it with `make merge-gate PR=<n>`;
+its suite jobs report skipped on the version-only diff, so the gate runs no
+suite and its wall time is the runner queue (about 13 min on #4165, about
+86 min on #4199). The classifier keys on
 the diff but the Release Gate keys on the branch name, so a bump pushed from
 any other branch shows only the two `ci.yml` checks: the artifact gate never
 ran, which is a reason to use the mandated branch, not a green. That is the
@@ -1622,13 +1642,20 @@ operator action on pypi.org; agents never delete releases or files.
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
 
-   **Expect seven checks on this PR, not a matrix.** A version-only
+   **Expect seven checks on this PR, not a matrix — then arm the merge
+   gate.** A version-only
    `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
    `changes`, `version-bump-guard` and `CI Gate` run and every other job reports
    skipping — the whole job set would be gating code this PR does not touch.
-   The other required check, `Merge gate (full suite)`, is not armed on a bump
-   PR at all (no `ready-to-merge` label, and the version-only diff would
-   classify the matrix out anyway), so seven is the complete list.
+   The other required check, `Merge gate (full suite)`, is not automatic but
+   is still required: once the seven are green, run `make merge-gate PR=<n>`.
+   The gate classifies the version-only diff as a release bump, its suite jobs
+   (`test`, `tui-e2e`, `coverage-report`) report skipped, and the gate runs no
+   suite, so its wall time is the runner queue (about 13 min on #4165, about
+   86 min on #4199). The PR ends with the seven plus a green
+   `Merge gate (full suite)`. An `--admin` merge before the gate is refused
+   by the ruleset (`Required status check "Merge gate (full suite)" is
+   expected`; measured on bump PR #4199, 2026-11-18).
    The other four come from `.github/workflows/release-gate.yml`, which fires
    on the push to `release-next` (its triggers also include `release-next-*`,
    pushes to `main`, and `workflow_dispatch`): `Release invariants` (the
@@ -2174,10 +2201,13 @@ isolated generation, then commit `current` under the existing install-root
 transaction; busy runtimes retain their loaded package/dependency/resource roots
 and move individually only when their existing idle latch admits it. Do not
 weaken fresh-artifact/signature, duplicate-attempt, stale-target, root ownership
-or conditional rollback checks. Automatic generation collection is frozen in
-both PyPI and snapshot update tails: an absent discovery/argv/open-file reference
-is not proof that a runtime will never read a bundled asset later. An unreadable
-fleet census must not veto isolated preparation, and must never license deletion.
+or conditional rollback checks. Every promotion tail (PyPI, snapshot, mesh) then
+runs `update.reclaim_after_promotion` = `lop install prune`'s own guarded policy,
+never a second deletion path (operator, 2026-11-16, after 113 generations piled up
+under the old freeze): current, the running tree, record-named roots and the
+`update.keep_generations` (2) newest survive; `update.auto_prune: false` disables;
+no kill/move; failure never fails the update. An unreadable fleet
+census must not veto isolated preparation, and must never license deletion.
 
 Installed/current and actual service-serving builds are different outcomes.
 Daemon-owned work and unsupported old reload capabilities must defer service
@@ -2286,9 +2316,11 @@ Warnings that still hold, each of which has already cost a release:
   and has silently consumed the number you are about to use. That is exactly
   how 0.50.1 and 0.50.2 were burned — each consumed by a PR's own bump, neither
   ever built, tagged or published, and the next owner had to skip both. The
-  `version-bump-guard` CI job now catches this on the PR, but it does **not**
-  block an `--admin` merge, because `main`'s ruleset configures no required
-  status checks and admins hold a bypass. The pre-tag check is the backstop.
+  `version-bump-guard` CI job now catches this on the PR and, through the
+  required `CI Gate` (ruleset 26808267, no bypass actors), blocks even an
+  `--admin` merge; the admin bypass covers only the review rule. The pre-tag
+  check is the backstop for a bump that slipped in before the guard or under a
+  `chore(release):` title.
 - **A shard failure on your branch alone is not evidence your diff caused it.**
   CI shards the unit suite with `scripts/shard_tests.py` — a
   longest-processing-time-first (LPT) partition of
@@ -2921,10 +2953,11 @@ tool and is unavailable here — GitHub restricts it to org-owned public
 repositories and Enterprise Cloud private ones, and this repository is
 user-owned (`repository.mergeQueue` is null; `enableMergeQueue` does not exist).
 The second context has to be in the ruleset for the block to bite:
-`gh api repos/damianvtran/local-operator/rulesets/3622629` shows
-`required_status_checks` carrying `CI Gate` alone, and
-`Merge gate (full suite)` is added with a `PUT` on that ruleset — until it is
-there, the gate is a comment rather than a lock. Add it **after** the workflow
+`gh api repos/damianvtran/local-operator/rules/branches/main` shows
+`required_status_checks` (ruleset 26808267) carrying both `CI Gate` and
+`Merge gate (full suite)`; ruleset 3622629 holds only the review and
+non-fast-forward rules. Without the second context the gate is a comment
+rather than a lock. Add it **after** the workflow
 that reports it has merged, and never before: a required context that nothing
 reports sits in "Expected" and blocks every PR in the fleet.
 

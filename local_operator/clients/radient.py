@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, SecretStr
 from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.agents import MAX_AGENT_NAME_CHARS
 from local_operator.clients._http import (
+    MODEL_LIST_TIMEOUT,
     APIError,
     NotModified,
     api_error_from_exception,
@@ -2277,7 +2278,9 @@ class RadientClient:
         headers = self._get_headers()
 
         try:
-            response = requests.get(url, headers=headers)
+            # Bounded: an unanswered connection must not hold the caller (and, before
+            # the route moved this off the loop, the whole server) for minutes.
+            response = requests.get(url, headers=headers, timeout=MODEL_LIST_TIMEOUT)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
             data = response.json()
             return RadientListModelsResponse.model_validate(data)

@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "audit_id": "a6",
+  "audit_kind": "independent_translation_reaudit_changed_keys",
+  "locale": "vi",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-18",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #4216 round 2: the 4 mobile.doctor.watches keys changed by 193e08e33, judged side by side with English, round-1 wording and en/mobile.doctor.context.json; other keys unchanged since round 1 (a4/a5) and not re-audited",
+  "key_count": 37,
+  "keys_audited": 4,
+  "changed_keys": [
+    "mobile.doctor.watches.near",
+    "mobile.doctor.watches.at_limit",
+    "mobile.doctor.watches.instances_near",
+    "mobile.doctor.watches.instances_at_limit"
+  ],
+  "source_sha256": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+  "target_sha256": "a797bddaee42db7174b0a8c53618a1cd2493d27717fc4089852183fa160fa1f2",
+  "source_audit_revision": "193e08e33f5de800203275dce399f0b4730ca7d6",
+  "branch": "fix/inotify-followups",
+  "worktree": "~/local-operator/.worktrees/inotify-followups",
+  "translator": {
+    "agent": "coder subagent of PR #4216 round-1 remediation (commit 193e08e33; rewrote the English source and all 7 translations of the 4 keys)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-18"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n re-auditor, lopdev team member (`task` subagent), session 1689332f69cf; did not write or audit-correct these translations in any earlier round and edited no locale value",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-18",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+    "context": "37cd00260c30fd76cef084e713715cf50f504e8f15a0297b2e4d629674eeed5e",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guide": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "checks": [
+    "placeholder set identical to English for all 4 keys; {how} select has exactly command/program/other arms",
+    "rendered all 3 arms x 4 keys with synthetic params via local_operator.i18n.runtime.render_message: 12/12 OK (sysctl present, {command} verbatim in command arm, holder absent in other arm, no braces, no '? (', no empty parens)",
+    "no arm begins with {name}; fs.inotify.max_user_watches / max_user_instances, {command} and quoted OS errors verbatim",
+    "terminology unchanged from round-1 passed wording (file watch vs watch handle kept distinct)",
+    "copy_scan.py over rendered sentences: 0 findings",
+    "Select arms complete; 'handle theo dõi' and 'lượt theo dõi tệp' terminology matches round 1; 'Phần lớn do … giữ' natural."
+  ],
+  "renders": [
+    [
+      "near",
+      "command",
+      "Tài khoản của bạn đang dùng 8100/8192 lượt theo dõi tệp được phép trên máy tính này, gần chạm giới hạn. Phần lớn thuộc về node (tiến trình 4242): hãy khởi động lại nó bằng systemctl --user restart dev.service, hoặc nhờ quản trị viên tăng fs.inotify.max_user_watches."
+    ],
+    [
+      "near",
+      "program",
+      "Tài khoản của bạn đang dùng 8100/8192 lượt theo dõi tệp được phép trên máy tính này, gần chạm giới hạn. Phần lớn thuộc về node (tiến trình 4242): hãy khởi động lại chương trình đó, hoặc nhờ quản trị viên tăng fs.inotify.max_user_watches."
+    ],
+    [
+      "near",
+      "other",
+      "Tài khoản của bạn đang dùng 8100/8192 lượt theo dõi tệp được phép trên máy tính này, gần chạm giới hạn. Hãy nhờ quản trị viên tăng fs.inotify.max_user_watches."
+    ],
+    [
+      "at_limit",
+      "command",
+      "Tài khoản của bạn đã dùng hết lượt theo dõi tệp trên máy tính này (8100/8192), nên các chương trình theo dõi tệp sẽ báo lỗi “No space left on device”. Phần lớn thuộc về node (tiến trình 4242): hãy khởi động lại nó bằng systemctl --user restart dev.service, hoặc nhờ quản trị viên tăng fs.inotify.max_user_watches."
+    ],
+    [
+      "at_limit",
+      "program",
+      "Tài khoản của bạn đã dùng hết lượt theo dõi tệp trên máy tính này (8100/8192), nên các chương trình theo dõi tệp sẽ báo lỗi “No space left on device”. Phần lớn thuộc về node (tiến trình 4242): hãy khởi động lại chương trình đó, hoặc nhờ quản trị viên tăng fs.inotify.max_user_watches."
+    ],
+    [
+      "at_limit",
+      "other",
+      "Tài khoản của bạn đã dùng hết lượt theo dõi tệp trên máy tính này (8100/8192), nên các chương trình theo dõi tệp sẽ báo lỗi “No space left on device”. Hãy nhờ quản trị viên tăng fs.inotify.max_user_watches."
+    ],
+    [
+      "instances_near",
+      "command",
+      "Tài khoản của bạn đang dùng 126/128 handle theo dõi được phép trên máy tính này, gần chạm giới hạn. Phần lớn do node (tiến trình 4242) giữ: hãy khởi động lại nó bằng systemctl --user restart dev.service, hoặc nhờ quản trị viên tăng fs.inotify.max_user_instances."
+    ],
+    [
+      "instances_near",
+      "program",
+      "Tài khoản của bạn đang dùng 126/128 handle theo dõi được phép trên máy tính này, gần chạm giới hạn. Phần lớn do node (tiến trình 4242) giữ: hãy khởi động lại chương trình đó, hoặc nhờ quản trị viên tăng fs.inotify.max_user_instances."
+    ],
+    [
+      "instances_near",
+      "other",
+      "Tài khoản của bạn đang dùng 126/128 handle theo dõi được phép trên máy tính này, gần chạm giới hạn. Hãy nhờ quản trị viên tăng fs.inotify.max_user_instances."
+    ],
+    [
+      "instances_at_limit",
+      "command",
+      "Tài khoản của bạn đã dùng hết handle theo dõi trên máy tính này (126/128), nên các chương trình theo dõi tệp sẽ báo lỗi “Too many open files”. Phần lớn do node (tiến trình 4242) giữ: hãy khởi động lại nó bằng systemctl --user restart dev.service, hoặc nhờ quản trị viên tăng fs.inotify.max_user_instances."
+    ],
+    [
+      "instances_at_limit",
+      "program",
+      "Tài khoản của bạn đã dùng hết handle theo dõi trên máy tính này (126/128), nên các chương trình theo dõi tệp sẽ báo lỗi “Too many open files”. Phần lớn do node (tiến trình 4242) giữ: hãy khởi động lại chương trình đó, hoặc nhờ quản trị viên tăng fs.inotify.max_user_instances."
+    ],
+    [
+      "instances_at_limit",
+      "other",
+      "Tài khoản của bạn đã dùng hết handle theo dõi trên máy tính này (126/128), nên các chương trình theo dõi tệp sẽ báo lỗi “Too many open files”. Hãy nhờ quản trị viên tăng fs.inotify.max_user_instances."
+    ]
+  ],
+  "not_verified": [
+    "native-speaker review",
+    "rendered desktop/terminal frame"
+  ]
+}
