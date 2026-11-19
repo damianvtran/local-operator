@@ -234,9 +234,7 @@ def test_state_lines_use_the_header_ink_not_dim() -> None:
     colours = {
         str(span.style.color.triplet.hex) if span.style.color.triplet else ""
         for span in content.spans
-        if span.start <= start < span.end
-        and isinstance(span.style, Style)
-        and span.style.color
+        if span.start <= start < span.end and isinstance(span.style, Style) and span.style.color
     }
     assert theme_mod.semantic_color("muted").lower() in {c.lower() for c in colours}
     assert theme_mod.semantic_color("dim").lower() not in {c.lower() for c in colours}
