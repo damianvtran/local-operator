@@ -118,15 +118,20 @@ chose not to run. Leaving it out is not enough for a peer that already holds
 it, because absence still means nothing (the partial-view rule above stands).
 So the bundle carries ``withdrawn``: the NAMES (never config) the sender has
 turned off. A receiver removes a name only when all three hold — the name is
-in that list, its index says the copy was mirrored FROM THIS SENDER, and the
-copy on disk still hashes to the recorded ``landed`` digest — and drops the
-index entry with it. An
+in that list, its index says the copy was mirrored FROM THIS SENDER (the
+authenticated link's device; no link identity withdraws nothing), and the
+EXACT file entry is the one this device wrote (``landed_entry``, a digest of
+the whole entry — the canonical ``landed`` row cannot see an ``oauth`` block
+or an unknown key; a copy installed before exact tracking must also equal what
+the materializer writes for its row) — and drops the index entry with it. An
 authored entry, an edited mirror, or another device's mirror is never removed;
 it is reported as a conflict by name. Re-enabling the server on the owner puts
-it back in ``servers``, and the next sync installs it as a normal mirror. An
-older receiver ignores the unknown key (``bundle_rows`` reads only
-``kind``/``version``/``servers``); an older sender sends no list, so nothing is
-withdrawn.
+it back in ``servers``, and the next sync installs it as a normal mirror. The
+receiver's ``state`` says per held name whether the asker is its recorded
+origin (``mirrored_from_you``), so a sender lists only names it could withdraw
+rather than re-asking about a peer's own server every tick. An older receiver
+answers ``state`` without that flag and ignores ``withdrawn``, so it is sent no
+list; an older sender sends no list, so nothing is withdrawn.
 
 THE OPS
 =======
@@ -741,7 +746,10 @@ def local_withdrawn(root: Path) -> list[str]:
 
     document, _problem = _read_document(root)
     names = sorted(
-        name for name in _suppressed_names(document) if mcp_config.SERVER_NAME_RE.match(name)
+        # ``fullmatch``: the pattern's ``$`` admits a trailing newline under ``match``.
+        name
+        for name in _suppressed_names(document)
+        if mcp_config.SERVER_NAME_RE.fullmatch(name)
     )
     return names[:MAX_MCP_ROWS]
 
@@ -804,7 +812,7 @@ def local_bundle(root: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def server_state(root: Path) -> dict[str, Any]:
+def server_state(root: Path, requester: str = "") -> dict[str, Any]:
     """A digest manifest of the user-scope servers THIS device holds.
 
     The sender's input: it sees that a peer already holds an equal revision
@@ -823,16 +831,28 @@ def server_state(root: Path) -> dict[str, Any]:
     ``landed`` digest is what proves the mirror is unedited; a hand-edited mirror
     (or one whose index record is gone) falls back to the disk digest and the
     conflict path reports it by name. An unreadable file reads as no servers.
+
+    ``mirrored_from_you`` (only when ``requester``, the AUTHENTICATED link's
+    device, is known): per held name, whether this device's index records the
+    requester as that entry's origin. A boolean about the requester only —
+    never another device's id. It lets a sender list in ``withdrawn`` only the
+    names a withdrawal can act on, so a peer's own same-named server is not
+    re-asked (and re-audited) every cadence tick (review M1 / security S3). Its
+    ABSENCE marks an older receiver, which ignores ``withdrawn`` anyway.
     """
     document, _problem = _read_document(root)
     recorded = definitions.read_index(root).get(INDEX_SECTION)
     recorded = recorded if isinstance(recorded, Mapping) else {}
     servers: dict[str, str] = {}
+    from_requester: dict[str, bool] = {}
     for name, raw in sorted(_entries_of(document).items()):
         if not isinstance(raw, Mapping):
             continue
         row_digest = definitions.digest_of(server_row(str(name), raw))
         record = recorded.get(str(name))
+        from_requester[str(name)] = bool(
+            requester and isinstance(record, Mapping) and record.get("origin") == requester
+        )
         if isinstance(record, Mapping):
             landed = str(record.get("landed") or "")
             source = str(record.get("digest") or "")
@@ -840,7 +860,9 @@ def server_state(root: Path) -> dict[str, Any]:
                 servers[str(name)] = source
                 continue
         servers[str(name)] = row_digest
-    return {"servers": servers}
+    if not requester:
+        return {"servers": servers}
+    return {"servers": servers, "mirrored_from_you": from_requester}
 
 
 def state_rows(root: Path) -> list[dict[str, Any]]:
@@ -989,7 +1011,9 @@ def bundle_withdrawn(bundle: Mapping[str, Any]) -> tuple[list[str], list[dict[st
     inferred from the rows it left out. Names are validated the way row names
     are (``SERVER_NAME_RE``); anything else is refused BY a bounded rendering of
     itself, so a malformed entry is visible without echoing an unbounded string.
-    Read to :data:`MAX_MCP_ROWS` + 1 entries and capped like the rows.
+    Read to :data:`MAX_MCP_ROWS` entries; a longer list gets ONE refused row
+    saying the rest were ignored, so truncation is visible rather than silent
+    (QA round 1, Q1) — a compliant sender caps at the same number.
     """
     from local_operator.mcp import config as mcp_config
 
@@ -1002,8 +1026,10 @@ def bundle_withdrawn(bundle: Mapping[str, Any]) -> tuple[list[str], list[dict[st
         ]
     names: list[str] = []
     refused: list[dict[str, Any]] = []
-    for item in raw[: MAX_MCP_ROWS + 1]:
-        if not isinstance(item, str) or not mcp_config.SERVER_NAME_RE.match(item):
+    for item in raw[:MAX_MCP_ROWS]:
+        # ``fullmatch``: under ``match`` the pattern's ``$`` admits "crm\n",
+        # which then matched nothing and was silently ignored (security S5).
+        if not isinstance(item, str) or not mcp_config.SERVER_NAME_RE.fullmatch(item):
             refused.append(
                 {
                     "kind": "server",
@@ -1014,7 +1040,17 @@ def bundle_withdrawn(bundle: Mapping[str, Any]) -> tuple[list[str], list[dict[st
             continue
         if item not in names:
             names.append(item)
-    return names[:MAX_MCP_ROWS], refused
+    if len(raw) > MAX_MCP_ROWS:
+        refused.append(
+            {
+                "kind": "server",
+                "name": "",
+                "reason": (
+                    f"its withdrawn list is over {MAX_MCP_ROWS} names; the rest were ignored"
+                ),
+            }
+        )
+    return names, refused
 
 
 def apply_bundle(root: Path, bundle: Mapping[str, Any], *, origin_device: str) -> dict[str, Any]:
@@ -1109,7 +1145,21 @@ def _apply_bundle_locked(
                 changed = True
     sent = {str(row.get("name") or "") for row in rows}
     index_dirty = False
+    # A DELETE IS AUTHORIZED ONLY BY THE AUTHENTICATED LINK. ``origin`` above
+    # falls back to the bundle's own ``origin_device`` for installs (pre-existing),
+    # but a withdrawal must never rest on a frame's self-description: with no
+    # link identity every name is refused (security S2 / review N1).
+    withdraw_origin = str(origin_device or "")
     for name in withdrawn:
+        if not withdraw_origin:
+            summary["refused"].append(
+                {
+                    "kind": "server",
+                    "name": name,
+                    "reason": "the sender's device is not authenticated, so nothing is withdrawn",
+                }
+            )
+            continue
         if name in sent:
             # A compliant sender never both sends and withdraws a name; which
             # half it meant cannot be told, so neither wins by inference.
@@ -1121,7 +1171,7 @@ def _apply_bundle_locked(
                 }
             )
             continue
-        verdict = _withdraw_row(name, origin, index, servers)
+        verdict = _withdraw_row(name, withdraw_origin, index, servers)
         if verdict is None:
             continue
         outcome, extra = verdict
@@ -1221,10 +1271,52 @@ def _apply_row(
         "origin": origin,
         "digest": incoming,
         "landed": definitions.digest_of(landed_row),
+        # The EXACT file entry this device wrote, not its canonical row: the
+        # canonical row drops an ``oauth``/``auth`` block's contents and unknown
+        # keys by design, so ``landed`` cannot see an operator's edit confined to
+        # them. A withdrawal DELETES the entry, so it must prove the whole entry
+        # untouched (security review round 1, S1) — this digest is that proof.
+        "landed_entry": _entry_digest(materialized),
         "name": name,
         "at": _now(),
     }
     return ("updated" if current is not None else "installed"), {}
+
+
+def _entry_digest(entry: Mapping[str, Any]) -> str:
+    """A digest of one ``mcpServers`` entry EXACTLY as the file holds it.
+
+    Every key and value counts (canonical JSON, so only key order is ignored),
+    unlike :func:`server_row`'s canonical row — the distinction a withdrawal's
+    "is this copy untouched" question turns on.
+    """
+    return definitions.digest_of(dict(entry))
+
+
+def _entry_untouched(
+    name: str, current_raw: Mapping[str, Any], recorded: Mapping[str, Any]
+) -> bool:
+    """Is the file entry the very bytes this device mirrored, byte for byte?
+
+    With ``landed_entry`` (installs from this build on) that is a straight digest
+    comparison. An index entry written BEFORE exact tracking has only the
+    canonical ``landed`` digest, which cannot see an added ``oauth`` block or an
+    unknown key; for it the entry must ALSO be exactly what the materializer
+    writes for that canonical row — the only shape a mirror ever lands — so any
+    key or value outside it reads as an edit. Unprovable is "not untouched":
+    the caller keeps the entry and reports it, because the cost of a wrong
+    "yes" is deleting an operator's config.
+    """
+    exact = str(recorded.get("landed_entry") or "")
+    if exact:
+        return _entry_digest(current_raw) == exact
+    landed = str(recorded.get("landed") or "")
+    if not landed:
+        return False
+    row = server_row(name, current_raw)
+    if definitions.digest_of(row) != landed:
+        return False
+    return _entry_digest(_materialize_row(row)) == _entry_digest(current_raw)
 
 
 def _withdraw_row(
@@ -1234,25 +1326,32 @@ def _withdraw_row(
 
     REMOVAL NEEDS PROOF THE COPY IS THE SENDER'S, UNTOUCHED: an index entry
     whose ``origin`` is this sender (the authenticated link's device, never the
-    bundle's self-description) AND a copy on disk that still hashes to the
-    recorded ``landed`` digest. Anything else is somebody's own server — an
-    authored entry, another device's mirror, an operator's edit — and a delete
-    here would destroy it on the strength of a name, so it is a conflict by name.
+    bundle's self-description) AND a file entry that is exactly the one this
+    device wrote (:func:`_entry_untouched` — the whole entry, not the canonical
+    row, which is blind to an ``oauth`` block or an unknown key). Anything else
+    is somebody's own server — an authored entry, another device's mirror, an
+    operator's edit — and a delete here would destroy it on the strength of a
+    name, so it is a conflict by name.
 
     Returns ``None`` when this device holds nothing under the name from this
-    sender (nothing to remove, nothing to report), and ``("index_only", {})``
-    when only a stale index entry of this sender's remains (its copy was already
-    deleted here): the entry is dropped so the provenance stops claiming a
-    mirror that is gone. The caller holds the lock and mutates nothing else.
+    sender (nothing to remove, nothing to report). ``("index_only", {})`` is a
+    DEFENSIVE branch a compliant sender never reaches — :func:`push_to_peer`
+    withdraws only names the peer's ``state`` listed, and ``state`` lists only
+    names on disk — kept so a hand-crafted or racing apply naming a mirror
+    already deleted here drops the stale index entry instead of leaving the
+    provenance claiming a copy that is gone. The caller holds the lock and
+    mutates nothing else.
     """
     recorded = _recorded(index, name)
     current_raw = servers.get(name)
     if recorded is None:
         if current_raw is None:
             return None
+        # ``origin: ""`` is the authored marker ``state`` uses: the sender asked,
+        # it is not where this entry came from (QA round 1, Q2).
         return "conflicts", {
             "reason": "this device authored an MCP server by that name, so it was not withdrawn",
-            "origin": origin,
+            "origin": "",
         }
     if str(recorded.get("origin") or "") != origin:
         if current_raw is None:
@@ -1269,14 +1368,17 @@ def _withdraw_row(
         if isinstance(section, dict):
             section.pop(name, None)
         return "index_only", {}
-    landed = str(recorded.get("landed") or "")
-    if (
-        not isinstance(current_raw, Mapping)
-        or not landed
-        or (definitions.digest_of(server_row(name, current_raw)) != landed)
-    ):
+    if not isinstance(current_raw, Mapping) or not _entry_untouched(name, current_raw, recorded):
+        # An exact-tracked copy that differs IS edited; a pre-tracking copy can
+        # only be "not provably untouched", and the sentence says which.
+        tracked = bool(isinstance(current_raw, Mapping) and recorded.get("landed_entry"))
         return "conflicts", {
-            "reason": "the copy of that name here has local edits, so it was not withdrawn"
+            "reason": (
+                "the copy of that name here has local edits, so it was not withdrawn"
+                if tracked
+                else "the copy of that name here has local edits or predates exact "
+                "tracking, so it was not withdrawn"
+            )
         }
     del servers[name]
     if isinstance(section, dict):
@@ -1376,9 +1478,20 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         for row in bundle["servers"]
         if remote_servers.get(str(row["name"])) != definitions.digest_of(row)
     ]
-    # Only names the peer HOLDS are worth a withdrawal: a name it never had
-    # needs no request, and the peer still decides whether its copy is ours.
-    withdraw = [name for name in bundle.get("withdrawn") or [] if name in remote_servers]
+    # Only names the peer recorded AS MIRRORED FROM THIS DEVICE are worth a
+    # withdrawal: its own same-named server, or another device's mirror, would
+    # be a conflict on every tick (and an audit row each time) for a request it
+    # can never honour (review M1 / security S3). The peer still re-checks
+    # provenance and the exact entry itself; this flag only saves the trip.
+    # No ``mirrored_from_you`` at all is an OLDER peer: it ignores ``withdrawn``,
+    # so asking would change nothing there and is not sent.
+    flags_in = remote.get("mirrored_from_you")
+    flags: dict[str, Any] = flags_in if isinstance(flags_in, dict) else {}
+    withdraw = [
+        name
+        for name in bundle.get("withdrawn") or []
+        if name in remote_servers and flags.get(name) is True
+    ]
     if not missing and not withdraw:
         return {
             "ok": True,
@@ -1494,7 +1607,7 @@ def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[
     def _handle(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
         phase = str(frame.get("phase") or "")
         if phase == "state":
-            return {"phase": "state", **server_state(server.root)}
+            return {"phase": "state", **server_state(server.root, requester=link.device_id)}
         if phase == "apply":
             bundle = frame.get("bundle")
             if not isinstance(bundle, Mapping):
@@ -1510,7 +1623,9 @@ def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[
                     AuditEvent(
                         event="mcp_defs_applied",
                         actor=link.device_id,
-                        subject=str(bundle.get("origin_device") or link.device_id),
+                        # The authenticated link, not the frame's self-description:
+                        # this record now covers deletes (security S4).
+                        subject=str(link.device_id or ""),
                         network_id=link.network_id,
                         epoch=link.epoch,
                         detail={

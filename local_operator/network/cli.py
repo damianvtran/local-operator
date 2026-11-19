@@ -13133,7 +13133,7 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         # withdrawal instead (mcpdefs' explicit-withdrawal exception). Only for
         # the device's own rows: a mirror is never sent from here either way.
         if row.get("disabled") and not origin:
-            line += " — disabled: not sent; peers withdraw the copy they mirrored"
+            line += " — disabled: not sent; peers withdraw an unedited mirror of it"
         lines.append(line)
     if not lines:
         lines = ["no user-scope MCP servers on this device"]
