@@ -578,9 +578,7 @@ def test_probe_evidence_reaches_the_uplink_reading_end_to_end(
     monkeypatch.setattr(relay, "_new_dial_socket", lambda _f: DialSocket(time_out))
     with monkeypatch.context() as patch:
         patch.setattr(relay.threading.Thread, "start", lambda self: None)
-        probe = relay.probe_candidates(
-            endpoint, deadline=time.monotonic() + 0.1, connect_cap=1.0
-        )
+        probe = relay.probe_candidates(endpoint, deadline=time.monotonic() + 0.1, connect_cap=1.0)
     assert [attempt.detail for attempt in probe.attempts] == ["no_answer"]
     assert uplink.uplink_checks(DUAL, rows_for(probe.attempts), route_reader=ROUTED) == []
 
