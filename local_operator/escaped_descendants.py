@@ -280,13 +280,24 @@ class Tracker:
         self._reap_zombies(escaped)
         self._reap_zombies(orphans)
 
-    def sweep(self, *, deadline: float, signum: int = signal.SIGKILL) -> "SweepResult":
+    def sweep(self, *, deadline: float, signum: int | None = None) -> "SweepResult":
         """Signal every live escaped member until two clean scans prove none.
 
         Called after the owned group has been killed; ``deadline`` is the run's
         shared cleanup bound. Never raises for a census problem: it reports it.
+        ``signum`` defaults to SIGKILL.
         """
         result = SweepResult(subreaper=self.subreaper)
+        if signum is None:
+            # Resolved here, not as a default argument: ``signal.SIGKILL`` is
+            # Unix-only, and a default is evaluated when the class is defined,
+            # so naming it there made this module unimportable on Windows (the
+            # xplat probe's import sweep). Without SIGKILL nothing can be
+            # proven gone, so the honest answer is unproven, never a crash.
+            signum = getattr(signal, "SIGKILL", None)
+            if signum is None:
+                result.reason = "no SIGKILL on this platform"
+                return result
         if not self._baseline_ok:
             result.reason = "pre-spawn descendant baseline unreadable"
             return result

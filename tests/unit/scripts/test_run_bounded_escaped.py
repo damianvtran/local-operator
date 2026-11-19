@@ -237,6 +237,29 @@ def test_an_unreadable_census_is_unproven_not_absent(monkeypatch, no_real_signal
     assert not result.proven and "unreadable" in result.reason
 
 
+def test_the_module_imports_without_sigkill_and_sweeps_unproven(monkeypatch, no_real_signals):
+    # Windows has no signal.SIGKILL. The xplat probe imports every module there,
+    # so nothing Unix-only may be evaluated at import (a default argument is).
+    # Load a fresh copy with SIGKILL removed rather than reloading ``ed``, which
+    # would swap the classes other tests in this file hold.
+    import importlib.util
+
+    monkeypatch.delattr(signal, "SIGKILL")
+    name = "escaped_descendants_without_sigkill"
+    spec = importlib.util.spec_from_file_location(name, ed.__file__)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)  # dataclasses resolve here
+    spec.loader.exec_module(module)
+
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: no_real_signals.append((pid, sig)))
+    monkeypatch.setattr(module, "_scan", lambda: {ESCAPEE: _row(ESCAPEE)})
+    tracker = module.Tracker(root=ROOT, owned_pgid=OWNED, subreaper=True, own_sid=1)
+    tracker.baseline_sids = frozenset()
+    result = tracker.sweep(deadline=time.monotonic() + 0.1)
+    assert not result.proven and "SIGKILL" in result.reason
+    assert no_real_signals == []
+
+
 def test_a_threaded_zombie_leader_still_counts_as_live():
     assert not _row(ESCAPEE, state="Z", threads=3).dead
     assert _row(ESCAPEE, state="Z", threads=1).dead
