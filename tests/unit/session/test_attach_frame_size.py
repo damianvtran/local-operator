@@ -1174,15 +1174,17 @@ def test_every_job_row_field_is_classified() -> None:
     assert not stale, f"stale entries for row fields that no longer exist: {sorted(stale)}"
 
 
-@pytest.mark.parametrize("long_context", ["none", "priced", "unpriced"])
-@pytest.mark.parametrize("cache_reported", [None, True, False])
-def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    cache_reported: bool | None,
-    long_context: str,
+def _install_variant_receipts(
+    monkeypatch: pytest.MonkeyPatch, cache_reported: bool | None, long_context: str
 ) -> None:
-    """The full frame accommodates both live cache evidence and pricing tiers."""
+    """Swap ``_receipt`` for one carrying a receipt variant's live evidence and tier.
+
+    ``cache_reported`` stamps the private cache evidence a real provider stream
+    leaves on a receipt (read off ``OpenAICompatClient`` itself, not hand-set
+    from nothing); ``long_context`` adds the OpenAI long-context tier fields.
+    Shared by the all-year frame and the cache-evidence identity test below so
+    the two cannot drift apart on what a "variant receipt" is.
+    """
     if cache_reported is not None:
         import httpx
 
@@ -1230,6 +1232,46 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
             )
 
         monkeypatch.setitem(globals(), "_receipt", tier_receipt)
+
+
+#: The cache-evidence value the all-year frame is built with. ``True`` is the
+#: POPULATED live evidence the axis exists for (PR #3236): the frame must carry
+#: receipts that hold it, not the default ``None`` that has nothing to leak.
+_ALL_YEAR_CACHE_REPORTED = True
+
+
+# WHY ONLY ``long_context`` IS PARAMETRISED HERE, not ``cache_reported`` too.
+#
+# This used to be the full 3 x 3 grid, and every case is expensive: one case
+# builds 200 jobs x (500 retained rows + 400 folded
+# receipts), then freezes and serializes that state FOUR times (the member, released,
+# member-baseline and spend-channel arms). Measured on one case with ``-n0``:
+# 58.0 s of CPU, of which 26.5 s is the four ``freeze_new_store_state`` calls and
+# 21.3 s the four ``sync_wire_payload`` calls; building the fixture itself is
+# under 6 s, so caching it would not help. On CI each case ran over 240 s and the
+# nine of them were a 7m20 tail that left ``test (3.12, 0)`` 19 s under its
+# 38-minute ceiling (run 44483083119) and timed #4257 out three times.
+#
+# Six of those nine cases were byte-for-byte duplicates. ``_cache_read_reported``
+# is a ``PrivateAttr`` kept OFF serialized frames on purpose (see ``Usage``), so
+# the cache axis can change the frame only if that attribute starts leaking onto
+# the wire. "Still fits under 1 MiB" was a weak way to catch that -- it could
+# only see a leak large enough to cross a line limit. The leak is now pinned by
+# ``test_live_cache_evidence_adds_no_bytes_to_the_attach_frame``, which demands
+# BYTE IDENTITY between None/True/False on every projection that carries a
+# receipt (member, released and ``JobState.from_job`` rows, plus the state-level
+# tail), for each ``long_context`` value, on a state small enough to cost
+# milliseconds. With identity proven, the populated value below stands for all
+# three, and the long-context axis -- which DOES change public wire fields --
+# keeps all three of its cases at full size.
+@pytest.mark.parametrize("long_context", ["none", "priced", "unpriced"])
+def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    long_context: str,
+) -> None:
+    """The full frame accommodates both live cache evidence and pricing tiers."""
+    _install_variant_receipts(monkeypatch, _ALL_YEAR_CACHE_REPORTED, long_context)
     jobs = [
         job.model_copy(
             update={
@@ -1799,6 +1841,91 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         f"{_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES:,} bytes of pre-existing excess. "
         f"{oversized_frame_report(channels_frame, _MAX_LINE_BYTES)}"
     )
+
+
+def _cache_variant_frames(
+    monkeypatch: pytest.MonkeyPatch, cache_reported: bool | None, long_context: str
+) -> dict[str, str]:
+    """Every receipt-carrying attach projection of a SMALL state, as wire JSON.
+
+    The same constructions the all-year frame uses for its receipts -- a job's
+    folded ``cost_components`` and the state-level ``usage_components`` tail --
+    and the same three row projections its arms measure (members, released rows
+    and ``JobState.from_job`` rows), shrunk to two jobs so a variant costs
+    milliseconds instead of a minute. Size is irrelevant here: the claim checked
+    on it is identity, which does not depend on how many rows repeat it.
+    """
+    with monkeypatch.context() as patch:
+        _install_variant_receipts(patch, cache_reported, long_context)
+        jobs = [
+            job.model_copy(
+                update={
+                    # More than one receipt per job, or the wire fold
+                    # (``_fold_job_usage_in_place``) skips the list entirely and
+                    # the folded path would go unmeasured.
+                    "usage": Usage(
+                        input_tokens=1_000,
+                        cost_components=[_receipt(index) for index in range(5)],
+                    )
+                }
+            )
+            for job in _jobs(2, 3)
+        ]
+        usage_components = [
+            FrontendUsage.model_validate(_receipt(index).model_dump(mode="json"))
+            for index in range(5)
+        ]
+    if cache_reported is not None:
+        # Not vacuous: the evidence really is ON the state's receipts, so an
+        # identical frame means the wire dropped it, not that it never arrived.
+        receipts = [receipt for job in jobs if job.usage for receipt in job.usage.cost_components]
+        assert len(receipts) == 10
+        assert all(receipt._cache_read_reported is cache_reported for receipt in receipts)
+    state = FrontendSessionState(
+        session_id="s1", epoch="e1", jobs=jobs, usage_components=usage_components
+    )
+    settled = [
+        job.model_copy(update={"status": "completed", "settled_at": _RELEASED_ARM_SETTLED_AT})
+        for job in jobs
+    ]
+    projections = {
+        "member": jobs,
+        "released": [_with_lineage(_released_row(job), _NO_LINEAGE) for job in settled],
+        "from_job": [_with_lineage(JobState.from_job(job), _NO_LINEAGE) for job in settled],
+    }
+    frames: dict[str, str] = {}
+    for name, rows in projections.items():
+        store = FrontendStateStore(state.model_copy(update={"jobs": rows}))
+        frame = {
+            "op": "frontend_sync",
+            "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
+        }
+        frames[name] = json.dumps(frame)
+    return frames
+
+
+@pytest.mark.parametrize("long_context", ["none", "priced", "unpriced"])
+def test_live_cache_evidence_adds_no_bytes_to_the_attach_frame(
+    monkeypatch: pytest.MonkeyPatch, long_context: str
+) -> None:
+    """Cache evidence on a receipt is invisible on the wire, byte for byte.
+
+    This is what lets the all-year frame run with one cache value instead of
+    three (see the comment above it): the frames must be IDENTICAL, which is
+    stronger than the "still under 1 MiB" the 3 x 3 grid used to assert, which
+    could only see a leak large enough to cross a line limit.
+    """
+    baseline = _cache_variant_frames(monkeypatch, None, long_context)
+    for cache_reported in (True, False):
+        assert _cache_variant_frames(monkeypatch, cache_reported, long_context) == baseline, (
+            f"cache_reported={cache_reported} changed the attach frame. "
+            "`Usage._cache_read_reported` is live routing evidence kept off "
+            "serialized frames because repeating it across hundreds of receipts "
+            "breaks the bounded attach line; it has started riding the wire. "
+            "Keep it private, or re-parametrise "
+            "test_the_attach_frame_fits_for_a_session_that_ran_all_year over "
+            "cache_reported and re-measure the shard it lands on."
+        )
 
 
 @pytest.mark.parametrize(
