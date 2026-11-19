@@ -3282,14 +3282,12 @@ MoveWorkingSetConfirmScreen .move-workset {
 #move-workset-title {
     text-style: bold;
     color: $lo-fg;
-    margin-bottom: 1;
 }
 
 #move-workset-summary {
     width: 100%;
     height: auto;
     color: $lo-fg;
-    margin-bottom: 1;
     background: $lo-overlay;
     scrollbar-size-vertical: 1;
 }
@@ -3313,7 +3311,6 @@ MoveWorkingSetConfirmScreen .move-workset {
     height: auto;
     border: none;
     padding: 0 1;
-    margin-bottom: 1;
     background: $lo-overlay;
 }
 

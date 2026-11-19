@@ -418,6 +418,40 @@ def _relay_serves_workset_gate(record: Any) -> bool:
     return WORKSET_MOVE_CAPABILITY in tuple(getattr(record, "capabilities", None) or ())
 
 
+def _config_root() -> Path:
+    from local_operator.paths import config_dir
+
+    return Path(config_dir())
+
+
+def _nothing_to_carry_here(root: Path, session_id: str) -> bool:
+    """Whether THIS device's copy of ``session_id`` has an empty working set.
+
+    Used only to let a plain offload through a relay older than the gate
+    (``request_move``). No session directory here means nothing of it lives on this
+    device to leave behind (that relay refuses an offload it does not own). FAIL
+    CLOSED: a manifest that cannot be read is NOT "nothing", so the move stays
+    refused with the restart remedy.
+    """
+    from local_operator.network import workset
+
+    if not (Path(root) / "sessions" / session_id).is_dir():
+        return True
+    try:
+        manifest = workset.compute_manifest(
+            Path(root),
+            session_id,
+            # Emptiness does not depend on the destination; its id only feeds the
+            # scope digest, which nothing reads on this path.
+            to_device="",
+            cwd_hint=_session_cwd_at(Path(root), session_id),
+        )
+    except Exception:  # noqa: BLE001 — unknown is not empty (fail closed)
+        logger.info("mobility: could not read %s's working set", session_id, exc_info=True)
+        return False
+    return bool(manifest.empty)
+
+
 def stale_relay_message(root: Path | str | None = None) -> str:
     """:data:`RELAY_RESTART_MESSAGE` when this device's relay predates the gate, else "".
 
@@ -4691,7 +4725,12 @@ def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     nothing usable is known, which is what makes the prepare answer carry no
     ``cwd`` key and the destination invent no marker.
     """
-    root = Path(server.root)
+    return _session_cwd_at(Path(server.root), session_id)
+
+
+def _session_cwd_at(root: Path, session_id: str) -> str:
+    """:func:`_source_session_cwd` by config root, for a caller with no relay server
+    object (``request_move``'s stale-relay check runs in the CLI process)."""
     session_dir = root / "sessions" / session_id
 
     def usable(value: Any) -> bool:
@@ -7966,7 +8005,17 @@ def request_move(
     consenting = bool(dry_run or confirm_working_set or without_working_set)
     gated = consenting or not (keep or from_replica)
     if gated and not _relay_serves_workset_gate(record):
-        return _relay_refusal(session_id, "relay_restart_required", RELAY_RESTART_MESSAGE)
+        # A PLAIN OFFLOAD WITH NOTHING TO CARRY STILL GOES THROUGH (coordinator
+        # ruling, PR #4241 merge gate): the stale relay's ungated move loses nothing
+        # when this device's own manifest is empty, so it moves exactly as it did
+        # before the gate. Only an offload can be checked here (this device is its
+        # owner); a recall's owner is remote, and a consent or dry run cannot be
+        # carried by that relay at all, so those stay refused. The restart remedy is
+        # honest in this branch: it is THIS device's relay that is older than this lop.
+        plain_offload = not consenting and to != "local" and not from_replica
+        root_dir = resolved if resolved is not None else _config_root()
+        if not (plain_offload and _nothing_to_carry_here(root_dir, session_id)):
+            return _relay_refusal(session_id, "relay_restart_required", RELAY_RESTART_MESSAGE)
     action = "recover" if from_replica else ("recall" if to == "local" else "offload")
     # THE CALLER'S OWN ENVELOPE IS THE RELAY'S BOUND PLUS ITS MARGIN, and both terms
     # come from ``move_hold_s`` so the two cannot drift: a caller that gives up FIRST

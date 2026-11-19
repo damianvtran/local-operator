@@ -56,8 +56,9 @@ MoveDecision = Literal["confirm", "without", ""]
 
 #: The card's geometry, mirrored from ``local_operator.tcss`` (``.move-workset``):
 #: width cap, share of the screen, vertical/horizontal padding, and the rows its
-#: fixed parts take besides their text (title margin, summary margin, checkbox
-#: margin, a 3-row button). ``_fit`` turns them into the summary's row budget.
+#: fixed parts take besides their text (the ``.gap-above`` blank rows above the
+#: summary, the checkbox and the buttons, and a 3-row button). ``_fit`` turns them
+#: into the summary's row budget.
 _CARD_WIDTH = 86
 _CARD_SHARE = 0.9
 _CARD_PAD_Y = 2
@@ -148,7 +149,11 @@ class MoveWorkingSetConfirmScreen(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         with Container(classes="move-workset"):
             yield Static(self.title_text(), id="move-workset-title", markup=False)
-            with VerticalScroll(id="move-workset-summary"):
+            # SPACING IS `.gap-above`, the sheet's ONE sanctioned blank row
+            # (tests/unit/tui/test_minimalism.py pins it as the only vertical margin):
+            # the summary, the checkbox and the button row each open one row above
+            # themselves, the same rows the old per-widget `margin-bottom`s drew.
+            with VerticalScroll(id="move-workset-summary", classes="gap-above"):
                 for line in self.summary_lines():
                     depth, text = _indent(line)
                     row = Static(Content(text), classes="move-workset-line", markup=False)
@@ -159,9 +164,12 @@ class MoveWorkingSetConfirmScreen(ModalScreen[str]):
                 # checkbox wraps (``height: auto`` in the sheet) so the device name
                 # the consent depends on is never truncated (review D4).
                 yield _WrappingCheckbox(
-                    Content(self.checkbox_text()), value=False, id="move-workset-check"
+                    Content(self.checkbox_text()),
+                    value=False,
+                    id="move-workset-check",
+                    classes="gap-above",
                 )
-            with Horizontal(id="move-workset-buttons"):
+            with Horizontal(id="move-workset-buttons", classes="gap-above"):
                 if self._consentable:
                     # DISABLED UNTIL TICKED: the operator's requirement is an explicit
                     # approval, so Enter on a focused button cannot skip the checkbox.
@@ -218,7 +226,7 @@ class MoveWorkingSetConfirmScreen(ModalScreen[str]):
         rows += len(Content(self.title_text()).wrap(inner))
         if self._consentable or self._without:
             label = Content(self.checkbox_text()).wrap(max(1, inner - _CHECK_CHROME_X))
-            rows += len(label) + 1  # its margin-bottom
+            rows += len(label) + 1  # the blank row above it (.gap-above)
         budget = max(3, int(height * _CARD_SHARE) - rows)
         self.query_one("#move-workset-summary").styles.max_height = budget
 

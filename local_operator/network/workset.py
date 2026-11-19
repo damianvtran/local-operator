@@ -669,6 +669,34 @@ def _work_tree_top(directory: Path) -> Path | None:
     return None
 
 
+def _broken_gitdir_pointer(top: Path) -> bool:
+    """Whether ``top/.git`` is a ``gitdir:`` pointer FILE whose target is gone.
+
+    A linked worktree or submodule carries a ``.git`` file naming its real gitdir; a
+    removed gitdir leaves the pointer behind. Stat-only so the cause code does not
+    depend on how a given git version words the failure. Relative targets resolve
+    against the pointer file's directory, as git resolves them. Anything unreadable
+    or unparseable returns False and is left to git (still fail-closed there).
+    """
+    pointer = top / ".git"
+    try:
+        if not pointer.is_file():
+            return False
+        first = pointer.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+    except OSError:
+        return False
+    if not first or not first[0].startswith("gitdir:"):
+        return False
+    target = first[0][len("gitdir:") :].strip()
+    if not target:
+        return False
+    resolved = Path(target) if os.path.isabs(target) else top / target
+    try:
+        return not resolved.exists()
+    except OSError:
+        return False
+
+
 @dataclass(frozen=True)
 class Candidate:
     """A worktree this session tree touched, before facts are read."""
@@ -755,6 +783,16 @@ def discover_worktrees(seeds: Iterable[Seed]) -> list[Candidate]:
     members: dict[Path, list[tuple[Path, bool]]] = {}
     for top, tagged in tops.items():
         passive = mention_only(item.split("\0", 1)[0] for item in tagged)
+        if _broken_gitdir_pointer(top):
+            # Classed from the filesystem, not from git's stderr: git 2.50 says "not a
+            # git repository" here while CI's git 2.56 words it differently (the
+            # PR #4241 merge gate read `git_error`). Still fail closed for a top the
+            # session worked in; a mention-only top is simply not listed, as below.
+            if passive:
+                continue
+            raise WorksetUnknown(
+                "discover", str(top), "gitdir pointer target is missing", "not_a_repository"
+            )
         common = _git(
             top,
             "rev-parse",

@@ -345,6 +345,32 @@ def test_a_broken_gitdir_pointer_fails_closed(root: Path, rig: Rig, tmp_path: Pa
     assert failure.value.cause == "not_a_repository"
 
 
+def test_a_broken_gitdir_pointer_is_classed_whatever_git_says(
+    root: Path, rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Merge-gate regression (PR #4241): CI's git 2.56 words the removed-gitdir
+    failure differently from git 2.50 and the cause read ``git_error``. The pointer is
+    now classed from the filesystem, so git's wording — simulated here as an
+    unrecognised failure — cannot change the cause."""
+    proj2 = rig.home / "proj2"
+    proj2.mkdir()
+    (proj2 / ".git").write_text("gitdir: ../gone-relative\n", encoding="utf-8")
+    point_session_at(root / "sessions" / SID, proj2)
+    real_git = workset._git
+
+    def other_wording(cwd: Path, *args: str, **kwargs: object) -> object:
+        if Path(cwd) == proj2 and kwargs.get("required"):
+            raise workset.WorksetUnknown(str(kwargs["required"]), str(cwd), "x", "git_error")
+        return real_git(cwd, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workset, "_git", other_wording)
+
+    with pytest.raises(workset.WorksetUnknown) as failure:
+        _manifest(root, rig)
+
+    assert (failure.value.step, failure.value.cause) == ("discover", "not_a_repository")
+
+
 def test_dubious_ownership_is_classed_not_echoed() -> None:
     """U6: the cause is a CODE the surfaces translate, never git's text."""
     text = b"fatal: detected dubious ownership in repository at '/x'\n"

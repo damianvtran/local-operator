@@ -393,21 +393,26 @@ def test_a_scripted_refusal_speaks_once_and_names_the_keeper(
     ],
 )
 def test_a_relay_older_than_the_gate_is_never_sent_a_gated_move(
-    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any], tmp_path: Path
 ) -> None:
     """R1: a pre-gate relay ignored ``dry_run`` and MOVED the conversation. R9: a plain
     move to it was still forwarded, and on an offload that relay IS the owner, with no
-    gate, so the conversation left its worktrees without a word."""
+    gate, so the conversation left its worktrees without a word. The session here HAS
+    a working set (a dirty worktree), which is what makes the plain offload unsafe."""
     from types import SimpleNamespace
 
     from local_operator.network import mobility, relay, store
 
+    rig = make_rig(tmp_path / "ws")
+    monkeypatch.setenv("HOME", str(rig.home))
+    root = tmp_path / "cfg"
+    point_session_at(root / "sessions" / SESSION, rig.feat)
     sent: list[dict[str, Any]] = []
     old = SimpleNamespace(capabilities=["mesh-net-v1", "session-mobility-v1"])
     monkeypatch.setattr(store, "find_own_relay", lambda root=None: old)
     monkeypatch.setattr(relay, "control_request", lambda *a, **k: sent.append(k) or None)
 
-    args = {"to": "peer", **kwargs}
+    args = {"to": "peer", "root": root, **kwargs}
     refused: dict[str, Any] = dict(mobility.request_move(SESSION, **args))
 
     assert refused["code"] == "relay_restart_required", refused
@@ -415,7 +420,67 @@ def test_a_relay_older_than_the_gate_is_never_sent_a_gated_move(
     assert sent == []
     # Controls: the two ungated shapes still reach the same relay — a ``keep`` copy
     # (the source keeps everything) and a recovery from a local replica.
-    mobility.request_move(SESSION, to="peer", keep=True)
-    mobility.request_move(SESSION, to="", from_replica=True)
+    mobility.request_move(SESSION, to="peer", keep=True, root=root)
+    mobility.request_move(SESSION, to="", from_replica=True, root=root)
     assert len(sent) == 2
     assert mobility.WORKSET_MOVE_CAPABILITY in relay.wire.LINK_CAPABILITIES
+
+
+def _stale_relay(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    from types import SimpleNamespace
+
+    from local_operator.network import relay, store
+
+    sent: list[dict[str, Any]] = []
+    old = SimpleNamespace(capabilities=["mesh-net-v1", "session-mobility-v1"])
+    monkeypatch.setattr(store, "find_own_relay", lambda root=None: old)
+    monkeypatch.setattr(relay, "control_request", lambda *a, **k: sent.append(k) or None)
+    return sent
+
+
+@pytest.mark.parametrize("has_session_dir", [True, False])
+def test_a_plain_offload_with_nothing_to_carry_still_reaches_an_older_relay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, has_session_dir: bool
+) -> None:
+    """Merge-gate regression (PR #4241, tests/unit/mobile/test_mesh_relay.py x10): every
+    plain offload through a pre-gate relay was refused ``relay_restart_required``, even
+    a chat-only conversation whose ungated move loses nothing. Now it is forwarded
+    exactly as before the gate; only a non-empty (or unreadable) working set refuses."""
+    from local_operator.network import mobility
+
+    home = tmp_path / "home"
+    (home / "not-a-repo").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    root = tmp_path / "cfg"
+    if has_session_dir:
+        point_session_at(root / "sessions" / SESSION, home / "not-a-repo")
+    sent = _stale_relay(monkeypatch)
+
+    answer = dict(mobility.request_move(SESSION, to="peer", root=root))
+
+    # The fake relay answers nothing, so the caller reports the relay it could not
+    # ask; what matters is that the frame WAS sent, and no restart was demanded.
+    assert answer["code"] != "relay_restart_required", answer
+    assert len(sent) == 1
+    assert (sent[0]["action"], sent[0]["to"]) == ("offload", "peer")
+
+
+def test_an_unreadable_working_set_keeps_the_older_relay_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fail closed: a manifest that cannot be computed is not "nothing to carry"."""
+    from local_operator.network import mobility, workset
+
+    root = tmp_path / "cfg"
+    point_session_at(root / "sessions" / SESSION, tmp_path)
+    sent = _stale_relay(monkeypatch)
+
+    def unreadable(*_a: Any, **_k: Any) -> Any:
+        raise workset.WorksetUnknown("worktree_list", "~/proj", "git failed")
+
+    monkeypatch.setattr(workset, "compute_manifest", unreadable)
+
+    refused = dict(mobility.request_move(SESSION, to="peer", root=root))
+
+    assert refused["code"] == "relay_restart_required", refused
+    assert sent == []
