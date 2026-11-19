@@ -110,7 +110,10 @@ class _Extension:
     the origin (``decideAccess``: ``policyCovers``) and stores a persistent
     grant; a signed deny decides only the selected entry and is remembered
     for the origin (``node-site-decisions.ts``). ``before_decide`` lets a cell
-    run something (a teardown) while a decision is in flight.
+    run something (a teardown) while a decision is in flight, before the
+    extension applied it; ``after_apply`` after it applied but before the
+    reply reaches the host (R2-1); ``cancel_gate`` holds every
+    ``cancel_access`` until it is set, so a cell can park a teardown mid-way.
     """
 
     def __init__(self, entry_id: str = VECTOR["entry_id"]) -> None:
@@ -119,6 +122,9 @@ class _Extension:
         self.allowed = False
         self.denied = False
         self.before_decide: Any = None
+        self.after_apply: Any = None
+        self.cancel_gate: Any = None
+        self.submitted: list[dict[str, Any]] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     @property
@@ -159,6 +165,8 @@ class _Extension:
                 "expires_at": int(time.time() * 1000) + 600_000,
             }
         if method == "cancel_access":
+            if self.cancel_gate is not None:
+                await self.cancel_gate.wait()
             if entry is None or entry["state"] != "pending":
                 return {"origin": VECTOR["origin"], "state": "none"}
             entry["state"] = "none"
@@ -177,6 +185,14 @@ class _Extension:
         return None
 
     async def submit(self, params: dict[str, Any]) -> dict[str, Any]:
+        reply = await self._apply(params)
+        if reply.get("applied"):
+            self.submitted.append(params)
+            if self.after_apply is not None:
+                await self.after_apply()
+        return reply
+
+    async def _apply(self, params: dict[str, Any]) -> dict[str, Any]:
         if self.before_decide is not None:
             await self.before_decide()
         selected = self._entry_for(params["question_id"])
@@ -580,20 +596,160 @@ async def test_a_decision_for_a_requester_that_is_gone_is_refused_before_signing
     assert submitted == [] and ext.allowed is False
 
 
+async def _until(predicate: Any) -> None:
+    """Yield to the loop until ``predicate()`` holds — an ordering barrier on
+    observable state, never a wall-clock sleep (bounded so a broken ordering
+    fails rather than hangs)."""
+    import asyncio
+
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("ordering barrier never reached")
+
+
+def _status(root: Any, ask_id: str) -> str:
+    return str(root.ask_queue().find(ask_id)["status"])
+
+
 @pytest.mark.asyncio
-async def test_an_answer_racing_teardown_grants_nothing(tmp_path: Path) -> None:
-    """Answer RACING teardown: the child ends while the signed decision is in
-    flight. Teardown cancels the extension entry, so the decision finds no live
-    entry and nothing is granted or recorded as approved."""
+@pytest.mark.parametrize("word,state", [("approve", "allowed"), ("deny", "denied")])
+async def test_a_decision_the_extension_took_before_teardown_is_recorded_answered(
+    tmp_path: Path, word: str, state: str
+) -> None:
+    """R2-1, interleaving "submit first": the signed decision is APPLIED at the
+    extension, and the child's teardown lands before the reply reaches the
+    host. The record must say what the extension did. Fails on f9afe5418: the
+    teardown withdrew the card, so the ask said ``withdrawn`` while the
+    extension had stored the decision (reviewer m2)."""
+    import asyncio
+
     root, child = _family(tmp_path)
     ext = _Extension()
     assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
-    ext.before_decide = child.dispose
+    [record] = _open(root)
+    teardown: list[Any] = []
+
+    async def _teardown_lands() -> None:
+        teardown.append(asyncio.ensure_future(child.dispose()))
+        await _until(lambda: child._site_requests_closed)
+
+    ext.after_apply = _teardown_lands
+    outcome = await _decide(root, ext, word)
+    await teardown[0]
+    assert len(ext.submitted) == 1 and ext.submitted[0]["word"] == word
+    assert outcome["ok"] is True and outcome.get("recorded", True) is True, outcome
+    assert _status(root, record["ask_id"]) == "answered"
+    assert ext.state == state, "the entry the extension decided was not cancelled after"
+    assert root._site_cards == {}
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_that_won_the_lock_refuses_the_decision_unsubmitted(
+    tmp_path: Path,
+) -> None:
+    """R2-1, interleaving "teardown first": the teardown has started (parked
+    mid-way on its entry cancel) when the signed decision arrives. The
+    decision refuses ``requester_gone`` and NOTHING reaches the extension;
+    the card's record is ``withdrawn``, matching the extension (no grant)."""
+    import asyncio
+
+    root, child = _family(tmp_path)
+    ext = _Extension()
+    assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
+    [record] = _open(root)
+    ext.cancel_gate = asyncio.Event()
+    teardown = asyncio.ensure_future(child.dispose())
+    await _until(lambda: child._site_requests_closed)
+    mint_bridge_decide_grant(
+        session_id=root.session_id,
+        ask_id=record["ask_id"],
+        question_id=VECTOR["question_id"],
+        word="approve",
+        proof={"operator_sig": "3044ab", "operator_key_id": "kid", "challenge": "ch"},
+    )
+    outcome = await root.site_decide(
+        record["ask_id"], VECTOR["question_id"], "approve", submit=ext.submit
+    )
+    ext.cancel_gate.set()
+    await teardown
+    # Refused before any submit: by the closed requester / closed lock, or by
+    # the withdrawn record when the teardown's withdraw already landed.
+    assert outcome["ok"] is False, outcome
+    assert outcome.get("code", "requester_gone") == "requester_gone", outcome
+    assert ext.submitted == [] and ext.allowed is False
+    assert _status(root, record["ask_id"]) == "withdrawn"
+    assert _cancelled_by(ext, child) and ext.state == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_card_whose_lock_a_teardown_holds_is_not_decided(tmp_path: Path) -> None:
+    """R2-1, the lock itself: a teardown moved the card ``open -> closed``
+    and its withdraw has not landed yet. The decision refuses
+    ``requester_gone`` and submits nothing, whatever the requester flags say."""
+    root, child = _family(tmp_path)
+    ext = _Extension()
+    assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
+    [record] = _open(root)
+    root._site_cards[record["ask_id"]].state = "closed"
     outcome = await _decide(root, ext, "approve")
-    assert outcome["ok"] is False
-    assert ext.allowed is False and ext.state == "none"
-    assert _cancelled_by(ext, child)
-    assert _open(root) == [] and root._site_cards == {}
+    assert outcome["ok"] is False and outcome["code"] == "requester_gone", outcome
+    assert ext.submitted == [] and ext.allowed is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_decision_racing_teardown_is_recorded_withdrawn(tmp_path: Path) -> None:
+    """R2-1, the decision is in flight when the teardown lands, and the
+    extension REFUSES it (the entry expired there). The teardown waited for
+    that outcome and then withdrew the card: ``withdrawn`` exactly because
+    nothing was applied."""
+    import asyncio
+
+    root, child = _family(tmp_path)
+    ext = _Extension()
+    assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
+    [record] = _open(root)
+    teardown: list[Any] = []
+
+    async def _teardown_then_expire() -> None:
+        teardown.append(asyncio.ensure_future(child.dispose()))
+        await _until(lambda: child._site_requests_closed)
+        # The teardown is parked on the deciding card, so the card is still open.
+        assert _open(root) != []
+        ext.state = "expired"
+
+    ext.before_decide = _teardown_then_expire
+    outcome = await _decide(root, ext, "approve")
+    await teardown[0]
+    assert outcome["ok"] is False and ext.submitted == [] and ext.allowed is False
+    assert _status(root, record["ask_id"]) == "withdrawn"
+    assert root._site_cards == {}
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_whose_wait_ran_out_leaves_the_record_to_the_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1, bounded wait: the submit outlives the teardown's wait. The
+    teardown does not withdraw a card whose decision is still at the
+    extension; the decision records the truth when it returns."""
+    from local_operator.session.session import Session
+
+    monkeypatch.setattr(Session, "_SITE_TEARDOWN_DECIDE_WAIT_S", 0)
+    root, child = _family(tmp_path)
+    ext = _Extension()
+    assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
+    [record] = _open(root)
+
+    async def _teardown_times_out() -> None:
+        await child.dispose()  # completes: its wait ran out
+        assert _open(root) != [], "a deciding card is not withdrawn by a timed-out teardown"
+
+    ext.after_apply = _teardown_times_out
+    outcome = await _decide(root, ext, "approve")
+    assert outcome["ok"] is True and ext.allowed is True
+    assert _status(root, record["ask_id"]) == "answered"
 
 
 # --- one card per origin, bound per requester (S60334-2) ---------------------------------
@@ -695,3 +851,74 @@ async def test_a_lapsed_shared_card_releases_its_waiters(
         await asyncio.sleep(0)
     assert root._site_cards == {}
     assert sibling._pending_site_requests == {} and _cancelled_by(ext, sibling)
+
+
+# --- cleanup vs rebind (60334 R2-2) ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_late_lapse_cleanup_spares_the_entry_a_replacement_card_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: the shared card lapses and its cleanup (cancel the waiter's
+    entry) is scheduled; before it runs, the waiter requests again and the
+    extension hands back the same still-pending entry, so a REPLACEMENT card
+    binds it. The late cleanup must not cancel that entry. Fails on
+    f9afe5418: the old card's cleanup cancelled it and the approve of the
+    replacement card granted nothing."""
+    root, child = _family(tmp_path)
+    sibling = _child_of(tmp_path, root, "sibling")
+    ext = _Extension()
+    assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
+    assert (await _browser("request_access", sibling._build_tool_context(), ext)).details["shared"]
+    entry = ext.entry_of(f"session:{sibling.session_id}")
+    queue = root.ask_queue()
+    real_now = queue._now
+    monkeypatch.setattr(queue, "_now", lambda: real_now() + 3_600_000)
+    before = set(root._background_tasks)
+    root._prune_site_cards()  # the lapse cleanup is scheduled, not yet run
+    cleanup = set(root._background_tasks) - before
+    assert cleanup, "the lapse scheduled the waiter's entry cancel"
+    again = await _browser("request_access", sibling._build_tool_context(), ext)
+    assert not again.is_error, _text_of(again)
+    [replacement] = _open(root)
+    assert root._site_cards[replacement["ask_id"]].entry_id == entry
+    # Now the old card's scheduled cleanup runs (late).
+    await _until(lambda: all(task.done() for task in cleanup))
+    assert ext.entries[f"session:{sibling.session_id}"]["state"] == "pending"
+    outcome = await _decide(root, ext, "approve")
+    assert outcome["ok"] is True, outcome
+    result = await _browser("await_access", sibling._build_tool_context(), ext, timeout_s=5)
+    assert result.details["state"] == "allowed"
+
+
+@pytest.mark.asyncio
+async def test_an_old_cards_cleanup_after_a_rebind_spares_the_heirs_entry(tmp_path: Path) -> None:
+    """R2-2, rebind: the owner withdraws, its card is re-raised bound to the
+    waiter's entry, and a cleanup keyed by the OLD card fires late. Cleanup is
+    keyed by (card, entry): the old card's cleanup finds the entry bound to the
+    live replacement and skips the cancel, so the heir's approve still grants."""
+    import asyncio
+
+    root, child = _family(tmp_path)
+    sibling = _child_of(tmp_path, root, "sibling")
+    ext = _Extension()
+    assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
+    assert (await _browser("request_access", sibling._build_tool_context(), ext)).details["shared"]
+    [old] = _open(root)
+    entry = ext.entry_of(f"session:{sibling.session_id}")
+    cancel = sibling._site_request_cancels[entry]
+    late = root._guarded_site_cancel(
+        cancel, entry_id=entry, stale_ask_id=old["ask_id"], requester=sibling
+    )
+    await child.dispose()  # owner withdraws: the card passes to the sibling
+    [replacement] = _open(root)
+    assert replacement["ask_id"] != old["ask_id"]
+    assert root._site_cards[replacement["ask_id"]].owner() is sibling
+    await late()
+    await asyncio.sleep(0)
+    assert ext.entries[f"session:{sibling.session_id}"]["state"] == "pending"
+    outcome = await _decide(root, ext, "approve")
+    assert outcome["ok"] is True, outcome
+    result = await _browser("await_access", sibling._build_tool_context(), ext, timeout_s=5)
+    assert result.details["state"] == "allowed"
