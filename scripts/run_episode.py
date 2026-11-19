@@ -2250,9 +2250,40 @@ def main(
     # raw argv is what makes "the same invocation" exact, including flags this
     # process resolved and flags it must not reinterpret.
     args._raw_argv = raw
-    result = asyncio.run(
-        run(args, _test_owner_entry=_test_owner_entry, _test_owner_admission=_test_owner_admission)
-    )
+    # THE EPISODE OWNS THE BROKER IT STARTS. Resolving the store (infra refs,
+    # secret refs, the session's own registration) lazily starts a DETACHED
+    # ``secrets.brokerd`` for the episode's config root, and nothing ever
+    # stopped it: one orphan per episode, alive until its 30-minute idle timer.
+    # The scope stops only a broker THIS process spawned while it was open --
+    # never one it merely attached to (the operator's own) -- and it wraps the
+    # whole ``asyncio.run`` so every exit of ``run`` (preflight refusals
+    # included, which resolve infra refs first) is covered, and the blocking
+    # stop runs after the episode's loop has closed rather than on it.
+    from local_operator.evaluation.runner.host_secrets import owned_broker_scope
+
+    broker_scope = None
+    try:
+        with owned_broker_scope() as broker_scope:
+            result = asyncio.run(
+                run(
+                    args,
+                    _test_owner_entry=_test_owner_entry,
+                    _test_owner_admission=_test_owner_admission,
+                )
+            )
+    finally:
+        # ONE LINE PER BROKER THE EPISODE STARTED, successes included. The
+        # scope itself warns only about a broker it could NOT stop, so a clean
+        # stop left no trace and a campaign could not confirm from its own
+        # logs that its episodes stopped leaking daemons (PR #4236 review m5).
+        # Read after the ``with`` because the outcomes are filled in by the
+        # scope's exit, and in a ``finally`` because an episode that RAISES
+        # out of ``run`` stopped its broker just the same and owes the line.
+        for broker_pid, broker_outcome in broker_scope.outcomes if broker_scope else ():
+            print(
+                f"episode-started secret broker pid={broker_pid} outcome={broker_outcome}",
+                file=sys.stderr,
+            )
     sys.stdout.flush()
     sys.stderr.flush()
     if args.owned_host:

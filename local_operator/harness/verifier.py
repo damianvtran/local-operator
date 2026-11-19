@@ -584,6 +584,7 @@ def counted_host_tools(
     on_exhausted: Callable[[], None],
     refuse_when: Callable[[], str | None] | None = None,
     on_result: Callable[[Any], Any] | None = None,
+    command_refusal: str = COMMAND_BUDGET_REFUSAL,
 ) -> tuple[tuple["AgentTool", ...], Callable[[], int]]:
     """Wrap host tools so every call counts against ``limit``.
 
@@ -593,8 +594,10 @@ def counted_host_tools(
     launcher lets the child's next request answer instead of cancelling it.
     ``refuse_when`` adds a launcher-side refusal (the request budget) with its
     own text, checked after the command budget (the more specific fact when
-    both are spent); a refused call does not count. Returns the wrapped
-    tools and a reader for the count.
+    both are spent); a refused call does not count. ``command_refusal`` is
+    the cue's text (``{limit}`` is filled in): a caller whose answer is not
+    the VERDICT line must not have its child told to end with one. Returns
+    the wrapped tools and a reader for the count.
     """
 
     from local_operator.harness.types import TextContent, ToolResult
@@ -611,7 +614,7 @@ def counted_host_tools(
             refusal: str | None = None
             if count >= limit:
                 on_exhausted()
-                refusal = COMMAND_BUDGET_REFUSAL.format(limit=limit)
+                refusal = command_refusal.format(limit=limit)
             elif refuse_when is not None:
                 refusal = refuse_when()
             if refusal is not None:

@@ -517,9 +517,16 @@ class OSWorldV2Adapter:
         # is always False and calling it a check. Requiredness is enforced in
         # reset_start, after the task loads and still before allocation.
         provisioning.validate_proxy_config_file(params.infra_values, enable_proxy=False)
+        # The artifact root is not known until ``reset_start``; the workspace
+        # is, so the tool path is judged against it here and against the
+        # episode's root there (still before allocation).
+        tool_path = provisioning.resolve_evaluator_tool_path(
+            params.infra_values, forbidden_roots=(str(self._workspace_root),)
+        )
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)
+        vendor_bridge.inject_evaluator_tool_path(tool_path)
         self._action_settle_policy = action_settle_policy
         if self._task is not None:
             self._plan = provisioning.resolve(
@@ -652,6 +659,12 @@ class OSWorldV2Adapter:
         )
         self._secrets = {secret.name: secret.value for secret in params.secrets}
         self._install_secret_environment()
+        # Second half of the ``prepare`` check: the episode's own root is
+        # first named here. Before the provider exists, so a refusal is free.
+        provisioning.resolve_evaluator_tool_path(
+            self._infra_values,
+            forbidden_roots=(str(self._workspace_root), str(params.artifact_root)),
+        )
 
         provider = self._build_provider()
         # The cache root exists BEFORE allocate so a provider that downloads
