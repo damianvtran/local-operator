@@ -3519,9 +3519,11 @@ class AuthStore:
 
         Returns whether the write happened. A row that is GONE (a racing logout)
         is ``False`` and never a re-created row: an explicitly removed credential
-        stays removed. Best-effort on a sqlite error, like every other marker
-        write here — losing a marker restores the pre-marker behaviour rather
-        than failing the request that triggered it.
+        stays removed. Best-effort on a sqlite error while WRITING (taking the
+        reservation, the UPDATE, the commit), like every other marker write here
+        — losing a marker restores the pre-marker behaviour rather than failing
+        the request that triggered it. A sqlite error while READING the row
+        propagates, as it always did: "could not read" is not "no marker".
 
         ONE READ-MODIFY-WRITE. The read, ``mutate`` and the write run under the
         connection's statement lock and, when no transaction is already open, a
@@ -3542,21 +3544,52 @@ class AuthStore:
             return False
         conn = self._conn
         with conn.lock:
-            began = False
+            # Transaction state is sampled BEFORE BEGIN, not inferred from BEGIN
+            # having returned: the wrapped `execute` can open the transaction and
+            # still raise afterwards (draining the cursor, reading its
+            # attributes), and a flag set only on return would then skip the
+            # rollback and leave the reservation held on this shared connection.
+            owned = not conn.in_transaction
+
+            def release() -> None:
+                if owned and conn.in_transaction:
+                    conn.rollback()
+
             try:
-                if not conn.in_transaction:
+                if owned:
                     conn.execute("BEGIN IMMEDIATE")
-                    began = True
+                # else: a caller's transaction is already open; read and write
+                # inside it and let our commit below land it, exactly as the
+                # pre-reservation code committed within the caller's transaction.
+            except sqlite3.Error:
+                # Failing to take the write reservation (SQLITE_BUSY) is a
+                # write-side failure: best-effort, like the UPDATE below.
+                release()
+                logger.debug("auth payload marker reservation failed", exc_info=True)
+                return False
+            except BaseException:
+                release()
+                raise
+            try:
+                # READ phase. A sqlite error here propagates (after cleanup) as it
+                # did before the reservation existed: a caller such as the refresh
+                # path must not proceed as though the marker were absent when the
+                # row simply could not be read.
                 row = self.get_credential(credential_id)
                 if row is None or not isinstance(row.data, dict):
-                    if began:
-                        conn.rollback()
+                    release()
                     return False
                 data = dict(row.data)
                 if not mutate(data):
-                    if began:
-                        conn.rollback()
+                    release()
                     return False
+            except BaseException:
+                # A raising read or `mutate` must not leave the reservation held:
+                # the next statement on this shared connection would run inside it.
+                release()
+                raise
+            try:
+                # WRITE phase: best-effort on a sqlite error (see docstring).
                 if moves_write_stamp:
                     conn.execute(
                         "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
@@ -3569,15 +3602,11 @@ class AuthStore:
                     )
                 conn.commit()
             except sqlite3.Error:
-                if began and conn.in_transaction:
-                    conn.rollback()
+                release()
                 logger.debug("auth payload marker write failed", exc_info=True)
                 return False
             except BaseException:
-                # A raising `mutate` must not leave the reservation held: the
-                # next statement on this shared connection would run inside it.
-                if began and conn.in_transaction:
-                    conn.rollback()
+                release()
                 raise
         return True
 

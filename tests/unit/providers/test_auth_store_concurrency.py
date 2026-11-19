@@ -18,11 +18,15 @@ on main from two store races these tests pin directly:
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_operator.network.credentials import renewal
+from local_operator.providers import auth_store
 from local_operator.providers.auth_store import (
     AWAITING_WRITEBACK_KEY,
     REFRESH_DELEGATE_KEY,
@@ -142,3 +146,114 @@ def test_a_claim_that_read_before_an_adoption_cannot_write_over_it(tmp_path: Pat
     assert AWAITING_WRITEBACK_KEY not in row.data, "the claim undid the adoption"
     assert row.data["refresh"] == "synthetic-refresh-adopted"
     assert row.data[REFRESH_DELEGATE_KEY]["epoch"] == 2
+
+
+# ---------------------------------------------------------------------------
+# `_update_payload` failure paths (PR #4269 review round 1, S1/S2, R1-m1)
+# ---------------------------------------------------------------------------
+
+
+def _raise_after(
+    monkeypatch: pytest.MonkeyPatch, store: AuthStore, prefix: str, exc: BaseException
+) -> None:
+    """Make the store's wrapped ``execute`` raise AFTER a matching statement ran."""
+    conn = store._conn  # noqa: SLF001
+    real = conn.execute
+
+    def execute(sql: str, *args: Any, **kwargs: Any) -> Any:
+        result = real(sql, *args, **kwargs)
+        if sql.startswith(prefix):
+            raise exc
+        return result
+
+    monkeypatch.setattr(conn, "execute", execute)
+
+
+def _payload(store: AuthStore, row_id: int) -> dict[str, Any]:
+    row = store.get_credential(row_id)
+    assert row is not None
+    return dict(row.data)
+
+
+def test_a_wrapper_raising_after_begin_still_releases_the_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1: BEGIN ran, then the wrapper raised before returning.
+
+    The old ``began`` flag was set only once ``execute`` returned, so this left
+    the transaction open on the shared connection and every later statement ran
+    inside it. The entry-time sample rolls it back.
+    """
+    store, row_id = _lent_store(tmp_path)
+    before = _payload(store, row_id)
+    _raise_after(monkeypatch, store, "BEGIN", sqlite3.OperationalError("after begin"))
+
+    assert store._update_payload(row_id, lambda d: d.update(x=1) or True) is False  # noqa: SLF001
+    monkeypatch.undo()
+    assert store._conn.in_transaction is False  # noqa: SLF001
+    assert _payload(store, row_id) == before
+
+
+def test_a_read_error_propagates_and_releases_the_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S2: a failed marker READ raises, as before the reservation existed.
+
+    Turning it into ``False`` would let the refresh path proceed as though no
+    marker were there when the row could not be read at all.
+    """
+    store, row_id = _lent_store(tmp_path)
+
+    def broken_read(_credential_id: int) -> Any:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store, "get_credential", broken_read)
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        store._update_payload(row_id, lambda d: True)  # noqa: SLF001
+    assert store._conn.in_transaction is False  # noqa: SLF001
+
+
+def test_a_write_error_is_best_effort_false_with_no_partial_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S2: a failed marker WRITE stays best-effort, and nothing is half-written."""
+    store, row_id = _lent_store(tmp_path)
+    before = _payload(store, row_id)
+    _raise_after(monkeypatch, store, "UPDATE", sqlite3.OperationalError("database is locked"))
+
+    assert store._update_payload(row_id, lambda d: d.update(x=1) or True) is False  # noqa: SLF001
+    monkeypatch.undo()
+    assert store._conn.in_transaction is False  # noqa: SLF001
+    assert _payload(store, row_id) == before
+
+
+def test_rows_are_drained_while_the_statement_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-m1: the deterministic form of the concurrent-read test above.
+
+    Another thread must be unable to take the lock while the cursor drains.
+    """
+    store, row_id = _lent_store(tmp_path)
+    lock = store._conn.lock  # noqa: SLF001
+    held: list[bool] = []
+    real_init = auth_store._FetchedCursor.__init__  # noqa: SLF001
+
+    def init(self: Any, cursor: sqlite3.Cursor) -> None:
+        probe: list[bool] = []
+
+        def try_take() -> None:
+            got = lock.acquire(blocking=False)
+            probe.append(not got)
+            if got:
+                lock.release()
+
+        t = threading.Thread(target=try_take)
+        t.start()
+        t.join()
+        held.extend(probe)
+        real_init(self, cursor)
+
+    monkeypatch.setattr(auth_store._FetchedCursor, "__init__", init)  # noqa: SLF001
+    assert store.get_credential(row_id) is not None
+    assert held and all(held)
