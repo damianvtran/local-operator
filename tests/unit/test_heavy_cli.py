@@ -28,17 +28,22 @@ pytestmark = pytest.mark.skipif(not heavy_lease.supported(), reason="flock is PO
 
 ROOT = Path(__file__).resolve().parents[2]
 
-#: Holds slot 0 of ``argv[1]`` for ``argv[3]`` seconds, then writes the release
-#: time to ``argv[2]`` (a ``.held`` marker appears once the slot is taken).
+#: Holds slot 0 of ``argv[1]`` for up to ``argv[3]`` seconds, then writes the
+#: release time to ``argv[2]`` (a ``.held`` marker appears once the slot is
+#: taken). It releases early once a ``.release`` file appears next to the log,
+#: so a cell can free the slot on an observed event instead of a timer.
 _HOLDER = textwrap.dedent("""
     import sys, time
     from pathlib import Path
     from local_operator import heavy_lease
     directory, log, hold = Path(sys.argv[1]), Path(sys.argv[2]), float(sys.argv[3])
+    release = log.parent / (log.name + ".release")
     while (lease := heavy_lease.try_acquire(directory, 1, command="pnpm build")) is None:
         time.sleep(0.02)
     (log.parent / (log.name + ".held")).write_text("1")
-    time.sleep(hold)
+    deadline = time.monotonic() + hold
+    while time.monotonic() < deadline and not release.exists():
+        time.sleep(0.02)
     end = time.time()
     lease.release()
     log.write_text(f"{end}\\n")
@@ -115,11 +120,24 @@ def _disable_queue() -> None:
 
 def test_wait_returns_once_a_held_slot_frees(env: dict[str, str], tmp_path: Path) -> None:
     log = tmp_path / "holder.log"
-    holder = _hold(env, log, 2.0)
+    # The slot is freed only AFTER the waiter has reported itself queued, never
+    # on a fixed timer: a ``python -m local_operator.cli`` start costs ~0.7 s
+    # idle and can pass 2 s on a loaded runner, so a 2 s hold could expire
+    # before the waiter's first poll -- it then saw a free slot, printed
+    # nothing and exited 0 (py3.12 shard 4, job 135487900771; 30/30 locally
+    # with the cell pinned to one oversubscribed core). 60 s is only the
+    # holder's backstop; the waiter's own --timeout 30 bounds the readline.
+    holder = _hold(env, log, 60.0)
     try:
         waiter = _lop(env, "wait", "--timeout", "30")
-        out, err = waiter.communicate(timeout=40)
+        assert waiter.stderr is not None
+        first = waiter.stderr.readline()  # the queued note prints on the first poll
+        log.with_name(log.name + ".release").write_text("1")
+        out, rest = waiter.communicate(timeout=40)
+        err = first + rest
         returned = time.time()
+        # Let the holder write its release time; _reap would SIGKILL it mid-write.
+        holder.wait(timeout=30)
     finally:
         _reap(holder)
     assert waiter.returncode == 0, err
