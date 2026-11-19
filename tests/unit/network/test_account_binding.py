@@ -92,7 +92,7 @@ def test_existing_consent_yields_frozen_exact_binding_without_another_prompt(rig
     assert verified.read_binding == _read(rig)
     verified.require_read(rig.link, _read(rig))
     with pytest.raises(dataclasses.FrozenInstanceError):
-        verified.generation = 2
+        setattr(verified, "generation", 2)
     with pytest.raises(ValidationError):
         verified.requester_key.public_key = rig.own.public_key
     for operation in (
@@ -110,7 +110,7 @@ def test_legacy_projection_and_internal_snapshot_share_one_verifier(rig, monkeyp
     _active(rig)
     snapshot = asyncio.run(F._verified_context(rig.link, rig.auth, rig.row.id))
     with pytest.raises(dataclasses.FrozenInstanceError):
-        snapshot.journal_revision = 0
+        setattr(snapshot, "journal_revision", 0)
     with pytest.raises(ValidationError):
         snapshot.intent.account.account_id = "account-b"
     observed = []

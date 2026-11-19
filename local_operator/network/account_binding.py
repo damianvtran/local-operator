@@ -16,7 +16,7 @@ it is not a new bearer token or an in-process cryptographic security boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, NoReturn, SupportsIndex
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -115,7 +115,7 @@ class VerifiedAccountDeviceBinding:
     def __bool__(self) -> NoReturn:
         raise TypeError("a verified binding is not a boolean file grant")
 
-    def __reduce_ex__(self, protocol: int) -> NoReturn:
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
         raise TypeError("verified bindings cannot leave the owner process")
 
     def require_read(self, incoming_link: Any, read_binding: ReadBinding) -> None:
