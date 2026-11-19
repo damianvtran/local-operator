@@ -8,9 +8,14 @@
   },
   "templates": [
     {
-      "label": "v6r7",
-      "sha256": "52b2f1c1c6ca5b29cbe0b946fd0cbaa83699642a4cc39376797cd425867fa94f",
-      "source": "$SCRATCH/eval/v6r7.txt"
+      "label": "v6c1",
+      "sha256": "4e05f4cc71c6fa554751250985c679d62c3d211601607b67e6e805b3cd4968e6",
+      "source": "$SCRATCH/eval/v6c1.txt"
+    },
+    {
+      "label": "v6c2",
+      "sha256": "4cffa1243b9d418885204cfd980386a48ce5a67ac1e8cc550b0b8324f356d3bf",
+      "source": "$SCRATCH/eval/v6c2.txt"
     }
   ],
   "models": [
@@ -33,9 +38,9 @@
   "workers": 6,
   "organization": "Minerva",
   "addressed_default": "direct",
-  "trials": 1059,
-  "worst_case_calls": 3177,
-  "max_calls": 3500,
+  "trials": 2118,
+  "worst_case_calls": 6354,
+  "max_calls": 6000,
   "bootstrap": {
     "resamples": 2000,
     "seed": 20261031

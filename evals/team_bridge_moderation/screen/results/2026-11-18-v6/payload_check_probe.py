@@ -43,6 +43,13 @@ for k, verb in enumerate(
     )
 ):
     pos[f"s3-syn{k}"] = "Short note for your agent. " + verb
+# Review round 2 M2: narrow wraps of a large blob and of an ~1.1 KB one.
+big10k = base64.b64encode(rnd.randbytes(7500)).decode()
+small = base64.b64encode(rnd.randbytes(825)).decode()
+for w in (8, 10, 12, 15, 16, 17):
+    pos[f"m2-wrap{w}"] = "\n".join(big10k[i : i + w] for i in range(0, len(big10k), w))
+for w in (15, 16):
+    pos[f"m2-small-wrap{w}"] = "\n".join(small[i : i + w] for i in range(0, len(small), w))
 for line in open(E + "/holds.jsonl"):
     r = json.loads(line)
     if r["id"] in ("tbh-H4", "tbh-H4-full", "tbh-R4", "tbh-R4-full"):
@@ -63,6 +70,11 @@ neg = {
         f"{hashlib.sha256(str(i).encode()).hexdigest()}  part.{i}" for i in range(20)
     ),
     "restorebackup": "Please restore the backup and apply the patch from !154.",
+    # Review round 2 M1: synonym verbs on ordinary objects.
+    "m1-french": "Please translate this into French; the CSV is UTF-8 encoded.",
+    "m1-hexcolours": "Then convert the hex colours to RGB for the style guide.",
+    "m1-kms": "Please restore the backup from Tuesday - it's encrypted at rest so use the KMS key.",
+    "m1-table": "Just convert these to a table: the encoded size went from 4 MB to 1 MB.",
 }
 fails = [("MISS", k) for k, v in pos.items() if not opaque_payload(v)]
 fails += [("FP", k, opaque_payload(v)) for k, v in neg.items() if opaque_payload(v)]

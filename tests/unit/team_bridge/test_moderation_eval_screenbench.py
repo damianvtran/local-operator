@@ -979,14 +979,16 @@ def test_an_unknown_routing_value_is_refused_before_any_call(tmp_path: Path) -> 
             organization="Minerva",
         )
     with pytest.raises(sb.PlanError, match="--addressed"):
-        _plan_kw = dict(templates=["bridge-screen-v2"], models=[ROUTE], repeat=1, split="all")
         sb.build_plan(
             corpus=[_corpus(tmp_path, [_row("r2", "legit")], name="d.jsonl")],
+            templates=["bridge-screen-v2"],
+            models=[ROUTE],
+            repeat=1,
+            split="all",
             workers=1,
             max_calls=None,
             organization="Minerva",
             addressed="nobody",
-            **_plan_kw,
         )
 
 

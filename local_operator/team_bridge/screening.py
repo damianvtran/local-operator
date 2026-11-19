@@ -1161,8 +1161,16 @@ def text_screening_version(
 #: (``de ad be ef`` / ``de:ad:be:ef``) is a second pattern. Lowercase paths and
 #: identifiers (``local_operator/team_bridge``, ``bcmsg_...``) are not "encoded" and
 #: never count.
+#:
+#: NARROW WRAPS (code review round 2, M2). A cluster starts at an encoded token of
+#: :data:`_PAYLOAD_MIN_RUN` (8) characters, so a blob wrapped at 8-17 columns is
+#: measured too; at 16 every line of a 16-column wrap was too short to start one.
+#: Inside a cluster, a token that is not a plain lowercase word (a short wrapped line
+#: with no digit, say) BRIDGES the cluster without adding weight, so one such line
+#: does not reset the sum (and counts, when it mixes two character classes). Lowercase
+#: prose words still neither count nor bridge.
 PAYLOAD_BLOB_MIN_BYTES = 1024
-_PAYLOAD_MIN_RUN = 16
+_PAYLOAD_MIN_RUN = 8
 _PAYLOAD_MAX_GAP = 16
 _PAYLOAD_RUN = re.compile(r"[A-Za-z0-9+/=_-]+")
 _PAYLOAD_HEX = re.compile(r"[0-9A-Fa-f]+")
@@ -1175,10 +1183,12 @@ _PAYLOAD_SPACED_HEX = re.compile(
 #:      interpreter -- the command words are case-sensitive and must lead the line
 #:      or a code span, so a markdown table row ("| Python | 3.12 |"), "the gunzip
 #:      step failed" or a backticked mention of ``python -c`` never matches;
-#:   2. an imperative decode verb (or synonym: convert, translate, reassemble,
-#:      restore, ...) aimed at an object, when the message names an ENCODING
-#:      (base64, hex, gzip, encoded, ...) -- "Decode errors dropped" or "unpack the
-#:      feedback" do not qualify;
+#:   2. an imperative decode verb aimed at an object when the message names an
+#:      ENCODING (base64, hex, gzip, encoded, ...) -- "Decode errors dropped" or
+#:      "unpack the feedback" do not qualify; a SYNONYM (convert, translate,
+#:      reassemble, restore, ...) needs a STRONG encoding name (base64, gzip, rot13,
+#:      ...) or a payload object ("the parts/payload/bundle") -- "translate this into
+#:      French; it's UTF-8 encoded" or "convert the hex colours" do not qualify;
 #:   3. an imperative decode verb aimed at a pronoun/parts AND an imperative run
 #:      verb aimed at the result ("Glue the parts back together and follow the steps
 #:      in it") -- "run this by legal" alone does not qualify.
@@ -1201,15 +1211,32 @@ _ENCODING_NOUN = re.compile(
     r"(?i)base[- ]?64\b|\b(?:b64|hex(?:-encoded|adecimal)?|gzip(?:ped)?|zlib|uuencoded|rot13"
     r"|encoded|ciphertext|encrypted)\b|\.gz\b"
 )
-_DECODE_VERB = (
-    r"(?:decode|decompress|unpack|unzip|gunzip|convert|translate|decrypt|deobfuscate"
-    r"|reassemble|reconstruct|restore|glue|stitch|concatenate)"
+#: Encoding names that only ever mean a payload encoding. ``hex``, ``encoded`` and
+#: ``encrypted`` also describe colours, file encodings and storage ("UTF-8 encoded",
+#: "encrypted at rest"), so they back a STRONG decode verb only (review round 2 M1).
+_STRONG_ENCODING = re.compile(
+    r"(?i)base[- ]?64\b|\b(?:b64|gzip(?:ped)?|zlib|uuencoded?|rot13|ciphertext)\b|\.gz\b"
+)
+#: Verbs that mean "decode" on their own.
+_DECODE_STRONG = r"(?:decode|decompress|unpack|unzip|gunzip|decrypt|deobfuscate)"
+#: Synonyms that also mean ordinary things ("translate this into French", "convert
+#: these to a table", "restore the backup"): they count only with a strong encoding
+#: name in the message or a payload referent as their object (review round 2 M1).
+_DECODE_SYNONYM = r"(?:convert|translate|reassemble|reconstruct|restore|glue|stitch|concatenate)"
+_DECODE_VERB = r"(?:" + _DECODE_STRONG + "|" + _DECODE_SYNONYM + ")"
+_PAYLOAD_REFERENT = (
+    r"the\s+(?:parts|chunks|pieces|payload|blob|bundle|packet|encoded\s+\w+|base64\s+\w+)"
 )
 #: Imperative position: opening a sentence or line, or after please/then/and/now/just.
 _IMPERATIVE = r"(?:^|[.!?;:]\s+|\n\s*(?:[-*]\s+|\d+[.)]\s+)?|\b(?:please|then|and|now|just)\s+)"
-_DECODE_IMPERATIVE = re.compile(
-    r"(?im)" + _IMPERATIVE + _DECODE_VERB + r"\s+(?:it|this|that|them|these|the|in|into|with"
-    r"|using|from|to|each|all|both|part|parts|chunk|chunks)\b"
+_DECODE_OBJECT = (
+    r"\s+(?:it|this|that|them|these|the|in|into|with|using|from|to|each|all|both|part|parts"
+    r"|chunk|chunks)\b"
+)
+_DECODE_IMPERATIVE = re.compile(r"(?im)" + _IMPERATIVE + _DECODE_STRONG + _DECODE_OBJECT)
+_SYNONYM_IMPERATIVE = re.compile(r"(?im)" + _IMPERATIVE + _DECODE_SYNONYM + _DECODE_OBJECT)
+_SYNONYM_ON_PAYLOAD = re.compile(
+    r"(?im)" + _IMPERATIVE + _DECODE_SYNONYM + r"\s+(?:back\s+)?" + _PAYLOAD_REFERENT + r"\b"
 )
 _DECODE_ON_PARTS = re.compile(
     r"(?im)" + _IMPERATIVE + _DECODE_VERB + r"\s+(?:it|this|that|them|these|the\s+(?:parts"
@@ -1251,11 +1278,28 @@ def opaque_payload(body: str) -> str:
     total, previous_end = 0.0, None
     for match in _PAYLOAD_RUN.finditer(text):
         weight = _encoded_weight(match.group(0))
-        if weight == 0.0:
-            # A plain token (a word, a path) neither counts nor breaks the cluster,
-            # so a label between chunks does not reset the sum.
-            continue
         joins = previous_end is not None and match.start() - previous_end <= _PAYLOAD_MAX_GAP
+        if weight == 0.0:
+            # A plain lowercase word neither counts nor bridges, so prose never
+            # stretches a cluster. Inside a cluster, any other alphabet token bridges
+            # it (M2), and one mixing two of upper/lower/digit -- a short wrapped line
+            # that happens to lack the third class -- also counts its length, so a
+            # narrow wrap of a just-over-1 KiB blob is not lost to its digitless lines.
+            token = match.group(0)
+            if joins and not token.islower():
+                previous_end = match.end()
+                classes = sum(
+                    (
+                        any(c.isupper() for c in token),
+                        any(c.islower() for c in token),
+                        any(c.isdigit() for c in token),
+                    )
+                )
+                if classes >= 2:
+                    total += len(token)
+                    if total >= PAYLOAD_BLOB_MIN_BYTES:
+                        return "encoded_blob"
+            continue
         if not joins and len(match.group(0)) < _PAYLOAD_MIN_RUN:
             # Only a token of _PAYLOAD_MIN_RUN or more STARTS a cluster; a shorter
             # one (the tail line of a wrapped blob) only continues one.
@@ -1271,6 +1315,10 @@ def opaque_payload(body: str) -> str:
     if _PAYLOAD_SHELL.search(text) is not None:
         return "decode_or_run"
     if _ENCODING_NOUN.search(text) is not None and _DECODE_IMPERATIVE.search(text) is not None:
+        return "decode_or_run"
+    if _SYNONYM_ON_PAYLOAD.search(text) is not None or (
+        _STRONG_ENCODING.search(text) is not None and _SYNONYM_IMPERATIVE.search(text) is not None
+    ):
         return "decode_or_run"
     if _DECODE_ON_PARTS.search(text) is not None and _RUN_IMPERATIVE.search(text) is not None:
         return "decode_or_run"
