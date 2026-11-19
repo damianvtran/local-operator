@@ -36,7 +36,7 @@
   "relay.transcript.bridge.signed_out": "Sign in to Radient to see this message",
   "relay.transcript.bridge.other_account": "Received under another Radient account",
   "relay.transcript.bridge.not_member": "You are no longer in this conversation",
-  "relay.transcript.bridge.offline": "Couldn't reach Radient — close and reopen to retry",
+  "relay.transcript.bridge.offline": "Couldn't reach Radient — reopen the conversation to retry",
   "relay.transcript.bridge.deleted": "This message was deleted",
   "relay.transcript.bridge.more_messages": "{count, plural, one {# more message in this card} other {# more messages in this card}}"
 }
