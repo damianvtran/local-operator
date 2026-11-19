@@ -1595,11 +1595,19 @@ class OwnedGroup:
                 )
                 self._terminal_result = self.last
                 return self.last
+            dropped = set()
             for pid in live:
                 try:
                     view = self.identity(pid)
                 except Unknown as exc:
                     view, failure = None, exc
+                except ProcessLookupError:
+                    # Review R2: `kernel_identity` reads /proc/<pid>/stat and THEN
+                    # calls getpgid/getsid; a reap between the two raises ESRCH
+                    # straight out of the syscall. It is the same departure race
+                    # in a narrower window, so it takes the same proof below
+                    # instead of escaping as an unnamed refusal.
+                    view, failure = None, Unknown("actual parent/PG/SID unavailable")
                 else:
                     failure = Unknown("actual parent/PG/SID unavailable")
                 # A provider answering None (or any non-triple) instead of raising
@@ -1607,11 +1615,22 @@ class OwnedGroup:
                 # out of the proof instead of reaching a named refusal.
                 if not (isinstance(view, tuple) and len(view) == 3):
                     if self._live_member_departed(pid, deadline):
+                        dropped.add(pid)
                         continue
                     raise failure
                 parent, group, sid = view
                 if (group, sid) != (self.pgid, self.sid):
                     raise Unknown("member outside the recorded group/session")
+            if dropped:
+                # Review R4: pruned exactly as the `_departed` path prunes, so the
+                # published proof, Verdict members and any later residuals describe
+                # the members that remain rather than contradicting `vanished`.
+                # The leader/pgid is never dropped, so `kept` is empty only if the
+                # census never held it; that shape refuses, as `_departed`'s does.
+                kept = [pid for pid in members if pid not in dropped]
+                if not kept:
+                    raise Unknown("every census member departed: no member to prove")
+                members = kept
             # The witness must still hold at the END of the proof.
             final_state, final_witness = self._leader_witness(deadline)
             if final_state == "reaped":
@@ -1881,12 +1900,18 @@ class OwnedGroup:
         """
         if pid in (self.leader, self.pgid):
             return False
-        probe = self._departure
+        if self._departure is None and self.samples is not None:
+            # An injected sampler carries no trustworthy kernel facts.
+            return False
+        # `getattr`, not `os.getpgid` (review R1 / QA Q1): getpgid does not exist
+        # on Windows, and the xplat battery's `static.posix_attributes` rule fails
+        # CI on any unguarded `os.getpgid` use in a module that must import there.
+        # Without the syscall no kernel answer can confirm departure, so the
+        # member is NOT dropped -- the honest refusal, not an AttributeError. The
+        # injected probe (tests, any platform) is still honoured.
+        probe = self._departure or getattr(os, "getpgid", None)
         if probe is None:
-            if self.samples is not None:
-                # An injected sampler carries no trustworthy kernel facts.
-                return False
-            probe = os.getpgid
+            return False
         try:
             own = (self._proc_self or (lambda: os.readlink("/proc/self")))()
         except Exception:  # noqa: BLE001 - an unreadable namespace grants nothing
@@ -1894,7 +1919,16 @@ class OwnedGroup:
         if own != str(os.getpid()):
             return False
         # Unknown from an incomplete census propagates: it is a refusal on its own.
-        fresh = self._members(deadline)
+        # Review R5: like the cycle census and `_late_members`, a failed census
+        # re-reads the witness once so a reaped/reused pin reports as loss (and
+        # revokes signal authority) instead of hiding behind "census incomplete".
+        try:
+            fresh = self._members(deadline)
+        except Exception:
+            lost, _ = self._leader_witness(deadline)
+            if lost == "reaped":
+                raise PinLost("reservation lost during the departure census") from None
+            raise
         if pid in fresh:
             return False
         try:

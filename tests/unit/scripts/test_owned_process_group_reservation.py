@@ -984,3 +984,150 @@ def test_an_injected_sampler_without_a_departure_probe_grants_nothing():
     cap._departure = None
     verdict = cap.refresh(deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
+
+
+# Round-1 remediation (review R2-R5, QA Q1-Q2): each test below isolates ONE
+# conjunct of `_live_member_departed` or one record/route fact, and goes red if
+# that conjunct is deleted (mutants M1, M4 and M5 in the QA report survived the
+# tests above).
+
+
+def test_a_member_the_census_still_lists_refuses_even_when_getpgid_says_esrch():
+    """NEGATIVE CONTROL for the census conjunct (QA M1, review R3).
+
+    The fixture keeps 20 listed while the injected kernel answer is ESRCH, so the
+    census is the ONLY conjunct that can refuse: dropping `pid in fresh` would
+    certify a listed (live or zombie) member as departed.
+    """
+    kernel, cap, failed = _identity_race_world(reap=False)
+
+    def esrch(pid):
+        raise ProcessLookupError(pid)
+
+    cap._departure = esrch
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert failed["n"] == 1
+    assert verdict.status == "REFUSED", verdict.reason
+    assert "actual parent/PG/SID unavailable" in verdict.reason
+    assert "vanished" not in cap.probe
+
+
+def test_the_leader_is_never_departed_even_when_census_and_kernel_agree():
+    """NEGATIVE CONTROL for the leader/pgid exclusion (QA M4).
+
+    The witness is the pin; amnesty for it would let the proof run without the
+    one identity everything else is anchored to. Census and kernel are both made
+    to say "gone", so the exclusion is the only conjunct left to refuse.
+    """
+    kernel, cap, _ = _identity_race_world()
+
+    def gone(pid):
+        raise ProcessLookupError(pid)
+
+    cap._departure = gone
+    cap.census = lambda pgid, deadline: owned.AuthoritativeCensus((20,), True, True, "")
+    for pid in (kernel.leader, cap.pgid):
+        assert cap._live_member_departed(pid, kernel.clock() + 5.0) is False
+    assert "vanished" not in cap.probe
+
+
+@pytest.mark.parametrize(
+    "proc_self",
+    [lambda: "1", lambda: (_ for _ in ()).throw(OSError("no /proc"))],
+    ids=["other-namespace", "unreadable"],
+)
+def test_a_proc_self_that_does_not_name_us_refuses(proc_self):
+    """NEGATIVE CONTROL for C10 (QA M5, review R3): census and getpgid must speak
+    about OUR pid namespace, or an ESRCH proves nothing about the census's pid."""
+    kernel, cap, _ = _identity_race_world()
+    cap._proc_self = proc_self
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert "actual parent/PG/SID unavailable" in verdict.reason
+    assert "vanished" not in cap.probe
+
+
+def test_a_probe_answering_permission_error_refuses():
+    """NEGATIVE CONTROL: only ESRCH is departure; EPERM means the pid EXISTS."""
+    kernel, cap, _ = _identity_race_world()
+
+    def eperm(pid):
+        raise PermissionError(pid)
+
+    cap._departure = eperm
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert "vanished" not in cap.probe
+
+
+def test_esrch_from_the_identity_syscall_takes_the_departure_proof():
+    """Review R2: a reap between /proc/<pid>/stat and getpgid/getsid raises
+    ProcessLookupError out of `kernel_identity`; it must reach the same proof."""
+    kernel, cap, failed = _identity_race_world()
+
+    def syscall_race(pid):
+        if pid == 20 and not failed["n"]:
+            failed["n"] += 1
+            kernel.reap(20)
+            raise ProcessLookupError(pid)
+        return kernel.identity(pid)
+
+    cap.identity = syscall_race
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert failed["n"] == 1
+    assert verdict.status == "VERIFIED", verdict.reason
+    assert [row["pid"] for row in cap.probe["vanished"]] == [20]
+
+
+def test_esrch_from_the_identity_syscall_for_a_listed_member_refuses_named():
+    """Negative control for R2: the new route refuses with the NAMED reason."""
+    kernel, cap, failed = _identity_race_world(reap=False)
+
+    def syscall_race(pid):
+        if pid == 20 and not failed["n"]:
+            failed["n"] += 1
+            raise ProcessLookupError(pid)
+        return kernel.identity(pid)
+
+    cap.identity = syscall_race
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.reason == "Unknown:actual parent/PG/SID unavailable"
+
+
+def test_a_departed_member_is_pruned_from_the_published_proof():
+    """Review R4: Verdict members and `proof` must not still list a member the
+    same record publishes under `vanished`."""
+    kernel, cap, _ = _identity_race_world()
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "VERIFIED", verdict.reason
+    assert verdict.members == (kernel.leader,)
+    assert [row["pid"] for row in cap.probe["proof"]] == [kernel.leader]
+
+
+def test_a_lost_pin_beats_an_incomplete_departure_census():
+    """Review R5: the departure census re-reads the witness on failure, so a
+    reused leader number reports as pin loss (and revokes), not as unproven."""
+    kernel, cap, failed = _identity_race_world(census_complete=False)
+    racing = cap.identity
+
+    def race_and_reuse(pid):
+        if pid == 20 and not failed["n"]:
+            kernel.rows[kernel.leader] = (kernel.parent, kernel.leader, kernel.leader, "foreign")
+        return racing(pid)
+
+    cap.identity = race_and_reuse
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert failed["n"] == 1
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "pin_lost", verdict.reason
+
+
+def test_no_getpgid_and_no_injected_probe_never_departs(monkeypatch):
+    """Review R1 / QA Q1: off POSIX (no `os.getpgid`) nothing can confirm ESRCH,
+    so the member is kept and refused -- never an AttributeError."""
+    kernel, cap, _ = _identity_race_world()
+    cap._departure = None
+    cap.samples = None
+    monkeypatch.delattr(owned.os, "getpgid", raising=False)
+    assert cap._live_member_departed(20, kernel.clock() + 5.0) is False
