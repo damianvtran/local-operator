@@ -205,8 +205,9 @@ def test_busy_receipt_through_the_real_local_control_socket(
     assert calls == []
 
 
+@pytest.mark.parametrize("unrelated_publication", [None, "session", "root"])
 def test_a_turn_admitted_between_final_scan_and_supervisor_is_serialized(
-    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+    devices: Devices, monkeypatch: pytest.MonkeyPatch, unrelated_publication: str | None  # noqa: F811
 ) -> None:
     """Reviewer R1-B1's exact interleaving, with no mock at the registry/fence seam."""
     server_a, server_b, record = _rig(devices, monkeypatch)
@@ -223,6 +224,12 @@ def test_a_turn_admitted_between_final_scan_and_supervisor_is_serialized(
     real_publish = registry.publish
 
     def _observed_publish(record: Any, root: Any = None, dirname: Any = None) -> Any:
+        # The patch is process-global: unrelated publishers/heartbeats must not
+        # satisfy the admission witness while this turn is still behind its fence.
+        if getattr(record, "session_id", None) != "bu5y-restart-01" or root != server_a.root:
+            if dirname is None:
+                return real_publish(record, root)
+            return real_publish(record, root, dirname)
         publisher_attempted.set()
         try:
             if dirname is None:
@@ -247,6 +254,27 @@ def test_a_turn_admitted_between_final_scan_and_supervisor_is_serialized(
 
     def _supervisor(action: str) -> dict[str, Any]:
         calls.append(action)
+        if unrelated_publication is not None:
+            # A real idle write can finish under the exclusive admission fence.
+            # Neither another session here nor this ID on another root proves
+            # that the busy publication we are observing has completed.
+            unrelated = SessionRecord(
+                pid=os.getpid(),
+                kind="daemon",
+                session_id=(
+                    "unrelated-restart-01" if unrelated_publication == "session" else "bu5y-restart-01"
+                ),
+                conversation_name="unrelated idle heartbeat",
+                cwd=str(server_a.root),
+                model_label="test/mock",
+                control_port=1,
+                control_key="k" * 32,
+                busy=False,
+                started=True,
+            )
+            registry.publish(
+                unrelated, server_a.root if unrelated_publication == "session" else server_b.root
+            )
         # Fixed fence: the publisher is still excluded, so this wait expires and
         # the action linearizes first. Unfenced code lets publication finish here
         # and fails the busy-at-supervisor assertion below.
