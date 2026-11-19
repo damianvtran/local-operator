@@ -219,19 +219,6 @@ def test_other_helper_outcomes_stay_silent_and_forged_context_cannot_select_cred
     assert result.stderr == ""
 
 
-# QUARANTINED as the CULPRIT, not a victim: borrowed_git_env arms the daemon
-# self-revoke timer, which later fires `DELETE /installation/token` during an
-# unrelated test's teardown and trips the network guard there. REMOVE this
-# marker when #4261 (test/netguard-self-revoke-belt) merges.
-@pytest.mark.skip(
-    reason=(
-        "QUARANTINED 2026-11-18 flaky-sweep ledger lopdev-E01: arms the daemon "
-        "self-revoke timer, whose `DELETE https://api.github.com/installation/token` "
-        "trips the network guard in tests/unit/remote_compute/test_cli_remote.py "
-        "teardown (#4235 gate jobs 135207196151, 135107436353); owner: #4261 author; "
-        "real fix: #4261 test/netguard-self-revoke-belt — remove this skip when it merges"
-    )
-)
 def test_borrow_attaches_only_matching_display_context_without_an_extra_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
