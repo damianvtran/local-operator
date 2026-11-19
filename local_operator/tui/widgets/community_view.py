@@ -539,12 +539,11 @@ class CommunityView(Vertical):
             return
         if self.overlay is not None:
             return
-        order = ["rail", "messages", "composer"]
         composer = self.composer()
-        if composer is not None and composer.status in ("read_only", "locked"):
-            # D3: a disabled composer cannot take focus, so "[composer] ↵ send"
-            # in the footer beside letter-key header hints was a mixed signal.
-            order.remove("composer")
+        # D3: a disabled composer cannot take focus, so "[composer] ↵ send"
+        # in the footer beside letter-key header hints was a mixed signal.
+        composer_focusable = composer is None or composer.status not in ("read_only", "locked")
+        order = ["rail", "messages", "composer"] if composer_focusable else ["rail", "messages"]
         nxt = order[(order.index(self.area) + 1) % len(order) if self.area in order else 0]
         if self.narrow:
             self.drawer_open = nxt == "rail"

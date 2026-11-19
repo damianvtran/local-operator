@@ -25,6 +25,7 @@ import asyncio
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -61,7 +62,7 @@ def _rows(directory: Path) -> int:
     )
 
 
-def _read_result(details: dict) -> Message:
+def _read_result(details: dict[str, Any]) -> Message:
     return Message.tool_result(
         ToolResult(
             tool_call_id="c1",

@@ -72,7 +72,7 @@ async def test_refusal_and_too_late_cancel_map_to_sender_only_outcomes(tmp_path:
     def published_cancel(sent: Any) -> httpx.Response | None:
         if sent.path.endswith(":cancel"):
             return httpx.Response(200, json=outcome("published"))
-        return base(sent)
+        return base(sent) if base is not None else None
 
     hub.override = published_cancel
     assert (await backend.cancel("local-operator", "k" * 32)).kind == "too_late"
