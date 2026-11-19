@@ -1,0 +1,16 @@
+{
+  "wire.errors.bedrock.access_denied": "AWS ने {region} में यह अनुरोध अस्वीकार कर दिया: इस पहचान के पास Amazon Bedrock की IAM अनुमति नहीं है।",
+  "wire.errors.bedrock.check_list_denied": "ये AWS क्रेडेंशियल्स {region} में काम करते हैं, लेकिन Amazon Bedrock मॉडलों की सूची नहीं देख सकते; बिल्ट-इन मॉडल सूची इस्तेमाल की जाएगी।",
+  "wire.errors.bedrock.check_unverified": "इस कनेक्शन की जाँच के लिए {region} में Amazon Bedrock तक नहीं पहुँचा जा सका। इसे सत्यापन के बिना सहेज लिया गया।",
+  "wire.errors.bedrock.credential_resolution_failed": "Amazon Bedrock के लिए AWS क्रेडेंशियल्स लोड नहीं हो सके: {detail}",
+  "wire.errors.bedrock.credential_timeout": "Amazon Bedrock के लिए AWS क्रेडेंशियल्स लोड होने में {seconds, plural, one {# सेकंड} other {# सेकंड}} से ज़्यादा समय लगा।",
+  "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock ने {region} में ये AWS क्रेडेंशियल्स अस्वीकार कर दिए।",
+  "wire.errors.bedrock.invalid_connection": "यह Amazon Bedrock कनेक्शन मान्य नहीं है ({detail})। Bedrock को फिर से कनेक्ट करें।",
+  "wire.errors.bedrock.model_access": "इस AWS खाते के पास {model} की पहुँच {region} में नहीं है। Amazon Bedrock कंसोल में इस मॉडल की पहुँच चालू करें, या कोई दूसरा मॉडल चुनें।",
+  "wire.errors.bedrock.model_unavailable": "{model} मॉडल {region} में उपलब्ध नहीं है। इसका global. या क्षेत्रीय इन्फ़रेंस प्रोफ़ाइल (जैसे us.) आज़माएँ, या कोई दूसरा क्षेत्र चुनें।",
+  "wire.errors.bedrock.no_credentials": "Amazon Bedrock के लिए कोई AWS क्रेडेंशियल्स नहीं हैं। {bearer_env} सेट करें, या AWS वर्कर पर {auth_env} सेट करें, या सहेजे गए कनेक्शन से Bedrock कनेक्ट करें।",
+  "wire.errors.bedrock.profile_no_credentials": "AWS प्रोफ़ाइल {profile} में Amazon Bedrock के लिए इस्तेमाल लायक क्रेडेंशियल्स नहीं हैं।",
+  "wire.errors.bedrock.profile_not_found": "AWS प्रोफ़ाइल {profile} आपके AWS कॉन्फ़िग में नहीं मिली।",
+  "wire.errors.bedrock.secret_missing": "सहेजा गया Amazon Bedrock क्रेडेंशियल एन्क्रिप्टेड स्टोर में नहीं है। फिर से कनेक्ट करने के लिए {command} चलाएँ।",
+  "wire.errors.bedrock.session_expired": "प्रोफ़ाइल {profile} का AWS साइन-इन सत्र समाप्त हो गया है। {command} चलाएँ, फिर दोबारा कोशिश करें।"
+}

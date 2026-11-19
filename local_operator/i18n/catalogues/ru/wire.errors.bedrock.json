@@ -1,0 +1,16 @@
+{
+  "wire.errors.bedrock.access_denied": "AWS отклонил этот запрос в регионе {region}: у удостоверения нет разрешения IAM для Amazon Bedrock.",
+  "wire.errors.bedrock.check_list_denied": "Эти учётные данные AWS работают в регионе {region}, но не могут получить список моделей Amazon Bedrock; будет использован встроенный список моделей.",
+  "wire.errors.bedrock.check_unverified": "Не удалось связаться с Amazon Bedrock в регионе {region}, чтобы проверить подключение. Оно сохранено без проверки.",
+  "wire.errors.bedrock.credential_resolution_failed": "Не удалось загрузить учётные данные AWS для Amazon Bedrock: {detail}",
+  "wire.errors.bedrock.credential_timeout": "Загрузка учётных данных AWS для Amazon Bedrock заняла больше {seconds, plural, one {# секунды} few {# секунд} many {# секунд} other {# секунды}}.",
+  "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock отклонил эти учётные данные AWS в регионе {region}.",
+  "wire.errors.bedrock.invalid_connection": "Это подключение к Amazon Bedrock недействительно ({detail}). Подключите Bedrock заново.",
+  "wire.errors.bedrock.model_access": "У этого аккаунта AWS нет доступа к {model} в регионе {region}. Включите доступ к модели в консоли Amazon Bedrock или выберите другую модель.",
+  "wire.errors.bedrock.model_unavailable": "Модель {model} недоступна в регионе {region}. Попробуйте её профиль инференса global. или региональный (например, us.) либо другой регион.",
+  "wire.errors.bedrock.no_credentials": "Нет учётных данных AWS для Amazon Bedrock. Задайте {bearer_env}, на рабочей машине в AWS — {auth_env}, или подключите Bedrock через сохранённое подключение.",
+  "wire.errors.bedrock.profile_no_credentials": "В профиле AWS {profile} нет пригодных учётных данных для Amazon Bedrock.",
+  "wire.errors.bedrock.profile_not_found": "Профиль AWS {profile} не найден в вашей конфигурации AWS.",
+  "wire.errors.bedrock.secret_missing": "Сохранённые учётные данные Amazon Bedrock отсутствуют в зашифрованном хранилище. Выполните {command}, чтобы подключиться заново.",
+  "wire.errors.bedrock.session_expired": "Сессия входа AWS для профиля {profile} истекла. Выполните {command} и повторите попытку."
+}

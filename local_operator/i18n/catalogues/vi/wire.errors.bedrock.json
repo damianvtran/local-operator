@@ -1,0 +1,16 @@
+{
+  "wire.errors.bedrock.access_denied": "AWS đã từ chối yêu cầu này tại {region}: danh tính không có quyền IAM cho Amazon Bedrock.",
+  "wire.errors.bedrock.check_list_denied": "Thông tin xác thực AWS này hoạt động tại {region} nhưng không liệt kê được các mô hình Amazon Bedrock; danh sách mô hình tích hợp sẵn sẽ được dùng.",
+  "wire.errors.bedrock.check_unverified": "Không kết nối được tới Amazon Bedrock tại {region} để kiểm tra kết nối này. Kết nối đã được lưu nhưng chưa xác minh.",
+  "wire.errors.bedrock.credential_resolution_failed": "Không tải được thông tin xác thực AWS cho Amazon Bedrock: {detail}",
+  "wire.errors.bedrock.credential_timeout": "Việc tải thông tin xác thực AWS cho Amazon Bedrock mất hơn {seconds, plural, other {# giây}}.",
+  "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock đã từ chối thông tin xác thực AWS này tại {region}.",
+  "wire.errors.bedrock.invalid_connection": "Kết nối Amazon Bedrock này không hợp lệ ({detail}). Hãy kết nối lại Bedrock.",
+  "wire.errors.bedrock.model_access": "Tài khoản AWS này không có quyền truy cập {model} tại {region}. Hãy bật quyền truy cập mô hình trong bảng điều khiển Amazon Bedrock, hoặc chọn mô hình khác.",
+  "wire.errors.bedrock.model_unavailable": "{model} không khả dụng tại {region}. Hãy thử hồ sơ suy luận global. hoặc theo khu vực của mô hình (ví dụ us.), hoặc một khu vực khác.",
+  "wire.errors.bedrock.no_credentials": "Không có thông tin xác thực AWS cho Amazon Bedrock. Hãy đặt {bearer_env}, hoặc trên worker AWS thì đặt {auth_env}, hoặc kết nối Bedrock bằng một kết nối đã lưu.",
+  "wire.errors.bedrock.profile_no_credentials": "Hồ sơ AWS {profile} không có thông tin xác thực dùng được cho Amazon Bedrock.",
+  "wire.errors.bedrock.profile_not_found": "Không tìm thấy hồ sơ AWS {profile} trong cấu hình AWS của bạn.",
+  "wire.errors.bedrock.secret_missing": "Thông tin xác thực Amazon Bedrock đã lưu không còn trong kho được mã hóa. Hãy chạy {command} để kết nối lại.",
+  "wire.errors.bedrock.session_expired": "Phiên đăng nhập AWS của hồ sơ {profile} đã hết hạn. Hãy chạy {command}, rồi thử lại."
+}
