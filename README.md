@@ -375,6 +375,11 @@ projects; thank you to their authors and contributors:
 What each one informed, and a note on reuse and credit:
 [credits in full](docs/guide/credits.md).
 
+Session voice credits [qwen-audio-agent](https://github.com/QwenAudio/qwen-audio-agent) (QwenAudio),
+[speech-to-speech](https://github.com/huggingface/speech-to-speech) (Hugging Face), the Qwen3-TTS, Parakeet and
+Smart Turn models, and [Silero VAD](https://github.com/snakers4/silero-vad) (Silero Team); not reviewed or endorsed
+by them. Speech runs through Radient or your own ElevenLabs key; see [credits in full](docs/guide/credits.md#session-voice).
+
 Core contributor: Damian Tran &lt;[damian@gominerva.com](mailto:damian@gominerva.com)&gt;.
 
 ## License
