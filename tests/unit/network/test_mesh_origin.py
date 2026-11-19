@@ -205,6 +205,66 @@ def test_12b_verified_answer_revised_by_unstamped_or_unverified_write_reads_fals
     assert _fold(_stamp(), [_stamp(), None])["verified"] is False
 
 
+def test_12c_stamp_sits_beside_the_app_signature_proof_never_instead_of_it() -> None:
+    """Convergence with main's F2 attestation (5f11cd48e / c0b978a08).
+
+    ``_answer_by`` must build on ``by_record``: taking the PR's original
+    ``{"surface": by}`` would silently drop main's ``proof: app-signature`` on
+    every attested answer. And the fold applies BOTH laundering rules
+    independently: an unproven, unstamped revision strips the proof and drops
+    the stamp to unverified, while the surface stays the weakest label.
+    """
+    from local_operator.asks import store as ask_store
+    from local_operator.asks.queue import _answer_by
+    from local_operator.asks.surfaces import ProvenSurface
+    from local_operator.harness.types import AskOption, AskQuestion
+
+    proven = ProvenSurface("desktop", "app-signature")
+    assert _answer_by(proven, None) == {"surface": "desktop", "proof": "app-signature"}
+    assert _answer_by(proven, _stamp()) == {
+        "surface": "desktop",
+        "proof": "app-signature",
+        "mesh_origin": _stamp(),
+    }
+    # Absent, never null: a local/legacy row stays byte-identical to main's.
+    assert _answer_by("tui", None) == {"surface": "tui"}
+
+    at = 1_000_000
+    question = AskQuestion(
+        id="q", question="Ship it?", options=[AskOption(label="Yes"), AskOption(label="No")]
+    ).model_dump()
+    queued = {
+        "v": 1,
+        "kind": ask_store.EVENT_QUEUED,
+        "at": at,
+        "ask_id": "a1",
+        "expires_at": at + 3_600_000,
+        "timeout_s": 3600,
+        "questions": [question],
+    }
+    answered = {
+        "kind": ask_store.EVENT_ANSWERED,
+        "ask_id": "a1",
+        "at": at + 1,
+        "by": _answer_by(proven, _stamp()),
+        "answers": {"q": ["No"]},
+    }
+    [kept] = ask_store.fold([queued, answered], at + 2)
+    assert kept["answered_by"]["proof"] == "app-signature"
+    assert kept["answered_by"]["mesh_origin"]["verified"] is True
+    revised = {
+        "kind": ask_store.EVENT_REVISED,
+        "ask_id": "a1",
+        "at": at + 3,
+        "by": _answer_by("desktop", None),
+        "answers": {"q": ["Yes"]},
+        "supersedes": at + 1,
+    }
+    [laundered] = ask_store.fold([queued, answered, revised], at + 4)
+    assert "proof" not in laundered["answered_by"]
+    assert laundered["answered_by"]["mesh_origin"]["verified"] is False
+
+
 # ---------------------------------------------------------------------------
 # Imported sessions (test 8, unit half; the promote call sites are in the relay file)
 # ---------------------------------------------------------------------------
