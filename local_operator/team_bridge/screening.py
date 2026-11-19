@@ -3987,6 +3987,32 @@ def _conclude_parsed(
             served_hop=served_hop,
             screener_preferred=screener_preferred,
         ):
+            from local_operator.team_bridge import hold_release as hr
+
+            if not hr.preferred_answer(served_provider, actual_model, screener_preferred):
+                # A fallback can identify work for OWNER review, not authorize
+                # a preferred-screener release. Reuse the generic review protocol:
+                # its signed owner decision is the only delivery authority, and
+                # its row retains the actual answering hop and bounce verdict.
+                code = "model_hold"
+                _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
+                _remember_answer_hold(
+                    store, owner, envelope, snapshot, code, epoch, answered_model=cache_model
+                )
+                _record_review_decision(
+                    store,
+                    owner,
+                    prepared,
+                    code,
+                    actual_model=actual_model,
+                    served_provider=served_provider,
+                    served_hop=served_hop,
+                    screener_preferred=screener_preferred,
+                    screener_verdict="bounce",
+                    screener_reason=reason,
+                    categories=categories,
+                )
+                return ScreenResult("hold", hold_code=code).set_private_reason(reason)
             return _commit_work_scope_hold(
                 store,
                 owner,
@@ -4642,14 +4668,12 @@ def _work_scope_conversion(
     B4b DECISIONS Amendment 1, D2: only a v2 decision naming EXACTLY
     ``new_work_request``; ``out_of_scope_work`` and ``personal_info_request``
     are disclosure-class and stay terminal bounces under every template (S-1).
-    Amendment 2 adds two gates, both of which only ever keep the pre-B4b
-    terminal reject: the answer must carry trusted PREFERRED-stage provenance
-    from #3444 (including later preferred hops, never the ordinary cascade), and the
-    REASON must pass the release-only check (``hold_release.strict_release_reason``:
-    no prose-named second category, no negation, no format characters). A
-    non-preferred answer is therefore a bounce, not an ineligible hold (code
-    review m2), and with the setting off this is False and the path below is
-    byte-identical to the pre-B4b build.
+    Preferred-stage answers retain the B4b work-scope release path. A trusted
+    fallback answer may instead become a generic owner-review hold, never a
+    preferred release: the caller preserves its provenance and bounce verdict.
+    Both paths require the work-scope setting and strict release-only reason;
+    fallback review additionally requires the generic review setting. Disclosure
+    categories, untrusted provenance and setting-off remain terminal bounces.
     """
 
     from local_operator.team_bridge import hold_release
@@ -4660,7 +4684,13 @@ def _work_scope_conversion(
     if not hold_release.converts(tuple(categories)):
         return False
     if not hold_release.preferred_answer(served_provider, actual_model, screener_preferred):
-        return False
+        if not (
+            served_provider
+            and actual_model
+            and served_hop is not None
+            and hold_release.review_enabled(store.config_dir)
+        ):
+            return False
     if not hold_release.strict_release_reason(reason):
         return False
     return hold_release.enabled(store.config_dir)
