@@ -62,6 +62,24 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "a reason CODE copied into the receipt block, rendered later by workset_text",
     ),
+    # The offload's return path (#4245 round 3, B2). Each ``str()`` normalises a reason
+    # CODE in transit and never renders it: ``destination_transfer`` journals the coarse
+    # code the owner was already sent into ``pending.json``'s ``source_left``;
+    # ``destination_outcome`` copies it into the ``done`` frame's row; ``source_receipt``
+    # keeps a peer code only if ``workset_text.known_reason`` admits it (else
+    # ``not_transferred``). The sentence is ``workset_text.reason_text``, at render time.
+    ("local_operator/network/workset_move.py", "destination_transfer", "reason"): (
+        1,
+        "a decline reason CODE journaled for the source's receipt, never rendered raw",
+    ),
+    ("local_operator/network/workset_move.py", "destination_outcome", "reason"): (
+        1,
+        "a reason CODE copied into the done frame's row, rendered later by workset_text",
+    ),
+    ("local_operator/network/workset_move.py", "source_receipt", "reason"): (
+        1,
+        "a peer reason CODE kept only if workset_text's closed table knows it",
+    ),
     # These f-strings use this device's HeavyClass.reason command label
     # (long-lived-command and acquired notices) and memory_budget.reason
     # (why the local cap is off). Neither value comes from a mesh peer.

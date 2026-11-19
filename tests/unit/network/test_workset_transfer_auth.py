@@ -273,6 +273,9 @@ def test_a_healthy_log_writes_one_durable_row_before_the_first_byte(
     answers: list[bool] = []
 
     def required(event: audit_mod.AuditEvent) -> bool:
+        # Review m1: no span has been read when the row is admitted — the row is
+        # written before the first byte, not alongside it.
+        assert spans == [], spans
         answers.append(real_required(event))
         return answers[-1]
 
@@ -298,6 +301,32 @@ def test_a_healthy_log_writes_one_durable_row_before_the_first_byte(
     assert row["detail"]["kind"] == "span" and row["detail"]["offset"] == 0
     assert row["detail"]["artifact"] == digest and row["detail"]["peer"] == DEST
     assert "session.workset.serve" in AuditLog.DURABLE_EVENTS
+
+
+@pytest.mark.parametrize("hole", ["degraded", "disabled"])
+def test_a_contiguous_continuation_refuses_once_the_log_has_a_hole(
+    staged: tuple[_Server, str], spans: list[tuple[int, int]], hole: str
+) -> None:
+    """#4245 security review S-1: one row covers a stream, but health is re-checked.
+
+    Before the fix a continuation consulted only the cursor, so a log that became
+    disabled or degraded after the first span kept streaming bytes into a trail with
+    a hole. The continuation must refuse with zero bytes AND write no row (the first
+    row still covers what was sent before the hole).
+    """
+    server, digest = staged
+    first = _fetch(server, digest=digest, offset=0, limit=64)
+    assert first["result"] == "chunk", first
+    assert spans == [(0, 1)], spans
+    if hole == "degraded":
+        server.audit.degraded = True
+    else:
+        server.audit._enabled = False
+    answer = _fetch(server, digest=digest, offset=64, limit=64)
+    assert answer["result"] == "refused" and answer["code"] == "audit_unavailable", answer
+    assert "data" not in answer
+    assert spans == [(0, 1)], "a span was read after the log lost its integrity"
+    assert len(_serve_rows(server.root)) == 1
 
 
 class _Transport:

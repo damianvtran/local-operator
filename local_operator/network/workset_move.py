@@ -781,7 +781,9 @@ def _audit_workset_serve(
     row is published and fsynced. This function used to reimplement that check from
     the writer's privates (``_write_lock``, ``syncs``, ``publication_of``) while #4228
     was unmerged; the swap removes that second copy of the durability contract and
-    adds the degraded-log refusal the stand-in lacked.
+    adds the degraded-log refusal the stand-in lacked. A contiguous continuation does
+    not come here (one row covers the stream); ``serve_fetch`` re-checks the same
+    admission predicate, ``AuditLog.admits_required``, before each one.
 
     The event is in ``AuditLog.DURABLE_EVENTS`` (``record_required`` refuses anything
     else) and every key below is in its ``DETAIL_KEYS`` allowlist, so the row is
@@ -839,6 +841,14 @@ def serve_fetch(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) -
     directory listing: the directory also holds ``<hex>.json`` sidecars and the
     journal). Only a ``sha256:<64 hex>`` name is ever opened. The prefix form serves
     no content; it lets the destination prove its ``.part`` before resuming.
+
+    AUDIT: the first span of a stream (offset 0, or any offset that does not continue
+    this process's cursor — a resume) writes ONE durable ``session.workset.serve`` row
+    before its first byte, and that row covers every contiguous continuation after it.
+    Each continuation still re-checks the log's health (``AuditLog.admits_required``,
+    #4245 security review S-1): a log disabled or degraded mid-stream refuses the next
+    span with ``audit_unavailable`` and zero bytes, and writes no row — the existing
+    row already covers the bytes sent before the hole.
     """
     from local_operator.network import sync as sync_mod
 
@@ -935,7 +945,18 @@ def serve_fetch(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) -
                 return _refused("bad_request", "offset is past the end of the artifact", session_id)
             with _SERVE_LOCK:
                 continuing = offset > 0 and _SERVE_CURSOR.get(key) == offset
-            if not continuing:
+            if continuing:
+                # No new row (the stream's first row covers this span), but no bytes
+                # into a trail that has since become disabled or holed (S-1).
+                log = getattr(server, "audit", None)
+                if log is None or not log.admits_required():
+                    return _refused(
+                        "audit_unavailable",
+                        "this device could not record the transfer in its audit log, so "
+                        "no working file was sent",
+                        session_id,
+                    )
+            else:
                 if not _audit_workset_serve(
                     server,
                     session_id=session_id,

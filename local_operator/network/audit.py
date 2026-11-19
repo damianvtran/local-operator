@@ -1242,6 +1242,19 @@ class AuditLog:
 
     # -- writing ------------------------------------------------------------
 
+    def admits_required(self) -> bool:
+        """Would :meth:`record_required` admit a row right now (enabled, not degraded)?
+
+        WHY A PUBLIC PREDICATE: a caller whose ONE durable row already covers a stream
+        (the working-set serve's contiguous continuations, #4245 security review S-1)
+        must still stop the moment the trail it relies on is disabled or has a hole,
+        without writing another row per chunk or reading this writer's privates.
+        ``record_required`` uses this same predicate, so the two cannot drift. A
+        ``True`` here is advisory, not an admission: only ``record_required`` holds
+        the write lock and proves a row durable.
+        """
+        return bool(self._enabled) and not self.degraded
+
     def record_required(self, event: AuditEvent) -> bool:
         """Commit a durable admission before its caller releases protected bytes.
 
@@ -1254,7 +1267,7 @@ class AuditLog:
         if event.event not in self.DURABLE_EVENTS:
             raise ValueError("a required audit record must be a durable event")
         with self._write_lock:
-            if not self._enabled or self.degraded:
+            if not self.admits_required():
                 return False
             # Required content admission cannot acknowledge a scrubbed/truncated
             # row. Ordinary telemetry still tolerates dropping unapproved detail.
