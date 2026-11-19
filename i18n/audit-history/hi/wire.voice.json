@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.voice",
-  "history_sha256": "c375e4369c4fa5ad1e2b6642e514f83940ac658de89df7b73aaff13afd2f90f9",
+  "history_sha256": "1e189a8c6b6cedb4aaf50cf63096f674bf86d32d7c7c9d5fdd3b367b9f4ccd5b",
   "entries": [
     {
       "locale": "hi",
@@ -70,6 +70,37 @@
       },
       "status": "translated",
       "note": "Translator-only receipt for the review-round delta of wire.voice (Hindi): new keys session_syncing, spoken.approval_needed ({title}), spoken.approval_needed_untitled, spoken.code_omitted, spoken.link, and the rewritten invalid_message (the {reason} placeholder is gone from the English source). Independent audit NOT completed, so wire.voice is not shipped for this locale until a passed receipt is appended. Source hash pins the full current en namespace; context and translated target hashes are the files translated against. Glossary i18n/glossary.md and i18n/style-guides/hi.md. Placeholders preserved ({title}, {session_id}, {reason}, {limit_mib}, {detail}); the spoken.* strings are read aloud by TTS so kept short and plain, spoken.link is one word, spoken.code_omitted keeps the English parenthesis pair (optional per the context note). No rendered, pseudo or native audit claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.voice",
+      "source_sha256": "8512860b98c48da1c4fc5f2b86344c6c84b288b2fcb2b618f596647f2c38ebd1",
+      "context_sha256": "aebbfbbb4b6a37442ad74f1316aff7d0297326eda6b357562c95a0e74f27bc3c",
+      "target_sha256": "a90f870366fb5d32ffad6991555960970e443e4a93cae3cb53c8cdd9328fb9a0",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 14434fb37ba2",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "lopdev coder acting as independent i18n auditor (audit-only brief; did not author or edit any of the audited translations)",
+        "session": "255bf0f37cac",
+        "session_kind": "lopdev session id of the auditing coder",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as stated in the session's own system prompt",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19",
+        "fallback": "none known: no provider fallback surfaced in the session; the auditor inspected no harness route log",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "translator_session": "14434fb37ba2",
+        "scope": "audit of the 6 review-round keys (session_syncing, spoken.approval_needed, spoken.approval_needed_untitled, spoken.code_omitted, spoken.link, invalid_message); the other 37 keys were already audited and signed passed and were not re-audited, but this receipt pins the whole current namespace hashes"
+      },
+      "status": "passed",
+      "note": "Independent audit of the review-round delta of wire.voice against en/wire.voice.json + wire.voice.context.json, i18n/glossary.md, the locale style guide and the already-audited neighbours (store_busy for 'try again in a moment', approval_pending/phrase.on_screen_first, 'command' as used in cli.sessions_help, 'conversation' as in not_enabled/switched). Source, context and target sha256 recomputed from the files on disk and equal the translator receipt. Scripted over all 43 keys: key set equals en; {placeholders} identical ({title} in spoken.approval_needed, none in invalid_message); NFC; no bidi/zero-width/format controls; no ASCII quotes. fr: U+202F before ':' in spoken.approval_needed and invalid_message, apostrophe U+2019; ru: 'чуть позже' as in store_busy; zh-CN: full-width ：，。（） throughout; ur: ۔ stops, no bidi controls; hi: danda, 'थोड़ी देर बाद फिर कोशिश करें' as in store_busy. spoken.* strings are short plain words, spoken.link is one word, spoken.code_omitted keeps the English parenthesis pair (optional per context), terms match the shipped corpus (approval, link, code block, sync, command). Back-translations: session_syncing: This conversation is syncing right now. Try again after a little while. approval_needed: Approval needed: {title}. approval_needed_untitled: Approval needed. code_omitted: (code block skipped) link: link invalid_message: That message was not sent: it is too long or seems like a command. Same model family as the translator (anthropic/claude-sonnet-5-5), different session and brief. Text-level audit only: no rendered, TTS-playback, native-speaker or RTL rendering check performed."
     }
   ]
 }
