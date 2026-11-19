@@ -243,8 +243,15 @@ class ScreenLeg:
         sender: str,
         organization: str,
         msg_type: str = "question",
+        addressed: str = "",
+        relation: str = "",
     ) -> InboundOutcome:
         """Render, dispatch, parse - the production pipeline's first two thirds.
+
+        ``addressed``/``relation`` fill the routing slots of bridge-screen-v5/v6
+        exactly as the connector does (``""`` = not stated; ``relation`` then
+        renders the hub's default ``member``). Templates without the slots ignore
+        them, so every pre-routing caller is unchanged.
 
         The third third (receipt persistence, budget, quarantine) is the
         connector's, and the eval deliberately does not simulate it: a HOLD here
@@ -266,6 +273,8 @@ class ScreenLeg:
                     organization=organization,
                     msg_type=msg_type,
                     version=self.screen_version,
+                    addressed=addressed,
+                    relation=relation,
                 )
             else:
                 # Candidate bytes, shipped rules: see __init__ for why the eval
@@ -279,6 +288,8 @@ class ScreenLeg:
                     msg_type=msg_type,
                     nonce=None,
                     attachments=None,
+                    addressed=addressed,
+                    relation=relation,
                 )
         except ValueError as error:
             # A renderer refusal is a real finding: an unrenderable message is one
