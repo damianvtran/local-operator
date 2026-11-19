@@ -1,0 +1,105 @@
+{
+  "locale": "ru",
+  "namespace": "wire.teams.effective",
+  "audit_pass": 1,
+  "status": "passed",
+  "review_type": "independent linguistic and mechanical audit; not runtime or rendered approval",
+  "key_count": 9,
+  "findings": [],
+  "unresolved_blocker_major_count": 0,
+  "per_key": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "source": "No team named {role} was found.",
+      "current_text": "Команда с именем «{role}» не найдена.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Correct negative result; «с именем» and Russian guillemets preserve the opaque team name without inflection. команда matches the glossary.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "source": "The agent registry could not be read. Check the agent definitions and try again.",
+      "current_text": "Не удалось прочитать реестр агентов. Проверьте определения агентов и повторите попытку.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Accurate broad read failure; реестр агентов and определения агентов are grammatical technical Russian. No invented corrupt-file diagnosis; both remediation actions retained.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "source": "The model configuration could not be read. Check your configuration and try again.",
+      "current_text": "Не удалось прочитать конфигурацию моделей. Проверьте настройки и повторите попытку.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Model configuration and general settings check both retained. Impersonal failure plus polite plural imperative fits the Russian guide.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "source": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "current_text": "Недопустимое значение в subagents.models.{tier}. Укажите идентификатор provider/model или объект с настройками модели.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Invalid value location preserved. provider/model identifier and configuration object are clearly alternative valid shapes; объект с настройками модели correctly avoids an alias-table reading of mapping.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "source": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "current_text": "Недопустимый объект настроек в subagents.models.{tier}. Задайте для model идентификатор provider/model и, при необходимости, для effort — поддерживаемый уровень рассуждений.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Required model assignment is unconditional: «Задайте для model идентификатор provider/model». Only effort is qualified by «при необходимости». Supported reasoning-effort value is retained as «поддерживаемый уровень рассуждений». No inversion or omission of required-versus-optional fields.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "source": "No model is configured at subagents.models.{tier}.",
+      "current_text": "Модель в subagents.models.{tier} не настроена.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Absence of a configured model, not failure to launch, is preserved. Literal tier path is unchanged.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "source": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "current_text": "Недопустимый идентификатор модели в subagents.models.{tier}. Используйте формат provider/model.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Invalid selector and exact provider/model format remedy retained. идентификатор модели is idiomatic in this technical context; no raw invalid value is exposed.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "source": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "current_text": "Не удалось определить модель {selector}. Проверьте идентификатор модели и настройки провайдера.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "«Не удалось определить модель» expresses unsuccessful model resolution without asserting launch or provider outage. Both identifier and provider-configuration checks retained; selector remains opaque.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "source": "This team member is unavailable. Check its model configuration and agent definition.",
+      "current_text": "Этот участник команды недоступен. Проверьте настройки его модели и определение агента.",
+      "verdict": "passed",
+      "mechanical": "Exact key and argument name/type parity; context-preserved technical tokens intact; no markup/backtick syntax introduced or dropped.",
+      "accuracy_idiom_register_terminology": "Unavailable member and both remediation targets retained. участник команды is idiomatic and consistent with the guide; его correctly agrees with участник, not команда. No launch claim.",
+      "findings": []
+    }
+  ],
+  "fit": "All nine context notes specify natural wrapping and no fixed cell-width limit; no maxCells/maxChars hints exist. Longest stored value is tier_invalid_mapping, 173 Unicode code points. This is not rendered overflow proof.",
+  "plural_cldr": "No source or target plural/select/selectordinal branches. All arguments retain simple type; Russian plural arms are not applicable and were not invented.",
+  "language_summary": "Native professional Russian: impersonal failures, neutral plural imperatives, lowercase address implicit, sentence case, guillemets and spaced em dash. No untranslated English diagnostic prose remains; Latin is limited to the explicitly preserved technical syntax.",
+  "remaining_gates": [
+    "Second independent audit instance for this high-visibility configuration-remedy namespace",
+    "Pseudo-localization and actual client/runtime rendered verification; no visual, terminal shaping or overflow proof performed"
+  ],
+  "limitations": [
+    "No translation changes, repository writes, generated updates, historical-ledger writes, builds, installs, server or PR operations.",
+    "This scratch first-audit pass is not a shipped-state claim or authorization to skip remaining gates.",
+    "No translation API/SDK/MT service used; judgments made directly from frozen English, context and Russian."
+  ]
+}

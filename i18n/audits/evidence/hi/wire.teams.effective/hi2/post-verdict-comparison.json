@@ -1,0 +1,13 @@
+{
+  "record_reference": "record.json",
+  "first_receipt": {
+    "path": "/Users/damian/.local-operator/sessions/1a6e70595b8d/scratchpad/hi-first-audit/receipt.json",
+    "sha256": "cac5f4e16944be66ee8acb22767fb3d047d405e1285e97038efe3e40e28c9eb0"
+  },
+  "comparison_performed_after_independent_report_frozen": true,
+  "independent_report_sha256": "9c71f5787a8afd516d8d50b3653414e2caf66a31814af164425f435259b33136",
+  "first_receipt_status": "passed",
+  "independent_status": "passed",
+  "agreement": "Both text audits pass the same pinned inputs; first receipt did not inform this audit.",
+  "not_execution_evidence": true
+}

@@ -1,0 +1,38 @@
+{
+  "locale": "vi",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "translator": {
+    "agent": "i18n-translator session bdce0d00e792",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19",
+    "provenance_source": "Requesting session brief; translator identity not independently introspected"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "0bb39ba82ecb",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Current session host model declaration",
+    "fallback": "none observed",
+    "independent_from_translator_session": "bdce0d00e792",
+    "independent_from_first_auditor_session": "cef644ceab2f",
+    "date": "2026-11-19",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "fallback_used": false
+  },
+  "status": "passed",
+  "note": "Second independent vi audit: 9/9 linguistic/mechanical passed; 0 blocker/major. Record i18n/audits/evidence/vi/wire.teams.effective/vi-a2-0bb39b/record.json",
+  "evidence": "i18n/audits/evidence/vi/wire.teams.effective/vi-a2-0bb39b/record.json",
+  "round": "a2",
+  "keys_audited": 9,
+  "scope_exclusions": [
+    "pseudo-localization",
+    "runtime fallback",
+    "bidi rendering",
+    "HTTP",
+    "UI visual/layout proof",
+    "ledger append/dry-run/apply",
+    "full build/install/test suite"
+  ]
+}

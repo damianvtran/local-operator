@@ -1,0 +1,11 @@
+{
+  "wire.teams.effective.team_missing": "{role} نام کی کوئی ٹیم نہیں ملی۔",
+  "wire.teams.effective.registry_unreadable": "ایجنٹ رجسٹری پڑھی نہیں جا سکی۔ ایجنٹ کی تعریفیں دیکھیں اور دوبارہ کوشش کریں۔",
+  "wire.teams.effective.config_unreadable": "ماڈل کی ترتیبات پڑھی نہیں جا سکیں۔ اپنی ترتیبات دیکھیں اور دوبارہ کوشش کریں۔",
+  "wire.teams.effective.tier_invalid_value": "subagents.models.{tier} میں درج قدر درست نہیں۔ اسے provider/model کی شکل میں ماڈل منتخب کرنے کی عبارت یا ماڈل کی میپنگ پر سیٹ کریں۔",
+  "wire.teams.effective.tier_invalid_mapping": "subagents.models.{tier} میں درج میپنگ درست نہیں۔ model میں provider/model کی شکل میں ماڈل منتخب کرنے کی عبارت درج کریں اور، اگر چاہیں، effort میں استدلال کی کوئی معاونت یافتہ سطح درج کریں۔",
+  "wire.teams.effective.tier_unconfigured": "subagents.models.{tier} میں کوئی ماڈل مقرر نہیں ہے۔",
+  "wire.teams.effective.tier_invalid_selector": "subagents.models.{tier} میں ماڈل منتخب کرنے کی عبارت درست نہیں۔ provider/model کی شکل استعمال کریں۔",
+  "wire.teams.effective.model_unresolvable": "ماڈل {selector} کا تعین نہیں ہو سکا۔ ماڈل منتخب کرنے کی عبارت اور فراہم کنندہ کی ترتیبات دیکھیں۔",
+  "wire.teams.effective.unavailable": "ٹیم کا یہ رکن دستیاب نہیں۔ اس کے ماڈل کی ترتیبات اور ایجنٹ کی تعریف دیکھیں۔"
+}
