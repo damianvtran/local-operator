@@ -1,24 +1,22 @@
 {
   "corpus": {
     "evals/team_bridge_moderation/screen/corpus/adv.jsonl": "11a59c3c59e6353713c88a097f771baf6e718cb2e17a3fdce5bcbf10eacbc476",
-    "/Users/damian/.local-operator/sessions/10adb6bdde12/scratchpad/eval/refuse.jsonl": "15c96b11527695db3f0908b1d776133c12b7b893b1f61b1cf4e08a80f0049f24",
+    "$SCRATCH/eval/refuse.jsonl": "15c96b11527695db3f0908b1d776133c12b7b893b1f61b1cf4e08a80f0049f24",
     "evals/team_bridge_moderation/screen/corpus/ho2.jsonl": "322f6079ab85b5ef27125f4ad3aef6ad96a253d9cd5783259fe72db46bae433c",
     "evals/team_bridge_moderation/screen/corpus/ho3.jsonl": "7b3534925d5c15b23a1554f113ab39a9ef5fd34fba032ebaf260dd5b3b3d278a",
     "evals/team_bridge_moderation/screen/corpus/relay.jsonl": "56d1be651787dfda21bbc73e3a1db117e2a250e25246b8a59dec7ba162ab8ad2"
   },
   "templates": [
     {
-      "label": "v6r4",
-      "sha256": "5e8f20957ff8915b27e4d9929fcd4978c7e790d7c00055465becf32d6de0c3f5",
-      "source": "/Users/damian/.local-operator/sessions/10adb6bdde12/scratchpad/eval/v6r4.txt"
+      "label": "v6r7",
+      "sha256": "52b2f1c1c6ca5b29cbe0b946fd0cbaa83699642a4cc39376797cd425867fa94f",
+      "source": "$SCRATCH/eval/v6r7.txt"
     }
   ],
   "models": [
-    "anthropic/claude-sonnet-5-5",
     "anthropic/claude-opus-5-5"
   ],
   "supports_sampling_params": {
-    "anthropic/claude-sonnet-5-5": false,
     "anthropic/claude-opus-5-5": false
   },
   "split": "all",
@@ -32,12 +30,12 @@
     "legit": 73
   },
   "repeat": 3,
-  "workers": 8,
+  "workers": 6,
   "organization": "Minerva",
   "addressed_default": "direct",
-  "trials": 2118,
-  "worst_case_calls": 6354,
-  "max_calls": 7000,
+  "trials": 1059,
+  "worst_case_calls": 3177,
+  "max_calls": 3500,
   "bootstrap": {
     "resamples": 2000,
     "seed": 20261031

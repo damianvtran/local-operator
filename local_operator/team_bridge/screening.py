@@ -49,6 +49,7 @@ import json
 import logging
 import re
 import secrets
+import unicodedata
 import weakref as _weakref
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1132,74 +1133,146 @@ def text_screening_version(
 #: The fixed local payload check (operator ruling 2026-11-18, holds triage H4/R4).
 #:
 #: WHY A LOCAL RULE AND NOT A PROMPT LINE. bridge-screen-v6 narrows ``hold`` to
-#: "unreadable, or you cannot tell whether a category applies" and stops reading
-#: replies and handoffs as new work (fix (e)). That makes the MODEL more willing to
-#: deliver, and the two messages that stayed correctly away from the agent in the
-#: triage were 13 KB base64+gzip bundles with instructions to decode and run them:
-#: text the screener cannot read, so its verdict on them is a guess either way. A
-#: guess must not be what admits an opaque payload, and a hold naming
-#: ``new_work_request`` must not turn it into an owner-releasable work-scope hold
-#: (R4 was exactly that shape). So this check runs on the body, after the model,
-#: and only ever makes the outcome STRICTER. Moderation stays fail-closed for
-#: injection and exfiltration; this is the part of it no template revision can
-#: weaken.
+#: "unreadable, or you cannot tell what is asked" and stops reading replies and
+#: handoffs as new work (fix (e)). That makes the MODEL more willing to deliver, and
+#: the two messages the triage kept correctly away from the agent were 13 KB
+#: base64+gzip bundles carrying instructions to decode and run them: text the
+#: screener cannot read, so its verdict on them is a guess. A guess must not be what
+#: admits an opaque payload, and a hold naming ``new_work_request`` must not turn
+#: one into an owner-releasable work-scope hold (R4 had exactly that shape). So this
+#: check runs on the body, independently of the model, and only ever makes the
+#: outcome STRICTER (:func:`_payload_outcome`).
 #:
-#: Thresholds: 1 KiB of contiguous encoded alphabet (whitespace-wrapped lines
-#: joined, as base64 is usually wrapped at 64/76 columns). A run must be at least
-#: :data:`_PAYLOAD_MIN_RUN` characters to count, so prose, paths (``.``/``:`` are
-#: outside the alphabet) and a single 64-character hash never add up to a blob.
+#: WHAT IT DOES NOT COVER (security review S-3). It is a per-message floor against
+#: the encodings and phrasings below, not a guarantee: a payload split across
+#: several messages, an encoding it does not recognise, or a paraphrase of the
+#: decode/run instruction falls back to the screener's own verdict, which still
+#: bounces injection and exfiltration on its own terms.
+#:
+#: BLOB RULE. Unicode format characters (category ``Cf``: zero-width spaces and
+#: joiners) are deleted first, so a payload split by invisible characters is
+#: measured whole. Encoded-alphabet tokens that look ENCODED -- mixed case plus a
+#: digit (base64/base64url), or pure hex -- are summed across a cluster whose gaps are at most
+#: :data:`_PAYLOAD_MAX_GAP` characters, which joins wrapped lines (any column),
+#: JSON string arrays and labelled chunks (``part 2/4: ...``). Hex counts at half
+#: weight, since it carries half a byte per character: that keeps evidence lists of
+#: commit SHAs and sha256 digests (up to ~50 in a row) readable (code review F3)
+#: while a hex dump of the same payload still fires. Separated hex
+#: (``de ad be ef`` / ``de:ad:be:ef``) is a second pattern. Lowercase paths and
+#: identifiers (``local_operator/team_bridge``, ``bcmsg_...``) are not "encoded" and
+#: never count.
 PAYLOAD_BLOB_MIN_BYTES = 1024
-_PAYLOAD_MIN_RUN = 40
+_PAYLOAD_MIN_RUN = 16
+_PAYLOAD_MAX_GAP = 16
 _PAYLOAD_RUN = re.compile(r"[A-Za-z0-9+/=_-]+")
-#: Instructions to DECODE or RUN something: tool invocations and imperative
-#: phrasing. Past-tense reports ("I ran the suite") do not match; an instruction
-#: to the recipient's agent to execute or unpack text it was sent does. Kept
-#: deliberately concrete -- every entry names a decoder, an interpreter handoff or
-#: an imperative aimed at a payload -- because the check overrides the screener.
-_PAYLOAD_INSTRUCTION = re.compile(r"""(?imx)
-    \bbase64\s+(?:-d|-D|--decode)\b
-    | \bb64decode\b | \batob\s*\( | \bfrombase64string\b | \buudecode\b
-    | \bgunzip\b | \bgzip\s+(?:-\w*d|--decompress) | \bzcat\b | \bxxd\s+-r\b
-    | \bopenssl\s+(?:enc|base64)\b[^\n]*\s-d\b
-    | \|\s*(?:sudo\s+)?(?:sh|bash|zsh|python3?|node|perl|ruby)\b
-    | \b(?:sh|bash|zsh)\s+-c\b | \bpython3?\s+-c\b | \bnode\s+-e\b
-    | \beval\s*\( | \bexec\s*\( | \binvoke-expression\b
-    | \bdecode\s+(?:it|this|that|them|these
-        |the\s+(?:payload|blob|bundle|attachment|parts?|data|text|string|packet|file))\b
-    | \bdecode\s+(?:in|into|with|using|and|then)\b
-    # An imperative "Decode ..." opening a sentence or line, or after please/then/and
-    # (triage H4: "Decode in a NEW owner-created isolated directory, inspect JSON ...").
-    | (?:^|[.!?;:]\s+|\b(?:please|then|and)\s+)(?:decode|decompress|unpack|unzip)\b
-    | \b(?:run|execute)\s+(?:it|this|that|them|these
-        |the\s+(?:decoded|attached|following|below|enclosed|embedded)\b)
+_PAYLOAD_HEX = re.compile(r"[0-9A-Fa-f]+")
+_PAYLOAD_SPACED_HEX = re.compile(
+    r"(?:[0-9A-Fa-f]{2}[ \t\r\n:,]){%d,}" % (PAYLOAD_BLOB_MIN_BYTES // 3)
+)
+#: DECODE/RUN RULE (code review F1). A word match is not an instruction, so every arm
+#: needs a payload context the same message supplies:
+#:   1. a shell command line that decodes, or pipes a fetch/echo into an
+#:      interpreter -- the command words are case-sensitive and must lead the line
+#:      or a code span, so a markdown table row ("| Python | 3.12 |"), "the gunzip
+#:      step failed" or a backticked mention of ``python -c`` never matches;
+#:   2. an imperative decode verb (or synonym: convert, translate, reassemble,
+#:      restore, ...) aimed at an object, when the message names an ENCODING
+#:      (base64, hex, gzip, encoded, ...) -- "Decode errors dropped" or "unpack the
+#:      feedback" do not qualify;
+#:   3. an imperative decode verb aimed at a pronoun/parts AND an imperative run
+#:      verb aimed at the result ("Glue the parts back together and follow the steps
+#:      in it") -- "run this by legal" alone does not qualify.
+_PAYLOAD_SHELL = re.compile(r"""(?mx)
+    (?:^|`)[ \t]*(?:\$[ \t]*)?
+    (?:gunzip\b|zcat\b
+      |(?:curl|wget|cat|echo|printf|base64)\b[^\n`|]*\|[ \t]*(?:sudo[ \t]+)?
+       (?:sh|bash|zsh|python3?|node|perl|ruby)\b)
+    | \beval[ \t]*\([ \t]*(?:atob|Buffer\.from|base64\.b64decode|b64decode)\b
+    # Decode commands are specific enough to count anywhere in a line ("then
+    # base64 -d bundle.txt"), as is an interpreter one-liner that decodes or execs.
+    | \bbase64[ \t]+(?:-d|-D|--decode)\b|\bxxd[ \t]+-r\b|\buudecode\b
+    | \bopenssl[ \t]+(?:enc|base64)\b[^\n`]*[ \t]-d\b
+    | \b(?:python3?|node|perl|ruby)[ \t]+-[ce][ \t]+["'][^"'\n]*
+      (?:b64decode|decompress|atob|Buffer\.from|exec|eval|system|spawn)
     """)
+_ENCODING_NOUN = re.compile(
+    # ``base64`` without a leading boundary: redaction can glue it to the verb
+    # ("Decodebase64 then gunzip", triage R4).
+    r"(?i)base[- ]?64\b|\b(?:b64|hex(?:-encoded|adecimal)?|gzip(?:ped)?|zlib|uuencoded|rot13"
+    r"|encoded|ciphertext|encrypted)\b|\.gz\b"
+)
+_DECODE_VERB = (
+    r"(?:decode|decompress|unpack|unzip|gunzip|convert|translate|decrypt|deobfuscate"
+    r"|reassemble|reconstruct|restore|glue|stitch|concatenate)"
+)
+#: Imperative position: opening a sentence or line, or after please/then/and/now/just.
+_IMPERATIVE = r"(?:^|[.!?;:]\s+|\n\s*(?:[-*]\s+|\d+[.)]\s+)?|\b(?:please|then|and|now|just)\s+)"
+_DECODE_IMPERATIVE = re.compile(
+    r"(?im)" + _IMPERATIVE + _DECODE_VERB + r"\s+(?:it|this|that|them|these|the|in|into|with"
+    r"|using|from|to|each|all|both|part|parts|chunk|chunks)\b"
+)
+_DECODE_ON_PARTS = re.compile(
+    r"(?im)" + _IMPERATIVE + _DECODE_VERB + r"\s+(?:it|this|that|them|these|the\s+(?:parts"
+    r"|chunks|pieces|payload|blob|bundle|string|text|packet|data))\b"
+)
+_RUN_IMPERATIVE = re.compile(
+    r"(?im)" + _IMPERATIVE + r"(?:run|execute|carry\s+out|follow|apply|install|source|do)\s+"
+    r"(?:it|this|that|them|what\s+it\s+says|the\s+(?:following\s+)?(?:steps|instructions|script"
+    r"|result|output|commands?|patch|decoded\b))"
+)
+
+
+def _encoded_weight(token: str) -> float:
+    """How much of ``token`` counts toward a blob: 1/char base64, 1/2 hex, 0 plain.
+
+    Half weight applies only to digest-sized hex (64 characters or fewer: commit
+    SHAs, sha256 lines); a longer hex run is a dump, not an identifier.
+    """
+
+    if _PAYLOAD_HEX.fullmatch(token):
+        return len(token) / 2 if len(token) <= 64 else float(len(token))
+    has_upper = any(c.isupper() for c in token)
+    has_lower = any(c.islower() for c in token)
+    has_digit = any(c.isdigit() for c in token)
+    return float(len(token)) if (has_upper and has_lower and has_digit) else 0.0
 
 
 def opaque_payload(body: str) -> str:
     """``"encoded_blob"`` / ``"decode_or_run"`` when the fixed local check fires, else ``""``.
 
-    Pure and linear in the body (two non-backtracking scans), so it can run on
-    every screened message and the eval can apply the identical rule to its
-    trials. See :data:`PAYLOAD_BLOB_MIN_BYTES` for why it exists.
+    Pure and linear in the body (non-backtracking scans), so it runs on every
+    screened message and on cached-verdict reuse, and the eval applies the identical
+    rule to its trials. See :data:`PAYLOAD_BLOB_MIN_BYTES` for the rules and limits.
     """
 
     if not isinstance(body, str) or not body:
         return ""
-    joined, previous_end = 0, 0
-    for match in _PAYLOAD_RUN.finditer(body):
-        size = match.end() - match.start()
-        if joined and not body[previous_end : match.start()].strip():
-            # Continues the current run across pure whitespace (line wrapping),
-            # whatever its length: a wrapped blob's last line is usually short.
-            joined += size
-        else:
-            # Only a chunk of _PAYLOAD_MIN_RUN or more can START a run, so prose
-            # words never accumulate into one.
-            joined = size if size >= _PAYLOAD_MIN_RUN else 0
+    text = "".join(ch for ch in body if unicodedata.category(ch) != "Cf")
+    total, previous_end = 0.0, None
+    for match in _PAYLOAD_RUN.finditer(text):
+        weight = _encoded_weight(match.group(0))
+        if weight == 0.0:
+            # A plain token (a word, a path) neither counts nor breaks the cluster,
+            # so a label between chunks does not reset the sum.
+            continue
+        joins = previous_end is not None and match.start() - previous_end <= _PAYLOAD_MAX_GAP
+        if not joins and len(match.group(0)) < _PAYLOAD_MIN_RUN:
+            # Only a token of _PAYLOAD_MIN_RUN or more STARTS a cluster; a shorter
+            # one (the tail line of a wrapped blob) only continues one.
+            continue
+        if not joins:
+            total = 0.0
+        total += weight
         previous_end = match.end()
-        if joined >= PAYLOAD_BLOB_MIN_BYTES:
+        if total >= PAYLOAD_BLOB_MIN_BYTES:
             return "encoded_blob"
-    if _PAYLOAD_INSTRUCTION.search(body) is not None:
+    if _PAYLOAD_SPACED_HEX.search(text) is not None:
+        return "encoded_blob"
+    if _PAYLOAD_SHELL.search(text) is not None:
+        return "decode_or_run"
+    if _ENCODING_NOUN.search(text) is not None and _DECODE_IMPERATIVE.search(text) is not None:
+        return "decode_or_run"
+    if _DECODE_ON_PARTS.search(text) is not None and _RUN_IMPERATIVE.search(text) is not None:
         return "decode_or_run"
     return ""
 
@@ -1788,7 +1861,13 @@ def _screen_prepare(
         f"{snapshot.admission_revision}|{envelope.envelope_digest}"
         f"|{_identities_digest(snapshot.approved_serving_identities)}"
     )
-    if snapshot.default_model is not None:
+    # Security review S-4: the receipt key carries the POLICY template's hash
+    # (v2), not the rendered addressed template or the engine, so an ``allow``
+    # recorded before the fixed payload check existed would replay as a delivery
+    # here, skipping :func:`_conclude_parsed`. A body the check fires on is
+    # therefore never served from a receipt: it falls through to a fresh screen,
+    # where the forced ``model_hold`` applies.
+    if snapshot.default_model is not None and not opaque_payload(envelope.private_body()):
         # ONE atomic native consumption (A2/A3): owner generation, current
         # published policy, receipt epoch and creator generation all verified
         # inside a single transaction; the live object is re-read LAST.
@@ -2661,6 +2740,12 @@ async def _screen_spend(
     # 13b. A8 ADMISSION DECISION (the production seam, shared with the batch
     #      path): disabled -> legacy; first non-deliver -> existing handling;
     #      trusted preferred hop -> bypass; otherwise the privacy pass.
+    #      The fixed local payload check is applied FIRST (review F4): a forced
+    #      hold is a first-stage non-deliver, so _decide passes it straight
+    #      through -- no paid privacy call, and no privacy_* code can replace the
+    #      required ``model_hold``.
+    screener_disposition = parsed[0]
+    parsed, payload_forced = _payload_outcome(parsed, prepared.envelope.private_body())
     decision = await _decide(
         store,
         owner,
@@ -2685,6 +2770,8 @@ async def _screen_spend(
         prepared,
         attempt_id=attempt_id,
         fingerprint=fingerprint,
+        payload_forced=payload_forced,
+        screener_disposition=screener_disposition,
         parsed=parsed,
         actual_model=actual_model,
         policy=policy,
@@ -2837,6 +2924,8 @@ def _conclude_parsed(
     answer_model: str | None = None,
     privacy_decision_id: str | None = None,
     privacy_gate: "tuple[Path | None, Any] | None" = None,
+    payload_forced: bool | None = None,
+    screener_disposition: str = "",
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
 
@@ -2867,9 +2956,13 @@ def _conclude_parsed(
 
     envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
     message_id = envelope.message_id
-    # The fixed local payload check runs FIRST and only ever tightens: a forced
-    # hold skips the work-scope conversion below and lands as ``model_hold``.
-    parsed, payload_forced = _payload_outcome(parsed, envelope.private_body())
+    # The fixed local payload check only ever tightens: a forced hold skips the
+    # work-scope conversion below and lands as ``model_hold``. Both production
+    # callers apply it before the A8 decision and pass the result in; a caller
+    # that has not (``payload_forced is None``) gets it applied here.
+    if payload_forced is None:
+        screener_disposition = parsed[0]
+        parsed, payload_forced = _payload_outcome(parsed, envelope.private_body())
     disposition, categories, reason, _verdict = parsed
     cache_model = actual_model if answer_model is None else answer_model
     if (
@@ -2919,7 +3012,10 @@ def _conclude_parsed(
             served_provider=served_provider,
             served_hop=served_hop,
             screener_preferred=screener_preferred,
-            screener_verdict="hold",
+            # A forced hold records what the MODEL answered (review F5), so the
+            # owner-review record does not claim the screener held a message it
+            # delivered; the reason carries "local payload check: <code>".
+            screener_verdict=(screener_disposition or "hold") if payload_forced else "hold",
         )
         return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
     if disposition == "bounce" and not categories:
@@ -4571,7 +4667,10 @@ async def _screen_batch_core(
         #      is persisted in its decision row before its own privacy call,
         #      which sees ONLY this message's body. A privacy failure is that
         #      message's typed hold — never ``batch_unresolved``, which would
-        #      buy a fresh paid first screen.
+        #      buy a fresh paid first screen. The local payload check runs
+        #      before it, as on the single path (review F4).
+        screener_disposition = parsed[0]
+        parsed, payload_forced = _payload_outcome(parsed, prepared.envelope.private_body())
         decision = await _decide(
             store,
             owner,
@@ -4599,6 +4698,8 @@ async def _screen_batch_core(
             prepared,
             attempt_id=attempt_id,
             fingerprint=digest,
+            payload_forced=payload_forced,
+            screener_disposition=screener_disposition,
             parsed=parsed,
             actual_model=actual_model,
             policy=policy,
