@@ -640,6 +640,24 @@ class MoveResumeRequested(TypedDict):
     session_id: str
 
 
+class MoveDryRun(TypedDict):
+    """``request_move(..., dry_run=True)``: the working set the move WOULD carry.
+
+    Nothing moved, so this is neither a receipt nor a refusal. It is a TypedDict
+    rather than a bare ``dict[str, Any]`` in :func:`request_move`'s return union on
+    purpose: a plain ``dict`` member defeats the ``ok`` discriminant, so a caller's
+    ``assert result["ok"] is False`` no longer narrows to
+    :class:`SessionMoveRefusal` and every refusal key read fails type-checking.
+    ``ok: Literal[True]`` keeps the union discriminable.
+    """
+
+    ok: Literal[True]
+    dry_run: Literal[True]
+    session_id: str
+    confirmation_required: bool
+    working_set: dict[str, Any]
+
+
 class MoveEngagement(TypedDict):
     """What the destination did about arriving live (``--engage-on-arrival``).
 
@@ -7883,7 +7901,7 @@ def request_move(
     confirm_working_set: str = "",
     without_working_set: bool = False,
     dry_run: bool = False,
-) -> SessionMoveResult | SessionMoveRefusal | dict[str, Any]:
+) -> SessionMoveResult | SessionMoveRefusal | MoveDryRun:
     """Move (or with ``keep``, copy) ``session_id`` to the device named by ``to``.
 
     ``to`` is a peer name or device id, or ``"local"`` to recall a session to this
