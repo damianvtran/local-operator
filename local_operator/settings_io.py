@@ -5665,6 +5665,42 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=1024,
         help=(_t(_ws.network_max_handshakes_help())),
     ),
+    # THE PER-SOURCE SHARE of that cap (PR #4290): how many of those pre-auth
+    # slots ONE address may occupy, so a single source can never fill the pool.
+    # An occupancy cap, not a member reservation — several sources together can
+    # still fill the global cap. The relay clamps the effective value to
+    # ``max(1, network.max_handshakes - 1)`` at start, so a value at or above the
+    # global cap is legal here but never lets one source take every slot.
+    # Default mirrors ``relay.DEFAULT_MAX_HANDSHAKES_PER_SOURCE`` (pinned by
+    # ``_consumer_defaults()``); the maximum mirrors ``max_handshakes``'.
+    Setting(
+        key="network.max_handshakes_per_source",
+        path=("network", "max_handshakes_per_source"),
+        section="network",
+        label=_t(_ws.network_max_handshakes_per_source_label()),
+        kind=Kind.INT,
+        default=3,
+        minimum=1,
+        maximum=1024,
+        help=(_t(_ws.network_max_handshakes_per_source_help())),
+    ),
+    # How long a new connection may send NOTHING before the relay closes it, so a
+    # silent connection cannot hold a pre-auth slot for the whole handshake
+    # budget. Runs inside that budget, never in addition to it. ``0`` is an
+    # explicit disable (hence minimum 0.0, not a positive floor); the maximum is
+    # ``relay.FIRST_BYTE_TIMEOUT_MAX_S``, and the relay re-validates a hand-edited
+    # value at start and falls back to the default with one warning line.
+    Setting(
+        key="network.first_byte_timeout_s",
+        path=("network", "first_byte_timeout_s"),
+        section="network",
+        label=_t(_ws.network_first_byte_timeout_s_label()),
+        kind=Kind.FLOAT,
+        default=2.0,
+        minimum=0.0,
+        maximum=60.0,
+        help=(_t(_ws.network_first_byte_timeout_s_help())),
+    ),
     # -- network.sync / network.credentials (mesh build plan P0) ---------------
     # Declared by P0 so the sync and credentials slices never edit this file (the
     # plan's conflict rule). Defaults mirror the READERS' module constants —

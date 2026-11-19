@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings",
-  "history_sha256": "4d80305773b9cd9eb7db8a47607eaed2b9a135de1f75166e7b718ab4cecdd30c",
+  "history_sha256": "06e19008bcc5b12e01209db31ac2ac4fb927ec29ff9114e2617b95822c7994d7",
   "entries": [
     {
       "locale": "hi",
@@ -1186,6 +1186,40 @@
       "evidence": "i18n/audits/evidence/hi/wire.settings/m4135b/record.json",
       "round": "m4135b",
       "keys_audited": 883
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "34b0fca0cc479254846cf29be6d3b995d233c5316bfeba65eeb5eaa3ced1139d",
+      "target_sha256": "b2e2fc1bbcbd0fe02cba359218969d5d5693c7459d1fb1ef609354807e7bb0eb",
+      "translator": {
+        "agent": "coder (team lopdev, PR #4290 implementer), session 8f32655fa3ef",
+        "session": "8f32655fa3ef",
+        "model": null,
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, independent i18n audit of PR #4290 round 1), session 47bf41818827; independent of translator 8f32655fa3ef",
+        "session": "47bf41818827",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4290 (fix/relay-preauth-limits, head 547be1a81) i18n audit round 1: independent reviewer session 47bf41818827 audited the 4 new keys network_max_handshakes_per_source.{label,help} and network_first_byte_timeout_s.{label,help} against en 34b0fca0cc47 (no .context.json notes exist for these keys; meaning checked against the settings_io.py registry: per-source 1..1024 default 3, clamped below the global cap; first-byte 0..60 s default 2, inside the handshake budget, 0 disables). Mechanical, whole namespace: key set equals en; vs merge-base e5701dda2 only those 4 keys differ, every other value byte-identical (carried from the prior passed audit); no placeholders/backticks in en and none introduced; digits match en; NFC; no bidi/control chars. Meaning, 'seconds', '0 turns it off', 'counted inside not added to' the handshake limit, 'dropped at accept with no reply frame' preserved; terminology matches the neighbouring network_max_handshakes strings in this locale. Findings: none. Translator model not recorded in the PR or commits, so left null rather than inferred. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4290-r1",
+      "keys_audited": 4
     }
   ]
 }

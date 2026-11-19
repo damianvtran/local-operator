@@ -1689,6 +1689,14 @@ def network_credentials_offline_hold_s_label() -> Msg:
     return Msg("wire.settings.network_credentials_offline_hold_s.label", {})
 
 
+def network_first_byte_timeout_s_help() -> Msg:
+    return Msg("wire.settings.network_first_byte_timeout_s.help", {})
+
+
+def network_first_byte_timeout_s_label() -> Msg:
+    return Msg("wire.settings.network_first_byte_timeout_s.label", {})
+
+
 def network_listen_address_help() -> Msg:
     return Msg("wire.settings.network_listen_address.help", {})
 
@@ -1703,6 +1711,14 @@ def network_max_handshakes_help() -> Msg:
 
 def network_max_handshakes_label() -> Msg:
     return Msg("wire.settings.network_max_handshakes.label", {})
+
+
+def network_max_handshakes_per_source_help() -> Msg:
+    return Msg("wire.settings.network_max_handshakes_per_source.help", {})
+
+
+def network_max_handshakes_per_source_label() -> Msg:
+    return Msg("wire.settings.network_max_handshakes_per_source.label", {})
 
 
 def network_port_help() -> Msg:

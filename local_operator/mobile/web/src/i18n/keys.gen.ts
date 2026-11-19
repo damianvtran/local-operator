@@ -1576,10 +1576,14 @@ export type MessageParams = {
   "wire.settings.network_credentials_grant_ttl_s.label": undefined;
   "wire.settings.network_credentials_offline_hold_s.help": undefined;
   "wire.settings.network_credentials_offline_hold_s.label": undefined;
+  "wire.settings.network_first_byte_timeout_s.help": undefined;
+  "wire.settings.network_first_byte_timeout_s.label": undefined;
   "wire.settings.network_listen_address.help": undefined;
   "wire.settings.network_listen_address.label": undefined;
   "wire.settings.network_max_handshakes.help": undefined;
   "wire.settings.network_max_handshakes.label": undefined;
+  "wire.settings.network_max_handshakes_per_source.help": undefined;
+  "wire.settings.network_max_handshakes_per_source.label": undefined;
   "wire.settings.network_port.help": undefined;
   "wire.settings.network_port.label": undefined;
   "wire.settings.network_rollout_on_update.choice.auto.description": undefined;

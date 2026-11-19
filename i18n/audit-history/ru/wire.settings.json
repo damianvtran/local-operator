@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "356da673c83b6793af20722c1fde8e9d8aa0f34f984cc0536d49351330ecaa09",
+  "history_sha256": "abf7d49637271aac89a6a5f6165252e00485890d7738cd0f69827d695a6c1338",
   "entries": [
     {
       "locale": "ru",
@@ -1215,6 +1215,43 @@
       "evidence": "i18n/audits/evidence/ru/wire.settings/m4135b/record.json",
       "round": "m4135b",
       "keys_audited": 883
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "34b0fca0cc479254846cf29be6d3b995d233c5316bfeba65eeb5eaa3ced1139d",
+      "target_sha256": "a8ac889815630ea18a376ddaca491da5bcfb0a4d9db0342a1fc80882c556b01a",
+      "translator": {
+        "agent": "coder (team lopdev, PR #4290 implementer), session 8f32655fa3ef",
+        "session": "8f32655fa3ef",
+        "model": null,
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, independent i18n audit of PR #4290 round 1), session 47bf41818827; independent of translator 8f32655fa3ef",
+        "session": "47bf41818827",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "I-ru-1"
+        ],
+        "locale_verdict": "CLEAN after auditor correction",
+        "corrections": "1 correction: network_first_byte_timeout_s.label \"Ожидание первого байта\" -> \"Тайм-аут первого байта\" (MINOR, terminology: every other ru timeout label in wire.settings uses \"Тайм-аут\")."
+      },
+      "status": "passed",
+      "note": "PR #4290 (fix/relay-preauth-limits, head 547be1a81) i18n audit round 1: independent reviewer session 47bf41818827 audited the 4 new keys network_max_handshakes_per_source.{label,help} and network_first_byte_timeout_s.{label,help} against en 34b0fca0cc47 (no .context.json notes exist for these keys; meaning checked against the settings_io.py registry: per-source 1..1024 default 3, clamped below the global cap; first-byte 0..60 s default 2, inside the handshake budget, 0 disables). Mechanical, whole namespace: key set equals en; vs merge-base e5701dda2 only those 4 keys differ, every other value byte-identical (carried from the prior passed audit); no placeholders/backticks in en and none introduced; digits match en; NFC; no bidi/control chars. Meaning, 'seconds', '0 turns it off', 'counted inside not added to' the handshake limit, 'dropped at accept with no reply frame' preserved; terminology matches the neighbouring network_max_handshakes strings in this locale. 1 correction: network_first_byte_timeout_s.label \"Ожидание первого байта\" -> \"Тайм-аут первого байта\" (MINOR, terminology: every other ru timeout label in wire.settings uses \"Тайм-аут\"). Translator model not recorded in the PR or commits, so left null rather than inferred. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4290-r1",
+      "keys_audited": 4
     }
   ]
 }

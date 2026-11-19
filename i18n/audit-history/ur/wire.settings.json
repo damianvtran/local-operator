@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "c86067405fbac179ee6b189eb0ad9ec8ce19fd6ccab20fb990f2c539b775098d",
+  "history_sha256": "01bb896c7dbeda6777119a09050ceafaa2b62a59e3423d6936fcf674d1f9c0e7",
   "entries": [
     {
       "locale": "ur",
@@ -1257,6 +1257,43 @@
       "evidence": "i18n/audits/evidence/ur/wire.settings/m4135b/record.json",
       "round": "m4135b",
       "keys_audited": 883
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "34b0fca0cc479254846cf29be6d3b995d233c5316bfeba65eeb5eaa3ced1139d",
+      "target_sha256": "5d1a0b030d7715145f11f2be6911b1bb26f9a30143bad9186420890bd9dfdf1f",
+      "translator": {
+        "agent": "coder (team lopdev, PR #4290 implementer), session 8f32655fa3ef",
+        "session": "8f32655fa3ef",
+        "model": null,
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, independent i18n audit of PR #4290 round 1), session 47bf41818827; independent of translator 8f32655fa3ef",
+        "session": "47bf41818827",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "I-ur-1"
+        ],
+        "locale_verdict": "CLEAN after auditor correction",
+        "corrections": "1 correction (2 occurrences): network_max_handshakes_per_source.help \"پتہ\" -> \"ایڈریس\" (MINOR, terminology: the neighbouring listen_address label and every network-address string in the ur catalogues use \"ایڈریس\"; \"پتہ\" reads as a postal address)."
+      },
+      "status": "passed",
+      "note": "PR #4290 (fix/relay-preauth-limits, head 547be1a81) i18n audit round 1: independent reviewer session 47bf41818827 audited the 4 new keys network_max_handshakes_per_source.{label,help} and network_first_byte_timeout_s.{label,help} against en 34b0fca0cc47 (no .context.json notes exist for these keys; meaning checked against the settings_io.py registry: per-source 1..1024 default 3, clamped below the global cap; first-byte 0..60 s default 2, inside the handshake budget, 0 disables). Mechanical, whole namespace: key set equals en; vs merge-base e5701dda2 only those 4 keys differ, every other value byte-identical (carried from the prior passed audit); no placeholders/backticks in en and none introduced; digits match en; NFC; no bidi/control chars. Meaning, 'seconds', '0 turns it off', 'counted inside not added to' the handshake limit, 'dropped at accept with no reply frame' preserved; terminology matches the neighbouring network_max_handshakes strings in this locale. 1 correction (2 occurrences): network_max_handshakes_per_source.help \"پتہ\" -> \"ایڈریس\" (MINOR, terminology: the neighbouring listen_address label and every network-address string in the ur catalogues use \"ایڈریس\"; \"پتہ\" reads as a postal address). Translator model not recorded in the PR or commits, so left null rather than inferred. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4290-r1",
+      "keys_audited": 4
     }
   ]
 }
