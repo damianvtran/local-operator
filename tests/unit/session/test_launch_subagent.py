@@ -762,15 +762,40 @@ def _describe_referrer(obj: object) -> str:
     return f"{kind} ({type(obj).__qualname__})"
 
 
+def _safe_describe(obj: object) -> str:
+    """Describe a referrer without letting a hostile ``__getattr__`` or a
+    half-torn-down object raise from inside the assertion message, which
+    would replace the leak report with an unrelated traceback."""
+    try:
+        return _describe_referrer(obj)
+    except Exception:
+        return type(obj).__name__
+
+
 def _referrer_report(obj: object, limit: int = 20) -> str:
     """Name who still holds ``obj`` (two levels), so a CI-only retention
     failure reports its holder instead of just "still a live Session".
 
     The report's own frames (and the calling test's coroutine) and the
     referrer lists it builds are excluded; they hold ``obj`` only because we
-    are looking at it. So are ``obj``'s own internals (its ``__dict__`` and
-    methods bound to it): they are its cycle, not an outside holder, and
-    would otherwise crowd the real owner edge out of the capped report.
+    are looking at it. So is ``obj``'s own ``__dict__``: it is its cycle,
+    not an outside holder.
+
+    Methods bound to ``obj`` are kept, because a live bound method held by a
+    task done-callback, a ``call_soon`` handle or a subscriber list is exactly
+    the holder class this report exists to name. Only a bound method whose
+    sole holder is ``obj``'s own ``__dict__`` (a cached self-reference) is
+    skipped as noise; every other bound method is listed with its holder on
+    the line under it.
+
+    Ordering, not filtering, keeps the capped report useful: a referrer whose
+    every holder is ``obj``'s ``__dict__`` or one of ``obj``'s own attribute
+    values (e.g. a Session's job manager holding ``Session._on_job_completed``)
+    is a collectible internal cycle, so it is listed after the referrers held
+    from outside. Without that, a Session's dozen self-wired callbacks fill
+    the cap before the outside holder appears. A holder that a module's
+    globals keep alive gets that module named, since "<- list" alone does not
+    say which list.
     """
     if obj is None:
         return "collected during report"
@@ -778,24 +803,57 @@ def _referrer_report(obj: object, limit: int = 20) -> str:
     caller = here.f_back
     own: list[object] = [here, caller]
     gc.collect()
-    first = [
-        r
-        for r in gc.get_referrers(obj)
-        if not any(r is o for o in own)
-        and getattr(r, "cr_frame", None) is not caller
-        and r is not getattr(obj, "__dict__", None)
-        and getattr(r, "__self__", None) is not obj
-    ]
-    own.append(first)
+    obj_dict = getattr(obj, "__dict__", None)
+    internal_ids = {id(obj_dict)}
+    if isinstance(obj_dict, dict):
+        internal_ids.update(id(v) for v in obj_dict.values())
+    candidates = gc.get_referrers(obj)
+    own.append(candidates)
+    external: list[tuple[object, list[object]]] = []
+    internal: list[tuple[object, list[object]]] = []
+    own.append(external)
+    own.append(internal)
+
+    # A plain function, not ``any(x is o for o in own)``: a generator closing
+    # over the loop variable turns it into a cell, and that cell then shows
+    # up as a holder of every referrer, defeating the internal-cycle ordering.
+    def is_own(x: object) -> bool:
+        for o in own:
+            if x is o:
+                return True
+        return False
+
+    for r in candidates:
+        if is_own(r):
+            continue
+        if getattr(r, "cr_frame", None) is caller or r is obj_dict:
+            continue
+        raw = gc.get_referrers(r)
+        own.append(raw)
+        holders = [h for h in raw if not is_own(h)]
+        own.append(holders)
+        if getattr(r, "__self__", None) is obj and len(holders) == 1 and holders[0] is obj_dict:
+            continue
+        if holders and all(id(h) in internal_ids for h in holders):
+            internal.append((r, holders))
+        else:
+            external.append((r, holders))
     lines = [f"live {type(obj).__name__} still referenced by:"]
-    for ref in first:
-        lines.append(f"  {_describe_referrer(ref)}")
-        second = gc.get_referrers(ref)
-        own.append(second)
-        for up in second:
-            if any(up is o for o in own):
-                continue
-            lines.append(f"    <- {_describe_referrer(up)}")
+    for ref, holders in external + internal:
+        lines.append(f"  {_safe_describe(ref)}")
+        for up in holders:
+            line = f"    <- {_safe_describe(up)}"
+            if not isinstance(up, dict) and getattr(up, "f_code", None) is None:
+                modules = [
+                    g["__name__"]
+                    for g in gc.get_referrers(up)
+                    if isinstance(g, dict)
+                    and isinstance(g.get("__name__"), str)
+                    and "__file__" in g
+                ]
+                if modules:
+                    line += f" in module globals {', '.join(modules)}"
+            lines.append(line)
         if len(lines) >= limit:
             break
     return "\n".join(lines[:limit])
