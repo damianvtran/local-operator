@@ -1286,6 +1286,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace cannot target a directory",
     ),
     (
+        "local_operator/network/mobility.py::_arrival_resume_note",
+        "os.replace",
+        # The once-per-move arrival-note fence: `staged` is the marker's own
+        # `.tmp` sibling, written by `write_text` (a regular FILE) one line above,
+        # and the target is the fixed FILE name ARRIVAL_NOTE_MARKER inside the
+        # session directory — never the directory itself. os.replace refuses a
+        # directory target, so the session directory cannot be removed through it.
+        "Publishes the just-written move-arrival-note.json.tmp FILE over the fixed "
+        "move-arrival-note.json marker inside the session dir; os.replace rejects a "
+        "directory target.",
+    ),
+    (
         "local_operator/network/store.py::_quarantine",
         "os.replace",
         "Sets an unparsable network record or parked decision aside as <name>.corrupt, "

@@ -35,7 +35,6 @@ CONSTRAINTS:
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import logging
@@ -449,24 +448,26 @@ def session_tree(root: Path, session_id: str) -> list[str]:
 
 
 def _transcript_texts(session_dir: Path) -> Iterable[str]:
-    """The transcript forms readable without the session runtime: plain and ``.gz``.
+    """The head of the session's transcript, in whichever form it is stored.
 
-    Other archive forms are skipped rather than decoded here — a mention is a fallback
-    seed (cwd and provenance are the primary ones), and the restore path that reads
-    every form belongs to ``sync``/the runtime, not to a read-only relay probe.
+    Read through ``compression.read_head`` — the archive-aware resolver — so a
+    compressed session (``.zst``/``.gz``) seeds mentions like a plain one instead of
+    reading as "no transcript" (``test_transcript_reads_are_archive_aware``). It
+    decodes only the first ``_MAX_TRANSCRIPT_BYTES`` and never materialises a plain
+    copy, so this stays a read-only probe. An archive this build cannot decode is
+    skipped: a mention is a fallback seed (cwd and provenance are the primary ones),
+    so a missing one narrows the working set rather than failing the move.
     """
-    plain = session_dir / "transcript.jsonl"
+    # Lazy, like the other network-side readers (carry.py, file_index.py): the
+    # compression module pulls session/runtime helpers this module does not need.
+    from local_operator.session import compression
+
     try:
-        with plain.open("rb") as handle:
-            yield handle.read(_MAX_TRANSCRIPT_BYTES).decode("utf-8", "replace")
-    except OSError:
-        pass
-    archived = session_dir / "transcript.jsonl.gz"
-    try:
-        with gzip.open(archived, "rb") as handle:
-            yield handle.read(_MAX_TRANSCRIPT_BYTES).decode("utf-8", "replace")
-    except (OSError, EOFError):
-        pass
+        head = compression.read_head(session_dir, _MAX_TRANSCRIPT_BYTES)
+    except (compression.ArchiveError, OSError):
+        return
+    if head:
+        yield head.decode("utf-8", "replace")
 
 
 def candidate_seeds(

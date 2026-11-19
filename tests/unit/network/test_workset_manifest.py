@@ -98,6 +98,34 @@ def test_a_transcript_mention_alone_lists_the_worktree_as_mentioned_never_planne
     assert block["totals"]["worktrees"] == 0
 
 
+@pytest.mark.parametrize("codec", ["gzip", "zstd"])
+def test_a_compressed_transcripts_mention_is_still_read(
+    root: Path, rig: Rig, codec: str
+) -> None:
+    """CI guards (round 1): the mention scan reads through the archive-aware
+    resolver, so a session the compression pass archived (``.zst`` as well as
+    ``.gz``) seeds the same ``mentioned`` row as a plain one — before the fix the
+    ``.zst`` form read as "no transcript" and the mention silently vanished."""
+    from local_operator.session import compression
+
+    if codec == "zstd" and compression.available_codec() != "zstd":
+        pytest.skip("this build has no zstd codec")
+    session = root / "sessions" / SID
+    point_session_at(session, rig.home)
+    (session / "transcript.jsonl").write_text(
+        json.dumps({"type": "user", "content": "cat ~/proj/.worktrees/other/README"}) + "\n",
+        encoding="utf-8",
+    )
+    assert compression.compress_session(session, codec=codec).status == "compressed"
+    assert not (session / "transcript.jsonl").exists()
+
+    manifest = _manifest(root, rig)
+
+    assert manifest.mentioned == ("~/proj/.worktrees/other",)
+    # A read-only probe: the archive is not re-inflated beside the session.
+    assert not (session / "transcript.jsonl").exists()
+
+
 def test_a_mention_beside_a_cwd_does_not_widen_the_planned_set_or_the_digest(
     root: Path, rig: Rig
 ) -> None:
