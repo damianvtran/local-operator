@@ -32,8 +32,10 @@ from __future__ import annotations
 import errno
 import os
 import re
+import shlex
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -124,7 +126,14 @@ def _own_child_in(tree: Path, pids: list[int]) -> subprocess.Popen[bytes]:
 
 
 def _orphan_in(tree: Path, pids: list[int]) -> int:
-    """A process with its cwd inside whose parent exited: reparented, no record."""
+    """A process with its cwd inside whose parent exited: reparented, no record.
+
+    The detach goes through a ``bash -c`` whose OWN cwd is the tree, and the
+    orphan reads ``nohup`` for the instant between its exec of ``nohup`` and
+    ``nohup``'s exec of ``sleep``. So callers must not synchronise on "some
+    process is inside": they use :func:`_wait_holding`, which waits for THIS
+    pid to be THIS executable (gate 44544718557).
+    """
     out = subprocess.run(
         ["bash", "-c", "nohup sleep 120 >/dev/null 2>&1 & echo $!"],
         cwd=tree,
@@ -142,6 +151,11 @@ def _wait_seen(tree: Path, pid: int) -> None:
 
     Only the pre-#3987-remediation surface (``_live_cwd_inside`` and the cache)
     is used, so this file also runs against e9c27eb to prove test (a) red there.
+
+    Call it ONLY for a ``subprocess.Popen`` child (``_own_child_in``): ``Popen``
+    returns after that child's exec has landed, so "a process is inside" is a
+    safe synchronisation point there. For the detached orphan fixture use
+    :func:`_wait_holding` — see the WHY on :func:`_fresh_holder`.
     """
     real = os.path.realpath(tree)
     deadline = time.monotonic() + 10
@@ -152,6 +166,61 @@ def _wait_seen(tree: Path, pid: int) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"pid {pid} never showed a cwd inside {tree}")
+
+
+#: The executable ``_orphan_in`` hands over to. The sync waits for this name,
+#: because ``nohup`` is what the process is called until that exec lands.
+_ORPHAN_COMMAND = "sleep"
+
+
+def _fresh_holder(tree: Path, pid: int, command: str) -> bool:
+    """Whether a FRESH scan shows ``pid`` itself inside ``tree`` running ``command``.
+
+    WHY (gate 44544718557, job 135643277691, Linux 3.12 shard 5,
+    ``test_b_foreign_orphan_inside_stays_high_and_is_named``): :func:`_wait_seen`
+    returns on the first inventory hit for ANY process inside the tree, and the
+    orphan fixture puts no less than two processes there besides ``sleep`` — the
+    detaching ``bash -c``, and the orphan itself while ``nohup`` is still its
+    name. CI then named the holder exactly as the process table read it,
+    ``pid 10711 nohup (no session record; unknown process)``, and the assertion
+    on ``sleep`` failed while the decision was right in every other respect:
+    HIGH, the exact pid, foreign attribution. Nothing in the guard was wrong;
+    the test synchronised on the wrong event.
+
+    Freshness and identity are the whole point: the inventory is re-read with
+    ``fresh=True``, and the command comes from :func:`_process_table`, the same
+    reading the guard uses — never the 30 s cache, never the spawn record. A pid
+    that exited and was recycled cannot answer for the fixture: it would also
+    have to reappear with its cwd inside this fresh tree.
+    """
+    real = os.path.realpath(tree)
+    entries = prov._cwd_entries(fresh=True)
+    if entries is None:  # an unreadable inventory is not a synchronisation point
+        return False
+    if not any(held == pid and prov._inside(cwd, real) for held, cwd in entries):
+        return False
+    table = prov._process_table()
+    if table is None:
+        return False
+    row = table.get(pid)
+    return row is not None and row[1] == command
+
+
+def _wait_holding(
+    tree: Path, pid: int, command: str = _ORPHAN_COMMAND, *, budget_s: float = 10.0
+) -> None:
+    """Block until ``pid`` IS ``command`` with its cwd inside ``tree``; bounded.
+
+    The budget is a deadlock guard, not a slow-host allowance: a fixture that
+    never reaches its exec fails here naming the pid, rather than hanging a
+    worker that other tests are queued behind.
+    """
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if _fresh_holder(tree, pid, command):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"pid {pid} never showed {command} with its cwd inside {tree}")
 
 
 @pytest.mark.parametrize("command", FIELD)
@@ -184,7 +253,7 @@ def test_b_foreign_orphan_inside_stays_high_and_is_named(
 ) -> None:
     wt = _attr3880(home, repo)
     pid = _orphan_in(wt, live)
-    _wait_seen(wt, pid)
+    _wait_holding(wt, pid)
     risk, reason = _rank(home, command)
     assert risk is Risk.HIGH, reason
     assert f"pid {pid} sleep (no session record; unknown process)" in reason, reason
@@ -197,7 +266,7 @@ def test_b_own_and_foreign_together_stay_high(home: Path, repo: Path, live: list
     child = _own_child_in(wt, live)
     pid = _orphan_in(wt, live)
     _wait_seen(wt, child.pid)
-    _wait_seen(wt, pid)
+    _wait_holding(wt, pid)
     risk, reason = _rank(home, FIELD[0])
     assert risk is Risk.HIGH, reason
     assert f"pid {child.pid} sleep (this session)" in reason
@@ -242,7 +311,7 @@ async def test_b_judge_facts_name_the_foreign_holder(
 ) -> None:
     wt = _attr3880(home, repo)
     pid = _orphan_in(wt, live)
-    _wait_seen(wt, pid)
+    _wait_holding(wt, pid)
     prompts: list[str] = []
 
     async def judge(system: str, prompt: str) -> str:
@@ -318,22 +387,18 @@ def test_without_session_id_own_holder_still_busy(home: Path, repo: Path, live: 
 
 
 def _wait_seen_keeping_cache(tree: Path, pid: int) -> None:
-    """Wait until a FRESH inventory shows ``pid`` inside, then put the warm cache back.
+    """Wait until a FRESH scan shows ``pid`` inside as ``sleep``, then re-warm the cache.
 
     QA Q1's precondition is a cache warmed BEFORE the holder arrived; a fresh
     read refreshes the cache, so the earlier (still in-TTL) snapshot is restored.
+    The pid-exact, executable-exact wait is :func:`_wait_holding`'s: this fixture
+    is the same detached orphan, so an any-hit wait would race its exec
+    (gate 44544718557).
     """
     warm = prov._cwd_inventory_cache
     assert warm is not None
-    real = os.path.realpath(tree)
-    deadline = time.monotonic() + 10
     try:
-        while time.monotonic() < deadline:
-            entries = prov._cwd_entries(fresh=True) or ()
-            if any(p == pid and prov._inside(cwd, real) for p, cwd in entries):
-                return
-            time.sleep(0.05)
-        raise AssertionError(f"pid {pid} never showed a cwd inside {tree}")
+        _wait_holding(tree, pid)
     finally:
         prov._cwd_inventory_cache = warm
 
@@ -477,7 +542,7 @@ def test_race_live_holder_missing_from_process_table_stays_busy_and_named(
     """
     wt = _attr3880(home, repo)
     pid = _orphan_in(wt, live)
-    _wait_seen(wt, pid)
+    _wait_holding(wt, pid)
     real_table = prov._process_table
 
     def table_without_orphan() -> dict[int, tuple[int, str]] | None:
@@ -489,3 +554,113 @@ def test_race_live_holder_missing_from_process_table_stays_busy_and_named(
     risk, reason = _rank(home, FIELD[1])
     assert risk is Risk.HIGH, reason
     assert f"pid {pid} ? (no session record; unknown process)" in reason, reason
+
+
+# -- the wait synchronises on the executable the assertion names ------------------
+#
+# Gate 44544718557 (job 135643277691, Linux 3.12 shard 5) failed
+# test_b_foreign_orphan_inside_stays_high_and_is_named[cd ~/local-operator && git
+# worktree remove --force .worktrees/attr3880-ci] with
+#
+#   AssertionError: ... busy: cwd held by pid 10711 nohup (no session record;
+#   unknown process) ...
+#
+# — the correct decision (HIGH, exact pid, foreign attribution) under the wrong
+# command name. The orphan fixture detaches through ``bash -c`` and reads
+# ``nohup`` for the instant before its exec of ``sleep``, so an any-hit wait can
+# return pre-exec. These two tests pin the fixed contract: an event-based
+# pre-exec fixture (no spin, no timing guess), a wait that must not accept it,
+# and a negative control that the wait fails rather than hangs.
+
+
+def _wait_for_path(path: Path, pid: int, *, budget_s: float = 10.0) -> None:
+    """Block until the fixture's own marker file exists — an event, not a guess."""
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"pid {pid} never armed {path}")
+
+
+def _delayed_exec_orphan(tree: Path, pids: list[int], fifo: Path, armed: Path) -> int:
+    """A process inside ``tree`` that has NOT yet exec'd ``sleep`` — deterministically.
+
+    The child writes ``armed`` and then blocks reading ``fifo``, so "still
+    pre-exec" is an event the test observes rather than a race it hopes to win,
+    and the exec happens only when the test releases the fifo. No CPU spin: the
+    child sleeps in the kernel. The ``live`` fixture reaps it by exact pid
+    (``start_new_session`` makes it its own group leader, so a group kill takes
+    the whole tree).
+    """
+    script = (
+        f"printf ok > {shlex.quote(str(armed))}; "
+        f"read -r _ < {shlex.quote(str(fifo))}; exec sleep 120"
+    )
+    proc = subprocess.Popen(["bash", "-c", script], cwd=tree, start_new_session=True)
+    pids.append(proc.pid)
+    return proc.pid
+
+
+def test_wait_holding_waits_for_the_exec_the_assertion_names(
+    home: Path, repo: Path, live: list[int], tmp_path: Path
+) -> None:
+    """Regression pin: the wait must not return on a pre-exec holder."""
+    wt = _attr3880(home, repo)
+    fifo = tmp_path / "exec-gate"
+    os.mkfifo(fifo)
+    armed = tmp_path / "armed"
+    pid = _delayed_exec_orphan(wt, live, fifo, armed)
+    _wait_for_path(armed, pid)
+    # Pre-exec, deterministically: the tree IS held, by something that is not sleep.
+    assert _fresh_holder(wt, pid, "bash") is True
+    assert _fresh_holder(wt, pid, _ORPHAN_COMMAND) is False
+    # That is exactly where the old any-hit wait returned.
+    released = threading.Event()
+
+    def release() -> None:
+        time.sleep(0.2)
+        # Bounded, non-blocking open: a fixture that died must fail the wait on its
+        # own budget, never park this thread in ``open`` waiting for a reader.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)  # ENXIO: no reader yet
+            except OSError:
+                time.sleep(0.02)
+                continue
+            try:
+                os.write(fd, b"\n")
+            finally:
+                os.close(fd)
+            released.set()
+            return
+
+    writer = threading.Thread(target=release, daemon=True)
+    writer.start()
+    # Capture BOTH facts at the instant the wait returns, before the release can
+    # land: joining the writer first would let a broken (any-hit) wait look synced.
+    early = False
+    synced = False
+    try:
+        _wait_holding(wt, pid)
+        early = not released.is_set()
+        synced = _fresh_holder(wt, pid, _ORPHAN_COMMAND)
+    finally:
+        writer.join(timeout=5)
+    assert not early, "the wait returned before the exec it was named for"
+    assert synced, "the wait returned while the fixture was still pre-exec"
+
+
+def test_wait_holding_refuses_a_holder_that_never_reaches_its_exec(
+    home: Path, repo: Path, live: list[int], tmp_path: Path
+) -> None:
+    """Negative control: an un-released pre-exec fixture FAILS the sync, bounded."""
+    wt = _attr3880(home, repo)
+    fifo = tmp_path / "exec-gate"
+    os.mkfifo(fifo)
+    pid = _delayed_exec_orphan(wt, live, fifo, tmp_path / "armed")
+    _wait_for_path(tmp_path / "armed", pid)
+    with pytest.raises(AssertionError, match=f"never showed {_ORPHAN_COMMAND}"):
+        _wait_holding(wt, pid, budget_s=0.5)
+    assert _fresh_holder(wt, pid, _ORPHAN_COMMAND) is False
