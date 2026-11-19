@@ -13,7 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 
 from local_operator.browser_bridge.resources import RESOURCE_NAME
 from local_operator.session.retention import SESSIONS_DIRNAME
-from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, _read_claim, lease_holder
+from local_operator.session_lease import (
+    LEASE_NAME,
+    MIRROR_NAME,
+    _read_claim,
+    lease_holder,
+)
 
 # The batch size is the desktop protocol bound; this path does not walk a roster.
 OwnerID = Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{1,64}$")]
@@ -70,7 +75,9 @@ def _stamp(path: Path, *, directory: bool = False) -> tuple[int, ...] | None:
 def _read_owner(sessions: Path, session_id: str) -> BrowserOwnerRow:
     unknown = BrowserOwnerRow(session_id=session_id)
     directory = sessions / session_id
-    lease, mirror, resource = (directory / name for name in (LEASE_NAME, MIRROR_NAME, RESOURCE_NAME))
+    lease, mirror, resource = (
+        directory / name for name in (LEASE_NAME, MIRROR_NAME, RESOURCE_NAME)
+    )
 
     def snapshot() -> tuple[tuple[int, ...] | None, ...]:
         root = _stamp(sessions, directory=True)
@@ -96,7 +103,9 @@ def _read_owner(sessions: Path, session_id: str) -> BrowserOwnerRow:
             if len(raw) > _MAX_WITNESS_BYTES:
                 return unknown
             receipt = json.loads(raw)
-        if not isinstance(receipt, dict) or (has_resource and receipt.get("session_id") != session_id):
+        if not isinstance(receipt, dict) or (
+            has_resource and receipt.get("session_id") != session_id
+        ):
             return unknown
         scope = _generation(receipt.get("generation"))
         retention = receipt.get("retention", "")
@@ -126,13 +135,19 @@ def _read_owner(sessions: Path, session_id: str) -> BrowserOwnerRow:
             # A present but unreadable/dead claim is not proof that a run finished.
             # A child's in-process claim is only a positive liveness signal. Its
             # parent may stay alive long after the child's marker is released.
+            expected_pid = None
             if has_lease:
                 claim = _read_claim(lease)
                 owner_generation = _generation(claim.generation)
-                if owner_generation is None or claim.pid is None or claim.pid <= 0:
+                expected_pid = claim.pid
+                if owner_generation is None or expected_pid is None or expected_pid <= 0:
                     return unknown
             pid, verdict = lease_holder(directory)
-            if verdict == "live" and pid is not None and (not has_lease or pid == claim.pid):
+            if (
+                verdict == "live"
+                and pid is not None
+                and (expected_pid is None or pid == expected_pid)
+            ):
                 if not has_lease and receipt.get("terminal"):
                     # Unleased children reuse a generation on resume. The current
                     # claim wins, but it cannot bind an earlier run's terminal data.
@@ -168,4 +183,6 @@ def _read_owner(sessions: Path, session_id: str) -> BrowserOwnerRow:
 
 def read_browser_owner_status(root: Path, session_ids: list[str]) -> BrowserOwnerStatus:
     sessions = root / SESSIONS_DIRNAME
-    return BrowserOwnerStatus(owners=[_read_owner(sessions, session_id) for session_id in session_ids])
+    return BrowserOwnerStatus(
+        owners=[_read_owner(sessions, session_id) for session_id in session_ids]
+    )

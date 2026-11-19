@@ -15,7 +15,11 @@ from local_operator.browser_bridge.resources import RESOURCE_NAME, BrowserResour
 from local_operator.server import desktop
 from local_operator.server.app import app
 from local_operator.server.utils import browser_owner_status
-from local_operator.session.retention import LIVE_MARKER_NAME, claim_session, release_session
+from local_operator.session.retention import (
+    LIVE_MARKER_NAME,
+    claim_session,
+    release_session,
+)
 from local_operator.session_lease import LEASE_NAME, acquire_session_lease
 
 ROUTE = "/v1/desktop/browser/owner-status"
@@ -34,7 +38,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(desktop, "_CLAIMED", None)
     monkeypatch.setenv(desktop.TOKEN_ENV, BEARER)
     monkeypatch.setenv(desktop.ORIGINS_ENV, ORIGIN)
-    monkeypatch.setattr(app.state, "config_manager", SimpleNamespace(config_dir=tmp_path), raising=False)
+    monkeypatch.setattr(
+        app.state, "config_manager", SimpleNamespace(config_dir=tmp_path), raising=False
+    )
     # No lifespan: the HTTP middleware/auth/route are real, but the daemon's
     # background supervisors and deferred boot services are not under test.
     return TestClient(app, base_url=BASE)
@@ -67,8 +73,11 @@ async def _finish(
     resource.remember("ui:1:private-nonce", host="ui")
     resource.ensure_recovered = AsyncMock()  # type: ignore[method-assign]
     resource.client = lambda: SimpleNamespace(  # type: ignore[method-assign]
-        call=AsyncMock(side_effect=OSError("temporary host error"))
-        if transport_error else AsyncMock(return_value={"state": "closed"})
+        call=(
+            AsyncMock(side_effect=OSError("temporary host error"))
+            if transport_error
+            else AsyncMock(return_value={"state": "closed"})
+        )
     )
     result = await resource.finish(resource.execution_generation, status)
     assert result.state == ("pending" if transport_error else "closed")
@@ -161,7 +170,9 @@ async def test_new_lease_does_not_reuse_stale_browser_receipt(client, tmp_path):
     assert _post(client, PARENT) == [_row(PARENT)]
     new = acquire_session_lease(directory)
     try:
-        assert _post(client, PARENT) == [_row(PARENT, "live", None, "execution_lease", new.generation)]
+        assert _post(client, PARENT) == [
+            _row(PARENT, "live", None, "execution_lease", new.generation)
+        ]
     finally:
         new.release()
 
@@ -210,13 +221,25 @@ async def test_death_or_malformed_claim_is_not_terminal(client, tmp_path):
         assert _post(client, CHILD, MISSING) == [_row(CHILD), _row(MISSING)]
     finally:
         # Restore the claim for its generation-fenced release.
-        (directory / LEASE_NAME).write_text(json.dumps({"generation": dead.generation, "pid": dead.pid}))
+        (directory / LEASE_NAME).write_text(
+            json.dumps({"generation": dead.generation, "pid": dead.pid})
+        )
         dead.release()
+
+
+def test_live_pid_must_match_the_lease_claim(client, tmp_path, monkeypatch):
+    directory = tmp_path / "sessions" / PARENT
+    lease = acquire_session_lease(directory)
+    try:
+        monkeypatch.setattr(browser_owner_status, "lease_holder", lambda _: (lease.pid + 1, "live"))
+        assert _post(client, PARENT) == [_row(PARENT)]
+    finally:
+        lease.release()
 
 
 def test_changed_witness_invalidates_the_sample(client, tmp_path, monkeypatch):
     directory = tmp_path / "sessions" / PARENT
-    lease = acquire_session_lease(directory)
+    acquire_session_lease(directory)
     real = browser_owner_status.lease_holder
 
     def replaced_claim(path):
@@ -230,9 +253,12 @@ def test_changed_witness_invalidates_the_sample(client, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("headers", "status"),
-    [({}, 401), ({"Authorization": "Bearer wrong"}, 401),
-     ({**AUTH, "Origin": "https://untrusted.example"}, 403),
-     ({**AUTH, "Sec-Fetch-Site": "cross-site"}, 403)],
+    [
+        ({}, 401),
+        ({"Authorization": "Bearer wrong"}, 401),
+        ({**AUTH, "Origin": "https://untrusted.example"}, 403),
+        ({**AUTH, "Sec-Fetch-Site": "cross-site"}, 403),
+    ],
 )
 def test_boundary_refuses_unauthorized_requests(client, headers, status):
     response = client.post(ROUTE, headers=headers, json={"session_ids": [PARENT]})
@@ -248,9 +274,14 @@ def test_desktop_posture_absent(client, monkeypatch):
 @pytest.mark.parametrize(
     "body",
     [
-        {}, {"session_ids": []}, {"session_ids": PARENT}, {"session_ids": [7]},
-        {"session_ids": ["../escape"]}, {"session_ids": ["line\n"]},
-        {"session_ids": [PARENT, PARENT]}, {"session_ids": ["x" * 65]},
+        {},
+        {"session_ids": []},
+        {"session_ids": PARENT},
+        {"session_ids": [7]},
+        {"session_ids": ["../escape"]},
+        {"session_ids": ["line\n"]},
+        {"session_ids": [PARENT, PARENT]},
+        {"session_ids": ["x" * 65]},
         {"session_ids": [f"owner-{i}" for i in range(65)]},
         {"session_ids": [PARENT], "verdict": "ended", "token": "must-not-echo"},
     ],
