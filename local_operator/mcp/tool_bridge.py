@@ -246,13 +246,14 @@ def outbound_args_note(
     """The line a tool result carries when arguments were withheld, or ``None``.
 
     Says three things the model otherwise cannot know: which of its arguments
-    did not reach the tool, that the call ran WITHOUT them (so a default
-    applied wherever it meant to set a value), and which names the tool does
-    declare -- the correction is usually one of them (``timeout`` ->
-    ``timeout_s``). The intent field is left out of the declared list unless
-    the server itself declares it: it is the harness's field, not an argument
-    the model should reach for. Both lists are bounded (see the ``MAX_NOTE_*``
-    constants).
+    did not reach the tool, that the call was SENT without them (so a default
+    applied wherever it meant to set a value -- "sent", not "ran": the note is
+    also attached to a transport failure, where nothing ran), and which names
+    the tool does declare -- the correction is usually one of them
+    (``timeout`` -> ``timeout_s``). The intent field is left out of the
+    declared list unless the server itself declares it: it is the harness's
+    field, not an argument the model should reach for. Both lists are bounded
+    (see the ``MAX_NOTE_*`` constants).
     """
     if not rejected:
         return None
@@ -262,7 +263,7 @@ def outbound_args_note(
     return (
         f"[Note: {'arguments' if plural else 'argument'} not declared by this tool "
         f"{'were' if plural else 'was'} NOT sent: "
-        f"{_bounded_names(rejected, MAX_NOTE_REJECTED_NAMES)}. The call ran without "
+        f"{_bounded_names(rejected, MAX_NOTE_REJECTED_NAMES)}. The call was sent without "
         f"{'them' if plural else 'it'}. Declared arguments: {declared or '(none)'}.]"
     )
 

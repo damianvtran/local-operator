@@ -185,12 +185,16 @@ REQUEST_BUDGET_REFUSAL = (
 )
 
 #: ``ToolResult.details`` key a host tool sets (to ``True``) on a result for a
-#: call it turned away BEFORE anything reached the host: invalid arguments, a
-#: write-pattern refusal, no time left. :func:`counted_host_tools` does not
-#: charge such a call. WHY: the command budget bounds what the check may do to
-#: the host, and nine recorded checks all ran out of it -- two of them partly
-#: on calls the inspector had refused, which bought the child nothing and cost
-#: it a command it then could not spend reading the deliverable. ``details``
+#: call whose COMMAND ITSELF never reached the host: invalid arguments, a
+#: write-pattern refusal, no time left. Not "nothing reached the host": the
+#: evaluation inspector's once-per-episode sandbox probe and audit mode's
+#: per-round date stamp may run before such a refusal -- harness overhead with
+#: its own fixed bound, not a command the child chose.
+#: :func:`counted_host_tools` does not charge such a call. WHY: the command
+#: budget bounds what the check may do to the host, and nine recorded checks
+#: all ran out of it -- two of them partly on calls the inspector had refused,
+#: which bought the child nothing and cost it a command it then could not
+#: spend reading the deliverable. ``details``
 #: is never serialized to the provider, so the child cannot set this itself;
 #: only launcher-supplied tool code can. An uncharged call is still bounded:
 #: every one costs a request, and the request cap and the wall still apply.

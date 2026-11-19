@@ -241,7 +241,7 @@ class TestRejectedOutboundArgs:
         note = outbound_args_note(("timeout", "cwd"), self.STRICT)
         assert note is not None
         assert "arguments not declared by this tool were NOT sent: timeout, cwd." in note
-        assert "ran without them" in note
+        assert "was sent without them" in note
 
     def test_note_is_bounded(self) -> None:
         """A server may declare dozens of properties and a model may invent

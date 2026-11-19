@@ -1316,6 +1316,81 @@ async def test_a_host_call_that_raises_keeps_its_charge() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_cap_holds_when_calls_of_one_request_run_concurrently() -> None:
+    """The reason the slot is reserved BEFORE the tool runs (review R1-m1):
+    the calls of one request are gathered, so three calls against a budget of
+    two are all in flight before any returns. Exactly two may reach the tool,
+    the count may never pass the limit, and a call the tool then reports as
+    not dispatched gives back exactly ONE slot -- no more, no fewer."""
+
+    entered: list[str] = []
+    both_in = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal=None, on_update=None, context=None):
+        command = args["command"]
+        entered.append(command)
+        if len(entered) == 2:
+            both_in.set()
+        # Held open so every sibling is admitted or refused while these are
+        # still in flight: the interleaving a sequential test cannot produce.
+        await release.wait()
+        if command == "bad":
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name="inspect_command",
+                content=[TextContent(text="Refused: not a read.")],
+                is_error=True,
+                details={NOT_DISPATCHED_DETAIL: True},
+            )
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="inspect_command",
+            content=[TextContent(text="out")],
+        )
+
+    admitted: list[int] = []
+    exhausted: list[int] = []
+    [tool], used = counted_host_tools(
+        [inspect_tool([]).model_copy(update={"execute": execute})],
+        limit=2,
+        on_call=admitted.append,
+        on_exhausted=lambda: exhausted.append(1),
+    )
+
+    gathered = asyncio.gather(
+        tool.execute("c1", {"command": "cat a"}, None, None, ToolContext()),
+        tool.execute("c2", {"command": "bad"}, None, None, ToolContext()),
+        tool.execute("c3", {"command": "cat c"}, None, None, ToolContext()),
+    )
+    await asyncio.wait_for(both_in.wait(), timeout=5)
+    # Both slots are held by calls that have not returned; the third call was
+    # never let through to the tool.
+    assert entered == ["cat a", "bad"] and used() == 2
+    release.set()
+    first, refunded, over = await asyncio.wait_for(gathered, timeout=5)
+
+    assert entered == ["cat a", "bad"]
+    assert not first.is_error and _block_texts(first)[0] == "out"
+    assert _block_texts(refunded)[0] == "Refused: not a read."
+    assert _block_texts(refunded)[-1].startswith("\n[not counted: ")
+    assert over.is_error and "Command budget used (2 of 2)" in over.text
+    assert admitted == [1, 2] and max(admitted) <= 2
+    assert exhausted == [1]
+    # One charged, one refunded: exactly one slot is free again...
+    assert used() == 1
+
+    again = await tool.execute("c4", {"command": "cat d"}, None, None, ToolContext())
+    assert not again.is_error
+    assert _block_texts(again) == ["out", "\n[2 of 2 commands used; that was the last one]"]
+    # ...and only one: the call after it is refused before the tool.
+    spent = await tool.execute("c5", {"command": "cat e"}, None, None, ToolContext())
+    assert spent.is_error and "Command budget used (2 of 2)" in spent.text
+    assert entered == ["cat a", "bad", "cat d"] and used() == 2
+    assert admitted == [1, 2, 2] and exhausted == [1, 1]
+
+
+@pytest.mark.asyncio
 async def test_usage_line_is_never_registered_as_typed_evidence() -> None:
     """A typed check registers every block of a successful result as citable
     evidence; the count is the launcher's line, not something observed."""

@@ -789,6 +789,82 @@ class TestDroppedArgumentNote:
         assert result.text == "ok" and len(result.content) == 1
         await manager.disconnect_all()
 
+    #: The shape ``monitors.diff.unpack_records`` exists for: one JSON object
+    #: whose payload string holds blank-line-separated records.
+    RECORD_ENVELOPE = (
+        '{"messages": "=== Message from a ===\\nhello\\n\\n=== Message from b ===\\nhi"}'
+    )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "machine_read",
+        [{"monitor_check": True}, {"result_parsed_by_harness": True}],
+        ids=["monitor-tick", "harness-parsed-delegate"],
+    )
+    async def test_no_note_where_the_harness_parses_the_result_text(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, machine_read: dict[str, bool]
+    ) -> None:
+        """Regression (review R1-M1): a monitor may be armed on a strict MCP
+        tool with an undeclared argument (``test_mcp_extras_are_not_refused``),
+        and every tick then carried the note. The tick's text is what the
+        scheduler compares and ``is_record_log`` must parse WHOLE, so the
+        result has to be the server's text byte-for-byte -- same for a
+        built-in's delegate that ``json.loads`` it. The argument is still
+        dropped; the model's own call (the control) still gets the note."""
+        from local_operator.monitors.diff import is_record_log
+
+        envelope = self.RECORD_ENVELOPE
+        session = FakeSession(
+            call_result=CallToolResult(
+                content=[TextContent(type="text", text=envelope)], is_error=False
+            )
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+        args = {"command": "read", "extra": 1}
+
+        # What the same tool returns when nothing was dropped: the baseline an
+        # already-armed monitor stored before this note existed.
+        clean = await tool.execute("c0", {"command": "read"}, None, None, ToolContext())
+        assert clean.text == envelope and is_record_log(clean.text)
+
+        unattended = await tool.execute(
+            "c1", dict(args), None, None, ToolContext().model_copy(update=machine_read)
+        )
+        assert unattended.text == clean.text == envelope
+        assert len(unattended.content) == len(clean.content) == 1
+        assert is_record_log(unattended.text)
+
+        # Control: the same call on a model's own turn is told, and that text
+        # is exactly what would have broken the record view above.
+        noted = await tool.execute("c2", dict(args), None, None, ToolContext())
+        assert noted.text.startswith(envelope + "\n[Note: ") and "NOT sent: extra. " in noted.text
+        assert "The call was sent without it." in noted.text
+        assert not is_record_log(noted.text)
+
+        # The exemption withholds the NOTE, never the hygiene: all three calls
+        # reached the server without the undeclared key.
+        assert session.calls == [("search", {"command": "read"})] * 3
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_failed_monitor_tick_carries_no_note_either(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The error branches go through the same gate: a failing tick's text
+        is recorded as the check's output and compared like any other."""
+        session = FakeSession(raise_on_call=ValueError("Timed out while waiting for response"))
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1", {"command": "read", "extra": 1}, None, None, ToolContext(monitor_check=True)
+        )
+
+        assert result.is_error is True
+        assert len(result.content) == 1 and "[Note:" not in result.text
+        await manager.disconnect_all()
+
 
 class TestOwnTurnOnlyGate:
     @pytest.mark.asyncio

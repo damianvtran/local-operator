@@ -4633,7 +4633,18 @@ class McpManager:
         # default the model did not choose and a timeout the withheld
         # ``timeout`` would have prevented are the two cases that otherwise
         # look like the tool's own behaviour (see ``clean_outbound_args``).
-        dropped_note = outbound_args_note(prepared.rejected, properties)
+        #
+        # NOT on a call whose result text the harness parses itself: a monitor
+        # tick (``monitor_check``; ``is_record_log`` needs the WHOLE text to
+        # parse as JSON, and the tick's comparable text is this text, so the
+        # note would both lose the record view and register as one spurious
+        # change on every already-armed monitor) or a built-in's delegate
+        # (``result_parsed_by_harness``; ``web_search`` runs ``json.loads`` on
+        # it). No model reads those results raw, so the note could never be
+        # acted on there -- it could only corrupt what is parsed. The drop
+        # itself is unchanged on every path.
+        machine_read = context.monitor_check or context.result_parsed_by_harness
+        dropped_note = None if machine_read else outbound_args_note(prepared.rejected, properties)
 
         def noted(result: ToolResult) -> ToolResult:
             # Appended as its own block, after the tool's content: the
