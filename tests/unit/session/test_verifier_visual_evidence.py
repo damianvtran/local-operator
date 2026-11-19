@@ -307,6 +307,26 @@ def test_typed_prompt_asks_for_one_shape_and_its_own_example_decodes():
     ]
 
 
+def test_typed_prompt_row_rules_raise_the_bar_for_unmet_and_met():
+    """Two rules from recorded checks, both stricter: a row went UNMET because
+    its source (a PDF) could not be read, and rows went MET on a filename or a
+    mean-colour statistic -- the rows that were actually wrong."""
+
+    typed = run_evidence()
+    text = typed.prompt()
+    assert (
+        "UNMET requires an observed failure; a missing justification or an unreadable "
+        "source is UNVERIFIED."
+    ) in text
+    assert "MET requires observed content, not a filename, size or summary statistic." in text
+    # The example row is left exactly as it was: still a placeholder that
+    # fails closed if copied.
+    [example] = [line for line in text.splitlines() if line.startswith("Example: ")]
+    assert json.loads(example.removeprefix("Example: "))["requirements"][0]["status"] == (
+        "UNVERIFIED"
+    )
+
+
 @pytest.mark.asyncio
 async def test_typed_budget_cue_asks_for_the_json_answer_not_a_verdict_line(tmp_path, config_dir):
     """Every one of the twelve checks spent its command budget, so the last
