@@ -3303,7 +3303,7 @@ MoveWorkingSetConfirmScreen .move-workset {
     color: $lo-fg;
 }
 
-/* No border: the stock `tall` border drew stray edge glyphs on the card's
+/* No border here, because the stock `tall` border drew stray edge glyphs on the card's
  * overlay. Focus still reads from the label's selection tint. The toggle's
  * glyph is HIDDEN until ticked (the stock dim X read as already-ticked in the
  * first capture), and the ticked state uses the accent, so the one state the

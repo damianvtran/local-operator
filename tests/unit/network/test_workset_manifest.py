@@ -193,6 +193,23 @@ def test_strictness_is_decided_per_repository_not_by_its_first_top(
     assert rig.feat in [candidate.path for candidate in candidates]
 
 
+def test_a_relative_seed_never_resolves_against_the_relays_own_cwd(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Merge-gate regression (PR #4241, full-suite run 44460411714): a session built
+    without a cwd records ``"."`` (``Session``'s default), the wake index hands that
+    to the owner, and resolving it put the RELAY's process cwd — a repo checkout in
+    CI — into the working set, refusing a queued move ``working_set_unconfirmed``.
+    The relay standing inside a worktree is exactly the case that used to leak."""
+    monkeypatch.chdir(rig.feat)
+
+    assert workset.discover_worktrees([workset.Seed(".", "cwd")]) == []
+    assert workset.discover_worktrees([workset.Seed("a.txt", "provenance")]) == []
+    # Control: the same worktree named absolutely is still found.
+    found = workset.discover_worktrees([workset.Seed(str(rig.feat), "cwd")])
+    assert [candidate.path for candidate in found] == [rig.feat]
+
+
 def test_a_provenance_record_seeds_its_worktree(root: Path, rig: Rig) -> None:
     session = root / "sessions" / SID
     point_session_at(session, rig.home)

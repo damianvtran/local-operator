@@ -4615,7 +4615,8 @@ def _arrival_active(server: "RelayServer", session_id: str, *, resuming: bool) -
     Active means any of: the move was QUEUED and is now resuming at its safe point
     (the user asked to move mid-work), or the conversation or any session in its
     subagent tree (``workset.session_tree``) wrote a transcript row within the last
-    ``DEFAULT_KEEP_ALIVE_SECONDS`` (``session/runtime/process.py``, 300 s). That
+    ``DEFAULT_KEEP_ALIVE_SECONDS`` (defined in ``session/runtime/types.py`` and
+    re-exported by ``session/runtime/process.py``, 300 s). That
     window is the codebase's own "a person is involved with this runtime" bound —
     the post-viewer residency a runtime keeps before it drains — so a conversation
     inside it is one the user (or a running subagent) was just using. A finished
@@ -4629,7 +4630,10 @@ def _arrival_active(server: "RelayServer", session_id: str, *, resuming: bool) -
         return True
     try:
         from local_operator.network import workset
-        from local_operator.session.runtime.process import DEFAULT_KEEP_ALIVE_SECONDS
+
+        # From ``types``, never ``process``: the relay must not import a session
+        # owner (test_relay_e2e::test_the_relay_never_becomes_a_session_owner).
+        from local_operator.session.runtime.types import DEFAULT_KEEP_ALIVE_SECONDS
 
         root = Path(server.root)
         horizon = time.time() - float(DEFAULT_KEEP_ALIVE_SECONDS)

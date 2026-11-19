@@ -255,7 +255,9 @@ def test_the_summary_renders_the_destinations_probe_answer(
     )
 
 
-def test_no_engage_on_arrival_reaches_the_move_request(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_engage_on_arrival_reaches_the_move_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     from local_operator.network import mobility
 
     seen: list[dict[str, Any]] = []
@@ -270,8 +272,14 @@ def test_no_engage_on_arrival_reaches_the_move_request(monkeypatch: pytest.Monke
     assert seen[0]["no_engage_on_arrival"] is True
     assert _run(["--json"]) == 1
     assert seen[1]["no_engage_on_arrival"] is False
-    # The two flags contradict each other: refused before anything is sent.
-    assert _run(["--engage-on-arrival", "--no-engage-on-arrival"]) == 2
+    # The two flags contradict each other: argparse's mutually exclusive group refuses
+    # the pair (exit 2) before anything is sent, with the localized conflict line
+    # (no hand-written, untranslated refusal in cli.py — the i18n ceiling may only fall).
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as refused:
+        _run(["--engage-on-arrival", "--no-engage-on-arrival"])
+    assert refused.value.code == 2
+    assert "--engage-on-arrival" in capsys.readouterr().err
     assert len(seen) == 2
 
 

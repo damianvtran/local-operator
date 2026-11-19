@@ -1842,7 +1842,14 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # successful move (`sessions_move_command` returns the MOVE's status) — so on the
     # device that engaged the answer is only in `engagement.engaged`, and the help is
     # where a caller that never reads this comment finds that out.
-    move_parser.add_argument(
+    #
+    # `--engage-on-arrival` and `--no-engage-on-arrival` share a mutually exclusive
+    # group so argparse refuses the pair (exit 2) with its own conflict line, which
+    # `i18n.cli_failures.localise_failure` already renders in the user's language. A
+    # hand-written refusal in the command body would be a new untranslated legacy
+    # literal in cli.py, and the file's i18n ceiling may only fall.
+    engage_group = move_parser.add_mutually_exclusive_group()
+    engage_group.add_argument(
         "--engage-on-arrival",
         action="store_true",
         help=(_sh.move_engage_on_arrival().envelope(locale=help_locale)["text"]),
@@ -1851,7 +1858,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # conversation that was active when it moved is engaged on arrival by default and
     # handed one continuation note; this flag keeps the old cold arrival. Its help
     # lives in the fully translated working-set namespace, like the flags below.
-    move_parser.add_argument(
+    engage_group.add_argument(
         "--no-engage-on-arrival",
         action="store_true",
         help=_wsh.help_no_engage_on_arrival().envelope(locale=help_locale)["text"],
@@ -7727,14 +7734,6 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     if not session_id or not to:
         print(
             "sessions move needs a conversation id and --to DEVICE (or " "--cancel-queued SESSION)",
-            file=sys.stderr,
-        )
-        return 2
-    if bool(getattr(args, "engage_on_arrival", False)) and bool(
-        getattr(args, "no_engage_on_arrival", False)
-    ):
-        print(
-            "--engage-on-arrival and --no-engage-on-arrival cannot be combined",
             file=sys.stderr,
         )
         return 2

@@ -712,6 +712,16 @@ def discover_worktrees(seeds: Iterable[Seed]) -> list[Candidate]:
     """
     tops: dict[Path, list[str]] = {}
     for seed in seeds:
+        # A RELATIVE SEED NAMES NOTHING HERE. Every seed source records an absolute
+        # path when it records a real one; a relative value is what a session built
+        # without a cwd leaves behind (``Session`` defaults its cwd to ``"."``, and that
+        # reaches the wake index the owner reads first). Resolving it would anchor it
+        # to the RELAY process's own working directory, inventing a working set the
+        # conversation never touched and refusing the move ``working_set_unconfirmed``
+        # (the full-suite queued-move e2e, whose relay ran inside the repo checkout).
+        # A move with nothing to carry must proceed exactly as before the gate existed.
+        if not os.path.isabs(seed.path):
+            continue
         directory = _nearest_existing_dir(seed.path)
         if directory is None:
             continue
