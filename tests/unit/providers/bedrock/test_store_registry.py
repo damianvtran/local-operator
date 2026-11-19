@@ -190,7 +190,11 @@ def test_same_access_key_in_two_regions_keeps_both_rows_and_refs(tmp_path: Path)
             )
             refs.append(bconn.parse(row.data["key"]).ref)
         rows = store.list_credentials("bedrock", include_disabled=True)
-        assert sorted(bconn.parse(r.data["key"]).region for r in rows) == ["eu-west-1", "us-east-1"]
+        regions = [bconn.parse(r.data["key"]).region for r in rows]
+        # ``region`` is Optional on the parsed descriptor; every row here was
+        # written with one, so a None is itself a failure, not a value to skip.
+        assert None not in regions
+        assert sorted(r for r in regions if r is not None) == ["eu-west-1", "us-east-1"]
         names = _secret_names(tmp_path)
         assert all(any(ref in name for name in names) for ref in refs)
     finally:
