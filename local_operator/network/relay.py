@@ -85,7 +85,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, redial, store, wire
+from local_operator.network import nat64, projection, redial, store, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -990,7 +990,11 @@ def probe_candidates(
             return
         started = time.monotonic()
         try:
-            sock = socket.create_connection((address or endpoint, port), timeout=budget)
+            # ``nat64.create_connection``, not ``socket``'s: the ONE dial seam that
+            # retries an IPv4-only candidate through this network's NAT64 when this
+            # host has no IPv4 route (roaming stage 3). Same first connect, same
+            # exceptions; trust is still the handshake's call on the winning socket.
+            sock = nat64.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
             results.put(
                 _AttemptOutcome(
@@ -13820,7 +13824,10 @@ class RelayServer:
             except ValueError:
                 return None, "bad_endpoint"
             try:
-                sock = socket.create_connection((address or host, port), timeout=budget)
+                # The shared NAT64-aware seam (see ``probe_candidates``): a synthesised
+                # address only carries the bytes; the handshake below still decides
+                # whether the device on the other end is the member we meant.
+                sock = nat64.create_connection((address or host, port), timeout=budget)
             except OSError as exc:
                 return None, f"connect_failed:{exc.__class__.__name__}"
         deadline = wire.deadline_in(budget)
