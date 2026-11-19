@@ -131,7 +131,13 @@ PRICE_CATALOGUE_KEY = "models-dev.listing"
 #: existing install for up to a day — the same one-refetch repair as version 2,
 #: on whichever surface reads the document first (single-id resolution repairs
 #: in-call, the picker's bulk read repairs off-loop).
-PRICE_CATALOGUE_CAPTURE = 3
+#: Version 4 adds the ``google-vertex`` provider key to the projection AND
+#: reads nested ``cost.context_over_200k`` long-context tier pricing into
+#: ``DiscoveredModel.long_context_*``. Existing installs cached a version-3
+#: projection that omitted ``google-vertex`` entirely, so without bumping the
+#: capture stamp Vertex AI models would miss their models.dev prices and >200k
+#: tier rates until the 24h TTL expired. Same one-time refetch repair as v2/v3.
+PRICE_CATALOGUE_CAPTURE = 4
 
 #: A local (canonical) provider id, mapped to the models.dev provider keys that
 #: describe the same models — FIRST MATCH WINS, per model id. The local id is the
@@ -445,6 +451,19 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
     limit = entry.get("limit")
     limit = limit if isinstance(limit, Mapping) else {}
     cache_read = _positive_float(cost.get("cache_read"))
+    over_200k = cost.get("context_over_200k")
+    lc_input = 0.0
+    lc_output = 0.0
+    lc_cache_read = 0.0
+    lc_cache_write = 0.0
+    lc_threshold = 0
+    if isinstance(over_200k, Mapping):
+        lc_input = _positive_float(over_200k.get("input"))
+        lc_output = _positive_float(over_200k.get("output"))
+        lc_cache_read = _positive_float(over_200k.get("cache_read"))
+        lc_cache_write = _positive_float(over_200k.get("cache_write"))
+        if lc_input > 0 or lc_output > 0:
+            lc_threshold = 200_000
     name = entry.get("name")
     stated_input = _stated_price(cost.get("input"))
     stated_output = _stated_price(cost.get("output"))
@@ -489,6 +508,11 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
         ),
         cache_read_price=cache_read,
         cache_write_price=_positive_float(cost.get("cache_write")),
+        long_context_threshold=lc_threshold,
+        long_context_input_price=lc_input,
+        long_context_output_price=lc_output,
+        long_context_cache_read_price=lc_cache_read,
+        long_context_cache_write_price=lc_cache_write,
         # Never from here: a second-hand catalogue cannot issue the provider's
         # denial that a stated ``False`` means. See the module docstring.
         supports_images=None,

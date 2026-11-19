@@ -24,6 +24,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -2027,10 +2028,8 @@ def _oauth_listing_token(
 
         storage = credential_provider_id(provider)
         store = (
-            shared_auth_store(
-                db_path=base / "auth.db" if base is not None else None, config_dir=base
-            )
-            if provider == "meta-muse"
+            shared_auth_store(db_path=base / "auth.db", config_dir=base)
+            if base is not None
             else shared_auth_store()
         )
         rows = store.list_credentials(provider=storage)
@@ -2041,6 +2040,20 @@ def _oauth_listing_token(
             else:
                 token = str(row.data.get("access") or "")
             if token:
+                if storage == "google-vertex" and row.credential_type == "oauth":
+                    # Vertex AI's publisher catalogue needs the GCP project id in
+                    # ``x-goog-user-project``; ``account_id`` stores the email.
+                    project_id = (
+                        row.data.get("project_id")
+                        or row.data.get("org_id")
+                        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+                        or os.environ.get("VERTEX_PROJECT")
+                    )
+                    return (
+                        token,
+                        True,
+                        (str(project_id).strip() if project_id else None),
+                    )
                 account_id = (
                     row.data.get("account_id")
                     or row.data.get("org_id")
@@ -2196,6 +2209,18 @@ def info_from_discovered_model(
             # number — it under-states an Anthropic 5m write by 20%, which is
             # why a quoted write price above takes precedence.
             info.cache_writes_price = info.input_price
+    if row.long_context_threshold > 0 and (
+        row.long_context_input_price > 0 or row.long_context_output_price > 0
+    ):
+        info.long_context_threshold = row.long_context_threshold
+        if row.long_context_input_price > 0:
+            info.long_context_input_price = row.long_context_input_price
+        if row.long_context_output_price > 0:
+            info.long_context_output_price = row.long_context_output_price
+        if row.long_context_cache_read_price > 0:
+            info.long_context_cache_reads_price = row.long_context_cache_read_price
+        if row.long_context_cache_write_price > 0:
+            info.long_context_cache_writes_price = row.long_context_cache_write_price
     if row.supports_images is not None:
         # The provider's own statement, including a ``false``: ``DiscoveredModel``
         # spells "the listing did not say" as ``None``, so the only thing an
@@ -2328,6 +2353,22 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
                 # an Anthropic 5m write by 20% (1.25x base), which is why a quoted
                 # write price above wins and this is only the floor.
                 info.cache_writes_price = info.input_price
+    if (
+        not info.long_context_threshold
+        and row.long_context_threshold > 0
+        and (row.long_context_input_price > 0 or row.long_context_output_price > 0)
+    ):
+        info.long_context_threshold = row.long_context_threshold
+        if row.long_context_input_price > 0:
+            info.long_context_input_price = row.long_context_input_price
+        if row.long_context_output_price > 0:
+            info.long_context_output_price = row.long_context_output_price
+        if row.long_context_cache_read_price > 0:
+            info.long_context_cache_reads_price = row.long_context_cache_read_price
+        if row.long_context_cache_write_price > 0:
+            info.long_context_cache_writes_price = row.long_context_cache_write_price
+    if (not info.name or info.name == info.id) and row.name:
+        info.name = row.name
     if not _has_real_window(info) and row.context_window > 0:
         # A missing window is not cosmetic and not merely a rendering gap: the
         # compaction threshold is derived from it, so an unknown window disables
@@ -8488,13 +8529,15 @@ def cost_for_usage(
         # but this receipt has no OpenAI TTL provenance. Neither is safe.
         # Unstamped legacy/gateway receipts keep their pre-existing behavior.
         raise ValueError("OpenAI cache write TTL is unknown")
-    plain = _usage_field(usage, "input_tokens")
+    raw_input = _usage_field(usage, "input_tokens")
+    plain = raw_input
     if _cache_tokens_are_inside_input(provider):
         # Subtract, floored at zero: the buckets must stay disjoint, and a
         # provider that reports more cached tokens than prompt tokens is
         # malformed rather than a reason to hand back a negative bill.
         plain = max(0, plain - read - written)
     output = float(_usage_field(usage, "output_tokens"))
+    effective_info = model_info
     if (
         provider == "openai"
         and long_context
@@ -8506,8 +8549,34 @@ def cost_for_usage(
         read *= 2
         written *= 2
         output *= 1.5
-    price_moment = tariff.moment_for(model_info, usage, moment)
-    cost = calculate_cost(model_info, plain, output, read, written, moment=price_moment)
+    elif (
+        model_info.long_context_threshold
+        and raw_input > model_info.long_context_threshold
+        and (model_info.long_context_input_price or model_info.long_context_output_price)
+    ):
+        # Tiered long-context pricing (e.g. Google/Vertex >200k prompt tokens):
+        # threshold is evaluated against the FULL prompt size (``raw_input``)
+        # before subtracting cached tokens, and once crossed the entire request
+        # bills at the long-context tier rates (input, output including thinking
+        # tokens, and cached content reads).
+        lc_input = model_info.long_context_input_price or model_info.input_price
+        lc_output = model_info.long_context_output_price or model_info.output_price
+        lc_cache_read = model_info.long_context_cache_reads_price
+        if lc_cache_read is None:
+            lc_cache_read = model_info.cache_reads_price
+        lc_cache_write = model_info.long_context_cache_writes_price
+        if lc_cache_write is None:
+            lc_cache_write = model_info.cache_writes_price
+        effective_info = model_info.model_copy(
+            update={
+                "input_price": lc_input,
+                "output_price": lc_output,
+                "cache_reads_price": lc_cache_read,
+                "cache_writes_price": lc_cache_write,
+            }
+        )
+    price_moment = tariff.moment_for(effective_info, usage, moment)
+    cost = calculate_cost(effective_info, plain, output, read, written, moment=price_moment)
     cost *= fast_multiplier
     if provider == "anthropic":
         # Anthropic's receipt identifies the 1h subset; its documented price is

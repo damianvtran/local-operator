@@ -33,7 +33,8 @@ from local_operator.model.registry import (
     xai_models,
 )
 from local_operator.providers.auth_store import AuthStore
-from local_operator.providers.controller import PICKER_TTL_S, ProviderController
+from local_operator.providers.controller import PICKER_TTL_S, ProviderController, _enrich_prices
+from local_operator.providers.registry import get_provider_definition
 from local_operator.providers.local import (
     LOCAL_PROVIDER_IDS,
     local_api_key,
@@ -268,7 +269,7 @@ async def list_models(
                     models.append(
                         ModelEntry(id=row.id, name=info.name, provider="deepseek", info=info)
                     )
-            elif provider_detail.id in ("google", "google-vertex"):
+            elif provider_detail.id == "google":
                 for model_name, model_info in google_models.items():
                     models.append(
                         ModelEntry(
@@ -276,6 +277,44 @@ async def list_models(
                             name=model_info.name,
                             provider=provider_detail.id,
                             info=model_info,
+                        )
+                    )
+            elif provider_detail.id == "google-vertex":
+                # Share Vertex AI's live publisher listing + models.dev price
+                # enrichment with the TUI/desktop picker so newly released
+                # Gemini models appear on `/v1/models?provider=google-vertex`
+                # with real limits and pricing rather than a static snapshot.
+                controller = ProviderController(provider_auth_store, config_manager.config_dir)
+                api_key, is_oauth, project_id = await controller.listing_credential(
+                    "google-vertex", read_only=True
+                )
+                rows, _ = await asyncio.to_thread(
+                    available_models,
+                    "google-vertex",
+                    api_key=api_key,
+                    is_oauth=is_oauth,
+                    account_id=project_id,
+                    ttl_s=PICKER_TTL_S,
+                )
+                vertex_def = get_provider_definition("google-vertex")
+                if vertex_def is not None:
+                    enriched_map = await asyncio.to_thread(
+                        _enrich_prices, [(vertex_def, rows)]
+                    )
+                    rows = enriched_map.get("google-vertex", rows)
+                for row in rows:
+                    fallback = google_models.get(row.id) or ModelInfo(
+                        id=row.id,
+                        name=row.name or row.id,
+                        description="Model listed by Google Vertex AI",
+                    )
+                    info = info_from_discovered_model("google-vertex", row.id, row, fallback)
+                    models.append(
+                        ModelEntry(
+                            id=row.id,
+                            name=info.name,
+                            provider="google-vertex",
+                            info=info,
                         )
                     )
             elif provider_detail.id == "kimi":

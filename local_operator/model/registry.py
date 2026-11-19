@@ -277,6 +277,14 @@ class ModelInfo(BaseModel):
     supports_responses_api: bool = False
     cache_writes_price: Optional[float] = None
     cache_reads_price: Optional[float] = None
+    # Tiered long-context pricing (e.g. Google/Vertex >200k prompt-token tier,
+    # where the entire request bills at higher rates once total input exceeds
+    # ``long_context_threshold``). ``None`` means flat pricing across the window.
+    long_context_threshold: Optional[int] = None
+    long_context_input_price: Optional[float] = None
+    long_context_output_price: Optional[float] = None
+    long_context_cache_reads_price: Optional[float] = None
+    long_context_cache_writes_price: Optional[float] = None
     time_of_use: str | None = Field(
         default=None,
         description=(
@@ -3180,7 +3188,14 @@ _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
     "anthropic": anthropic_models,
     "openai": openai_models,
     "google": google_models,
-    "google-vertex": google_models,
+    # Vertex AI serves the same Gemini models as AI Studio, so prefix its
+    # static rows with ``Vertex `` (rather than a trailing ``(Vertex)``
+    # parenthesised qualifier, which ``model/naming._drop_qualifier`` strips for
+    # compact labels and would collide with ``google/*``'s full label).
+    "google-vertex": {
+        model_id: info.model_copy(deep=True, update={"name": f"Vertex {info.name}"})
+        for model_id, info in google_models.items()
+    },
     "deepseek": deepseek_models,
     "alibaba": qwen_models,
     # Token Plan models are keyed under the canonical storage id only, so a walk

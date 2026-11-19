@@ -6418,7 +6418,10 @@ class GoogleClient:
                     )
                     usage._token_counts_reported = _reported_token_count(
                         raw_usage, "promptTokenCount"
-                    ) and _reported_token_count(raw_usage, "candidatesTokenCount")
+                    ) and (
+                        _reported_token_count(raw_usage, "candidatesTokenCount")
+                        or _reported_token_count(raw_usage, "thoughtsTokenCount")
+                    )
 
         if usage is not None:
             yield StreamUsageEvent(usage=usage)

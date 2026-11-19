@@ -298,3 +298,337 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
     finally:
         await host.close()
         host.store.close()
+
+
+# -- Vertex real-time catalogue discovery, credential project_id, pricing & ranking --
+
+
+def test_fetch_vertex_oauth_paginates_and_filters_non_chat_models() -> None:
+    """``_fetch_vertex`` sends Bearer + quota project, paginates, and keeps chat Gemini models."""
+    from local_operator.model.discovery import fetch_models
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if "pageToken" not in request.url.params:
+            return httpx.Response(
+                200,
+                json={
+                    "publisherModels": [
+                        {"name": "publishers/google/models/gemini-4-neon"},
+                        {"name": "publishers/google/models/gemini-3.8-flash@default"},
+                        {"name": "publishers/google/models/gemini-embedding-2"},
+                        {"name": "publishers/google/models/gemini-2.5-flash-tts"},
+                        {"name": "publishers/google/models/gemini-2.5-flash-image-preview"},
+                        {"name": "publishers/google/models/gemini-2.5-flash-live-001"},
+                        {"name": "publishers/google/models/gemini-nano-banana-pro"},
+                        {"name": "publishers/google/models/imagen-4.0-generate-001"},
+                        {"name": "publishers/google/models/veo-3.0"},
+                    ],
+                    "nextPageToken": "page-2",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "publisherModels": [
+                    {"name": "publishers/google/models/gemini-4-neon"},  # duplicate across pages
+                    {"name": "publishers/google/models/gemini-2.5-pro"},
+                    {"name": "publishers/google/models/gemini-2.5-flash-transcribe"},
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        rows = fetch_models(
+            "google-vertex",
+            api_key="ya29.test-token",
+            is_oauth=True,
+            account_id="minerva-vertex",
+            client=http,
+        )
+
+    assert rows is not None
+    assert [row.id for row in rows] == ["gemini-4-neon", "gemini-3.8-flash", "gemini-2.5-pro"]
+    assert len(seen) == 2
+    assert seen[0].url.path == "/v1beta1/publishers/google/models"
+    assert seen[0].url.params["pageSize"] == "100"
+    assert seen[1].url.params["pageToken"] == "page-2"
+    for req in seen:
+        assert req.headers["authorization"] == "Bearer ya29.test-token"
+        assert req.headers["x-goog-user-project"] == "minerva-vertex"
+        assert "x-goog-api-key" not in req.headers
+
+
+def test_fetch_vertex_api_key_401_falls_back_to_static_without_failure_banner(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Express/restricted API keys that 401 on publisherModels degrade cleanly to static rows."""
+    from local_operator.model.discovery import available_models
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import CatalogueEntry, ProviderController
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(401, json={"error": {"message": "API keys not supported"}})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        rows, status = available_models(
+            "google-vertex",
+            api_key="vx-express-key",
+            is_oauth=False,
+            cache_dir=tmp_path,
+            client=http,
+        )
+
+    assert status == "static"
+    assert len(rows) > 0
+    assert any(row.id == "gemini-3.8-flash" for row in rows)
+    assert len(seen) == 1
+    assert seen[0].headers["x-goog-api-key"] == "vx-express-key"
+    assert "authorization" not in seen[0].headers
+
+    # Because google-vertex still contributes static rows, catalogue_failures
+    # must NOT surface a spurious "Model listing unavailable" banner.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    store.upsert_credential("google-vertex", {"type": "api_key", "key": "vx-express-key"})
+    controller = ProviderController(store, tmp_path)
+    try:
+        entries = [
+            CatalogueEntry(
+                provider="google-vertex",
+                model_id="gemini-3.8-flash",
+                label="Gemini 3.8 Flash",
+                context_window=1_048_576,
+                input_price=0.75,
+                output_price=3.75,
+                connected=True,
+            )
+        ]
+        assert controller.catalogue_failures(entries, {"google-vertex": "static"}) == {}
+    finally:
+        controller.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_vertex_listing_and_catalogue_credentials_pass_project_id(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``listing_credential`` and ``_catalogue_credential`` pass ``project_id`` in slot 3."""
+    import time
+
+    from local_operator.model.configure import _catalogue_credential
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("VERTEX_PROJECT", raising=False)
+
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    store.upsert_credential(
+        "google-vertex",
+        {
+            "type": "oauth",
+            "access": "ya29.vertex-token",
+            "refresh": "1//refresh-token",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "email": "damian@gominerva.com",
+            "account_id": "damian@gominerva.com",
+            "org_name": "minerva-vertex",
+            "project_id": "minerva-vertex",
+            "location": "global",
+            "auth_mode": "oauth",
+        },
+    )
+    controller = ProviderController(store, tmp_path)
+    try:
+        token, is_oauth, project_id = await controller.listing_credential(
+            "google-vertex", read_only=True
+        )
+        assert token == "ya29.vertex-token"
+        assert is_oauth is True
+        assert project_id == "minerva-vertex"
+
+        cat_token, cat_is_oauth, cat_project = _catalogue_credential(
+            "google-vertex", base=tmp_path
+        )
+        assert cat_token == "ya29.vertex-token"
+        assert cat_is_oauth is True
+        assert cat_project == "minerva-vertex"
+    finally:
+        controller.close()
+        store.close()
+
+
+def test_vertex_models_dev_projection_and_long_context_cost_for_usage() -> None:
+    """models.dev ``google-vertex`` ``context_over_200k`` projects through to ``cost_for_usage``."""
+    from local_operator.harness.types import Usage
+    from local_operator.model.configure import (
+        _cache_tokens_are_inside_input,
+        cost_for_usage,
+        info_from_discovered_model,
+    )
+    from local_operator.model.prices import PRICE_CATALOGUE_CAPTURE, price_row, project
+    from local_operator.model.registry import ModelInfo
+
+    assert PRICE_CATALOGUE_CAPTURE == 4
+    assert _cache_tokens_are_inside_input("google-vertex") is True
+
+    body = {
+        "google-vertex": {
+            "id": "google-vertex",
+            "name": "Vertex",
+            "models": {
+                "gemini-2.5-pro": {
+                    "id": "gemini-2.5-pro",
+                    "name": "Gemini 2.5 Pro",
+                    "limit": {"context": 1_048_576, "output": 65_536},
+                    "modalities": {"input": ["text", "image", "audio"], "output": ["text"]},
+                    "cost": {
+                        "input": 1.25,
+                        "output": 10.0,
+                        "cache_read": 0.125,
+                        "context_over_200k": {
+                            "input": 2.5,
+                            "output": 15.0,
+                            "cache_read": 0.25,
+                        },
+                    },
+                },
+                "gemini-4-neon": {
+                    "id": "gemini-4-neon",
+                    "name": "Gemini 4 Neon",
+                    "limit": {"context": 1_048_576, "output": 65_536},
+                    "modalities": {"input": ["text", "image", "audio"], "output": ["text"]},
+                    "cost": {"input": 3.0, "output": 15.0, "cache_read": 0.15},
+                },
+            },
+        }
+    }
+    projected = project(body, '"etag-v4"')
+    assert projected["capture"] == 4
+    assert "google-vertex" in projected["providers"]
+
+    row = price_row(
+        "google-vertex",
+        "gemini-2.5-pro",
+        models_dev=projected["providers"],
+        openrouter=[],
+    )
+    assert row is not None
+    assert row.name == "Gemini 2.5 Pro"
+    assert row.long_context_threshold == 200_000
+    assert row.long_context_input_price == 2.5
+    assert row.long_context_output_price == 15.0
+    assert row.long_context_cache_read_price == 0.25
+
+    info = info_from_discovered_model(
+        "google-vertex",
+        "gemini-2.5-pro",
+        row,
+        ModelInfo(id="gemini-2.5-pro", name="gemini-2.5-pro", description=""),
+    )
+
+    # <= 200k prompt: standard tier. Cached tokens are inside input_tokens, so
+    # plain = 200_000 - 100_000 = 100_000 (never double-billed!).
+    short_usage = Usage(
+        input_tokens=200_000,
+        output_tokens=10_000,
+        cache_read_tokens=100_000,
+        reasoning_tokens=4_000,
+    )
+    expected_short = (100_000 * 1.25 + 100_000 * 0.125 + 10_000 * 10.0) / 1_000_000
+    assert cost_for_usage("google-vertex", info, short_usage) == pytest.approx(expected_short)
+
+    # > 200k prompt (evaluated BEFORE subtracting cache_read_tokens): entire
+    # request bills at >200k tier (plain 150k @ $2.50, cache_read 100k @ $0.25,
+    # output 10k including thoughts @ $15.00).
+    long_usage = Usage(
+        input_tokens=250_000,
+        output_tokens=10_000,
+        cache_read_tokens=100_000,
+        reasoning_tokens=4_000,
+    )
+    expected_long = (150_000 * 2.5 + 100_000 * 0.25 + 10_000 * 15.0) / 1_000_000
+    assert cost_for_usage("google-vertex", info, long_usage) == pytest.approx(expected_long)
+
+
+@pytest.mark.asyncio
+async def test_vertex_thought_only_usage_chunk_marks_tokens_reported() -> None:
+    """Vertex usage chunks with thoughtsTokenCount and no candidatesTokenCount stay reported."""
+    payload = {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": [{"thought": True, "text": "thinking..."}]},
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 6, "thoughtsTokenCount": 99, "totalTokenCount": 105},
+    }
+    body = f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = GoogleClient(base_url=VERTEX_API_URL, vertex=True, http_client=http)
+        events = [e async for e in client.stream(_vertex_request(), api_key="vx-api-key")]
+
+    usage_events = [u for e in events if (u := getattr(e, "usage", None)) is not None]
+    assert usage_events
+    usage = usage_events[-1]
+    assert usage.input_tokens == 6
+    assert usage.output_tokens == 99
+    assert usage.reasoning_tokens == 99
+    assert usage._token_counts_reported is True
+
+
+def test_vertex_catalogue_search_ranks_vertex_and_gemini_4_neon() -> None:
+    """Searching ``vertex`` and ``gemini-4-neon`` finds and ranks ``google-vertex/*`` rows."""
+    from local_operator.model.ranking import ModelRow, rank_rows
+
+    rows = [
+        ModelRow(
+            provider="google-vertex",
+            model_id="gemini-4-neon",
+            label="Gemini 4 Neon",
+            listing_name="Gemini 4 Neon",
+            context_window=1_048_576,
+            input_price=3.0,
+            output_price=15.0,
+        ),
+        ModelRow(
+            provider="google-vertex",
+            model_id="gemini-3.8-flash",
+            label="Gemini 3.8 Flash",
+            listing_name="Gemini 3.8 Flash",
+            context_window=1_048_576,
+            input_price=0.75,
+            output_price=3.75,
+        ),
+        ModelRow(
+            provider="anthropic",
+            model_id="claude-opus-5",
+            label="Claude Opus 5",
+            listing_name="Claude Opus 5",
+            context_window=1_000_000,
+            input_price=5.0,
+            output_price=25.0,
+        ),
+    ]
+
+    vertex_matches = rank_rows(rows, "vertex")
+    assert [r.selector for r in vertex_matches] == [
+        "google-vertex/gemini-4-neon",
+        "google-vertex/gemini-3.8-flash",
+    ]
+    neon_matches = rank_rows(rows, "gemini-4-neon")
+    assert [r.selector for r in neon_matches] == ["google-vertex/gemini-4-neon"]
+    flash_matches = rank_rows(rows, "gemini 3.8")
+    assert [r.selector for r in flash_matches] == ["google-vertex/gemini-3.8-flash"]

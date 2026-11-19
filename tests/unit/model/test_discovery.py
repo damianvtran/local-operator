@@ -1053,7 +1053,7 @@ def test_no_listing_providers_is_derived_from_the_provider_registry() -> None:
     # Derived, not hardcoded: with a literal id list, the provider added next is
     # always the one that silently gets no listing.
     assert discovery.NO_LISTING_PROVIDERS == expected
-    assert "google-vertex" in discovery.NO_LISTING_PROVIDERS
+    assert "google-vertex" not in discovery.NO_LISTING_PROVIDERS
     assert expected, "the registry should still contain at least one unlistable provider"
 
 

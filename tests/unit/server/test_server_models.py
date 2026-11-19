@@ -20,7 +20,7 @@ from local_operator.clients.openrouter import (
 from local_operator.env import get_env_config
 from local_operator.model import discovery
 from local_operator.model.discovery import DiscoveredModel, merge_models
-from local_operator.model.registry import anthropic_models, deepseek_models
+from local_operator.model.registry import anthropic_models, deepseek_models, google_models
 from local_operator.server.app import app
 
 
@@ -54,15 +54,20 @@ def client(monkeypatch):
     # duration of its own test.
     # Local runtime integration has its own owned-HTTP tests. Enumeration
     # tests must not inspect whichever server a developer has running today.
-    # Anthropic joins deepseek here because its branch now reads the same
-    # discovery seam: answering it with the registry rows is what a real
+    # Anthropic and google-vertex join deepseek here because their branches now
+    # read the same discovery seam: answering with registry rows is what a real
     # answer looks like with no cache and no credential.
+    static_by_provider = {
+        "deepseek": deepseek_models,
+        "anthropic": anthropic_models,
+        "google-vertex": google_models,
+    }
     monkeypatch.setattr(
         "local_operator.server.routes.models.available_models",
         lambda provider, **kw: (
             (
-                merge_models(deepseek_models if provider == "deepseek" else anthropic_models, None)
-                if provider in {"deepseek", "anthropic"}
+                merge_models(static_by_provider[provider], None)
+                if provider in static_by_provider
                 else []
             ),
             "static",
@@ -126,6 +131,48 @@ def test_deepseek_http_catalogue_uses_authenticated_live_inventory(
     assert rows[0]["info"]["context_window"] == 200_000
     assert seen[0][0] == "deepseek"
     assert "api_key" in seen[0][1]
+
+
+def test_vertex_http_catalogue_uses_live_inventory_with_enriched_prices(
+    client, mock_credential_manager, monkeypatch
+):
+    """``GET /v1/models?provider=google-vertex`` returns live Vertex models enriched with prices."""
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    def listing(provider, **kwargs):
+        seen.append((provider, kwargs))
+        return [DiscoveredModel(id="gemini-4-neon")], "ok"
+
+    def fake_enrich(listed, **_kwargs):
+        return {
+            "google-vertex": [
+                DiscoveredModel(
+                    id="gemini-4-neon",
+                    name="Gemini 4 Neon",
+                    context_window=1_048_576,
+                    max_tokens=65_536,
+                    input_price=3.0,
+                    output_price=15.0,
+                    cache_read_price=0.15,
+                    supports_prompt_cache=True,
+                )
+            ]
+        }
+
+    monkeypatch.setattr("local_operator.server.routes.models.available_models", listing)
+    monkeypatch.setattr("local_operator.server.routes.models._enrich_prices", fake_enrich)
+
+    response = client.get("/v1/models?provider=google-vertex")
+    assert response.status_code == 200
+    rows = response.json()["result"]["models"]
+    assert [row["id"] for row in rows] == ["gemini-4-neon"]
+    assert rows[0]["provider"] == "google-vertex"
+    assert rows[0]["name"] == "Gemini 4 Neon"
+    assert rows[0]["info"]["context_window"] == 1_048_576
+    assert rows[0]["info"]["input_price"] == 3.0
+    assert rows[0]["info"]["output_price"] == 15.0
+    assert seen[0][0] == "google-vertex"
+    assert "account_id" in seen[0][1]
 
 
 def test_list_providers_with_ollama_active(client):
