@@ -458,7 +458,6 @@ async def test_no_ancestor_queue_fails_closed_and_says_why(tmp_path: Path) -> No
     assert [m for m, _ in ext.calls] == ["request_access", "cancel_access"]
 
 
-
 @pytest.mark.asyncio
 async def test_top_level_keeps_mains_enqueue_ask_path(tmp_path: Path) -> None:
     """T16: a session with its own queue has NO site-card door and no fence,
