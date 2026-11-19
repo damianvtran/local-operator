@@ -91,6 +91,11 @@ class Outcome:
     memory_ceiling_mb: int | None = None
     memory_budget_source: str | None = None
     terminal_observer: str | None = None
+    # Descendants that left the owned group (setsid/setpgid). cleanup-required
+    # on Linux counts them through a child subreaper (escaped_descendants);
+    # every other path cannot, and says `unknown`.
+    descendant_cleanup: str = "unknown"
+    escaped_residuals: tuple[int, ...] = ()
 
     def finalization_failed(self, stage: str, exc: Exception) -> None:
         # A failed restore must not discard the structured outcome or hide behind
@@ -100,9 +105,19 @@ class Outcome:
             self.wrapper_exit_code = 126
             self.termination_cause = "finalization-failure"
 
-    def accept_terminal(self, owner, verdict) -> None:
+    def accept_terminal(self, owner, verdict, escaped=None) -> None:
         # A string status is not a certificate. The owner must have accepted
         # this exact terminal object before irreversible authority revocation.
+        # ``escaped`` is the escaped-descendant sweep: an empty owned group
+        # while a setsid'd Chrome lives is not cleanup (fd36, 2026-11-19), so
+        # without that proof the status is `unproven`, naming the live pids.
+        if escaped is not None:
+            self.descendant_cleanup = "proven-empty" if escaped.proven else "unproven"
+            self.escaped_residuals = tuple(escaped.remaining)
+            if not escaped.proven:
+                self.cleanup_status = "unproven"
+                self.cleanup_reason = escaped.describe()
+                return
         if owner.accepted_terminal(verdict):
             self.cleanup_status = "proven-empty"
             self.cleanup_reason = verdict.reason
@@ -159,8 +174,11 @@ class Receipt:
             "memory_budget_source": outcome.memory_budget_source,
             "terminal_observer": outcome.terminal_observer,
             # An empty owned group says nothing about descendants that escaped
-            # it. Neither contract has authority over that wider population.
-            "descendant_cleanup": "unknown",
+            # it; only cleanup-required's subreaper sweep can speak for them.
+            "descendant_cleanup": (
+                "unknown" if contract == "command-status" else outcome.descendant_cleanup
+            ),
+            "escaped_residuals": list(outcome.escaped_residuals),
         }
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         # x mode never truncates an earlier invocation. Failure, including fsync,
