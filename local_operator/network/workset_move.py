@@ -1914,9 +1914,7 @@ def destination_outcome(
     return {"transferred": True, "worktrees": rows}
 
 
-def source_receipt(
-    planned: Mapping[str, Any], outcome: Mapping[str, Any] | None
-) -> dict[str, Any]:
+def source_receipt(planned: Mapping[str, Any], outcome: Mapping[str, Any] | None) -> dict[str, Any]:
     """The SOURCE's receipt block for an offload that carried its working set.
 
     ``planned`` is this device's own pre-invite block (computed before the prepare
@@ -1959,9 +1957,7 @@ def source_receipt(
             reason = str(hit.get("reason") or "") if hit is not None else ""
             row.pop("reason", None)
             if state == "left_behind":
-                row["reason"] = (
-                    reason if workset_text.known_reason(reason) else "not_transferred"
-                )
+                row["reason"] = reason if workset_text.known_reason(reason) else "not_transferred"
         else:
             # Our row, unnamed by the answer (or a state outside the closed set): the
             # destination did not say what became of it. Not "stayed" — this

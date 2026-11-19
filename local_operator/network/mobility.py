@@ -7715,9 +7715,7 @@ def _recall(
         try:
             # ``record=False`` (#4245 round 4, M1): this answer is a version probe
             # nobody reads, so it must not become "what the operator confirmed".
-            _ask_workset_preflight(
-                transport, session_id, owner_device, owner_name, record=False
-            )
+            _ask_workset_preflight(transport, session_id, owner_device, owner_name, record=False)
         except Moved as refusal:
             if refusal.code == "working_set_unsupported":
                 return _move_refusal(
