@@ -324,12 +324,6 @@ LAST_SEEN_PERSIST_S = 30.0
 #: How often the redial loop wakes to look for a lost link whose backoff expired.
 #: The schedule itself is ``redial.backoff_s``; this is only its resolution.
 REDIAL_TICK_S = 1.0
-#: How often the redial loop re-reads the uplink while this device has NO route
-#: in any family. Dials are paused then (each would fail at once and only grow
-#: the peer's backoff), so this cadence alone bounds how long a recovered route
-#: waits for its kick. The reading is a route-table lookup that sends nothing
-#: (``network.uplink``), so a short cadence costs no traffic.
-UPLINK_OFFLINE_TICK_S = 5.0
 
 
 #: How long ONE member-table read may wait before the refresh gives up on it.
@@ -1176,7 +1170,7 @@ def peer_link_state(
     reason: str,
     attempts: Sequence[CandidateAttempt],
     *,
-    uplink_reading: Mapping[str, Any] | None = None,
+    route_reader: Callable[[str], bool | None] | None = None,
 ) -> str:
     """Keep host refusal, address black holes and handshake rejection distinct.
 
@@ -1185,11 +1179,13 @@ def peer_link_state(
     a third state that the aggregate reason alone cannot reliably distinguish.
 
     ``local_offline`` (2026-11-18: a Mac on an IPv6-only network dialling an
-    IPv4-only node2) is the fourth: THIS device has no route in any family the
-    peer's dialled endpoints use, so the failure is ours, not the peer's. It
-    wins over ``address_unreachable`` only, and only on a passive reading that
-    PROVES the missing route (``uplink.no_route_for``); no reading, or an
-    unknown family, keeps today's ``address_unreachable``.
+    IPv4-only node2) is the fourth: THIS device has no route to ANY of the
+    peer's own dialled endpoints, so the failure is ours, not the peer's. It
+    wins over ``address_unreachable`` only, and only when a passive lookup of
+    each endpoint PROVES the missing route (``uplink.no_route_for``). Asked per
+    endpoint, never inferred from the public-route reading (review R1): a LAN
+    or loopback peer keeps its route without a default route. No reader, a
+    hostname or an unreadable lookup keeps today's ``address_unreachable``.
     """
     if link is not None:
         return "reachable"
@@ -1213,7 +1209,9 @@ def peer_link_state(
     ):
         return "relay_down"
     if any(attempt.detail != DETAIL_NOT_ATTEMPTED for attempt in attempts):
-        if uplink.no_route_for(uplink_reading, [attempt.endpoint for attempt in attempts]):
+        if route_reader is not None and uplink.no_route_for(
+            [attempt.endpoint for attempt in attempts], route_reader
+        ):
             return "local_offline"
         return "address_unreachable"
     if reason in ("no_endpoint", "not_a_member"):
@@ -5875,10 +5873,10 @@ class RelayServer:
         #: (``network.redial``). Fed by link admission and close; read by
         #: ``_redial_loop`` and ``peer_status``.
         self.redial = redial.RedialTracker()
-        # The passive uplink reader (``network.uplink``). An attribute so a test
-        # can inject a scripted reader; a relay built without ``__init__`` has
-        # none and its redial loop behaves exactly as before this existed.
-        self._uplink_reader: Callable[[], dict[str, Any]] | None = uplink.read_uplink
+        # The passive per-endpoint route lookup (``network.uplink``). An attribute
+        # so a test can inject a scripted reader; a relay built without
+        # ``__init__`` has none, so no ``local_offline`` and no recovery kick.
+        self._route_reader: Callable[[str], bool | None] | None = uplink.endpoint_has_route
         #: Collapses repeats of one identical handshake refusal into one audit row
         #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
         self._refusal_rows = redial.RefusalCoalescer()
@@ -7183,24 +7181,18 @@ class RelayServer:
                     continue
                 if self._redial_candidates(member):
                     self.redial.seed(member.device_id)
-        tick = REDIAL_TICK_S
-        offline = False
-        while not self._stop.wait(tick):
-            # PAUSE WHILE OFFLINE, KICK ON RECOVERY (2026-11-18): with no route
-            # in any family every dial fails at once and only pushes the peer's
-            # backoff toward its 60 s cap, so a route that came back waited up to
-            # a minute for the next retry. Paused, nothing is burned; on the first
-            # reading with a route, every tracked peer is due at once. Fail-safe:
-            # a reading that is not a PROVEN ``offline`` (unknown, or a reader
-            # that raised) runs the pass exactly as before this existed.
-            if self._uplink_offline_now():
-                offline = True
-                tick = UPLINK_OFFLINE_TICK_S
-                continue
-            if offline:
-                offline = False
-                self.redial.kick_all()
-            tick = REDIAL_TICK_S
+        # Peers whose last failed redial had NO route to any of their own
+        # endpoints. Watched for a route to appear; see ``_kick_routed_peers``.
+        unroutable: set[str] = set()
+        while not self._stop.wait(REDIAL_TICK_S):
+            # ADVISORY, NEVER A PAUSE (security U1, review R1): the baseline
+            # backoff below runs for every peer whatever the route reading says,
+            # so a wrong reading can delay nobody and starve nobody. The reading
+            # only ADDS a retry: a peer proven unroutable is redialled the
+            # moment a route to ITS endpoints appears (U2), instead of waiting
+            # out a backoff grown while there was no route to it at all.
+            if unroutable:
+                self._kick_routed_peers(unroutable)
             for device_id in self.redial.due():
                 if self._stop.is_set():
                     return
@@ -7225,26 +7217,42 @@ class RelayServer:
                     link, reason = None, f"error:{type(exc).__name__}"
                 if link is None:
                     self.redial.failed(device_id, cause=reason or "unreachable")
+                    if self._peer_route(device_id) is False:
+                        unroutable.add(device_id)
 
-    def _uplink_now(self) -> dict[str, Any] | None:
-        """This device's passive uplink reading, or ``None`` when none can be taken.
+    def _peer_route(self, device_id: str) -> bool | None:
+        """Whether this device has a route to any of ``device_id``'s dial candidates.
 
-        ``getattr``: a relay built without ``__init__`` (a test's bare table) has
-        no reader and so no reading — the fail-safe that keeps today's behaviour.
+        ``None`` (no claim) without a reader, without candidates, or for any
+        hostname/unreadable lookup — see ``uplink.endpoints_route``.
         """
-        reader = getattr(self, "_uplink_reader", None)
+        reader = getattr(self, "_route_reader", None)
         if reader is None:
             return None
-        try:
-            reading = reader()
-        except Exception:  # noqa: BLE001 — a reading must never stop the loop
-            return None
-        return dict(reading) if isinstance(reading, Mapping) else None
+        endpoints = [
+            endpoint
+            for member in self._members_named(device_id)
+            for endpoint in self._redial_candidates(member)
+        ]
+        return uplink.endpoints_route(endpoints, reader)
 
-    def _uplink_offline_now(self) -> bool:
-        """Whether the reading PROVES no route in any family (never a guess)."""
-        reading = self._uplink_now()
-        return reading is not None and reading.get("state") == uplink.OFFLINE
+    def _kick_routed_peers(self, unroutable: set[str]) -> None:
+        """Kick each watched peer whose own endpoints have a route again (U2).
+
+        CONFIRMED RECOVERY ONLY: ``True`` from a fresh per-endpoint lookup. An
+        ``unknown`` answer is not recovery — it kicks nothing and the peer stays
+        watched; its baseline retry still runs regardless. A peer that linked
+        up meanwhile (a surface dial, or it dialled us) needs no kick. The
+        lookup sends nothing (``network.uplink``), so doing it once per tick
+        for the few unroutable peers costs syscalls, not traffic.
+        """
+        for device_id in list(unroutable):
+            if self._link_for(device_id) is not None:
+                unroutable.discard(device_id)
+                continue
+            if self._peer_route(device_id) is True:
+                unroutable.discard(device_id)
+                self.redial.kick(device_id)
 
     def _members_named(self, device_id: str) -> list[MemberRecord]:
         """Every active member row for ``device_id``, across this device's networks."""
@@ -15796,9 +15804,9 @@ class RelayServer:
         """
         peers: list[dict[str, Any]] = []
         deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
-        # One passive reading per listing (a route lookup, no traffic) is what
-        # lets a row say ``local_offline`` instead of blaming the peer.
-        uplink_reading = self._uplink_now()
+        # Per-endpoint passive route lookups (no traffic) are what let a row say
+        # ``local_offline`` instead of blaming the peer.
+        route_reader = getattr(self, "_route_reader", None)
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
@@ -15825,7 +15833,7 @@ class RelayServer:
                     if tracker is not None and link is None
                     else {"state": redial.CONNECTED, "attempts": 0}
                 )
-                state = peer_link_state(link, reason, attempts, uplink_reading=uplink_reading)
+                state = peer_link_state(link, reason, attempts, route_reader=route_reader)
                 peers.append(
                     {
                         "device_id": member.device_id,

@@ -6,8 +6,18 @@ with "no route", and every surface — the peer rows' ``address_unreachable``,
 the redial loop's growing backoff, ``doctor``'s remedies — pointed at node2,
 the one machine that had nothing wrong with it. The missing fact was about
 THIS device: it had no IPv4 route at all. This module reads that fact so the
-link state (``local_offline``), the redial loop (pause while offline, kick on
-recovery) and ``ready``/``doctor`` (an ``uplink`` row first) can name it.
+link state (``local_offline``), the redial loop (kick a peer the moment a
+route to it appears) and ``ready``/``doctor`` (an ``uplink`` row first) can
+name it.
+
+TWO READINGS, TWO SCOPES (review R1, security U1). The DEVICE reading
+(:func:`read_uplink`) asks about public route keys and so can only say "no
+route to the internet"; it feeds the device row and nothing else. Every claim
+about a PEER (``local_offline``, the redial kick) asks the kernel about that
+peer's OWN literal endpoints (:func:`endpoint_has_route`): a LAN, loopback,
+VPN or link-local peer keeps its route when the default route is gone, and
+must keep being dialled. Both readings are ADVISORY: nothing here pauses or
+skips a dial, so the redial loop's baseline backoff retry always runs.
 
 PASSIVE ONLY — A SECURITY CONSTRAINT, NOT AN OPTIMISATION (security review,
 session 60334; manager decision 79). The reading is a ROUTE TABLE LOOKUP: a
@@ -27,9 +37,9 @@ which families have a route, and when a family cannot be read it says
 reach a peer is reported as "<peer> isn't answering from this network" —
 never as a firewall or allowlist, because no cause beyond that is observable.
 
-FAIL-SAFE. Every caller treats a reading that raises, or one whose state is
-``unknown``, exactly as the code behaved before this module existed: no pause,
-no ``local_offline``, no uplink claim.
+FAIL-SAFE. Every caller treats a reading that raises, or one whose answer is
+``unknown`` (``None``), exactly as the code behaved before this module
+existed: no ``local_offline``, no kick, no uplink claim.
 """
 
 from __future__ import annotations
@@ -152,55 +162,117 @@ def unknown_reading() -> dict[str, Any]:
     return {"state": UNKNOWN, "ipv4": None, "ipv6": None}
 
 
-def endpoint_family(endpoint: str) -> str | None:
-    """``ipv4``/``ipv6`` for a literal ``host:port`` (or ``[v6]:port``); else ``None``.
+def _literal(endpoint: str) -> tuple[str, str, int] | None:
+    """``(family, host, port)`` for a literal ``host:port`` / ``[v6]:port``; else ``None``.
 
     A hostname has no family until it resolves, and resolving would be a probe
-    this module does not make, so it reads as ``None`` (could be either).
+    this module does not make, so it is ``None`` (could be either, unknown).
+
+    IPv4-MAPPED IPv6 (``[::ffff:a.b.c.d]``, review R2) is IPv4: the kernel
+    carries it over the IPv4 stack, so on an IPv4-only host it is routable and
+    on an IPv6-only host it is not. Classifying it by its spelling would invert
+    both answers.
     """
     text = str(endpoint or "").strip()
+    port = 0
     if text.startswith("["):
-        host = text[1:].split("]", 1)[0]
+        host, _, rest = text[1:].partition("]")
+        if rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
     elif text.count(":") == 1:
-        host = text.rsplit(":", 1)[0]
+        host, _, tail = text.rpartition(":")
+        port = int(tail) if tail.isdigit() else 0
     else:
         host = text
     try:
         parsed = ipaddress.ip_address(host)
     except ValueError:
         return None
-    return "ipv4" if parsed.version == 4 else "ipv6"
+    if parsed.version == 6:
+        mapped = getattr(parsed, "ipv4_mapped", None)
+        if mapped is not None:
+            return "ipv4", str(mapped), port
+        return "ipv6", host, port
+    return "ipv4", host, port
 
 
-def no_route_for(reading: Mapping[str, Any] | None, endpoints: Iterable[str]) -> bool:
-    """True only when this device has no route in ANY family ``endpoints`` use.
+def endpoint_family(endpoint: str) -> str | None:
+    """``ipv4``/``ipv6`` for a literal endpoint; ``None`` for a hostname or junk."""
+    literal = _literal(endpoint)
+    return literal[0] if literal else None
 
-    The ``local_offline`` predicate. Fail-safe in every direction: no reading,
-    no endpoints, or a family whose answer is unknown all return ``False``, so
-    the caller keeps today's ``address_unreachable``. A hostname endpoint could
-    be either family, so it counts only when BOTH families are proven absent.
+
+def endpoint_has_route(endpoint: str) -> bool | None:
+    """Whether the kernel has a route to THIS endpoint's own address.
+
+    WHY PER ENDPOINT (review R1 / security U1): "no route to the public route
+    keys" is not "no route to a peer". A LAN peer (``192.168.x``), a loopback
+    peer, a VPN or a link-local one has its own, more specific route that
+    survives a missing default route, and those peers still answer when the
+    internet is gone. So the peer-level claim asks the kernel about the peer's
+    own literal address — the same passive datagram ``connect`` as
+    :func:`family_has_route` (a route lookup: no packet, no DNS).
+
+    ``True``: a route and a bound source address. ``False``: a no-route errno
+    (or an unspecified source). ``None``: a hostname (never resolved here), an
+    unreadable family, or any other error — none of which is evidence.
     """
-    if not reading:
-        return False
-    families: set[str] = set()
-    for endpoint in endpoints:
-        family = endpoint_family(endpoint)
-        families.update((family,) if family else ("ipv4", "ipv6"))
-    if not families:
-        return False
-    return all(reading.get(family) is False for family in families)
+    literal = _literal(endpoint)
+    if literal is None:
+        return None
+    family, host, port = literal
+    af = _FAMILIES.get(family)
+    if af is None:
+        return False if family == "ipv6" else None
+    try:
+        sock = socket.socket(af, socket.SOCK_DGRAM)
+    except OSError as exc:
+        return False if exc.errno in _NO_ROUTE_ERRNOS else None
+    try:
+        # No packet leaves: connect() on SOCK_DGRAM is a route lookup. Port 0
+        # is refused by some stacks, so an endpoint without one uses discard (9).
+        sock.connect((host, port or 9))
+        source = str(sock.getsockname()[0])
+    except OSError as exc:
+        return False if exc.errno in _NO_ROUTE_ERRNOS else None
+    finally:
+        sock.close()
+    return source not in ("0.0.0.0", "::")
 
 
-def has_route_for(reading: Mapping[str, Any] | None, endpoints: Iterable[str]) -> bool:
-    """True when this device is PROVEN to have a route in some family ``endpoints`` use."""
-    if not reading:
-        return False
+EndpointReader = Callable[[str], "bool | None"]
+
+
+def endpoints_route(
+    endpoints: Iterable[str], route_reader: EndpointReader | None = None
+) -> bool | None:
+    """One answer for a peer's endpoints: ``True`` any routes, ``False`` NONE do.
+
+    ``False`` is the ``local_offline`` predicate and needs EVERY endpoint proven
+    route-less: one hostname, one unreadable lookup or no endpoints at all make
+    the answer ``None`` (unknown), which every caller reads as "make no claim".
+    ``route_reader`` defaults to :func:`endpoint_has_route`, looked up at call
+    time so a test's ``monkeypatch`` of the module attribute takes effect.
+    """
+    reader = route_reader if route_reader is not None else endpoint_has_route
+    answers: list[bool | None] = []
     for endpoint in endpoints:
-        family = endpoint_family(endpoint)
-        for candidate in (family,) if family else ("ipv4", "ipv6"):
-            if reading.get(candidate) is True:
-                return True
-    return False
+        if not str(endpoint or "").strip():
+            continue
+        try:
+            answers.append(reader(endpoint))
+        except Exception:  # noqa: BLE001 — a lookup that raises is not evidence
+            answers.append(None)
+    if any(answer is True for answer in answers):
+        return True
+    if answers and all(answer is False for answer in answers):
+        return False
+    return None
+
+
+def no_route_for(endpoints: Iterable[str], route_reader: EndpointReader | None = None) -> bool:
+    """True only when this device has NO route to ANY of the peer's own endpoints."""
+    return endpoints_route(endpoints, route_reader) is False
 
 
 def peer_only_family(endpoints: Iterable[str]) -> str | None:
@@ -242,16 +314,22 @@ def _device_words(state: str) -> str:
     )
 
 
-def _silent(detail: str) -> bool:
-    """A peer-row detail that is pure silence: nothing at that address answered.
+def _answered_by_silence(row: Mapping[str, Any], route_reader: EndpointReader | None) -> bool:
+    """A reachability row that IS attempt evidence of silence from a routable address.
 
-    Only these qualify for "isn't answering". A refused connection, a handshake
-    refusal or a budget that ran out after an answer all prove the peer's host
-    DID answer from this network, and their own rows already explain them.
+    "<peer> isn't answering from this network" is a claim about a real dial
+    (security U3): a dial to an endpoint this device HAS a route to, which then
+    timed out or drew no answer. ``readiness._silent_row`` is the one reader of
+    "silence" in both report dialects; a resolver error, a local error (no
+    route, a bad endpoint) or a row with no attempt is not silence, and a peer
+    with any such row keeps exactly the diagnostic it had before this module.
     """
-    if detail == "no_answer":
-        return True
-    return detail.startswith("connect_failed:") and "ConnectionRefusedError" not in detail
+    from local_operator.network import readiness
+
+    if not readiness._silent_row(row):  # noqa: SLF001 — the shared silence reader
+        return False
+    endpoint = str(row.get("endpoint") or "")
+    return endpoints_route([endpoint], route_reader) is True
 
 
 def uplink_checks(
@@ -259,18 +337,28 @@ def uplink_checks(
     checks: Iterable[Mapping[str, Any]],
     *,
     names: Mapping[str, str] | None = None,
+    route_reader: EndpointReader | None = None,
 ) -> list[dict[str, Any]]:
     """The ``uplink`` rows: this device's own row, then one per affected peer.
 
-    - this device: ``FAIL`` only on a proven ``offline`` (remedy: check this
-      device's network), ``ok`` naming its families otherwise; an ``unknown``
-      reading has NO device row at all — it would claim nothing, and a report
-      whose reading failed must read exactly as it did before this existed;
-    - a peer whose every endpoint is in a family this device has no route in:
-      ``FAIL`` with the family sentence and the same local remedy;
-    - a peer that never answered although this device HAS a route in its
-      family: "<peer> isn't answering from this network" and nothing more —
-      the cause is not observable from here, so none is named.
+    ROWS ONLY WHEN SOMETHING IS WRONG (QA Q-M1, decided): a healthy report
+    reads exactly as it did before this module existed.
+
+    - this device, ``offline`` (no route to the public route keys): ``FAIL``,
+      "no route to the internet", remedy "check this device's network" —
+      unless some peer row is ``ok``: a LAN/loopback peer answering proves the
+      device has a network, and the row must not contradict it (review R1);
+    - this device, one family only: an ``ok`` row naming its families, and
+      only ahead of a per-peer family row it explains;
+    - ``dual`` or ``unknown``: no device row;
+    - a peer none of whose literal endpoints this device has a route to
+      (``endpoints_route`` is ``False``, per endpoint — never inferred from
+      the public-route reading), all in one family this device has no route
+      in: ``FAIL`` "<family> route missing; <peer> has only <family>
+      addresses", with the local remedy;
+    - a peer every one of whose rows is a dial to a routable endpoint that
+      timed out or drew no answer: "<peer> isn't answering from this network"
+      and nothing more — no cause is observable from here, so none is named.
 
     ``names`` maps device ids to member names for rows that carry only an id
     (``doctor``'s); a row's own ``device_name`` (``ready``'s) wins.
@@ -280,31 +368,17 @@ def uplink_checks(
     reading = dict(reading) if reading else unknown_reading()
     state = str(reading.get("state") or UNKNOWN)
     remedy = _copy(keys.check_network())
-    device_row: dict[str, Any] = {
-        "check": "uplink",
-        "device_id": "",
-        "endpoint": "",
-        "ok": state != OFFLINE,
-        "code": state,
-        "detail": "" if state == UNKNOWN else _device_words(state),
-        "observed": {"ipv4": reading.get("ipv4"), "ipv6": reading.get("ipv6")},
-    }
-    if state == OFFLINE:
-        device_row["remedies"] = [remedy]
-        # The device row already says everything: no route in any family means
-        # no peer row can add a fact about this device's network.
-        return [device_row]
-    # A partly-read uplink (one family unknown) still proves the other family's
-    # answer, so the per-peer rows below may use it; only the device row waits
-    # for a whole reading.
-    rows = [] if state == UNKNOWN else [device_row]
+    checks = list(checks)
+    peer_rows_out: list[dict[str, Any]] = []
     by_peer: dict[str, list[Mapping[str, Any]]] = {}
+    any_ok = False
     for check in checks:
         if check.get("check") != "reachability":
             continue
         observed = check.get("observed")
         if isinstance(observed, Mapping) and observed.get("out_of_scope"):
             continue
+        any_ok = any_ok or bool(check.get("ok"))
         device_id = str(check.get("device_id") or "")
         if device_id and check.get("endpoint"):
             by_peer.setdefault(device_id, []).append(check)
@@ -314,13 +388,16 @@ def uplink_checks(
         endpoints = [str(row.get("endpoint") or "") for row in peer_rows]
         label = str(peer_rows[0].get("device_name") or (names or {}).get(device_id) or device_id)
         family = peer_only_family(endpoints)
-        if no_route_for(reading, endpoints) and family in ("ipv4", "ipv6"):
-            detail = _copy(
-                keys.no_ipv4_for_peer(peer=label)
-                if family == "ipv4"
-                else keys.no_ipv6_for_peer(peer=label)
-            )
-            rows.append(
+        if no_route_for(endpoints, route_reader):
+            # The family sentence names a fact the DEVICE reading proves, so it
+            # needs one family this device has no route in. Under ``offline``
+            # the device row already says it for every peer; a mixed-family or
+            # unproven case adds no fact. Never "isn't answering": undialable.
+            if state == OFFLINE or family not in ("ipv4", "ipv6"):
+                continue
+            if reading.get(family) is not False:
+                continue
+            peer_rows_out.append(
                 {
                     "check": "uplink",
                     "device_id": device_id,
@@ -328,14 +405,17 @@ def uplink_checks(
                     "endpoint": "",
                     "ok": False,
                     "code": "local_offline",
-                    "detail": detail,
+                    "detail": _copy(
+                        keys.no_ipv4_for_peer(peer=label)
+                        if family == "ipv4"
+                        else keys.no_ipv6_for_peer(peer=label)
+                    ),
                     "remedies": [remedy],
                 }
             )
             continue
-        silent = all(_silent(str(row.get("detail") or "")) for row in peer_rows)
-        if silent and has_route_for(reading, endpoints):
-            rows.append(
+        if all(_answered_by_silence(row, route_reader) for row in peer_rows):
+            peer_rows_out.append(
                 {
                     "check": "uplink",
                     "device_id": device_id,
@@ -346,4 +426,21 @@ def uplink_checks(
                     "detail": _copy(keys.not_answering(peer=label)),
                 }
             )
-    return rows
+    device_row: dict[str, Any] = {
+        "check": "uplink",
+        "device_id": "",
+        "endpoint": "",
+        "ok": state != OFFLINE,
+        "code": state,
+        "detail": "",
+        "observed": {"ipv4": reading.get("ipv4"), "ipv6": reading.get("ipv6")},
+    }
+    if state == OFFLINE and not any_ok:
+        device_row["detail"] = _device_words(state)
+        device_row["remedies"] = [remedy]
+        return [device_row, *peer_rows_out]
+    explains = any(row.get("code") == "local_offline" for row in peer_rows_out)
+    if state in (IPV4_ONLY, IPV6_ONLY) and explains:
+        device_row["detail"] = _device_words(state)
+        return [device_row, *peer_rows_out]
+    return peer_rows_out

@@ -1,10 +1,10 @@
 {
-  "cli.network_uplink.no_connection": "This device has no network connection.",
+  "cli.network_uplink.no_connection": "This device has no route to the internet.",
   "cli.network_uplink.dual": "this device has IPv4 and IPv6 routes",
   "cli.network_uplink.ipv4_only": "this device has an IPv4 route and no IPv6 route",
   "cli.network_uplink.ipv6_only": "this device has an IPv6 route and no IPv4 route",
-  "cli.network_uplink.no_ipv4_for_peer": "This device's network has no IPv4 route; {peer} is reachable over IPv4 only",
-  "cli.network_uplink.no_ipv6_for_peer": "This device's network has no IPv6 route; {peer} is reachable over IPv6 only",
+  "cli.network_uplink.no_ipv4_for_peer": "This device's network has no IPv4 route; {peer} has only IPv4 addresses",
+  "cli.network_uplink.no_ipv6_for_peer": "This device's network has no IPv6 route; {peer} has only IPv6 addresses",
   "cli.network_uplink.not_answering": "{peer} isn't answering from this network",
   "cli.network_uplink.check_network": "check this device's network"
 }

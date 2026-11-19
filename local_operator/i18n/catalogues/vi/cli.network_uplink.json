@@ -1,10 +1,10 @@
 {
-  "cli.network_uplink.no_connection": "Thiết bị này không có kết nối mạng.",
+  "cli.network_uplink.no_connection": "Thiết bị này không có tuyến tới internet.",
   "cli.network_uplink.dual": "thiết bị này có tuyến IPv4 và IPv6",
   "cli.network_uplink.ipv4_only": "thiết bị này có tuyến IPv4 nhưng không có tuyến IPv6",
   "cli.network_uplink.ipv6_only": "thiết bị này có tuyến IPv6 nhưng không có tuyến IPv4",
-  "cli.network_uplink.no_ipv4_for_peer": "Mạng của thiết bị này không có tuyến IPv4; chỉ có thể kết nối tới {peer} qua IPv4",
-  "cli.network_uplink.no_ipv6_for_peer": "Mạng của thiết bị này không có tuyến IPv6; chỉ có thể kết nối tới {peer} qua IPv6",
+  "cli.network_uplink.no_ipv4_for_peer": "Mạng của thiết bị này không có tuyến IPv4; {peer} chỉ có địa chỉ IPv4",
+  "cli.network_uplink.no_ipv6_for_peer": "Mạng của thiết bị này không có tuyến IPv6; {peer} chỉ có địa chỉ IPv6",
   "cli.network_uplink.not_answering": "{peer} không phản hồi từ mạng này",
   "cli.network_uplink.check_network": "kiểm tra mạng của thiết bị này"
 }

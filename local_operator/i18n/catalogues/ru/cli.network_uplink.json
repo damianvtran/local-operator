@@ -1,10 +1,10 @@
 {
-  "cli.network_uplink.no_connection": "У этого устройства нет сетевого подключения.",
+  "cli.network_uplink.no_connection": "У этого устройства нет маршрута в интернет.",
   "cli.network_uplink.dual": "у этого устройства есть маршруты IPv4 и IPv6",
   "cli.network_uplink.ipv4_only": "у этого устройства есть маршрут IPv4, но нет маршрута IPv6",
   "cli.network_uplink.ipv6_only": "у этого устройства есть маршрут IPv6, но нет маршрута IPv4",
-  "cli.network_uplink.no_ipv4_for_peer": "В сети этого устройства нет маршрута IPv4; {peer} доступен только по IPv4",
-  "cli.network_uplink.no_ipv6_for_peer": "В сети этого устройства нет маршрута IPv6; {peer} доступен только по IPv6",
+  "cli.network_uplink.no_ipv4_for_peer": "В сети этого устройства нет маршрута IPv4; у {peer} есть только адреса IPv4",
+  "cli.network_uplink.no_ipv6_for_peer": "В сети этого устройства нет маршрута IPv6; у {peer} есть только адреса IPv6",
   "cli.network_uplink.not_answering": "{peer} не отвечает из этой сети",
   "cli.network_uplink.check_network": "проверьте сеть этого устройства"
 }

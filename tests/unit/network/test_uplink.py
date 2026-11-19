@@ -1,4 +1,4 @@
-"""The passive uplink reading, ``local_offline``, the redial pause/kick and the rows.
+"""The passive uplink readings, ``local_offline``, the redial kick and the rows.
 
 Incident 2026-11-18: a Mac on an IPv6-only network dialled an IPv4-only node2
 and every surface blamed node2. Nothing here touches the real network: route
@@ -17,9 +17,10 @@ import pytest
 
 from local_operator.network import redial, relay, store, uplink
 
-#: Captured at import, before the directory's autouse fixture pins the reading
+#: Captured at import, before the directory's autouse fixture pins both readings
 #: to ``unknown`` for every other cell (``conftest._uplink_unknown``).
 _REAL_READ = uplink.read_uplink
+_REAL_ENDPOINT = uplink.endpoint_has_route
 
 
 class _Clock:
@@ -99,6 +100,110 @@ def test_route_lookup_sends_nothing_and_maps_errnos(monkeypatch: pytest.MonkeyPa
     assert uplink.family_has_route("ipv4") is None
 
 
+# -- per-endpoint route lookups (review R1, R2) ----------------------------------------
+
+
+class _RouteTable:
+    """A fake datagram socket over a scripted route table: no default route.
+
+    Only the listed addresses route (an on-link LAN, loopback); every other
+    destination — including the public route keys the device reading uses —
+    fails with ``ENETUNREACH``, exactly as a host whose WAN is down.
+    """
+
+    def __init__(self, routed: set[str]) -> None:
+        self.routed = routed
+        self.connects: list[tuple[int, str]] = []
+        table = self
+
+        class _Sock:
+            def __init__(self, family: int, kind: int) -> None:
+                assert kind == socket.SOCK_DGRAM  # a datagram connect transmits nothing
+                self.family = family
+                self.source = ""
+
+            def connect(self, key: Any) -> None:
+                table.connects.append((self.family, key[0]))
+                if key[0] not in table.routed:
+                    raise OSError(errno.ENETUNREACH, "no route")
+                self.source = "127.0.0.1" if key[0].startswith("127.") else "192.168.50.1"
+
+            def getsockname(self) -> tuple[str, int]:
+                return (self.source, 40000)
+
+            def send(self, *_args: Any) -> None:  # pragma: no cover - must never run
+                raise AssertionError("a route lookup must not send")
+
+            def close(self) -> None:
+                pass
+
+        self.socket = _Sock
+
+
+@pytest.fixture
+def no_default_route(monkeypatch: pytest.MonkeyPatch) -> _RouteTable:
+    table = _RouteTable({"192.168.50.7", "127.0.0.1", "203.0.113.5"})
+    monkeypatch.setattr(uplink.socket, "socket", table.socket)
+    return table
+
+
+def test_lan_and_loopback_peers_have_a_route_without_a_default_route(
+    no_default_route: _RouteTable,
+) -> None:
+    # The device reading says "no route to the internet"...
+    assert _REAL_READ()["state"] == uplink.OFFLINE
+    # ...yet the kernel routes the LAN and loopback peers (R1's netns repro).
+    assert _REAL_ENDPOINT("192.168.50.7:4097") is True
+    assert _REAL_ENDPOINT("127.0.0.1:4097") is True
+    assert _REAL_ENDPOINT("16.52.146.32:4097") is False
+    assert uplink.endpoints_route(["16.52.146.32:4097", "192.168.50.7:4097"], _REAL_ENDPOINT)
+    # The lookup is the peer's own address and port, never a route key.
+    assert (socket.AF_INET, "192.168.50.7") in no_default_route.connects
+
+
+def test_loopback_lookup_on_the_real_kernel_is_routed() -> None:
+    """The real syscall, no fakes: loopback is routed even in a sealed sandbox."""
+    assert _REAL_ENDPOINT("127.0.0.1:4097") is True
+
+
+def test_ipv4_mapped_literals_are_ipv4(no_default_route: _RouteTable) -> None:
+    assert uplink.endpoint_family("[::ffff:203.0.113.5]:7777") == "ipv4"
+    assert uplink.endpoint_family("::ffff:203.0.113.5") == "ipv4"
+    assert uplink.endpoint_family("[2001:db8::1]:7777") == "ipv6"
+    # Looked up over the IPv4 stack at its IPv4 address, where it routes.
+    assert _REAL_ENDPOINT("[::ffff:203.0.113.5]:7777") is True
+    assert no_default_route.connects[-1] == (socket.AF_INET, "203.0.113.5")
+
+
+@pytest.mark.parametrize("endpoint", ["node2.example:4097", "", "not an endpoint"])
+def test_a_hostname_or_junk_is_never_looked_up(
+    endpoint: str, no_default_route: _RouteTable
+) -> None:
+    assert _REAL_ENDPOINT(endpoint) is None
+    assert no_default_route.connects == []
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [
+        ([False, False], False),
+        ([False, True], True),
+        ([False, None], None),  # one unknown endpoint: not proven
+        ([], None),  # nothing to look up: not proven
+    ],
+)
+def test_endpoints_route_needs_every_endpoint_proven(answers: list[Any], expected: Any) -> None:
+    script = dict(zip([f"192.0.2.{i}:1" for i in range(len(answers))], answers))
+    assert uplink.endpoints_route(list(script), script.__getitem__) is expected
+
+
+def test_a_lookup_that_raises_is_not_evidence() -> None:
+    def broken(_endpoint: str) -> bool:
+        raise RuntimeError("synthetic")
+
+    assert uplink.endpoints_route(["192.0.2.1:1"], broken) is None
+
+
 # -- local_offline precedence --------------------------------------------------------
 
 
@@ -108,81 +213,78 @@ def _attempt(endpoint: str, detail: str = "connect_failed:OSError") -> Any:
     )
 
 
-V6_ONLY = {"state": uplink.IPV6_ONLY, "ipv4": False, "ipv6": True}
+def test_lan_and_loopback_peers_are_not_local_offline_without_a_default_route(
+    no_default_route: _RouteTable,
+) -> None:
+    for endpoint in ("192.168.50.7:4097", "127.0.0.1:4097"):
+        attempts = [_attempt(endpoint, "connect_failed:TimeoutError")]
+        assert (
+            relay.peer_link_state(None, "unreachable", attempts, route_reader=_REAL_ENDPOINT)
+            == "address_unreachable"
+        )
 
 
-def test_local_offline_wins_over_address_unreachable_for_the_peers_family() -> None:
-    attempts = [_attempt("16.52.146.32:4097")]
+def test_a_peer_with_no_route_to_any_endpoint_is_local_offline(
+    no_default_route: _RouteTable,
+) -> None:
+    attempts = [_attempt("16.52.146.32:4097"), _attempt("[2001:db8::1]:4097")]
     assert relay.peer_link_state(None, "unreachable", attempts) == "address_unreachable"
     assert (
-        relay.peer_link_state(None, "unreachable", attempts, uplink_reading=V6_ONLY)
+        relay.peer_link_state(None, "unreachable", attempts, route_reader=_REAL_ENDPOINT)
         == "local_offline"
     )
 
 
 @pytest.mark.parametrize(
-    ("endpoints", "reading"),
+    "endpoints",
     [
-        # The peer also advertises a family this device HAS a route in.
-        (["16.52.146.32:4097", "[2001:db8::1]:4097"], V6_ONLY),
-        # A hostname could resolve to either family: not proven.
-        (["node2.example:4097"], V6_ONLY),
-        # The family is unknown: no claim.
-        (["16.52.146.32:4097"], {"state": "unknown", "ipv4": None, "ipv6": True}),
-        # No reading at all (fail-safe).
-        (["16.52.146.32:4097"], None),
+        # One endpoint routes: the failure is not ours.
+        ["16.52.146.32:4097", "192.168.50.7:4097"],
+        # A hostname could resolve anywhere: never local_offline.
+        ["node2.example:4097"],
+        ["16.52.146.32:4097", "node2.example:4097"],
     ],
 )
-def test_local_offline_needs_a_proven_missing_route(endpoints: list[str], reading: Any) -> None:
+def test_local_offline_needs_every_endpoint_proven_unroutable(
+    endpoints: list[str], no_default_route: _RouteTable
+) -> None:
     attempts = [_attempt(endpoint) for endpoint in endpoints]
     assert (
-        relay.peer_link_state(None, "unreachable", attempts, uplink_reading=reading)
+        relay.peer_link_state(None, "unreachable", attempts, route_reader=_REAL_ENDPOINT)
         == "address_unreachable"
     )
 
 
-def test_offline_device_marks_hostname_peers_local_offline_too() -> None:
-    offline = {"state": uplink.OFFLINE, "ipv4": False, "ipv6": False}
-    attempts = [_attempt("node2.example:4097")]
-    assert (
-        relay.peer_link_state(None, "unreachable", attempts, uplink_reading=offline)
-        == "local_offline"
-    )
-
-
 def test_refused_and_handshake_states_are_untouched_by_the_reading() -> None:
-    offline = {"state": uplink.OFFLINE, "ipv4": False, "ipv6": False}
     refused = [
         _attempt("16.52.146.32:4097", f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError")
     ]
-    assert relay.peer_link_state(None, "x", refused, uplink_reading=offline) == "relay_down"
+    assert relay.peer_link_state(None, "x", refused, route_reader=lambda e: False) == "relay_down"
 
 
-# -- redial pause and kick -----------------------------------------------------------
+# -- redial: advisory, baseline retries kept, per-peer kick ----------------------------
 
 
 def _loop_server(
-    monkeypatch: pytest.MonkeyPatch, readings: list[Any], clock: _Clock
-) -> tuple[Any, list[float], list[str]]:
+    monkeypatch: pytest.MonkeyPatch, routes: Any, clock: _Clock, ticks: int
+) -> tuple[Any, list[float]]:
+    """A relay whose redial loop runs ``ticks`` fake seconds; returns dial times.
+
+    ``routes`` is the per-endpoint reader (``None`` = a relay with no reader,
+    the control that is exactly today's loop) or a callable of the clock.
+    """
     server: Any = object.__new__(relay.RelayServer)
     server.root = None
     server.redial = redial.RedialTracker(clock=clock, rand=lambda: 0.5)
-    waits: list[float] = []
-    dials: list[str] = []
-    script = iter(readings)
-
-    def reader() -> Any:
-        value = next(script)
-        if isinstance(value, Exception):
-            raise value
-        return value
-
-    server._uplink_reader = reader
+    dial_times: list[float] = []
+    waits = [0]
+    if routes is not None:
+        server._route_reader = lambda endpoint: routes(clock.now)
 
     def wait(delay: float) -> bool:
-        waits.append(delay)
+        waits[0] += 1
         clock.now += delay
-        return len(waits) > len(readings)
+        return waits[0] > ticks
 
     server._stop = SimpleNamespace(wait=wait, is_set=lambda: False)
     server._link_for = lambda device: None
@@ -190,86 +292,73 @@ def _loop_server(
     server._redial_candidates = lambda member: ["192.0.2.5:4097"]
 
     def dial(device_id: str, *, probe_timeout_s: float) -> tuple[None, str]:
-        dials.append(device_id)
+        dial_times.append(clock.now)
         return None, "unreachable"
 
     server._ensure_link_with_reason = dial
     monkeypatch.setattr(store, "list_networks", lambda root: [])
-    return server, waits, dials
+    return server, dial_times
 
 
-OFFLINE = {"state": uplink.OFFLINE, "ipv4": False, "ipv6": False}
-DUAL = {"state": uplink.DUAL, "ipv4": True, "ipv6": True}
+def _run(monkeypatch: pytest.MonkeyPatch, routes: Any, ticks: int = 300) -> list[float]:
+    clock = _Clock()
+    server, dial_times = _loop_server(monkeypatch, routes, clock, ticks)
+    server.redial.seed("d_peer")
+    server._redial_loop()
+    return [round(at - 1_000.0, 3) for at in dial_times]
 
 
-def test_redial_pauses_while_offline_and_kicks_on_recovery(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("answer", [True, False, None], ids=["routed", "unroutable", "unknown"])
+def test_every_peer_keeps_the_baseline_retry_whatever_the_reading(
+    monkeypatch: pytest.MonkeyPatch, answer: Any
 ) -> None:
-    clock = _Clock()
-    server, waits, dials = _loop_server(monkeypatch, [OFFLINE, OFFLINE, DUAL], clock)
-    server.redial.lost("d_peer", cause="timeout")
-    # Push the retry far out, as a long outage's backoff would.
-    for _ in range(6):
-        server.redial.failed("d_peer", cause="timeout")
-    attempts_before = server.redial.snapshot("d_peer")["attempts"]
-    next_retry = server.redial.snapshot("d_peer")["next_retry_at"]
-    server._redial_loop()
-    # First wait is the ordinary tick; the two offline readings re-read on the
-    # short bounded cadence and dial nothing.
-    assert waits[:3] == [
-        relay.REDIAL_TICK_S,
-        relay.UPLINK_OFFLINE_TICK_S,
-        relay.UPLINK_OFFLINE_TICK_S,
-    ]
-    # The recovered reading kicked the peer: dialled at once, long before its
-    # backed-off retry time, and exactly once.
-    assert dials == ["d_peer"]
-    assert clock.now < next_retry
-    assert server.redial.snapshot("d_peer")["attempts"] == attempts_before + 1
-    assert waits[3] == relay.REDIAL_TICK_S
+    """U1: the reading never pauses or skips a dial — a LAN peer (routed), a
+    peer with no route to any endpoint, and an unknown reading all dial at
+    exactly the control schedule (no reader: today's loop)."""
+    control = _run(monkeypatch, None)
+    assert len(control) >= 5  # the backoff schedule over 300 s, not one dial
+    assert _run(monkeypatch, lambda now: answer) == control
 
 
-def test_a_reading_that_raises_redials_exactly_as_before(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = _Clock()
-    server, waits, dials = _loop_server(monkeypatch, [RuntimeError("synthetic")], clock)
-    server.redial.seed("d_peer")
-    server._redial_loop()
-    assert dials == ["d_peer"]
-    assert waits == [relay.REDIAL_TICK_S, relay.REDIAL_TICK_S]
+def test_a_route_to_the_peer_appearing_kicks_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U2: confirmed recovery — the first True lookup after a False one."""
+    control = _run(monkeypatch, None)
+    recover_at = control[-1] + 3.0  # mid-backoff: the next retry is far off
+    kicked = _run(monkeypatch, lambda now: (now - 1_000.0) >= recover_at)
+    assert kicked[: len(control)] == control
+    # Redialled within one tick of the route appearing, not at the backoff.
+    assert kicked[len(control)] == pytest.approx(recover_at + relay.REDIAL_TICK_S, abs=1.0)
+    assert kicked[len(control)] < control[-1] + redial.backoff_s(len(control), rand=lambda: 0.5)
 
 
-def test_unknown_reading_never_pauses(monkeypatch: pytest.MonkeyPatch) -> None:
-    clock = _Clock()
-    server, waits, dials = _loop_server(monkeypatch, [uplink.unknown_reading()], clock)
-    server.redial.seed("d_peer")
-    server._redial_loop()
-    assert dials == ["d_peer"]
+def test_a_transition_to_unknown_is_not_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U2: unroutable -> unknown kicks nothing; the baseline schedule is unchanged."""
+    control = _run(monkeypatch, None)
+    flip = control[1] + 1.0
+    assert _run(monkeypatch, lambda now: False if (now - 1_000.0) < flip else None) == control
 
 
-def test_a_relay_without_a_reader_keeps_todays_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    clock = _Clock()
-    server, waits, dials = _loop_server(monkeypatch, [None], clock)
-    del server._uplink_reader
-    server.redial.seed("d_peer")
-    server._redial_loop()
-    assert dials == ["d_peer"]
-
-
-def test_kick_all_keeps_attempts_and_makes_everyone_due() -> None:
+def test_kick_keeps_attempts_and_makes_only_that_peer_due() -> None:
     clock = _Clock()
     tracker = redial.RedialTracker(clock=clock, rand=lambda: 0.5)
     tracker.lost("d_a", cause="timeout")
     tracker.failed("d_a", cause="timeout")
     tracker.lost("d_b", cause="timeout")
     assert tracker.due() == []
-    tracker.kick_all()
-    assert sorted(tracker.due()) == ["d_a", "d_b"]
+    tracker.kick("d_a")
+    tracker.kick("d_unknown")  # untracked: a no-op
+    assert tracker.due() == ["d_a"]
     assert tracker.snapshot("d_a")["attempts"] == 1
 
 
 # -- the rows ready and doctor print first --------------------------------------------
+
+
+OFFLINE = {"state": uplink.OFFLINE, "ipv4": False, "ipv6": False}
+DUAL = {"state": uplink.DUAL, "ipv4": True, "ipv6": True}
+V6_ONLY = {"state": uplink.IPV6_ONLY, "ipv4": False, "ipv6": True}
+NO_ROUTE = lambda endpoint: False  # noqa: E731
+ROUTED = lambda endpoint: True  # noqa: E731
 
 
 def _reach(device: str, endpoint: str, detail: str, ok: bool = False) -> dict[str, Any]:
@@ -283,105 +372,193 @@ def _reach(device: str, endpoint: str, detail: str, ok: bool = False) -> dict[st
     }
 
 
-def test_offline_device_row_is_first_and_names_this_device() -> None:
+def test_offline_device_row_is_first_and_claims_only_the_internet_route() -> None:
     rows = uplink.uplink_checks(
-        OFFLINE, [_reach("d_n2", "16.52.146.32:4097", "connect_failed:OSError")]
+        OFFLINE,
+        [_reach("d_n2", "16.52.146.32:4097", "connect_failed:OSError")],
+        route_reader=NO_ROUTE,
     )
     assert len(rows) == 1
     assert rows[0]["ok"] is False and rows[0]["code"] == "offline"
-    assert rows[0]["detail"] == "This device has no network connection."
+    assert rows[0]["detail"] == "This device has no route to the internet."
     assert rows[0]["remedies"] == ["check this device's network"]
 
 
-def test_family_mismatch_names_the_missing_route_and_the_peer() -> None:
+def test_offline_device_row_never_shows_while_a_lan_peer_answers(
+    no_default_route: _RouteTable,
+) -> None:
     rows = uplink.uplink_checks(
-        V6_ONLY, [_reach("d_n2", "16.52.146.32:4097", "connect_failed:OSError")]
+        OFFLINE,
+        [_reach("d_lan", "192.168.50.7:4097", "ok", ok=True)],
+        route_reader=_REAL_ENDPOINT,
+    )
+    assert rows == []
+
+
+def test_a_silent_lan_peer_without_a_default_route_isnt_answering(
+    no_default_route: _RouteTable,
+) -> None:
+    rows = uplink.uplink_checks(
+        OFFLINE,
+        [_reach("d_lan", "192.168.50.7:4097", "connect_failed:TimeoutError")],
+        route_reader=_REAL_ENDPOINT,
+    )
+    assert [row["code"] for row in rows] == ["offline", "peer_not_answering"]
+    assert rows[1]["detail"] == "node2 isn't answering from this network"
+
+
+def test_family_mismatch_names_the_missing_route_and_only_the_peers_addresses() -> None:
+    rows = uplink.uplink_checks(
+        V6_ONLY,
+        [_reach("d_n2", "16.52.146.32:4097", "connect_failed:OSError")],
+        route_reader=NO_ROUTE,
     )
     assert [row["code"] for row in rows] == ["ipv6_only", "local_offline"]
-    assert rows[0]["ok"] is True
+    assert rows[0]["ok"] is True and "remedies" not in rows[0]
     assert rows[1]["detail"] == (
-        "This device's network has no IPv4 route; node2 is reachable over IPv4 only"
+        "This device's network has no IPv4 route; node2 has only IPv4 addresses"
     )
     assert rows[1]["remedies"] == ["check this device's network"]
-    reverse = uplink.uplink_checks(
-        {"state": uplink.IPV4_ONLY, "ipv4": True, "ipv6": False},
-        [_reach("d_n2", "[2001:db8::7]:4097", "connect_failed:OSError")],
+    v4 = {"state": uplink.IPV4_ONLY, "ipv4": True, "ipv6": False}
+    rows = uplink.uplink_checks(
+        v4, [_reach("d_n2", "[2001:db8::1]:4097", "connect_failed:OSError")], route_reader=NO_ROUTE
     )
-    assert reverse[1]["detail"] == (
-        "This device's network has no IPv6 route; node2 is reachable over IPv6 only"
+    assert rows[1]["detail"] == (
+        "This device's network has no IPv6 route; node2 has only IPv6 addresses"
     )
+
+
+def test_a_single_family_peer_with_its_own_route_is_not_blamed_on_this_device() -> None:
+    """R1: v6-only device reading, but the kernel routes this IPv4 LAN peer."""
+    rows = uplink.uplink_checks(
+        V6_ONLY,
+        [_reach("d_lan", "192.168.50.7:4097", "connect_failed:OSError")],
+        route_reader=ROUTED,
+    )
+    assert rows == []
+
+
+@pytest.mark.parametrize("reading", [DUAL, None, uplink.unknown_reading()])
+def test_a_healthy_or_unknown_reading_adds_no_row(reading: Any) -> None:
+    """Q-M1: no uplink row unless something is wrong."""
+    rows = uplink.uplink_checks(
+        reading, [_reach("d_n2", "16.52.146.32:4097", "ok", ok=True)], route_reader=ROUTED
+    )
+    assert rows == []
 
 
 def test_a_routed_silent_peer_isnt_answering_and_no_cause_is_named() -> None:
     rows = uplink.uplink_checks(
-        DUAL, [_reach("d_n2", "16.52.146.32:4097", "connect_failed:TimeoutError")]
+        DUAL,
+        [_reach("d_n2", "16.52.146.32:4097", "connect_failed:TimeoutError")],
+        route_reader=ROUTED,
     )
-    assert rows[1]["detail"] == "node2 isn't answering from this network"
-    assert "remedies" not in rows[1]
+    assert [row["code"] for row in rows] == ["peer_not_answering"]
+    assert rows[0]["detail"] == "node2 isn't answering from this network"
+    assert "remedies" not in rows[0]
     for word in ("firewall", "allowlist"):
-        assert word not in rows[1]["detail"].lower()
+        assert word not in rows[0]["detail"].lower()
 
 
 @pytest.mark.parametrize(
-    "detail",
-    ["connect_failed:ConnectionRefusedError", "unknown_network", "handshake_not_attempted: x"],
+    ("details", "route"),
+    [
+        # Resolver and local errors are not a peer staying silent (U3).
+        (["connect_failed:gaierror"], ROUTED),
+        (["connect_failed:OSError"], ROUTED),
+        (["bad_endpoint"], ROUTED),
+        # No attempt at all.
+        (["not_attempted"], ROUTED),
+        # One silent dial beside one resolver error: not every row is evidence.
+        (["connect_failed:TimeoutError", "connect_failed:gaierror"], ROUTED),
+        # A timeout to an endpoint whose route is unknown: not a routable dial.
+        (["connect_failed:TimeoutError"], lambda endpoint: None),
+        # The host answered.
+        (["connect_failed:ConnectionRefusedError"], ROUTED),
+        (["unknown_network"], ROUTED),
+    ],
 )
-def test_a_peer_that_answered_gets_no_extra_row(detail: str) -> None:
-    rows = uplink.uplink_checks(DUAL, [_reach("d_n2", "16.52.146.32:4097", detail)])
-    assert len(rows) == 1
+def test_isnt_answering_needs_a_timed_out_dial_to_a_routable_endpoint(
+    details: list[str], route: Any
+) -> None:
+    peer_rows = [
+        _reach("d_n2", f"16.52.146.{index}:4097", detail) for index, detail in enumerate(details)
+    ]
+    assert uplink.uplink_checks(DUAL, peer_rows, route_reader=route) == []
 
 
-def test_unknown_reading_claims_nothing() -> None:
-    rows = uplink.uplink_checks(
-        None, [_reach("d_n2", "16.52.146.32:4097", "connect_failed:OSError")]
-    )
-    # No device row (it would claim nothing) and no peer row (nothing proven).
-    assert rows == []
-
-
-def test_ready_renders_the_uplink_row_first_with_its_remedy() -> None:
+def test_ready_renders_the_uplink_rows_first_with_their_remedy() -> None:
     from local_operator.network import readiness
 
     reach = _reach("d_n2", "16.52.146.32:4097", "connect_failed:OSError")
-    checks = uplink.uplink_checks(V6_ONLY, [reach]) + [reach]
+    checks = uplink.uplink_checks(V6_ONLY, [reach], route_reader=NO_ROUTE) + [reach]
     lines = readiness.render_check_lines(checks)
     assert lines[0] == "ok  uplink: this device has an IPv6 route and no IPv4 route"
     assert lines[1] == (
         "FAIL uplink node2: This device's network has no IPv4 route; "
-        "node2 is reachable over IPv4 only"
+        "node2 has only IPv4 addresses"
     )
     assert lines[2] == "    - check this device's network"
     assert lines[3].startswith("FAIL reachability node2")
 
 
-def test_doctor_puts_the_uplink_row_first(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def _doctor(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    payload: dict[str, Any],
+    reading: Any,
+) -> list[str]:
     from local_operator.network import cli
 
-    payload = {
+    monkeypatch.setattr(cli, "_relay_call", lambda *a, **k: payload)
+    monkeypatch.setattr(cli, "_uplink_reading", lambda: dict(reading))
+    monkeypatch.setattr(relay, "supervision_state", lambda: {"platform": "none"})
+    monkeypatch.setattr(relay, "foreign_supervision", lambda: [])
+    cli._cmd_doctor(Namespace(peer="", json=False))
+    return capsys.readouterr().out.splitlines()
+
+
+def _payload(endpoint: str, detail: str) -> dict[str, Any]:
+    return {
         "checks": [
             {
                 "check": "reachability",
                 "device_id": "d_n2",
-                "endpoint": "16.52.146.32:4097",
+                "endpoint": endpoint,
                 "ok": False,
-                "detail": "connect_failed:OSError",
+                "detail": detail,
             }
         ]
     }
-    monkeypatch.setattr(cli, "_relay_call", lambda *a, **k: payload)
-    monkeypatch.setattr(cli, "_uplink_reading", lambda: dict(OFFLINE))
-    monkeypatch.setattr(relay, "supervision_state", lambda: {"platform": "none"})
-    monkeypatch.setattr(relay, "foreign_supervision", lambda: [])
-    args = Namespace(peer="", json=False)
-    cli._cmd_doctor(args)
-    out = capsys.readouterr().out.splitlines()
+
+
+def test_doctor_puts_the_uplink_row_first(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(uplink, "endpoint_has_route", NO_ROUTE)
+    out = _doctor(
+        monkeypatch, capsys, _payload("16.52.146.32:4097", "connect_failed:OSError"), OFFLINE
+    )
     first = next(index for index, line in enumerate(out) if "uplink" in line)
     reach = next(index for index, line in enumerate(out) if "reachability" in line)
     assert first < reach
-    assert out[first] == "FAIL uplink: This device has no network connection."
+    assert out[first] == "FAIL uplink: This device has no route to the internet."
     assert out[first + 1] == "    - check this device's network"
+
+
+def test_doctor_on_a_healthy_host_prints_no_uplink_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q-M1: dual-stack and a peer that refused — exactly today's report."""
+    monkeypatch.setattr(uplink, "endpoint_has_route", ROUTED)
+    out = _doctor(
+        monkeypatch,
+        capsys,
+        _payload("16.52.146.32:4097", "connect_failed:ConnectionRefusedError"),
+        DUAL,
+    )
+    assert not any("uplink" in line for line in out)
+    assert any("reachability" in line for line in out)
 
 
 def test_doctor_with_a_failing_reading_keeps_todays_rows(

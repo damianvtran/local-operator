@@ -2,7 +2,7 @@
   "cli.network_uplink.no_connection": {
     "role": "mesh doctor/ready diagnostic: the first row, about this device's own network uplink",
     "tone": "factual, calm; about THIS device, never blames the peer",
-    "note": "Derived from a passive route-table reading only. Never mention a firewall, allowlist, ISP or any cause; only what is stated. IPv4/IPv6 are technical identifiers and stay as written. {peer} is a device name or id inserted verbatim. Full sentence with final period: no route in any address family."
+    "note": "Derived from a passive route-table reading only. Never mention a firewall, allowlist, ISP or any cause; only what is stated. IPv4/IPv6 are technical identifiers and stay as written. {peer} is a device name or id inserted verbatim. Full sentence with final period: no route to the public internet in either address family. Do NOT say the device has no network or no connection: a local-network peer may still be reachable."
   },
   "cli.network_uplink.dual": {
     "role": "mesh doctor/ready diagnostic: the first row, about this device's own network uplink",
@@ -22,12 +22,12 @@
   "cli.network_uplink.no_ipv4_for_peer": {
     "role": "mesh doctor/ready diagnostic: the first row, about this device's own network uplink",
     "tone": "factual, calm; about THIS device, never blames the peer",
-    "note": "Derived from a passive route-table reading only. Never mention a firewall, allowlist, ISP or any cause; only what is stated. IPv4/IPv6 are technical identifiers and stay as written. {peer} is a device name or id inserted verbatim. Sentence without final period; semicolon separates the two facts."
+    "note": "Derived from a passive route-table reading only. Never mention a firewall, allowlist, ISP or any cause; only what is stated. IPv4/IPv6 are technical identifiers and stay as written. {peer} is a device name or id inserted verbatim. Sentence without final period; semicolon separates the two facts. The second fact is only what the peer advertises (its addresses), never a claim about whether it can be reached."
   },
   "cli.network_uplink.no_ipv6_for_peer": {
     "role": "mesh doctor/ready diagnostic: the first row, about this device's own network uplink",
     "tone": "factual, calm; about THIS device, never blames the peer",
-    "note": "Derived from a passive route-table reading only. Never mention a firewall, allowlist, ISP or any cause; only what is stated. IPv4/IPv6 are technical identifiers and stay as written. {peer} is a device name or id inserted verbatim. Sentence without final period; semicolon separates the two facts."
+    "note": "Derived from a passive route-table reading only. Never mention a firewall, allowlist, ISP or any cause; only what is stated. IPv4/IPv6 are technical identifiers and stay as written. {peer} is a device name or id inserted verbatim. Sentence without final period; semicolon separates the two facts. The second fact is only what the peer advertises (its addresses), never a claim about whether it can be reached."
   },
   "cli.network_uplink.not_answering": {
     "role": "mesh doctor/ready diagnostic: the first row, about this device's own network uplink",
