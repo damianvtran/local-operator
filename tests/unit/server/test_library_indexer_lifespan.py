@@ -20,6 +20,7 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,7 @@ def _indexer_threads() -> list[threading.Thread]:
 
 
 @pytest.fixture
-def scratch_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def scratch_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     # Same redirection as the boot-gate tests, with Aida's boot ensure switched
     # off: this test is about the indexer's lifetime, not her bootstrap.
     root = tmp_path / ".local-operator"
