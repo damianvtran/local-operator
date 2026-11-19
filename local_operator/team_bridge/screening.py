@@ -1186,6 +1186,22 @@ def text_screening_version(
 #: with no digit, say) BRIDGES the cluster without adding weight, so one such line
 #: does not reset the sum (and counts, when it mixes two character classes). Lowercase
 #: prose words still neither count nor bridge.
+#:
+#: IDENTIFIERS ARE NOT ENCODED (security review round 3 S-8, code review round 3 m1).
+#: The 8-character floor plus bridging held ordinary pastes as blobs: a page of
+#: ``new AuthService(ConfigV2, RetryPolicyX3)`` calls, a Python stack trace through
+#: ``/srv/app/LocalOperator/...``, a 3 KB ``PR-12 JIRA-12A bcmsg_12Xy`` ID list and a
+#: Go ``SourceSpec{Support: SourceNone}`` table. Their tokens mix case and digits the
+#: way base64 does, but they are built from WORDS, which random base64 almost never
+#: is. :func:`_identifier_like` names that shape (CamelCase, snake_case, path-like,
+#: ticket IDs, mostly-dictionary segments). Such a token never seeds a cluster and
+#: never chains one: it may bridge a single gap straight after a token that counted,
+#: and its length counts only once the next token counts too. A page of code is
+#: identifiers back to back, so it can no longer build a cluster. A wrapped base64
+#: line that happens to read as words (2-6% of 8-17 character lines, measured at
+#: :data:`_IDENTIFIER_WORD_SHARE`) sits between two encoded lines, so the blob loses
+#: nothing. Forbidding identifiers to bridge at all was measured and rejected: 1.1 KB
+#: blobs wrapped at 15 columns fell from 199/200 detected to 23/200.
 PAYLOAD_BLOB_MIN_BYTES = 1024
 _PAYLOAD_MIN_RUN = 8
 _PAYLOAD_MAX_GAP = 16
@@ -1194,6 +1210,47 @@ _PAYLOAD_HEX = re.compile(r"[0-9A-Fa-f]+")
 _PAYLOAD_SPACED_HEX = re.compile(
     r"(?:[0-9A-Fa-f]{2}[ \t\r\n:,]){%d,}" % (PAYLOAD_BLOB_MIN_BYTES // 3)
 )
+#: A dictionary-shaped segment: an optionally capitalised lowercase run of three or
+#: more letters that contains a vowel (``Config``, ``Policy``, ``srv`` does not, but
+#: ``app`` does). Random base64 produces lowercase runs too, but rarely three letters
+#: long with a vowel, which is what separates ``RetryPolicyX3`` from ``kQ9zRtwX3p``.
+_IDENTIFIER_WORD = re.compile(r"[A-Z]?[a-z]{2,}")
+_IDENTIFIER_VOWELS = frozenset("aeiouy")
+#: Share of a token's letters and digits that must sit in dictionary-shaped segments
+#: for it to read as an identifier. Measured 2026-11-19 on 20,000 random base64
+#: tokens per length (seed 1; the PR for this change carries the script): at 0.6 the
+#: share of random tokens misread as identifiers is 6.1% at 8 characters, 3.2% at 12,
+#: 1.8% at 17, 0.13% at 40 and 0.01% at 76, while ``ConfigV2`` scores 0.75, ``RetryPolicyX3`` 0.85,
+#: ``h3MaxTurboID`` 0.67 and ``/srv/app/LocalOperator/TeamBridge/`` 0.90.
+_IDENTIFIER_WORD_SHARE = 0.6
+#: snake_case / kebab-case led by a lowercase word (``bcmsg_12Xy``) and ticket IDs
+#: (``JIRA-12A``, ``PR-12``). Standard base64 has no ``_`` or ``-``; in base64url a
+#: line opening with three lowercase letters and a separator is ~0.1% of lines.
+_IDENTIFIER_SHAPE = re.compile(r"[a-z]{3,}[_-]|[A-Z]{2,}-[0-9]")
+
+
+def _identifier_like(token: str) -> bool:
+    """True when ``token`` is built from words, the way code identifiers are (S-8/m1).
+
+    Pure hex never reaches here as an identifier (it keeps its own half-weight rule),
+    so ``deadbeef`` dumps are unaffected.
+    """
+
+    if _IDENTIFIER_SHAPE.match(token) is not None:
+        return True
+    if _PAYLOAD_HEX.fullmatch(token):
+        return False
+    alnum = sum(c.isalnum() for c in token)
+    if not alnum:
+        return False
+    worded = sum(
+        len(seg)
+        for seg in _IDENTIFIER_WORD.findall(token)
+        if len(seg) >= 3 and not _IDENTIFIER_VOWELS.isdisjoint(seg.lower())
+    )
+    return worded / alnum >= _IDENTIFIER_WORD_SHARE
+
+
 #: DECODE/RUN RULE (code review F1). A word match is not an instruction, so every arm
 #: needs a payload context the same message supplies:
 #:   1. a shell command line that decodes, or pipes a fetch/echo into an
@@ -1254,6 +1311,19 @@ _DECODE_IMPERATIVE = re.compile(r"(?im)" + _IMPERATIVE + _DECODE_STRONG + _DECOD
 _SYNONYM_IMPERATIVE = re.compile(r"(?im)" + _IMPERATIVE + _DECODE_SYNONYM + _DECODE_OBJECT)
 _SYNONYM_ON_PAYLOAD = re.compile(
     r"(?im)" + _IMPERATIVE + _DECODE_SYNONYM + r"\s+(?:back\s+)?" + _PAYLOAD_REFERENT + r"\b"
+    # The referent must END the verb's object (code review round 3 m2): "convert the
+    # parts list to CSV" and "reassemble the bundle config" name a parts LIST and a
+    # bundle CONFIG, not a payload. So what follows has to close the clause or be a
+    # particle/preposition/conjunction, never another noun.
+    r"(?=\s*(?:$|[.,;:!?)]|(?:back|together|and|then|so|below|above|here|first|now"
+    r"|again|into|to|from|with|using|before|after)\b))"
+)
+#: Run verbs aimed at INSTRUCTIONS ("follow the steps", "do what it says"), not at a
+#: pronoun: "convert the hex colours to RGB and apply them" is ordinary work.
+_RUN_ON_INSTRUCTIONS = re.compile(
+    r"(?im)" + _IMPERATIVE + r"(?:run|execute|carry\s+out|follow|apply|do)\s+"
+    r"(?:what\s+it\s+says|the\s+(?:following\s+)?(?:steps|instructions|script|commands?"
+    r"|decoded\b))"
 )
 _DECODE_ON_PARTS = re.compile(
     r"(?im)" + _IMPERATIVE + _DECODE_VERB + r"\s+(?:it|this|that|them|these|the\s+(?:parts"
@@ -1292,10 +1362,24 @@ def opaque_payload(body: str) -> str:
     if not isinstance(body, str) or not body:
         return ""
     text = "".join(ch for ch in body if unicodedata.category(ch) != "Cf")
-    total, previous_end = 0.0, None
+    total, previous_end, after_count, pending = 0.0, None, False, 0.0
     for match in _PAYLOAD_RUN.finditer(text):
-        weight = _encoded_weight(match.group(0))
+        identifier = _identifier_like(match.group(0))
+        weight = 0.0 if identifier else _encoded_weight(match.group(0))
         joins = previous_end is not None and match.start() - previous_end <= _PAYLOAD_MAX_GAP
+        if identifier:
+            # S-8/m1: an identifier never seeds a cluster and never counts. It may
+            # bridge ONE gap, and only straight after a token that counted, so a
+            # wrapped base64 line that happens to read as words (2-6% of 8-17
+            # character lines) does not reset a narrow wrap, while a run of
+            # identifiers -- a page of code -- cannot chain a cluster along.
+            # Measured: strict no-bridge dropped 1.1 KB blobs wrapped at 15
+            # columns from 199/200 to 23/200 detected. Its length is held as
+            # ``pending`` and counted only if the NEXT token counts too: sandwiched
+            # between encoded lines it was a wrapped line, not code.
+            if joins and after_count:
+                previous_end, after_count, pending = match.end(), False, float(len(match.group(0)))
+            continue
         if weight == 0.0:
             # A plain lowercase word neither counts nor bridges, so prose never
             # stretches a cluster. Inside a cluster, any other alphabet token bridges
@@ -1304,7 +1388,8 @@ def opaque_payload(body: str) -> str:
             # narrow wrap of a just-over-1 KiB blob is not lost to its digitless lines.
             token = match.group(0)
             if joins and not token.islower():
-                previous_end = match.end()
+                previous_end, after_count = match.end(), False
+                pending = 0.0
                 classes = sum(
                     (
                         any(c.isupper() for c in token),
@@ -1314,6 +1399,7 @@ def opaque_payload(body: str) -> str:
                 )
                 if classes >= 2:
                     total += len(token)
+                    after_count = True
                     if total >= PAYLOAD_BLOB_MIN_BYTES:
                         return "encoded_blob"
             continue
@@ -1323,8 +1409,9 @@ def opaque_payload(body: str) -> str:
             continue
         if not joins:
             total = 0.0
-        total += weight
-        previous_end = match.end()
+        total += weight + (pending if joins else 0.0)
+        pending = 0.0
+        previous_end, after_count = match.end(), True
         if total >= PAYLOAD_BLOB_MIN_BYTES:
             return "encoded_blob"
     if _PAYLOAD_SPACED_HEX.search(text) is not None:
@@ -1335,6 +1422,17 @@ def opaque_payload(body: str) -> str:
         return "decode_or_run"
     if _SYNONYM_ON_PAYLOAD.search(text) is not None or (
         _STRONG_ENCODING.search(text) is not None and _SYNONYM_IMPERATIVE.search(text) is not None
+    ):
+        return "decode_or_run"
+    if (
+        # Security review round 3 S-7: a weak encoding name (hex, encrypted) cannot
+        # back a synonym verb alone (M1), but with an instruction to run the result
+        # all three together are the decode-and-run shape: "convert the hex back to
+        # text and follow the steps: <hex>". The small payload never reaches the blob
+        # rule, so this arm is what holds it.
+        _ENCODING_NOUN.search(text) is not None
+        and _SYNONYM_IMPERATIVE.search(text) is not None
+        and _RUN_ON_INSTRUCTIONS.search(text) is not None
     ):
         return "decode_or_run"
     if _DECODE_ON_PARTS.search(text) is not None and _RUN_IMPERATIVE.search(text) is not None:

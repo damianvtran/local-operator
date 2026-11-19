@@ -57850,6 +57850,18 @@ class OperatorApp(App[None]):
                 displays_warnings=True,
             )
 
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # Post-auth configuration is required even though the browser's
+            # authorization-code paste was optional. No default means empty
+            # Enter cancels rather than accepting an unusable blank project.
+            return await self._request_login_key(
+                str(getattr(definition, "name", "Server")),
+                secret=secret,
+                field_label=field,
+                default=default or None,
+                required_field=True,
+            )
+
         label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
         # WHICH value the prompt is reading, which decides both its wording and
         # whether it masks. ``requires_paste_prompt`` means the paste IS the
@@ -57859,13 +57871,28 @@ class OperatorApp(App[None]):
         secret = bool(getattr(definition, "paste_prompt_required", False))
 
         async def on_manual_code_input() -> str | None:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
             # ``sole_path`` tracks ``secret`` here and is a DIFFERENT question
             # that happens to have the same answer for every provider in the
             # registry: "is the paste the only way this login can finish?".
             # Anthropic's is not (the loopback callback is still listening and a
             # declined paste re-parks), so declining must not be reported as a
             # cancelled login.
-            return await self._request_login_key(str(label), secret=secret, sole_path=secret)
+            return await self._request_login_key(
+                str(label),
+                secret=secret,
+                sole_path=secret,
+                field_label=(
+                    prompt_tr(prompt_keys.field_service_account())
+                    if getattr(definition, "id", None) == "google-vertex-sa"
+                    else None
+                ),
+                required_field=getattr(definition, "id", None) == "google-vertex-sa",
+            )
 
         return LoginCallbacks(
             on_auth_url=on_auth_url,
@@ -57873,6 +57900,7 @@ class OperatorApp(App[None]):
             on_progress=on_progress,
             on_input_rejected=on_input_rejected,
             on_manual_code_input=on_manual_code_input,
+            on_setup_input=on_setup_input,
             displays_warnings=True,
         )
 
@@ -57885,17 +57913,21 @@ class OperatorApp(App[None]):
         field_label: str | None = None,
         default: str | None = None,
         credential: bool = False,
+        required_field: bool = False,
     ) -> str | None:
-        """Put a paste prompt in the transcript and await the key.
+        """Await a credential, optional OAuth code, or explicit setup field.
 
         Awaited by the login flow on this app's own loop (``_login_flow`` runs
         as a Textual worker), so the block is mounted directly here rather than
         marshalled across threads — the same reason
         :meth:`request_tool_approval` mounts its card inline.
 
-        Returns the pasted text, or ``None`` for a cancel, which is exactly the
-        ``on_manual_code_input`` contract. The value is never logged, never
-        echoed, and is not retained by the block once handed over.
+        Returns the value, or ``None`` for a cancel. Secret values are masked;
+        nonsecret fields and optional OAuth codes remain readable. No value is
+        logged or retained by the block once handed over. ``required_field``
+        selects required-login instructions instead of endpoint setup's
+        keep-default instructions; callers pass no default when empty Enter
+        must cancel. It does not repurpose the optional browser-code fallback.
         """
         from local_operator.tui.widgets.key_prompt import KeyPromptBlock
 
@@ -57920,6 +57952,13 @@ class OperatorApp(App[None]):
             )
         if field_label and secret:
             instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+        if required_field:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
+            instructions = prompt_tr(prompt_keys.hint_required())
         block = KeyPromptBlock(
             provider_label,
             secret=secret,

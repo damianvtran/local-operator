@@ -1,0 +1,15 @@
+Execution companion; provenance: i18n/audits/evidence/ur/providers.vertex_prompts/vp1c-02e2/record.json
+PASS reversed prompt.field.note only and reproduced old context SHA-256 3cd3aea2a7d54c979bfd3bdbbaa46da061c4a5a99ad02c3075ce8ca23cfdf916
+PASS current context SHA-256 fa524f9163a535252a9f9eac8d391b46f86fcd2435c3723a8d0be12b6198faef
+PASS English and all seven target SHA-256 hashes unchanged
+PASS all original primary artifacts hash-match original record
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ur --namespace providers.vertex_prompts
+2cc8239eb5932041eb9c615bc00ff8bf2198f80bbc405b538c1054da65887cd1
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/ur/providers.vertex_prompts/vp1c-02e2/receipt.json --expected-history-sha 2cc8239eb5932041eb9c615bc00ff8bf2198f80bbc405b538c1054da65887cd1 --dry-run
+i18n/audit-history/ur/providers.vertex_prompts.json
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/ur/providers.vertex_prompts/vp1c-02e2/receipt.json --expected-history-sha 2cc8239eb5932041eb9c615bc00ff8bf2198f80bbc405b538c1054da65887cd1 --apply
+i18n/audit-history/ur/providers.vertex_prompts.json
+exit=0
+PASS preserved 1 previous history rows and appended exactly one context-successor row

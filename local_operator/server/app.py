@@ -238,10 +238,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # instead of paying the 26.5 s cold scan inside the request that opened the
     # Library page. Its first run backfills newest-first and reports
     # ``state=building`` with real session counts until it catches up.
+    #
+    # OWNED BY THIS LIFESPAN, AND STOPPED IN ITS TEARDOWN. The indexer's threads
+    # are daemons, so nothing else ends them before the process exits: every
+    # in-process boot (each ``with TestClient(app)``) used to leave a
+    # ``library-indexer`` and a ``library-thumbs`` thread running against a
+    # config dir the test then deleted. ``metadata._connect`` mkdirs a missing
+    # parent back and switches the fresh file to WAL while the old file's
+    # connections are still held, which SIGBUSed xdist workers in CI. We keep
+    # the instance only when THIS boot started it: one already running (a lazy
+    # ``service.list_assets`` start, a caller's own indexer) is not ours to end.
+    library_indexer = None
     try:
-        from local_operator.library.indexer import ensure_started
+        from local_operator.library.indexer import ensure_started, is_running
 
-        ensure_started(config_dir)
+        already_running = is_running(config_dir)
+        started = ensure_started(config_dir)
+        if not already_running:
+            library_indexer = started
     except Exception:  # noqa: BLE001 — indexing must never be the failure
         logger.debug("library indexer unavailable at startup", exc_info=True)
 
@@ -794,6 +808,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await unbind_hub_pool()
         except Exception:  # noqa: BLE001 — teardown of a socket pool must never be the failure
             logger.debug("hub http pool close failed at shutdown", exc_info=True)
+        # The library indexer this boot started (see the startup block for the
+        # SIGBUS this prevents). Never raises: a derived index that will not stop
+        # is logged, not allowed to abort the rest of the teardown; it sits in
+        # ``finally`` so a raise earlier in the teardown cannot leak the threads. ``stop``
+        # joins with its own 5 s bound and the loops honour the stop flag
+        # between units of work, so this does not hold shutdown on a long scan.
+        if library_indexer is not None:
+            try:
+                from local_operator.library.indexer import stop_started
+
+                # Off the loop: the joins block, and the loop still serves the
+                # rest of the teardown (and the watchdog) while they run.
+                await asyncio.to_thread(stop_started, library_indexer)
+            except Exception:  # noqa: BLE001 — teardown of a derived index never raises
+                logger.debug("library indexer stop failed at shutdown", exc_info=True)
         # The record outlives nothing: it is removed here, LAST, and under
         # `finally:` so that no exit path can leave a file behind claiming a
         # live daemon at a port nothing listens on. The heartbeat keeps running

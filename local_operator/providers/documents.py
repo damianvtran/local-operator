@@ -157,6 +157,7 @@ DOCUMENT_FORMS: dict[str, DocumentForm] = {
     # per-request reading the contract's table carries.
     "openai": DocumentForm("openai_chat", 32_000_000, None, "openai"),
     "google": DocumentForm("google", 50_000_000, 1000, "google"),
+    "google-vertex": DocumentForm("google", 50_000_000, 1000, "google-vertex"),
     "openrouter": DocumentForm("openrouter", 32_000_000, None, "openrouter"),
     "mistral": DocumentForm("mistral", 50_000_000, 1000, "mistral"),
 }
@@ -372,7 +373,7 @@ def admission_wire(provider: str, *, supports_responses_api: bool = False) -> st
     """
     if provider in {"anthropic", "anthropic-key"}:
         return "anthropic-messages"
-    if provider == "google":
+    if provider in ("google", "google-vertex"):
         return "google-content"
     if provider == "openai" and supports_responses_api:
         return "openai-responses"
