@@ -562,6 +562,7 @@ def test_every_registry_brand_is_pinned() -> None:
         "openai-key": "OpenAI",
         "openai-api-key": "OpenAI",
         "anthropic-key": "Anthropic",
+        "bedrock": "Amazon Bedrock",
         "radient": "Radient",
         "radient-key": "Radient",
         "alibaba": "Alibaba Cloud",

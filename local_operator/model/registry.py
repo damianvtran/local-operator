@@ -72,6 +72,19 @@ SupportedHostingProviders = [
         requiredCredentials=["ANTHROPIC_API_KEY"],
         recommended=True,
     ),
+    # Amazon Bedrock's only NAMED secret is the Bedrock API key env var; the
+    # other auth methods (profiles, access keys, IAM roles) are connection
+    # descriptors / the AWS default chain, never an env-named key. Listing it
+    # here makes the legacy credential rung and the strict shell-env scrub
+    # (``tools/shell_env.provider_credential_names``) both cover it.
+    ProviderDetail(
+        id="bedrock",
+        name="Amazon Bedrock",
+        description="Anthropic's Claude models on your AWS account",
+        url="https://aws.amazon.com/bedrock/",
+        requiredCredentials=["AWS_BEARER_TOKEN_BEDROCK"],
+        recommended=False,
+    ),
     ProviderDetail(
         id="google",
         name="Google",

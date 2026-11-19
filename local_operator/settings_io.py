@@ -2139,7 +2139,6 @@ SETTINGS: tuple[Setting, ...] = (
         default="",
         help=_t(_ws.providers_bedrock_region_help()),
         empty_unsets=True,
-        synonyms=("aws", "region"),
     ),
     Setting(
         key="providers.bedrock.auth",
@@ -2150,7 +2149,6 @@ SETTINGS: tuple[Setting, ...] = (
         default="",
         help=_t(_ws.providers_bedrock_auth_help()),
         empty_unsets=True,
-        synonyms=("aws", "ambient", "iam"),
     ),
     # -- providers.openrouter: chat-completions `provider` routing object ----
     #
