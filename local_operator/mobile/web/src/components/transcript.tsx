@@ -959,7 +959,10 @@ export function Transcript({
 			   shrinks the text, so hold the control and it lands under the thumb. */
 			const opening = control.getAttribute("aria-expanded") === "false";
 			const sel = opening
-				? `[data-user-text][data-message-id="${CSS.escape(id)}"]`
+				/* Any folding body that names itself: a user bubble
+				   (`user-text.tsx`) or a Team Bridge card body
+				   (`bridge-card-body.tsx`), which share this recipe. */
+				? `[data-message-id="${CSS.escape(id)}"]`
 				: `[data-message-toggle="${CSS.escape(id)}"]`;
 			const anchor = opening ? el.querySelector(sel) : control;
 			if (!anchor) return;

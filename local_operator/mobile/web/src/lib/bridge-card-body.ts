@@ -141,11 +141,15 @@ export function bridgeCardBodyOf(payload: unknown): BridgeCardBody | null {
 	const frame = object(payload);
 	if (frame.v !== 1 || !Array.isArray(frame.items)) return null;
 	const items = frame.items.map(itemOf).filter((item): item is BridgeCardBodyItem => item !== null);
+	/* An item dropped for unattributable ids is still a message in this card:
+	   it is counted with the overflow so the card never shows 2 of 3 with no
+	   hint that a third exists (review m3). */
+	const dropped = frame.items.length - items.length;
 	const declaredMore = typeof frame.more === "number" && Number.isSafeInteger(frame.more) && frame.more > 0
 		? frame.more
 		: 0;
 	const listed = items.slice(0, BRIDGE_CARD_BODY_MAX_ITEMS);
-	return { items: listed, more: declaredMore + (items.length - listed.length) };
+	return { items: listed, more: declaredMore + dropped + (items.length - listed.length) };
 }
 
 /** The one line a NON-admitted item shows, keyed. `hub_unsupported` and an
@@ -205,6 +209,14 @@ export function bridgeItemCopyKey(item: BridgeCardBodyItem): BridgeItemCopyKey {
  * after 40 hides more than it saves), and a cut never splits a UTF-16
  * surrogate pair (an emoji would render as a replacement glyph).
  */
+/** The collapsed preview as painted: the cut plus an ellipsis, unless the cut
+    already ends a sentence ("item 7.…" reads as a doubled stop; design N1).
+    The worded Show more under it is the fold cue either way. */
+export function bridgeBodyPreviewText(preview: { text: string; truncated: boolean }): string {
+	if (!preview.truncated) return preview.text;
+	return /[.!?…。！？]$/u.test(preview.text) ? preview.text : `${preview.text}…`;
+}
+
 export function bridgeBodyPreview(
 	body: string,
 	limit = BRIDGE_CARD_BODY_COLLAPSE_CHARS,

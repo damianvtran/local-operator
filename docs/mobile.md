@@ -513,7 +513,17 @@ core's display store and is read separately, keyed by that row:
   deleted; `offline` = the computer could not reach Radient). A client maps an
   unknown state, an `admitted` item without a body, or a malformed frame to
   unavailable — never to a guessed outcome.
-- **No caching.** Read on each render; revocation (sign-out, leave, account switch,
+- **Not yet written.** A live receipt can reach the phone before its journal row
+  is written (an idle or steered session emits the receipt, then persists under
+  the turn lock), so the first read of the newest card can answer `404 {"error":
+  "no such bridge card"}`. The phone web treats that one body (not every 404) as
+  "not yet": it keeps Loading and re-asks after 0.5 s and 1.5 s, abandoning the
+  waits on unmount, and shows the generic unavailable line only if the row is
+  still missing. An empty `items` list with `more: 0` (a card from before
+  receipts carried message ids) is "nothing to resolve": no panel, the receipt
+  line alone, as in the TUI.
+- **No caching.** Read once per mount (re-asked only for a not-yet-written row,
+  above); a remount reads again; revocation (sign-out, leave, account switch,
   hub delete) must show on the next read. Render the body as data under an
   "External message · untrusted content" frame.
 

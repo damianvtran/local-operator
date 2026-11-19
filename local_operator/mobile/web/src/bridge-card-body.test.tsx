@@ -10,16 +10,22 @@ import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "./api";
 import { Transcript } from "./components/transcript";
+import { MESSAGE_PRESSED_EVENT } from "./lib/message-fold";
+import { CONTENT_RESIZED_EVENT } from "./lib/content-resized";
 import {
 	BRIDGE_CARD_BODY_COLLAPSE_CHARS,
 	bridgeBodyPreview,
+	bridgeBodyPreviewText,
 	bridgeCardBodyEnabled,
 	bridgeCardBodyOf,
 	bridgeItemCopyKey,
 } from "./lib/bridge-card-body";
 import type { Capabilities, TranscriptEntry } from "./types";
 
-vi.mock("./api", () => ({
+vi.mock("./api", async (importOriginal) => ({
+	/* The real error class: the panel tells "not yet written" apart from a
+	   final failure by its status and body. */
+	HttpError: (await importOriginal<typeof import("./api")>()).HttpError,
 	getHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	getSubagentHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	imageUrl: vi.fn(() => ""),
@@ -88,11 +94,23 @@ describe("bridge card body model", () => {
 		expect(bridgeCardBodyOf({ v: 1, items: [item("held", { body: "secret" })], more: 0 })!.items[0].body).toBeUndefined();
 	});
 
-	it("drops items without ids and caps the card at 20, counting the rest", () => {
+	it("drops items without ids and caps the card at 20, counting the rest (dropped ones too)", () => {
 		const items = Array.from({ length: 23 }, (_, n) => ({ ...item("pending"), message_id: `bcmsg_${n}` }));
 		const parsed = bridgeCardBodyOf({ v: 1, items: [{ state: "admitted", body: "x" }, ...items], more: 5 })!;
 		expect(parsed.items).toHaveLength(20);
-		expect(parsed.more).toBe(8);
+		// 5 declared + 3 over the cap + 1 dropped for missing ids (review m3).
+		expect(parsed.more).toBe(9);
+		const three = bridgeCardBodyOf({ v: 1, items: [item("pending"), { state: "pending" }, { ...item("held"), message_id: "x".repeat(129) }], more: 0 })!;
+		expect(three.items).toHaveLength(1);
+		expect(three.more).toBe(2);
+	});
+
+	it("does not append an ellipsis after a sentence-ending stop (design N1)", () => {
+		expect(bridgeBodyPreviewText({ text: "item 7.", truncated: true })).toBe("item 7.");
+		expect(bridgeBodyPreviewText({ text: "really?", truncated: true })).toBe("really?");
+		expect(bridgeBodyPreviewText({ text: "句子。", truncated: true })).toBe("句子。");
+		expect(bridgeBodyPreviewText({ text: "mid word", truncated: true })).toBe("mid word…");
+		expect(bridgeBodyPreviewText({ text: "whole.", truncated: false })).toBe("whole.");
 	});
 
 	it("maps every state to the ruled copy key", () => {
@@ -199,6 +217,127 @@ describe("bridge card on the transcript", () => {
 		await waitFor(() => expect(second.container.textContent).toContain("This message was deleted"));
 		expect(second.container.textContent).not.toContain("kept");
 		expect(mockedBody).toHaveBeenCalledTimes(2);
+	});
+
+	it("re-asks a card whose row is not written yet, showing Loading, then the body (review M1)", async () => {
+		mockedBody
+			.mockRejectedValueOnce(new api.HttpError(404, "no such bridge card"))
+			.mockResolvedValueOnce({ v: 1, items: [item("admitted", { body: "arrived" })], more: 0 });
+		const view = draw([card()]);
+		await waitFor(() => expect(mockedBody).toHaveBeenCalledTimes(1));
+		await act(async () => {});
+		// Between the 404 and the re-ask the card still says Loading, not unavailable.
+		expect(view.container.textContent).toContain("Loading message…");
+		expect(view.container.textContent).not.toContain("Message body unavailable");
+		await waitFor(() => expect(view.container.textContent).toContain("arrived"), { timeout: 2000 });
+		expect(mockedBody).toHaveBeenCalledTimes(2);
+		expect(view.container.textContent).not.toContain("Message body unavailable");
+	});
+
+	it("says unavailable only after the not-yet retries run out, and never retries another 404", async () => {
+		mockedBody.mockRejectedValue(new api.HttpError(404, "no such bridge card"));
+		const missing = draw([card("m1")]);
+		await waitFor(() => expect(missing.container.textContent).toContain("Message body unavailable"), { timeout: 4000 });
+		// The first ask plus the two bounded re-asks, no more.
+		expect(mockedBody).toHaveBeenCalledTimes(3);
+		cleanup();
+		mockedBody.mockReset();
+		mockedBody.mockRejectedValue(new api.HttpError(404, "unknown session"));
+		const gone = draw([card("m2")]);
+		await waitFor(() => expect(gone.container.textContent).toContain("Message body unavailable"));
+		expect(mockedBody).toHaveBeenCalledTimes(1);
+	}, 10_000);
+
+	it("abandons the not-yet re-ask when the row unmounts", async () => {
+		mockedBody.mockRejectedValue(new api.HttpError(404, "no such bridge card"));
+		const view = draw([card()]);
+		await waitFor(() => expect(mockedBody).toHaveBeenCalledTimes(1));
+		view.unmount();
+		await new Promise((resolve) => setTimeout(resolve, 2300));
+		expect(mockedBody).toHaveBeenCalledTimes(1);
+	}, 10_000);
+
+	it("aborts the pending read on unmount and writes nothing late (review m2)", async () => {
+		let settle: (value: unknown) => void = () => {};
+		mockedBody.mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const view = draw([card()]);
+			await waitFor(() => expect(mockedBody).toHaveBeenCalledTimes(1));
+			const signal = mockedBody.mock.calls[0][2] as AbortSignal;
+			expect(signal.aborted).toBe(false);
+			view.unmount();
+			expect(signal.aborted).toBe(true);
+			await act(async () => settle({ v: 1, items: [item("admitted", { body: "late" })], more: 0 }));
+			expect(errors).not.toHaveBeenCalled();
+		} finally {
+			errors.mockRestore();
+		}
+	});
+
+	it("draws no panel for a pre-receipt card with nothing to resolve (review m1)", async () => {
+		mockedBody.mockResolvedValue({ v: 1, items: [], more: 0 });
+		const view = draw([card()]);
+		await waitFor(() => expect(view.container.querySelector("[data-bridge-card-body]")?.getAttribute("data-state")).toBe("empty"));
+		const box = view.container.querySelector<HTMLElement>("[data-bridge-card-body]")!;
+		expect(box.hidden).toBe(true);
+		expect(box.textContent).toBe("");
+		expect(view.container.textContent).toContain("Ada · DM");
+		expect(view.container.textContent).not.toContain("Message body unavailable");
+		expect(view.container.textContent).not.toContain("External message");
+	});
+
+	it("tells the transcript to hold the pressed control around Show more / Show less (design D3)", async () => {
+		mockedBody.mockResolvedValue({ v: 1, items: [item("admitted", { body: "line of text ".repeat(80) })], more: 0 });
+		const view = draw([card()]);
+		const toggle = await view.findByRole("button", { name: "Show more" });
+		const seen: string[] = [];
+		const scroller = view.container.querySelector(".lo-scroll")!;
+		const onPress = (event: Event) => seen.push(`press:${(event as CustomEvent<{ id: string }>).detail.id}:${(event.target as HTMLElement).getAttribute("aria-expanded")}`);
+		const onResize = () => seen.push("resize");
+		scroller.addEventListener(MESSAGE_PRESSED_EVENT, onPress);
+		scroller.addEventListener(CONTENT_RESIZED_EVENT, onResize);
+		fireEvent.click(toggle);
+		// Pressed BEFORE the flip (still collapsed), then the resize after it.
+		expect(seen).toEqual(["press:bridge:m1:0:false", "resize"]);
+		// The id names the body the scroller holds when opening, and the control when closing.
+		expect(view.container.querySelector('[data-message-id="bridge:m1:0"]')).not.toBeNull();
+		expect(view.container.querySelector('[data-message-toggle="bridge:m1:0"]')).toBe(toggle);
+	});
+
+	it("holds the body's top on Show more and the control on Show less (design D3)", async () => {
+		mockedBody.mockResolvedValue({ v: 1, items: [item("admitted", { body: "line of text ".repeat(80) })], more: 0 });
+		const view = draw([card()]);
+		const more = await view.findByRole("button", { name: "Show more" });
+		const scroller = view.container.querySelector<HTMLElement>(".lo-scroll")!;
+		Object.defineProperty(scroller, "scrollHeight", { value: 4000, configurable: true });
+		Object.defineProperty(scroller, "clientHeight", { value: 500, configurable: true });
+		vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({ top: 100 } as DOMRect);
+		/* Opening: something above moved the body's top by 40; the scroller
+		   follows the BODY, not the control at its foot. */
+		const body = view.container.querySelector<HTMLElement>('[data-message-id="bridge:m1:0"]')!;
+		vi.spyOn(body, "getBoundingClientRect")
+			.mockReturnValueOnce({ top: 300 } as DOMRect)
+			.mockReturnValue({ top: 340 } as DOMRect);
+		scroller.scrollTop = 200;
+		fireEvent.click(more);
+		expect(scroller.scrollTop).toBe(240);
+		/* Closing a long body pulls the control up by 1000; the scroller follows
+		   it so the control stays under the thumb. */
+		const less = view.getByRole("button", { name: "Show less" });
+		vi.spyOn(less, "getBoundingClientRect")
+			.mockReturnValueOnce({ top: 1460 } as DOMRect)
+			.mockReturnValue({ top: 460 } as DOMRect);
+		scroller.scrollTop = 1300;
+		fireEvent.click(less);
+		expect(scroller.scrollTop).toBe(300);
+	});
+
+	it("leaves room under each card so the next receipt heads its own card (design D5)", async () => {
+		mockedBody.mockResolvedValue({ v: 1, items: [item("pending")], more: 0 });
+		const view = draw([card()]);
+		await waitFor(() => expect(view.container.textContent).toContain("Waiting to be delivered"));
+		expect(view.container.querySelector("[data-bridge-card-body]")!.className).toContain("mb-2.5");
 	});
 
 	it("leaves an older relay's card exactly as today: no read, no panel", async () => {
