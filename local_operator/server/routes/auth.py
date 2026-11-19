@@ -378,6 +378,12 @@ async def login(body: LoginRequest, host: DesktopAuth = Depends(get_desktop_auth
     until the user pressed "reopen". A flow slower than the bound still works;
     the renderer's poll picks the URL up.
     """
+    definition = get_provider_definition(body.provider)
+    if definition is not None and definition.login_kind == "aws":
+        # Amazon Bedrock's connect needs structured inputs (method, Region,
+        # profile, secrets) this single-prompt operation cannot carry; the
+        # renderer uses the AWS panel routes below (design §7 route 2).
+        raise _bedrock_refusal(422, "bedrock_use_aws_panel", _bedrock_keys().use_aws_panel())
     try:
         op = await host.start(body.provider)
     except SignInUnavailableError as error:
@@ -589,3 +595,317 @@ async def logout(provider_id: str, host: DesktopAuth = Depends(get_desktop_auth)
     finally:
         controller.close()
     return _reply({}, "Stored credentials removed. Environment credentials are unchanged.")
+
+
+# -- Amazon Bedrock (design §7, ``features.bedrock_auth``) ---------------------
+#
+# Bedrock's connection is a STRUCTURED choice (method, Region, profile, maybe
+# two secrets) that the single-prompt sign-in operation cannot carry, so it
+# gets four routes of its own on this router (same bearer, same envelope).
+# The flow logic is ``providers/bedrock/login.py``, shared with ``lop login
+# bedrock`` and the TUI, so every surface validates and stores identically.
+
+
+def _bedrock_refusal(status: int, code: str, message: Any) -> HTTPException:
+    """A Bedrock refusal: the catalogued sentence under the contract's code.
+
+    The wire ``code`` is the machine category the desktop panel switches on
+    (``bedrock_sso_expired`` ...), which is not the message id, so it rides
+    ``envelope(code=...)`` exactly as the runtime-busy codes do.
+    """
+    return HTTPException(status, message.envelope(code=code))
+
+
+def _bedrock_keys() -> Any:
+    from local_operator.i18n.keys import wire_errors_bedrock
+
+    return wire_errors_bedrock
+
+
+class BedrockConnectionBody(BaseModel):
+    """``PUT /v1/auth/providers/bedrock/connection`` (contract delta 1: this exact body).
+
+    One flat model with ``extra="forbid"`` rather than a pydantic discriminated
+    union, so a value outside the contract's bounds answers OUR 422 envelope
+    with a ``bedrock_*`` code the renderer can show, not FastAPI's generic
+    validation list. Which fields each ``method`` may carry is enforced in
+    :func:`_bedrock_input`. Secrets are ``SecretStr`` so they never appear in a
+    repr, a validation error or a log line.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    method: str
+    region: str | None = None
+    profile: str | None = None
+    api_key: SecretStr | None = None
+    access_key_id: str | None = None
+    secret_access_key: SecretStr | None = None
+    session_token: SecretStr | None = None
+
+
+#: The fields each method may carry besides ``method`` (contract shapes).
+_BEDROCK_FIELDS: dict[str, frozenset[str]] = {
+    "api_key": frozenset({"region", "api_key"}),
+    "profile": frozenset({"region", "profile"}),
+    "access_key": frozenset({"region", "access_key_id", "secret_access_key", "session_token"}),
+}
+
+
+def _bedrock_input(body: BedrockConnectionBody) -> Any:
+    from local_operator.providers.bedrock import login as blogin
+
+    def secret(value: SecretStr | None) -> str | None:
+        return value.get_secret_value() if value is not None else None
+
+    allowed = _BEDROCK_FIELDS.get(body.method, frozenset({"region"}))
+    extra = (body.model_fields_set - {"method"}) - allowed
+    if body.method not in blogin.INPUT_METHODS or extra:
+        field_name = "method" if body.method not in blogin.INPUT_METHODS else sorted(extra)[0]
+        raise blogin.InputInvalid("bedrock_input_invalid", field_name)
+    inp = blogin.ConnectionInput(
+        method=body.method,
+        region=body.region,
+        profile=body.profile,
+        api_key=secret(body.api_key),
+        access_key_id=body.access_key_id,
+        secret_access_key=secret(body.secret_access_key),
+        session_token=secret(body.session_token),
+    )
+    blogin.validate_input(inp)
+    return inp
+
+
+def _invalid_input(error: Any) -> HTTPException:
+    keys = _bedrock_keys()
+    if error.code == "bedrock_region_invalid":
+        return _bedrock_refusal(422, error.code, keys.region_invalid(region=error.value or ""))
+    return _bedrock_refusal(422, "bedrock_input_invalid", keys.input_invalid(field=error.field))
+
+
+def _bedrock_connections(store: AuthStore) -> list[dict[str, Any]]:
+    """Stored Bedrock rows for the panel: labels and non-secret facts only."""
+    from local_operator.providers.bedrock import connection as bconn
+    from local_operator.providers.bedrock.login import WIRE_METHOD
+
+    rows: list[dict[str, Any]] = []
+    for row in store.list_credentials("bedrock"):
+        key = row.data.get("key")
+        raw_meta = row.data.get("bedrock")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        try:
+            conn = bconn.parse(key) if isinstance(key, str) else None
+        except bconn.DescriptorError:
+            conn = None
+        if conn is None:
+            continue
+        rows.append(
+            {
+                "credential_id": row.id,
+                "method": WIRE_METHOD.get(conn.method, conn.method),
+                "profile": conn.profile,
+                "region": conn.region,
+                "label": str(meta.get("label") or credential_identity(row) or conn.method),
+            }
+        )
+    return rows
+
+
+@router.get("/v1/auth/providers/bedrock/aws", response_model=CRUDResponse)
+async def bedrock_aws_context(host: DesktopAuth = Depends(get_desktop_auth)):
+    """The AWS context for the panel (design §7 route 3). Never a credential value.
+
+    Profiles are listed from config keys and the on-disk SSO caches only —
+    no credential is resolved (``credential_process`` could hang). A config
+    botocore cannot parse answers 500 ``bedrock_context_failed`` with the
+    parser's own text (contract delta 5): "line 14 is broken" is the fix.
+    """
+    from local_operator.providers.bedrock import profiles as bprofiles
+
+    def build() -> dict[str, Any]:
+        found = bprofiles.list_profiles()
+        env_profile = None
+        import os
+
+        if os.environ.get("AWS_PROFILE"):
+            env_profile = next(
+                (p.region for p in found if p.name == os.environ["AWS_PROFILE"]), None
+            )
+        region, source = bprofiles.default_region(profile_region_value=env_profile)
+        enabled, sources = bprofiles.ambient_sources()
+        return {
+            "regions": bprofiles.regions(),
+            "default_region": region,
+            "default_region_source": source,
+            "profiles": [profile.to_json() for profile in found],
+            "aws_cli_available": bprofiles.aws_cli_path() is not None,
+            # Built from the descriptor vocabulary so the key and the method
+            # name stay one spelling.
+            _default_chain_key(): {"enabled": enabled, "sources": sources},
+            "connections": _bedrock_connections(host.store),
+        }
+
+    try:
+        context = await asyncio.to_thread(build)
+    except Exception as error:  # noqa: BLE001 - surfaced with its own text, never a credential
+        detail = str(error).strip()[:500] or type(error).__name__
+        raise _bedrock_refusal(
+            500, "bedrock_context_failed", _bedrock_keys().context_failed(detail=detail)
+        ) from None
+    return _reply(context, "AWS context retrieved.")
+
+
+def _default_chain_key() -> str:
+    from local_operator.providers.bedrock.login import DEFAULT_CHAIN
+
+    return DEFAULT_CHAIN
+
+
+@router.put("/v1/auth/providers/bedrock/connection", response_model=CRUDResponse)
+async def bedrock_connect(
+    body: BedrockConnectionBody,
+    request: Request,
+    host: DesktopAuth = Depends(get_desktop_auth),
+):
+    """Validate, then store one Bedrock connection (design §7 route 4).
+
+    Same order as ``save_key``: check first, store only a connection that was
+    not definitively rejected. A rejection is 422 with its ``bedrock_*`` code;
+    an unverified check (``valid: null``) stores and says why in ``reason``,
+    with no ``code`` (contract delta 6). Defaults and the session re-home run
+    exactly as after a saved key.
+    """
+    from local_operator.providers.bedrock import login as blogin
+
+    try:
+        inp = _bedrock_input(body)
+    except blogin.InputInvalid as error:
+        raise _invalid_input(error) from None
+    region = await asyncio.to_thread(blogin.effective_region, inp)
+    verdict = await blogin.check_input(inp, region)
+    if verdict.valid is False:
+        raise _bedrock_refusal(
+            422,
+            verdict.code or "bedrock_credentials_rejected",
+            w.provider_refusal(error=verdict.reason or ""),
+        )
+    row = blogin.build_row(inp, region)
+    stored = host.store.upsert_credential("bedrock", row)
+    from local_operator.providers.auth_cli import _invalidate_cached_listing
+
+    _invalidate_cached_listing("bedrock")
+    applied = await asyncio.to_thread(
+        apply_desktop_login_defaults, host.config_manager, "bedrock", oauth=False
+    )
+    from local_operator.server.utils.desktop_rehome import (
+        rehome_after_login,
+        with_rehome_count,
+    )
+
+    moved: list[tuple[str, str]] = []
+    deferred: list[str] = []
+    try:
+        moved, deferred = await rehome_after_login(request.app, "bedrock")
+    except Exception:  # noqa: BLE001 — the connection is stored; the repair is best effort
+        logger.warning("could not re-home sessions after connecting Bedrock", exc_info=True)
+    applied = with_rehome_count(applied, moved, deferred)
+    raw_meta = stored.data.get("bedrock")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    return _reply(
+        {
+            "valid": verdict.valid,
+            "reason": verdict.reason,
+            "credential_id": stored.id,
+            "label": str(meta.get("label") or blogin.label_for(inp, region)),
+            # The built-in catalogue is what the picker shows until discovery
+            # runs; a live count would cost a second signed call here.
+            "models_available": None,
+            "defaults_applied": applied,
+        },
+        "Amazon Bedrock connected.",
+    )
+
+
+class BedrockSsoBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile: str
+
+
+@router.post("/v1/auth/providers/bedrock/sso-login", response_model=CRUDResponse)
+async def bedrock_sso_login(body: BedrockSsoBody, host: DesktopAuth = Depends(get_desktop_auth)):
+    """Start ``aws sso login`` / ``aws login`` for a profile (design §7 route 5).
+
+    Explicit user action only (a button press). Returns an ordinary
+    ``LoginOperation`` snapshot, polled and cancelled through the existing
+    operation routes; ``auth_url``/``user_code`` carry the device URL and
+    code (contract delta 3). 422 ``aws_cli_missing`` without the CLI, 422
+    ``bedrock_profile_not_found`` / ``bedrock_sso_not_applicable`` for a
+    profile that cannot sign in, 409 while one runs for the same profile.
+    """
+    from local_operator.providers.bedrock import profiles as bprofiles
+    from local_operator.providers.bedrock import sso_login
+
+    keys = _bedrock_keys()
+    if not bprofiles.valid_profile_input(body.profile):
+        raise _bedrock_refusal(422, "bedrock_input_invalid", keys.input_invalid(field="profile"))
+    try:
+        found = await asyncio.to_thread(bprofiles.list_profiles)
+    except Exception as error:  # noqa: BLE001
+        detail = str(error).strip()[:500] or type(error).__name__
+        raise _bedrock_refusal(
+            500, "bedrock_context_failed", keys.context_failed(detail=detail)
+        ) from None
+    profile = next((p for p in found if p.name == body.profile), None)
+    if profile is None:
+        raise _bedrock_refusal(
+            422, "bedrock_profile_not_found", keys.profile_not_found(profile=body.profile)
+        )
+    command = bprofiles.login_command(profile.name, profile.kind) or ""
+    refusal = sso_login.refusal(profile.kind)
+    if refusal == "not_sso":
+        raise _bedrock_refusal(
+            422, "bedrock_sso_not_applicable", keys.sso_not_applicable(profile=profile.name)
+        )
+    if refusal == "aws_cli_missing":
+        raise _bedrock_refusal(422, "aws_cli_missing", keys.aws_cli_missing())
+    if refusal == "headless":
+        raise _bedrock_refusal(422, "bedrock_sso_headless", keys.sso_headless(command=command))
+    if host.active_bedrock_sso(profile.name) is not None:
+        raise _bedrock_refusal(409, "bedrock_sso_busy", keys.sso_busy(profile=profile.name))
+    try:
+        op = await host.start_bedrock_sso(profile.name, profile.kind)
+    except SignInUnavailableError as error:
+        raise HTTPException(503, w.auth_refusal(error=str(error)).envelope()) from None
+    try:
+        await asyncio.wait_for(op.ready.wait(), timeout=LOGIN_READY_TIMEOUT_S)
+    except TimeoutError:
+        pass
+    return _reply(op.snapshot(), "AWS sign-in started.")
+
+
+class BedrockCheckBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    credential_id: int
+
+
+@router.post("/v1/auth/providers/bedrock/check", response_model=CRUDResponse)
+async def bedrock_check(body: BedrockCheckBody, host: DesktopAuth = Depends(get_desktop_auth)):
+    """Re-validate one stored connection (design §7 route 6): ``{valid, reason, code}``."""
+    from local_operator.providers.bedrock import check as bcheck
+
+    row = next(
+        (r for r in host.store.list_credentials("bedrock") if r.id == body.credential_id), None
+    )
+    key = row.data.get("key") if row is not None else None
+    if not isinstance(key, str):
+        raise _bedrock_refusal(
+            404, "bedrock_connection_missing", _bedrock_keys().connection_missing()
+        )
+    verdict = await bcheck.check_connection(key, 15.0)
+    return _reply(
+        {
+            "valid": verdict.valid,
+            "reason": verdict.reason,
+            "code": verdict.code if verdict.valid is False else None,
+        },
+        "Amazon Bedrock connection checked.",
+    )

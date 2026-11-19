@@ -320,6 +320,8 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         race["over"] = False
 
     reader: dict[str, Any] = {"thread": None, "future": None}
+    if definition.login_kind == "aws":
+        return _aws_callbacks(on_auth_url, on_progress)
     manual_input = on_manual_code_input if definition.accepts_paste_prompt else None
     return LoginCallbacks(
         on_auth_url=on_auth_url,
@@ -329,6 +331,101 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         # Keep local-server setup's existing host support unchanged. This hook
         # is for required post-auth fields, not a new endpoint setup wizard.
         on_setup_input=on_setup_input if not definition.local_setup else None,
+        displays_warnings=True,
+    )
+
+
+async def _read_on_daemon(reader: Callable[[], str]) -> str | None:
+    """Run one blocking terminal read on a daemon thread; ``None`` on EOF/Ctrl+C.
+
+    The same discipline as ``on_manual_code_input`` above, and for the same
+    measured reason: ``asyncio.to_thread`` would park interpreter shutdown on a
+    300 s executor join behind an uninterruptible ``input()`` after Ctrl+C.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = loop.create_future()
+
+    def deliver(setter: Callable[[], None]) -> None:
+        if not future.done():
+            setter()
+
+    def worker() -> None:
+        try:
+            value = reader()
+        except Exception as raised:  # noqa: BLE001 — reported to the awaiting flow
+            error = raised
+            loop.call_soon_threadsafe(deliver, lambda: future.set_exception(error))
+        except BaseException:
+            logger.debug("login field reader exited during teardown", exc_info=True)
+        else:
+            read = value
+            loop.call_soon_threadsafe(deliver, lambda: future.set_result(read))
+
+    threading.Thread(target=worker, daemon=True, name="lo-login-field").start()
+    try:
+        return await future
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def _aws_callbacks(
+    on_auth_url: Callable[..., None], on_progress: Callable[[str], None]
+) -> LoginCallbacks:
+    """Terminal hooks for Amazon Bedrock's structured AWS login (login_kind "aws").
+
+    ``on_choice`` prints a numbered list and reads a number; ``on_setup_input``
+    reads one field, through ``getpass`` when it is a secret (an access key's
+    secret or a Bedrock API key never lands in scrollback). Without a terminal
+    on stdin neither hook is attached, and ``login_bedrock`` fails at once with
+    the headless remedy (env vars) instead of blocking on a pipe — a
+    provisioning script must not hang on a picker nobody sees.
+    """
+    if not sys.stdin.isatty():
+        return LoginCallbacks(on_progress=on_progress, on_warning=on_progress)
+    from local_operator.i18n.keys import wire_login_bedrock as k
+    from local_operator.i18n.messages import render_resolved
+
+    async def on_choice(
+        title: str, options: list[tuple[str, str, str]], default: str | None
+    ) -> str | None:
+        print(f"\n{title}")
+        default_index = None
+        for index, (value, label, description) in enumerate(options, start=1):
+            if value == default:
+                default_index = index
+            suffix = f" — {description}" if description else ""
+            marker = " *" if value == default else ""
+            print(f"  {index}. {label}{marker}{suffix}")
+        prompt = render_resolved(
+            k.choice_default_prompt(count=str(len(options)), default=str(default_index))
+            if default_index
+            else k.choice_prompt(count=str(len(options)))
+        )
+        while True:
+            answer = await _read_on_daemon(lambda: input(prompt))
+            if answer is None:
+                return None
+            answer = answer.strip()
+            if not answer:
+                return options[default_index - 1][0] if default_index else None
+            if answer.isdigit() and 1 <= int(answer) <= len(options):
+                return options[int(answer) - 1][0]
+            print(render_resolved(k.choice_invalid()))
+
+    async def on_setup_input(label: str, default: str, secret: bool) -> str | None:
+        prompt = f"{label}: "
+        if secret:
+            import getpass
+
+            return await _read_on_daemon(lambda: getpass.getpass(prompt))
+        return await _read_on_daemon(lambda: input(prompt))
+
+    return LoginCallbacks(
+        on_auth_url=on_auth_url,
+        on_progress=on_progress,
+        on_warning=on_progress,
+        on_setup_input=on_setup_input,
+        on_choice=on_choice,
         displays_warnings=True,
     )
 

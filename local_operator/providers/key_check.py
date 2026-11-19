@@ -58,6 +58,11 @@ class KeyCheck:
 
     valid: bool | None
     reason: str | None
+    #: Optional machine category for a REJECTION (``valid is False``), e.g.
+    #: ``bedrock_sso_expired``. Only providers whose connect surface switches on
+    #: it set one (Bedrock's desktop panel, design §7 route 4); every other
+    #: provider leaves it ``None`` and its callers never read it.
+    code: str | None = None
 
 
 def _label(definition: ProviderDefinition) -> str:

@@ -539,6 +539,19 @@ class LoginCallbacks:
     # never touch stdin. None cancels; an empty value is interpreted by the
     # caller (optional endpoint fields can keep defaults; required login fields cancel).
     on_setup_input: Callable[[str, str, bool], Awaitable[str | None] | str | None] | None = None
+    #: One single-select choice: ``(title, [(value, label, description)], default)``
+    #: -> the chosen ``value``, or ``None`` to cancel. Structured logins (Amazon
+    #: Bedrock's method / profile / Region pickers, login_kind "aws") ask
+    #: through it so a host can render a real picker. Optional: a host without
+    #: it gets a numbered ``on_setup_input`` prompt instead
+    #: (``providers/bedrock/login.choose``), so existing embedders keep working.
+    on_choice: (
+        Callable[
+            [str, list[tuple[str, str, str]], str | None],
+            Awaitable[str | None] | str | None,
+        ]
+        | None
+    ) = None
     #: Structured facts about the flow a host renders as CONTROLS rather than
     #: prose: ``user_code`` (a device flow's code), ``launch_url`` (the short
     #: loopback ``/launch`` alias) and ``expires_in`` (seconds until the flow's

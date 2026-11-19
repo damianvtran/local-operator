@@ -137,6 +137,7 @@ from local_operator.harness.types import (
     FAULT_KEY,
     INTERRUPTED_FAULTS,
     AgentMessage,
+    AskOption,
     AskQuestion,
     ImageContent,
     Message,
@@ -57829,6 +57830,8 @@ class OperatorApp(App[None]):
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
+        if getattr(definition, "login_kind", None) == "aws":
+            return self._aws_login_callbacks(definition, on_auth_url, on_progress, on_warning)
         if getattr(definition, "local_setup", False):
 
             async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
@@ -57904,6 +57907,80 @@ class OperatorApp(App[None]):
             displays_warnings=True,
         )
 
+    def _aws_login_callbacks(
+        self,
+        definition: object,
+        on_auth_url: Callable[..., None],
+        on_progress: Callable[[str], None],
+        on_warning: Callable[[str], None],
+    ) -> LoginCallbacks:
+        """Hooks for Amazon Bedrock's structured AWS login (login_kind "aws").
+
+        Two surfaces this app already has, no new widget: every pick (method,
+        profile, Region, "sign in now?") is ONE single-select question on the
+        ask picker (`request_user_choice`), and every typed field is the
+        login key prompt (`_request_login_key`), masked for secrets. The flow
+        itself lives in `providers/bedrock/login.py`; this only renders it.
+        """
+        from local_operator.i18n.keys import wire_login_bedrock as bk
+
+        # Lazily, like `_login_callbacks` itself: `callback_server` drags in a
+        # loopback listener's imports that only a login needs.
+        from local_operator.providers.oauth.callback_server import LoginCallbacks
+
+        name = str(getattr(definition, "name", None) or "Amazon Bedrock")
+
+        async def on_choice(
+            title: str, options: list[tuple[str, str, str]], default: str | None
+        ) -> str | None:
+            if len(options) == 1:
+                # The picker's floor is two answers (`AskQuestion`), and a
+                # one-row list is an announcement, not a choice: take it and
+                # say so, rather than asking the user to ratify it.
+                on_progress(f"{title} {options[0][1]}")
+                return options[0][0]
+            by_label = {label: value for value, label, _description in options}
+            # The picker always offers a free-text row; a typed answer that IS
+            # one of the values (a Region id typed instead of picked) counts.
+            by_label.update({value: value for value, _label, _description in options})
+            recommended = next(
+                (index for index, option in enumerate(options) if option[0] == default), None
+            )
+            question = AskQuestion(
+                id="bedrock_login",
+                question=title,
+                options=[
+                    AskOption(label=label, description=description)
+                    for _value, label, description in options
+                ],
+                recommended=recommended,
+            )
+            answer = await self.request_user_choice([question])
+            picked = (answer or {}).get("bedrock_login") or []
+            return by_label.get(picked[0]) if picked else None
+
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            hint = _t(bk.field_hint())
+            return await self._request_login_key(
+                name,
+                secret=secret,
+                field_label=field,
+                # "" (not None): Enter on an empty OPTIONAL field (the
+                # session token) submits "" instead of cancelling setup.
+                default=default,
+                credential=False,
+                instructions=hint,
+            )
+
+        return LoginCallbacks(
+            on_auth_url=on_auth_url,
+            on_progress=on_progress,
+            on_warning=on_warning,
+            on_setup_input=on_setup_input,
+            on_choice=on_choice,
+            displays_warnings=True,
+        )
+
     async def _request_login_key(
         self,
         provider_label: str,
@@ -57914,6 +57991,7 @@ class OperatorApp(App[None]):
         default: str | None = None,
         credential: bool = False,
         required_field: bool = False,
+        instructions: str | None = None,
     ) -> str | None:
         """Await a credential, optional OAuth code, or explicit setup field.
 
@@ -57943,8 +58021,11 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        instructions = None
-        if field_label:
+        # A caller-supplied hint wins: the defaults below describe the
+        # local-server setup fields ("keeps the current token if the URL is
+        # unchanged"), which is wrong for any other structured login's fields
+        # (Amazon Bedrock's access key, Region, session token).
+        if instructions is None and field_label:
             instructions = (
                 f"Enter keeps {default}"
                 if default and not secret
