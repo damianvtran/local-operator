@@ -60,6 +60,11 @@ def _native_boundary(mp: pytest.MonkeyPatch, root: Path, keyfile: Path) -> None:
     mp.setattr(A, "local_anchor_trio", lambda root=None: {**trio, "spki": point})
     mp.setattr(sign, "resolve_backend_name", lambda root: trust.SECURE_ENCLAVE)
     mp.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *a, **kw: None)
+    # The actor's sign-in would start the org Agent Hub boundary on an unjoined
+    # daemon thread (a network call with synthetic tokens, writing under
+    # ``root/hub``); not what this boundary test exercises, and a late write
+    # can recreate a deleted tmp dir. Same neutralisation as the ``rig`` fixture.
+    mp.setattr(AuthStore, "_org_hub_boundary", lambda self, boundary: None)
 
     class SoftwarePresence:
         handle = SimpleNamespace(key_id=trio["key_id"])
