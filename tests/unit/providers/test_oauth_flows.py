@@ -1676,9 +1676,7 @@ async def test_every_paste_key_provider_can_actually_be_logged_into() -> None:
         # The QwenCloud Token Plan requires a paste too, but continues into a
         # device flow that would reach the network; it is driven with a mock
         # transport in ``test_qwencloud_token_plan_login_captures_key_and_device_grant``.
-        if p.login is not None
-        and p.paste_prompt_required
-        and p.id != "alibaba-token-plan-oauth"
+        if p.login is not None and p.paste_prompt_required and p.id != "alibaba-token-plan-oauth"
         # Reads a service-account JSON key and mints a token over the network;
         # driven end to end in ``test_vertex_oauth`` with a mock transport.
         and p.id != "google-vertex-sa"
