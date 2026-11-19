@@ -1632,7 +1632,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # in `guides/configuration/GUIDE.md`. They are added below, after the other
     # visible commands, and a new visible command must be added here too.
     sessions_subparsers = sessions_parser.add_subparsers(
-        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync}"
+        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync,notifications}"
     )
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
@@ -2018,6 +2018,13 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # holds and the store audit" section of `guides/configuration/GUIDE.md`;
     # the handlers and `session/cleanup.py`'s holds block carry the semantics
     # for a code reader. Follow-up: one help-tranche key per argument/command.
+    notifications_parser = sessions_subparsers.add_parser("notifications", parents=[parent_parser])
+    notifications_parser.add_argument("session")
+    notifications_action = notifications_parser.add_mutually_exclusive_group()
+    notifications_action.add_argument("--grant", action="store_true")
+    notifications_action.add_argument("--revoke", action="store_true")
+    notifications_parser.add_argument("--reason", default="")
+
     hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
     hold_parser.add_argument("session")
     hold_parser.add_argument("--reason", required=True)
@@ -8040,6 +8047,41 @@ def sessions_sync_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sessions_notifications_command(args: argparse.Namespace) -> int:
+    """Explicit operator-authorized local notification policy; JSON control output.
+
+    No spawn/profile field or agent registration calls this operation. Like other
+    local operator controls it may be executed by an assistant only when the
+    operator actually authorized this routing change, not on its own initiative.
+    This is not an authenticated-human or same-uid security boundary.
+    """
+    import json
+
+    from local_operator.notifications.authority import granted, read_decision, set_grant
+    from local_operator.session.cleanup import resolve_session_reference
+
+    root = config_dir() / "sessions"
+    session_id, candidates = resolve_session_reference(root, str(args.session))
+    if session_id is None:
+        print(json.dumps({"error": "ambiguous_session" if candidates else "session_not_found"}))
+        return 2
+    directory = root / session_id
+    try:
+        if args.grant or args.revoke:
+            decision = set_grant(directory, allow=bool(args.grant), reason=str(args.reason))
+        else:
+            decision = read_decision(directory)
+        print(
+            json.dumps(
+                {"session_id": session_id, "granted": granted(directory), "decision": decision}
+            )
+        )
+        return 0
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"error": str(exc), "session_id": session_id}))
+        return 2
+
+
 def sessions_hold_command(args: argparse.Namespace) -> int:
     """``lop sessions hold`` — record an operator value hold on one conversation.
 
@@ -8230,6 +8272,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
+
+    if getattr(args, "sessions_command", None) == "notifications":
+        return sessions_notifications_command(args)
 
     if getattr(args, "sessions_command", None) == "hold":
         return sessions_hold_command(args)
