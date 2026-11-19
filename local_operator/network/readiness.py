@@ -110,6 +110,20 @@ CAPABILITY_SERVE_DAEMON = "serve_daemon"
 #: operator met that refusal on lop-remote-node-2 with ``ready`` reporting the
 #: peer fine: the report names the owner's decision before anyone hits it.
 CAPABILITY_MODEL_SWITCH = "model_switch"
+#: (k) THIS device's GitHub lend is served from a gh CLI login (lend honesty,
+#: 2026-11-19). The gh arm is the account's full user token; the only thing
+#: holding a borrower to the designated repositories is the git-side fence. The
+#: operator kept that login on purpose (node2), so this is a WARN that states the
+#: exposure, never a refusal and never a gate.
+CAPABILITY_GITHUB_BROAD_TOKEN = "github_broad_token"
+
+#: The gh arm's spelling, mirrored from ``credentials.github.SOURCE_GH`` so the
+#: renderer needs no import of the credentials module at module load; a unit test
+#: pins the two together.
+GITHUB_SOURCE_GH = "gh"
+
+#: The one sentence both surfaces print (``ready`` row detail, credentials ledger).
+GITHUB_BROAD_TOKEN_NOTE = "a broad user token (gh CLI login) sits behind a git-only repo fence"
 #: (k) the operator's custom instructions: did this peer keep its own copy over
 #: another device's (``definitions._apply_operator_instructions_locked``)? Added
 #: 2026-11-11 (PR #3829 review round 1, R1-2): that refusal used to show only in
@@ -194,6 +208,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # will run work — on the wrong build, or until the next reboot. Warn with
         # the remedy; the update/restart path is its point of use.
         CAPABILITY_SERVE_DAEMON,
+        # A gh-served GitHub lend is the operator's deliberate choice; the row
+        # names the broad token, it never fails onboarding.
+        CAPABILITY_GITHUB_BROAD_TOKEN,
         # Turns on the borrowed model still run; only switching is refused, and
         # widening the share is the owner's access decision, never a gate here.
         CAPABILITY_MODEL_SWITCH,
@@ -1442,10 +1459,16 @@ def shareable_lines(rows: Iterable[Mapping[str, Any]]) -> list[str]:
     lines = ["shareable here:"]
     for row in materialized:
         if "provider" in row:
+            # ``label`` when the row carries one (the github row names its serving
+            # arm there; ``kind`` stays the stable machine field).
             lines.append(
-                f"  {row.get('provider')}  {row.get('kind')}  "
+                f"  {row.get('provider')}  {row.get('label') or row.get('kind')}  "
                 f"login held — share: {row.get('remedy') or ''}"
             )
+            if row.get("source") == GITHUB_SOURCE_GH:
+                # The same caution the ``ready`` row gives (lend honesty,
+                # 2026-11-19), at the place a share is decided.
+                lines.append(f"      {GITHUB_BROAD_TOKEN_NOTE}")
             # ONE CAUTION LINE, RADIENT ONLY (design review round 1, D1): the org
             # login is the family's person-scoped account — it can publish and
             # delete teams and agents — and its row was otherwise word-for-word the
@@ -3258,6 +3281,47 @@ def local_serve_daemon_rows(root: Path, *, device_id: str = "") -> list[dict[str
             {"serve_daemons": fact},
             peer_label=THIS_DEVICE_LABEL,
             source=SOURCE_LOCAL,
+        )
+    ]
+
+
+def local_github_source_rows(
+    root: Path, *, device_id: str = "", home: Path | None = None
+) -> list[dict[str, Any]]:
+    """A WARN row when THIS device's GitHub ladder resolves to the gh arm, else nothing.
+
+    Lend honesty (2026-11-19): the App and token arms are scoped credentials, but
+    the gh arm serves the account's full user token, and the only boundary a
+    borrower meets is the git-side designated-repository fence. Non-gating
+    (``NON_GATING_EQUIPMENT``), so it reads ``warn`` and never changes the verdict.
+    Empty for every other answer — including an unreadable ladder — so a device
+    not served by gh keeps its report byte-for-byte. Names only; no token is read.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    try:
+        source = github_mod.resolve_source(root, home=home)
+    except Exception:  # noqa: BLE001 — a broken ladder read states nothing here
+        return []
+    if source != github_mod.SOURCE_GH:
+        return []
+    return [
+        _capability_row(
+            device_id=device_id,
+            device_name=THIS_DEVICE_LABEL,
+            capability=CAPABILITY_GITHUB_BROAD_TOKEN,
+            ok=False,
+            code=CAPABILITY_GITHUB_BROAD_TOKEN,
+            detail=(
+                f"GitHub is served from the {github_mod.GH_SOURCE_LABEL}: "
+                f"{GITHUB_BROAD_TOKEN_NOTE}"
+            ),
+            remedies=(
+                "store a fine-grained token (GITHUB_TOKEN) or a GitHub App key to serve "
+                "a narrower credential instead",
+            ),
+            source=SOURCE_LOCAL,
+            observed={"source": source, "label": github_mod.GH_SOURCE_LABEL},
         )
     ]
 
@@ -7211,6 +7275,12 @@ def compose(
         # `--peer` report, which asked about another device.
         checks.extend(
             local_serve_daemon_rows(
+                server.root,
+                device_id=server.identity.device_id if server.identity else "",
+            )
+        )
+        checks.extend(
+            local_github_source_rows(
                 server.root,
                 device_id=server.identity.device_id if server.identity else "",
             )

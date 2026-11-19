@@ -253,6 +253,27 @@ SOURCE_GH = "gh"
 #: the ladder forbids.
 SOURCE_UNREADABLE = "unreadable"
 
+#: What a listing SHOWS for the gh arm (lend honesty, 2026-11-19). ``GITHUB_KIND``
+#: stays the machine ``kind`` — it is the placement row's wire type, the offer
+#: table's key and the relay's grant filter, so renaming it would break those
+#: readers — but printing ``github-app`` beside a lend served from a gh login
+#: told the operator an App-scoped credential was travelling when gh's token is
+#: the account's own broad user token, fenced to the designated repositories
+#: only by the git-side checks. The App and token arms keep ``GITHUB_KIND`` as
+#: their label: that is exactly what they showed before.
+GH_SOURCE_LABEL = "gh CLI login (full account)"
+
+
+def source_label(source: str) -> str:
+    """The label a listing shows for the arm ``source`` names (never a secret).
+
+    Only the gh arm reads differently; every other answer — App, token, no arm,
+    unreadable — keeps the row's historic ``GITHUB_KIND`` so nothing that was
+    honest before changes its words.
+    """
+    return GH_SOURCE_LABEL if source == SOURCE_GH else GITHUB_KIND
+
+
 #: How much of ``gh``'s hosts file one read may take. gh writes a few hundred
 #: bytes; the bound exists so a pathological file cannot make the lender read
 #: it wholesale — and an oversized file is refused BY NAME, never parsed
@@ -1476,6 +1497,17 @@ def resolve_source(root: Path | None = None, *, home: Path | None = None) -> str
     PRESENCE, not usability, for each arm it does resolve: a configured but
     broken arm RESOLVES so the serve-time refusal can name it. THE ONE ORDER:
     the lender serves with this, and the receipts name the arm with it.
+
+    SELECTION ORDER, first match wins (narrowest credential first):
+
+    1. ``SOURCE_APP`` — the ``APP_SECRET_NAME`` entry in the encrypted store;
+    2. ``SOURCE_TOKEN`` — the ``TOKEN_SECRET_NAME`` (PAT) entry in that store;
+    3. ``SOURCE_GH`` — a ``gh`` CLI login for github.com (:func:`gh_login_present`),
+       the account's full user token: the widest arm, so the listing labels it
+       :data:`GH_SOURCE_LABEL` and ``ready`` warns about it;
+    4. ``""`` — nothing to serve.
+
+    An unreadable store at step 1 or 2 answers ``SOURCE_UNREADABLE`` and stops.
     """
     app_state = _secret_state(root, APP_SECRET_NAME)
     if app_state is None:
