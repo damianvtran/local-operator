@@ -104,7 +104,8 @@ def test_without_the_flag_behaviour_is_unchanged(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     # -1e300/1e300 are finite floats datetime cannot represent: refused at
     # parse time (2), not left to crash utc_stamp at the post-wait breach.
-    "bad", ["soon", "2026-11-19T08:05:00", "nan", "2026-13-40T00:00Z", "-1e300", "1e300"]
+    "bad",
+    ["soon", "2026-11-19T08:05:00", "nan", "2026-13-40T00:00Z", "-1e300", "1e300"],
 )
 def test_unparseable_start_by_is_a_usage_error_before_anything(tmp_path: Path, bad: str) -> None:
     marker = tmp_path / "must-not-exist"
