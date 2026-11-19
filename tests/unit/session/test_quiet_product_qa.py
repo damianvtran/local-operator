@@ -490,13 +490,19 @@ async def run_case(case, tmp_path, monkeypatch):
         # new actual user prompt must neither inherit acceptance nor rerun work.
         scripts = [batch(call("qa_effect")), final("QA_FRESH_AFTER_ABORT"), final()]
 
+    # Bound unconditionally, ahead of the queued-user branch, because the
+    # assertions below live in a SECOND `case == "queued-user"` block that the
+    # analyzer cannot correlate with this one (reportPossiblyUnboundVariable on
+    # the later read). The event is inert for every other case: the spawn hook
+    # that awaits it is only installed inside this branch.
+    startup_allowed = asyncio.Event()
+
     if case == "queued-user":
         # Force the startup/poll ordering that exposed the old outer-start
         # steering race, without starving CPUs or guessing a spawn duration.
         # The first real interrupt poll releases startup; the eval worker and
         # bridge remain real, and the existing deadlock guard bounds a broken
         # poll hook rather than turning an absent receipt into success.
-        startup_allowed = asyncio.Event()
         spawn = eval_tool._spawn
         peek_interrupt = loop_module.AgentLoop._peek_interrupt
 
@@ -692,6 +698,10 @@ async def run_case(case, tmp_path, monkeypatch):
                 if isinstance(event, ToolExecutionEndEvent) and event.tool_name == "no_reply"
             ]
             assert len(quiet_results) == 1 and not quiet_results[0].is_error
+            # `details` is Optional; narrow it explicitly (as the
+            # wrapped-exception branch below already does) rather than
+            # suppressing the optional-member report.
+            assert quiet_results[0].result.details is not None
             assert quiet_results[0].result.details.get("quiet_request_pending") is True
             assert all(not root.is_error for root in roots), "enclosing eval did not complete"
             queued_input = "QA queued actual user"
