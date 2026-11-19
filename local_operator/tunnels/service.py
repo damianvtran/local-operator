@@ -718,6 +718,15 @@ async def _refine(
     return TUNNEL_INACTIVE
 
 
+def _requires_client_update(failure: BaseException) -> bool:
+    # Read typed status across wrappers, never prose/provider data. An older API
+    # wrapper may retain 426 without the dedicated new exception type.
+    return any(
+        isinstance(link, RequestFailed) and link.status == 426
+        for link in _failure_chain(failure)
+    )
+
+
 def authorization_failure_reason(failure: BaseException) -> str:
     """Name why the poller could not renew the relay authorization lease.
 
@@ -734,6 +743,10 @@ def authorization_failure_reason(failure: BaseException) -> str:
     transport error it hit while refreshing. The wording each reason produces
     lives with the gateway, so one cause cannot drift into two sentences.
     """
+    if _requires_client_update(failure):
+        from local_operator.tunnels.upgrade import REASON
+
+        return REASON
     local = _local_cause(failure)
     if local is not None:
         return local
@@ -797,6 +810,10 @@ def classify_failure(failure: BaseException) -> Failure:
     two families it catches (fail closed, with a traceback) rather than parking
     on a shape it cannot describe.
     """
+    if _requires_client_update(failure):
+        from local_operator.tunnels import upgrade
+
+        return Failure("terminal_config", upgrade.REASON, upgrade.detail())
     local = _local_cause(failure)
     if local is not None:
         # Transient: both clear by themselves (see `_local_cause`).
@@ -1287,6 +1304,7 @@ async def run() -> int:
             else:
                 assert child is not None
                 exited = asyncio.create_task(child.wait())
+            crash: BaseException | None = None
             try:
                 # `scanner` belongs in this set: a poller that dies of a failure
                 # this loop does not classify must stop the unit rather than
@@ -1308,6 +1326,7 @@ async def run() -> int:
                         crash is not None
                         and relay is not None
                         and not (relay.revoked.is_set() or relay.withdrawn.is_set())
+                        and not _requires_client_update(crash)
                     ):
                         # A connector bug must not become a silent restart loop:
                         # name the exception type (never its args, which could
@@ -1325,6 +1344,10 @@ async def run() -> int:
                     await asyncio.wait_for(
                         asyncio.gather(scanner, return_exceptions=True), timeout=5
                     )
+            if crash is not None and _requires_client_update(crash):
+                # Preserve a renewal-time protocol refusal through connector task
+                # teardown; main owns the permanent park and safe local guidance.
+                raise crash
             # Crashes, a dead poller and remote suspension are restartable. Only
             # an explicit local stop exits successfully and stays stopped under
             # supervision.

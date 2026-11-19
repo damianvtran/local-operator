@@ -1,0 +1,17 @@
+{
+  "tunnel.upgrade.client.label": {
+    "role": "Permanent tunnel setup/status blocker title",
+    "tone": "Concise, factual",
+    "note": "HTTP 426 means this connector cannot bootstrap the server's relay-only protocol, not an authentication, network or billing problem. The supervisor parks instead of retrying. No width budget is imposed."
+  },
+  "tunnel.upgrade.client.guidance": {
+    "role": "Shell exception, connector/status detail and TUI setup remedy",
+    "tone": "Actionable, calm",
+    "note": "Locally authored mapping for HTTP 426; never copies server bodies. Preserve technical tokens config.yml and all placeholders exactly. update_command is lop update on the shell or /update in the TUI; reconnect_command is lop tunnel connect on the shell or /mobile enable in the TUI. override is the literal tunnel.transport: cloudflare. The override may be absent: do not instruct enabling Cloudflare or imply login/billing changes help. A first supported version is not yet assigned; rollout remains gated on an actual capability-advertising release and fleet verification."
+  },
+  "tunnel.upgrade.client.plain": {
+    "role": "Graphical setup/status guidance without shell commands",
+    "tone": "Actionable, calm",
+    "note": "Same permanent HTTP 426 state for surfaces without a terminal. Preserve Local Operator, Radient, config.yml and tunnel.transport: cloudflare as technical/product tokens. This is a manual update/configuration/reconnect prerequisite, not a retry/login/billing action. No button or automatic update is implied."
+  }
+}

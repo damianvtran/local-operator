@@ -21,7 +21,12 @@ from local_operator.providers.auth_store import (
     CredentialInvalidError,
 )
 from local_operator.tunnels.config import DEFAULT_API_URL
-from local_operator.tunnels.errors import LoginRequired, RecordNotFound, RequestFailed
+from local_operator.tunnels.errors import (
+    ClientUpgradeRequired,
+    LoginRequired,
+    RecordNotFound,
+    RequestFailed,
+)
 
 #: Pauses before re-opening the store after `AuthStoreBusyError`. Why retry at
 #: all: the bootstrap guard is held only while another `lop` process opens the
@@ -356,6 +361,10 @@ class RadientTunnels:
         # Never surface provider error bodies: they may echo a bearer, client
         # secret, or connector token. The status is enough for a useful retry.
         if response.status_code >= 400:
+            # Only the tunnel-family contract owns this status. Never reflect its
+            # body (even JSON claiming to be a helpful upgrade instruction).
+            if response.status_code == 426 and api_path is None:
+                raise ClientUpgradeRequired()
             # 404 gets a TYPE, not just the generic sentence: it is the one status
             # the tunnel commands translate, because under an owner-pinned
             # request it usually means the selected login does not own this
