@@ -1996,10 +1996,6 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # key (or path) -- the one REQUIRED paste that is not an API key.
         "google-vertex-key",
         "google-vertex-sa",
-        # Amazon Bedrock's login is the Bedrock API-key paste
-        # (``create_api_key_login``); profiles, SSO and access keys are set up
-        # outside this flow, so reading the key IS the login.
-        "bedrock",
     }, required
 
     # And the union a host actually gates on: required plus the browser
@@ -2007,6 +2003,12 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
     # appearing here would mean a prompt racing its HTTP callback.
     accepts = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.accepts_paste_prompt}
     assert accepts == required | {"anthropic", "zai-oauth", "google-vertex"}, accepts
+
+    # Bedrock's structured AWS flow owns its questions; a generic paste card
+    # would race that flow and falsely treat profile/SSO auth as an API key.
+    bedrock = next(p for p in PROVIDER_REGISTRY if p.id == "bedrock")
+    assert bedrock.login_kind == "aws"
+    assert not bedrock.accepts_paste_prompt
 
 
 @pytest.mark.asyncio
