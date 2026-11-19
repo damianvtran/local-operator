@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.network import audit as audit_mod
 from local_operator.network import sync as sync_mod
 from local_operator.network import workset, workset_move
 from local_operator.network.audit import AuditLog
@@ -215,6 +216,88 @@ def test_an_audit_that_cannot_be_proven_written_serves_zero_bytes(
     answer = _fetch(server, digest=digest, offset=0)
     assert answer["result"] == "refused" and answer["code"] == "audit_unavailable", answer
     assert "data" not in answer and spans == []
+
+
+# The serve gate is ``AuditLog.record_required`` (PR #4228). These cells pin its
+# fail-closed contract at the serve. Against the pre-#4228 stand-in (which read
+# ``_enabled`` and the fsync counter from the writer's privates) the disabled and
+# fsync cells were already green, the degraded cell was RED — it served a chunk from
+# a log already known to have a hole — and the healthy cell was red because nothing
+# went through ``record_required``.
+
+
+def test_a_disabled_audit_log_serves_zero_bytes(
+    staged: tuple[_Server, str], spans: list[tuple[int, int]]
+) -> None:
+    server, digest = staged
+    server.audit = AuditLog(server.root, enabled=False)
+    answer = _fetch(server, digest=digest, offset=0)
+    assert answer["result"] == "refused" and answer["code"] == "audit_unavailable", answer
+    assert "data" not in answer and spans == []
+    assert _serve_rows(server.root) == []
+
+
+def test_a_degraded_audit_log_serves_zero_bytes(
+    staged: tuple[_Server, str], spans: list[tuple[int, int]]
+) -> None:
+    server, digest = staged
+    # An earlier failed write left a hole the log cannot see; a row appended after
+    # it would sit in a trail already known to be incomplete.
+    server.audit.degraded = True
+    answer = _fetch(server, digest=digest, offset=0)
+    assert answer["result"] == "refused" and answer["code"] == "audit_unavailable", answer
+    assert "data" not in answer and spans == []
+    assert _serve_rows(server.root) == []
+
+
+def test_a_failed_audit_fsync_serves_zero_bytes(
+    staged: tuple[_Server, str], spans: list[tuple[int, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, digest = staged
+
+    def failing_fsync(fd: int) -> None:
+        raise OSError("injected serve-row fsync failure")
+
+    monkeypatch.setattr(audit_mod.os, "fsync", failing_fsync)
+    answer = _fetch(server, digest=digest, offset=0)
+    assert answer["result"] == "refused" and answer["code"] == "audit_unavailable", answer
+    assert "data" not in answer and spans == []
+    assert server.audit.degraded
+
+
+def test_a_healthy_log_writes_one_durable_row_before_the_first_byte(
+    staged: tuple[_Server, str], spans: list[tuple[int, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, digest = staged
+    real_required = server.audit.record_required
+    answers: list[bool] = []
+
+    def required(event: audit_mod.AuditEvent) -> bool:
+        answers.append(real_required(event))
+        return answers[-1]
+
+    monkeypatch.setattr(server.audit, "record_required", required)
+    syncs = server.audit.syncs
+    answer = _fetch(server, digest=digest, offset=0, limit=64)
+    assert answer["result"] == "chunk" and answer["offset"] == 0, answer
+    assert answers == [True]
+    assert server.audit.syncs > syncs, "the serve row was not fsynced"
+    assert spans == [(0, 1)], spans
+    (row,) = _serve_rows(server.root)
+    assert set(row["detail"]) == {
+        "peer",
+        "to_device",
+        "lease_epoch",
+        "artifact",
+        "bytes",
+        "offset",
+        "path",
+        "kind",
+    }
+    assert set(row["detail"]) == audit_mod.DETAIL_KEYS["session.workset.serve"]
+    assert row["detail"]["kind"] == "span" and row["detail"]["offset"] == 0
+    assert row["detail"]["artifact"] == digest and row["detail"]["peer"] == DEST
+    assert "session.workset.serve" in AuditLog.DURABLE_EVENTS
 
 
 class _Transport:

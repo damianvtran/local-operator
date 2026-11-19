@@ -769,47 +769,50 @@ def _audit_workset_serve(
 ) -> bool:
     """Write ONE durable ``session.workset.serve`` row; ``True`` only if it is on disk.
 
-    WHY NOT ``AuditLog.record``: it never raises and only flushes on a timer, so it
-    cannot gate bytes (design §8.3). PR #4228's ``AuditLog.record_required`` is the
-    intended API and was NOT merged when this landed (checked 2026-11-18,
-    ``gh pr view 4228``: OPEN), so this is the stand-in, kept behind this one function
-    so the swap is a one-line change. It is durable on the same terms as the log's own
-    DURABLE_EVENTS: the event is listed there, so ``record`` flushes AND fsyncs it
-    before returning; this function holds the writer's lock across the call and then
-    requires that (a) the row's sequence number is published to the file and (b) the
-    fsync counter moved — the two facts ``flush``/``sync`` only change on success.
-    Any doubt is ``False``, and the caller serves zero bytes. Metadata is bounded: no
-    payload, no secret, no file content — ids, sizes and one home-relative path.
+    The caller serves ZERO bytes on ``False`` (design §8.3): an egress an incident
+    cannot reconstruct is the loss the audit trail exists to prevent, so any doubt is a
+    refusal.
+
+    WHY ``AuditLog.record_required`` AND NOT ``record``: ``record`` never raises and
+    only flushes on a timer, so it cannot gate bytes. ``record_required`` (PR #4228)
+    is the log's own fail-closed admission: it refuses a disabled or already-degraded
+    log, holds the writer's lock across the append and its acknowledgement so a
+    concurrent row cannot stand in for this one, and answers ``True`` only once THIS
+    row is published and fsynced. This function used to reimplement that check from
+    the writer's privates (``_write_lock``, ``syncs``, ``publication_of``) while #4228
+    was unmerged; the swap removes that second copy of the durability contract and
+    adds the degraded-log refusal the stand-in lacked.
+
+    The event is in ``AuditLog.DURABLE_EVENTS`` (``record_required`` refuses anything
+    else) and every key below is in its ``DETAIL_KEYS`` allowlist, so the row is
+    written as sent. Metadata is bounded: no payload, no secret, no file content —
+    ids, sizes and one home-relative path, cut to the log's per-value cap here so the
+    row holds what this function sent rather than a silently shortened copy.
     """
-    from local_operator.network.audit import AuditEvent
+    from local_operator.network.audit import MAX_DETAIL_VALUE_CHARS, AuditEvent
 
     log = getattr(server, "audit", None)
-    if log is None or not getattr(log, "_enabled", False):
+    if log is None:
         return False
     try:
-        lock = log._write_lock  # noqa: SLF001 — one writer; see the docstring
-        with lock:
-            syncs = int(getattr(log, "syncs", 0))
-            log.record(
-                AuditEvent(
-                    event=AUDIT_WORKSET_SERVE,
-                    actor=server.identity.device_id,
-                    subject=session_id,
-                    outcome="ok",
-                    detail={
-                        "peer": to_device,
-                        "to_device": to_device,
-                        "lease_epoch": lease_epoch,
-                        "artifact": digest,
-                        "bytes": int(size),
-                        "offset": int(offset),
-                        "path": path[:512],
-                        "kind": kind,
-                    },
-                )
+        return log.record_required(
+            AuditEvent(
+                event=AUDIT_WORKSET_SERVE,
+                actor=server.identity.device_id,
+                subject=session_id,
+                outcome="ok",
+                detail={
+                    "peer": to_device,
+                    "to_device": to_device,
+                    "lease_epoch": lease_epoch,
+                    "artifact": digest,
+                    "bytes": int(size),
+                    "offset": int(offset),
+                    "path": path[:MAX_DETAIL_VALUE_CHARS],
+                    "kind": kind,
+                },
             )
-            seq = int(log.recorded_through)
-            return log.publication_of(seq) == "file" and int(getattr(log, "syncs", 0)) > syncs
+        )
     except Exception:  # noqa: BLE001 — an audit that cannot be proven is a refusal
         logger.warning("workset: could not write the serve audit for %s", session_id, exc_info=True)
         return False
