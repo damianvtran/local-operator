@@ -6502,7 +6502,9 @@ def _drain_pair_offer(
     op = str(frame.get("op") or "")
     if op == "net_pair_abort":
         raise refusal_from_pairing(
-            str(frame.get("reason") or "aborted"), detail=str(frame.get("detail") or "")
+            str(frame.get("reason") or "aborted"),
+            detail=str(frame.get("detail") or ""),
+            spent=frame.get("spent") is True,
         )
     if op != "net_pair_offer":
         raise MeshRefusal(
@@ -6634,7 +6636,9 @@ def _finish_pairing(
         # The refusing device's own sentence comes too: it is the only place the
         # joiner can learn which id was refused and what to do about it (Q-R3-3).
         raise refusal_from_pairing(
-            str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
+            str(answer.get("reason") or "aborted"),
+            detail=str(answer.get("detail") or ""),
+            spent=answer.get("spent") is True,
         )
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
@@ -6837,11 +6841,17 @@ def _awaiting_payload(pending: Any) -> dict[str, Any]:
         # person approves it in the app's Mesh approvals by typing the code the OTHER
         # device shows; the agent relays nothing back. The terminal path still exists
         # as a same-user fallback (GUIDE "Without the app") and is not named here, so
-        # an agent reading this sentence is never handed a command to run itself.
+        # an agent reading this sentence is never handed a command to run itself. The
+        # last clause claims only what holds (review round 1, M3/S-R1-6): the app's
+        # attestation guards the CARD; the CLI fallback is not gated, so the sentence
+        # asks the agent to leave the answer to the person rather than claiming an
+        # agent cannot answer.
         sentence = (
             f"This device's code is {shown}: the person on the other device types it "
             "there. Ask the user to approve this pairing in the app's Mesh approvals by "
-            "typing the code the other device shows. An agent cannot answer a pairing."
+            "typing the code the other device shows. Leave the answer to the user: the "
+            "app's card is the path that needs a person, and the terminal fallback is "
+            "a same-user path with no such check."
         )
     clause = offers_mod.sentence_clause(
         state, items, inviter=pending.inviter_name or pending.inviter_device_id
@@ -6972,6 +6982,8 @@ def _park_join(
         offer_state=str(offer_view["state"]),
         # The Mesh approvals card's attestation binds this (``pairing_attest``).
         nonce=types.new_pairing_nonce(),
+        # The card's "as <role>" (QA round 1, Q1): the token's own role.
+        role=str(getattr(envelope, "role", "") or ""),
     )
     # A leftover answer from an earlier ceremony would answer THIS one: the record is
     # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is

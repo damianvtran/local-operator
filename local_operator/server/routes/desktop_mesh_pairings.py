@@ -17,7 +17,9 @@ THE BEARER IS NOT ENOUGH TO ANSWER. Every answer must be covered by an app attes
 protection only: the same-user terminal fallback (``lop network confirm`` / ``join
 --confirm``) still exists and the relay cannot tell the two apart.
 
-STATUS MAP: 404 ``no_pending_pairing``; 403 ``pairing_needs_app``; 409
+STATUS MAP: 404 ``no_pending_pairing``; 403 ``pairing_needs_app``; 400 ``bad_request``
+(an inviter admit with no ``shares`` list, or shares on any other answer; nothing
+spent); 409
 ``sas_mismatch`` (body carries ``attempts_left``; the card stays open),
 ``pairing_expired``, ``pairing_not_ready``, and any other relay refusal; 503
 ``relay_unavailable``. Messages are keyed copy (``network.pairing``); the renderer
@@ -47,7 +49,10 @@ class PairingAnswer(BaseModel):
 
     decision: Literal["admit", "decline"]
     code: str = Field(default="", max_length=16)
-    #: Reduce-only share choice (inviter); ``None`` = the offered set.
+    #: The inviter's reduce-only share choice, REQUIRED on an inviter admit (``[]``
+    #: shares nothing) and absent or ``[]`` on every other answer — never "absent =
+    #: the offered set" (S-R1-1). Optional at the model so a missing list is refused
+    #: as a keyed ``bad_request`` before any attestation is spent, not as a 422.
     shares: list[str] | None = Field(default=None, max_length=256)
     #: The card row's ``nonce`` — which ceremony (and stage) this answers.
     nonce: str = Field(min_length=1, max_length=128)
@@ -58,6 +63,7 @@ class PairingAnswer(BaseModel):
 _STATUS = {
     "no_pending_pairing": 404,
     "pairing_needs_app": 403,
+    "bad_request": 400,
     "relay_unavailable": 503,
 }
 

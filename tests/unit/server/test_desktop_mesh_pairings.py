@@ -144,9 +144,12 @@ def _joiner(root: Path) -> types.PendingJoin:
 def _body(
     nonce: str, *, code: str = CODE, decision: str = "admit", deadline: int | None = None
 ) -> dict[str, Any]:
+    # ``shares: []`` always: an inviter admit must name its selection (S-R1-1), and an
+    # empty list is the one shape every other answer may carry too.
     return {
         "decision": decision,
         "code": code,
+        "shares": [],
         "nonce": nonce,
         "deadline": deadline if deadline is not None else int(time.time()) + 60,
     }
@@ -163,7 +166,7 @@ async def _attest(
         "nonce": body["nonce"],
         "act": pairing_attest.act_for(body["decision"]),
         "code": body["code"] if body["decision"] == "admit" else "",
-        "shares": body.get("shares") or [],
+        "shares": body.get("shares", []),
         "deadline": body["deadline"],
     }
     return await service._frame(b"tok", json.dumps(frame).encode())  # noqa: SLF001
@@ -342,7 +345,7 @@ async def test_joiner_card_strikes_decline_at_the_bound(api) -> None:
 def test_the_attest_frame_validator_refuses_bad_shapes() -> None:
     good = {
         "op": pairing_attest.ATTEST_OP,
-        "side": "joiner",
+        "side": "inviter",
         "invite_id": INVITE,
         "nonce": "ab" * 8,
         "act": "respond",
@@ -361,8 +364,18 @@ def test_the_attest_frame_validator_refuses_bad_shapes() -> None:
         {"deadline": int(time.time()) - 1},
         {"deadline": True},
         {"nonce": ""},
+        # S-R1-1: an inviter admit names its selection; nothing else carries one.
+        {"shares": None},
+        {"shares": "a"},
+        {"side": "joiner"},
+        {"act": "decline", "code": ""},
     ):
         assert isinstance(pairing_attest.validate_frame({**good, **bad}), str), bad
+    absent = {key: value for key, value in good.items() if key != "shares"}
+    assert pairing_attest.validate_frame(absent) == "bad-frame", "absent must not read as []"
+    for side in ("inviter", "joiner"):
+        declined = {**absent, "side": side, "act": "decline", "code": ""}
+        assert isinstance(pairing_attest.validate_frame(declined), app_attest.AttestedRow)
 
 
 def test_the_ask_contract_is_unchanged_by_the_generalisation() -> None:
@@ -372,3 +385,70 @@ def test_the_ask_contract_is_unchanged_by_the_generalisation() -> None:
         {"op": "ask_attest", "session_id": "s1", "ask_id": "a1", "act": "respond", "answers": {}}
     )
     assert isinstance(row, app_attest.AttestedRow) and row.scope == "s1" and row.target == "a1"
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation: S-R1-1 (explicit shares), S-R1-5 (read-only GET), Q1, Q2.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_inviter_admit_without_a_share_list_is_refused_before_anything_is_spent(
+    api,
+) -> None:
+    """S-R1-1: ``content`` binds ``[]`` for "absent" too, so a body that attested
+    "share nothing" and then omitted ``shares`` used to reach the relay with no list
+    — which the relay read as "serve the whole offer"."""
+    client, root, relay, service, _app = api
+    pending = _inviter(root)
+    body = _body(pending.nonce)
+    assert (await _attest(service, "inviter", body)) == {"ok": True}
+    omitted = {key: value for key, value in body.items() if key != "shares"}
+    response = await client.post(_url("inviter"), json=omitted)
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "bad_request"
+    assert relay.confirms() == [], "the relay was asked without a selection"
+    # Nothing was consumed: the honest body (``shares: []``) still answers, and the
+    # relay is handed exactly that empty list.
+    honest = await client.post(_url("inviter"), json=body)
+    assert honest.status_code == 200, honest.text
+    [sent] = relay.confirms()
+    assert sent["shares"] == []
+
+
+@pytest.mark.asyncio
+async def test_listing_never_prunes_or_asks_the_relay(api) -> None:
+    """S-R1-5: a GET is a read. An expired inviter row and its decision stay on disk
+    for their owner (the relay) to remove, and the relay's pruning list op is not
+    called at all."""
+    client, root, relay, _service, _app = api
+    pending = _inviter(root)
+    pending.expires_at = time.time() - 5
+    store.save_pending_pairing(pending, root)
+    store.save_pair_decision(types.PairDecision(invite_id=INVITE, decision="decline"), root)
+    response = await client.get("/v1/desktop/mesh/pairings")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["pairings"] == []
+    assert store.pending_path(INVITE, root).exists(), "the GET pruned the card"
+    assert store.decision_path(INVITE, root).exists(), "the GET pruned the decision"
+    assert [op for op, _fields in relay.calls] == []
+
+
+@pytest.mark.asyncio
+async def test_card_rows_name_the_peer_and_role_and_share_one_offer_vocabulary(api) -> None:
+    """Q1: the joiner card names the inviter by its device NAME and shows the invite's
+    role. Q2: "nothing offered" reads ``empty`` on both cards."""
+    client, root, _relay, _service, _app = api
+    pending = _inviter(root)
+    pending.offer_state = "sent"
+    store.save_pending_pairing(pending, root)
+    joiner = _joiner(root)
+    joiner.role = "drive"
+    joiner.offer_state = "empty"
+    store.save_pending_join(joiner, root)
+    rows = (await client.get("/v1/desktop/mesh/pairings")).json()["result"]["pairings"]
+    by_side = {row["side"]: row for row in rows}
+    assert by_side["joiner"]["peer_name"] == "desktop"
+    assert by_side["joiner"]["role"] == "drive"
+    assert by_side["inviter"]["offers"]["state"] == by_side["joiner"]["offers"]["state"]
+    assert by_side["inviter"]["offers"]["state"] == "empty"

@@ -3026,7 +3026,8 @@ routes sit behind the desktop bearer (`require_desktop`) on their own router
 `server/utils/desktop_mesh_pairings.py`.
 
 **`GET /v1/desktop/mesh/pairings`** → `{pairings: [row, …]}`, oldest first, read-only
-(it never clears or creates anything). One row per open ceremony on THIS device:
+(it never clears, quarantines or creates anything, and never asks the relay: inviter
+rows are read from the relay's own files). One row per open ceremony on THIS device:
 
 ```json
 {"id": "inviter:<invite_id>", "side": "inviter|joiner",
@@ -3034,11 +3035,15 @@ routes sit behind the desktop bearer (`require_desktop`) on their own router
  "invite_id": "…", "network_id": "…", "network_name": "…",
  "peer_device_id": "…", "peer_name": "…", "role": "drive",
  "code": "481926", "fingerprint": "…",
- "offers": {"state": "sent|listed|empty|absent|…", "items": [{"key","label","kind","share"}]},
+ "offers": {"state": "listed|empty|absent|skipped_peer_unsupported|…", "items": [{"key","label","kind","share"}]},
  "expires_at": 1763500000.0, "seconds_left": 512, "attempts_left": 3,
  "nonce": "<hex>", "can_answer_here": false, "answer_unavailable": "unsupported_host"}
 ```
 
+- `offers.state` is one vocabulary on both sides: `listed` (items to show) or `empty`
+  (nothing offered); `absent`/`skipped_peer_unsupported` mean one build cannot carry a
+  list. `peer_name` is the other device's name, `""` when an older token carried only
+  its id; `role` is the invite's role on both sides (`""` from an older joiner record).
 - `code` is THIS device's own derivation, shown for the person on the OTHER device to
   type there. It is not a secret (it is in the park JSON already); the boundary is the
   attestation below.
@@ -3053,12 +3058,17 @@ routes sit behind the desktop bearer (`require_desktop`) on their own router
 - `can_answer_here` is true only on a host with the app-attestation listener AND a
   row in an answerable stage. `answer_unavailable`: `""`, `unsupported_host`
   (not macOS), or `no_app_attestation` (macOS, listener failed to bind).
-- The window is `min(invite remaining, 600 s)` (`handshake.PAIR_PARK_CEILING_S`). At
+- The window is `min(invite remaining, 600 s)` (`handshake.PAIR_PARK_CEILING_S`),
+  fixed ONCE when the ceremony starts: both inviter stages carry the same `expires_at`,
+  which also caps the attestation `deadline`. At
   most 4 inviter ceremonies park per relay; a 5th joiner is refused `pairing_busy`,
   which spends nothing.
 
 **`POST /v1/desktop/mesh/pairings/{side}/{invite_id}/answer`**
-body `{decision: "admit"|"decline", code, shares?, nonce, deadline}` (strict).
+body `{decision: "admit"|"decline", code, shares, nonce, deadline}` (strict). `shares`
+is REQUIRED on an inviter admit — exactly the keys to serve, `[]` serves none; there is
+no "absent = the whole offer" — and absent or `[]` on every other answer; anything else
+is `400 bad_request` before the attestation is spent.
 Order of checks — the order is the security property:
 
 1. the card must be live (`404 no_pending_pairing`); its `nonce` must match
@@ -3073,7 +3083,8 @@ Order of checks — the order is the security property:
 4. inviter: the relay's `net_pair_confirm` with `code` — the RELAY compares against
    its own derivation (caller `matched` is ignored), spends one attempt on a mismatch
    inside the same lock as the stage check, and declines/consumes when the budget is
-   spent. Joiner: `network.pairing_answers.answer_card` (the CLI's own writer); it
+   spent. Once the ceremony has a decision, or its budget is spent, every later answer
+   (card or terminal) is `409 pairing_expired` and nothing is overwritten. Joiner: `network.pairing_answers.answer_card` (the CLI's own writer); it
    never blocks on the other device.
 
 200 → `{status: "sent"|"waiting_for_other_device"|"refused", attempts_left}`.

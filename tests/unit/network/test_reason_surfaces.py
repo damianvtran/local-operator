@@ -757,7 +757,7 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Frame fields copied into audit records and ``set_trust(reason=…)``: the audit
     # trail is the machine register (`lop network log` prints the record verbatim on
     # purpose, and its ``remedy`` field is the human one).
-    ("local_operator/network/relay.py", "RelayServer._ctl_pair_confirm", "reason"): (
+    ("local_operator/network/relay.py", "RelayServer._pair_confirm_legacy", "reason"): (
         1,
         "an audit-record field",
     ),

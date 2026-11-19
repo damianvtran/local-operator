@@ -33,6 +33,9 @@ from local_operator.network import cli as net_cli
 from local_operator.network import handshake as hs_mod
 from local_operator.network import invite as invite_mod
 from local_operator.network import relay, store, types
+from local_operator.network.credentials import placement as placement_mod
+from local_operator.network.credentials.types import BROKER_CAPABILITY
+from tests.unit.network.test_pair_offer import _seed
 from tests.unit.network.test_relay_e2e import _init_network, _join, _mint_invite
 from tests.unit.network.test_relay_e2e import devices as _devices_fixture
 
@@ -144,10 +147,17 @@ def test_stage_one_card_is_hidden_from_legacy_callers_refuses_answers_and_its_de
         assert (
             server_a._ctl_pair_pending({}) == []
         ), "a legacy CLI must not see stage 1"  # noqa: SLF001
+        nonce = row["nonce"]
         for frame in (
             {"invite_id": invite_id, "decision": "admit", "matched": True},
-            {"invite_id": invite_id, "decision": "admit", "code": row["sas"]},
-            {"invite_id": invite_id, "decision": "decline", "code": ""},
+            {
+                "invite_id": invite_id,
+                "decision": "admit",
+                "code": row["sas"],
+                "nonce": nonce,
+                "shares": [],
+            },
+            {"invite_id": invite_id, "decision": "decline", "code": "", "nonce": nonce},
         ):
             with pytest.raises(types.MeshRefusal) as excinfo:
                 server_a._ctl_pair_confirm(frame)  # noqa: SLF001
@@ -167,7 +177,7 @@ def test_stage_one_card_is_hidden_from_legacy_callers_refuses_answers_and_its_de
         after = store.load(record.network_id, server_a.root)
         assert after.member(server_b.identity.device_id) is None, "stale admit was read"
         server_a._ctl_pair_confirm(  # noqa: SLF001
-            {"invite_id": invite_id, "decision": "decline", "code": ""}
+            {"invite_id": invite_id, "decision": "decline", "code": "", "nonce": stage_two["nonce"]}
         )
     finally:
         release.set()
@@ -191,7 +201,14 @@ def test_a_card_code_is_compared_by_the_relay_and_a_mismatch_keeps_the_ceremony_
         wrong = "000000" if right != "000000" else "111111"
         # A caller-asserted ``matched: true`` is IGNORED once a code is present.
         reply = server_a._ctl_pair_confirm(  # noqa: SLF001
-            {"invite_id": invite_id, "decision": "admit", "code": wrong, "matched": True}
+            {
+                "invite_id": invite_id,
+                "decision": "admit",
+                "code": wrong,
+                "matched": True,
+                "nonce": row["nonce"],
+                "shares": [],
+            }
         )
         assert reply["status"] == "sas_mismatch" and reply["attempts_left"] == 2
         assert store.pair_decision(invite_id, server_a.root) is None, "a mismatch decided"
@@ -201,7 +218,13 @@ def test_a_card_code_is_compared_by_the_relay_and_a_mismatch_keeps_the_ceremony_
         assert store.pending_pairing(invite_id, server_a.root) is not None, "card closed"
         assert "result" not in out and "error" not in out, "the socket was ended"
         reply = server_a._ctl_pair_confirm(  # noqa: SLF001
-            {"invite_id": invite_id, "decision": "admit", "code": right, "nonce": row["nonce"]}
+            {
+                "invite_id": invite_id,
+                "decision": "admit",
+                "code": right,
+                "nonce": row["nonce"],
+                "shares": [],
+            }
         )
         assert reply["status"] == "sent" and reply["decision"] == "admit"
     finally:
@@ -224,7 +247,13 @@ def test_the_third_card_mismatch_spends_the_budget_and_consumes_the_invite(
     try:
         row = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
         wrong = "000000" if row["sas"] != "000000" else "111111"
-        frame = {"invite_id": row["invite_id"], "decision": "admit", "code": wrong}
+        frame = {
+            "invite_id": row["invite_id"],
+            "decision": "admit",
+            "code": wrong,
+            "nonce": row["nonce"],
+            "shares": [],
+        }
         statuses = [server_a._ctl_pair_confirm(dict(frame)) for _ in range(3)]  # noqa: SLF001
         assert [s["status"] for s in statuses] == ["sas_mismatch", "sas_mismatch", "refused"]
         assert [s["attempts_left"] for s in statuses] == [2, 1, 0]
@@ -262,7 +291,13 @@ def test_a_fifth_parked_ceremony_is_busy_and_spends_nothing(
     try:
         row = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
         server_a._ctl_pair_confirm(  # noqa: SLF001
-            {"invite_id": row["invite_id"], "decision": "admit", "code": row["sas"]}
+            {
+                "invite_id": row["invite_id"],
+                "decision": "admit",
+                "code": row["sas"],
+                "nonce": row["nonce"],
+                "shares": [],
+            }
         )
     finally:
         thread.join(30)
@@ -310,3 +345,265 @@ def test_expiry_clears_the_card_frees_the_slot_and_changes_no_membership(
     assert after.invites[0].attempts == 0, "a delay spent an attempt"
     # The joiner was not admitted: it holds no record of the network.
     assert not store.record_path(record.network_id, server_b.root).exists(), out
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation (security S-R1-1..4, code M2): each cell FAILS on 7e88f31c.
+# ---------------------------------------------------------------------------
+
+
+def _card(row: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """The desktop route's code-carrying frame for ``row`` (the card's answer)."""
+    frame = {
+        "invite_id": row["invite_id"],
+        "decision": "admit",
+        "code": row["sas"],
+        "nonce": row["nonce"],
+    }
+    frame.update(extra)
+    return frame
+
+
+def _gate_the_decision_poll(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Hold the listener just before it starts polling for a decision.
+
+    The latch race is "an answer lands between the exhausting decline and the
+    listener's next 0.2 s poll"; holding the poll makes that gap as wide as the cell
+    needs instead of hoping a thread schedule reproduces it.
+    """
+    gate = threading.Event()
+    real = relay.RelayServer._await_pairing_decision  # noqa: SLF001
+
+    def gated(self: relay.RelayServer, pending: types.PendingPairing, window: float) -> Any:
+        gate.wait(60)
+        return real(self, pending, window)
+
+    monkeypatch.setattr(relay.RelayServer, "_await_pairing_decision", gated)
+    return gate
+
+
+def test_a_card_admit_must_name_its_shares_and_an_empty_list_grants_nothing(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-R1-1: a card answer's selection is EXPLICIT. Absent is refused (it used to
+    fall through to "every offered credential"); ``[]`` admits with zero grants and
+    no broker capability, with a real credential on offer."""
+    server_a, server_b, host, port = devices
+    _seed(server_a.root, "openai", {"refresh": "r", "access": "a", "email": "damian@example.com"})
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        row = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        assert [item["key"] for item in row["offer"]] == ["openai"], "the premise: an offer"
+        with pytest.raises(types.MeshRefusal) as excinfo:
+            server_a._ctl_pair_confirm(_card(row))  # noqa: SLF001 — no ``shares`` key
+        assert excinfo.value.code == "bad_request"
+        assert store.pair_decision(row["invite_id"], server_a.root) is None
+        reply = server_a._ctl_pair_confirm(_card(row, shares=[]))  # noqa: SLF001
+        assert reply["status"] == "sent" and reply["shares"] == []
+    finally:
+        thread.join(30)
+    assert "error" not in out, out.get("error")
+    member = store.load(record.network_id, server_a.root).member(server_b.identity.device_id)
+    assert member is not None and member.active
+    assert BROKER_CAPABILITY not in member.capabilities
+    document = placement_mod.PlacementDocument.load(
+        record.network_id, server_a.root, self_device=server_a.identity.device_id
+    )
+    assert document.entry("openai") is None, "an empty selection served a credential"
+
+
+def test_after_the_budget_is_spent_no_later_answer_is_recorded_on_any_ingress(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-R1-2 / M1: the exhausting decline is TERMINAL. A correct code (card) or a
+    legacy ``matched`` y/N arriving before the listener's next poll is refused and
+    overwrites nothing; the invite is consumed and nobody is admitted."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    gate = _gate_the_decision_poll(monkeypatch)
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        row = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        invite_id = row["invite_id"]
+        wrong = "000000" if row["sas"] != "000000" else "111111"
+        statuses = [
+            server_a._ctl_pair_confirm(_card(row, code=wrong, shares=[]))["status"]  # noqa: SLF001
+            for _ in range(3)
+        ]
+        assert statuses == ["sas_mismatch", "sas_mismatch", "refused"]
+        for late in (
+            _card(row, shares=[]),
+            {"invite_id": invite_id, "decision": "admit", "matched": True},
+        ):
+            with pytest.raises(types.MeshRefusal) as excinfo:
+                server_a._ctl_pair_confirm(late)  # noqa: SLF001
+            assert excinfo.value.code == "pairing_expired", late
+        decided = store.pair_decision(invite_id, server_a.root)
+        assert decided is not None and decided.decision == "decline"
+        assert decided.reason == "sas_mismatch", "the exhausting decline was overwritten"
+    finally:
+        gate.set()
+        thread.join(30)
+    assert isinstance(out.get("error"), types.MeshRefusal)
+    after = store.load(record.network_id, server_a.root)
+    assert after.member(server_b.identity.device_id) is None
+    assert after.invites[0].state == "consumed"
+
+
+def test_cleanup_after_a_re_park_leaves_the_new_ceremonys_card_and_decision(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-R1-3: an ending ceremony removes only ITS records. A second ceremony that
+    parked the same invite key (the retryable-refusal window) keeps its card and its
+    decision through the first one's cleanup."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    successor: dict[str, Any] = {}
+
+    def answer_then_be_replaced(
+        self: relay.RelayServer, pending: types.PendingPairing, window: float
+    ) -> types.PairDecision:
+        del window
+        # Another ceremony parks the same invite key and gets a decision before this
+        # one's cleanup runs. Built via ``from_json`` so the cell runs (and fails for
+        # the right reason) on a build without the ``ceremony`` field.
+        newer = dict(pending.to_json(), nonce="ee" * 16, ceremony="successor")
+        store.save_pending_pairing(types.PendingPairing.from_json(newer), self.root)
+        store.save_pair_decision(
+            types.PairDecision.from_json(
+                {
+                    "invite_id": pending.invite_id,
+                    "decision": "decline",
+                    "reason": "declined",
+                    "ceremony": "successor",
+                }
+            ),
+            self.root,
+        )
+        successor["invite_id"] = pending.invite_id
+        return types.PairDecision(invite_id=pending.invite_id, decision="decline")
+
+    monkeypatch.setattr(relay.RelayServer, "_await_pairing_decision", answer_then_be_replaced)
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    thread.join(30)
+    assert isinstance(out.get("error"), types.MeshRefusal)
+    deadline = time.time() + 10
+    while time.time() < deadline and server_a._pair_parked:  # noqa: SLF001
+        time.sleep(0.05)
+    assert server_a._pair_parked == 0  # noqa: SLF001 — both finallys have run
+    invite_id = successor["invite_id"]
+    card = store.pending_pairing(invite_id, server_a.root)
+    assert card is not None and card.nonce == "ee" * 16, "the new ceremony's card was removed"
+    decided = store.pair_decision(invite_id, server_a.root)
+    assert decided is not None, "the new ceremony's decision was removed"
+
+
+def test_both_inviter_stages_share_one_absolute_deadline(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-R1-4: stage 2 cannot outlive stage 1. The deadline is fixed once, when the
+    ceremony starts; the stage-2 flip used to start a fresh window. An invite that
+    outlives the ten-minute ceiling is the case where the two differ (with less left
+    than the ceiling, both windows end at the invite's own expiry)."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    state = store.load_secrets(record.network_id, server_a.root)
+    minted = invite_mod.mint(record, state.secret, role="drive", ttl_s=3600.0)
+    record.invites.append(minted.record)
+    store.save(record, server_a.root)
+    token, envelope = minted.token, minted.envelope
+    release, _typed = _hold_the_joiner(monkeypatch)
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        stage_one = _wait_row(server_a, types.PAIR_STAGE_AWAITING_JOINER)
+        time.sleep(1.5)  # the joiner's person takes a moment to type
+        release.set()
+        stage_two = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        assert stage_two["expires_at"] == pytest.approx(stage_one["expires_at"], abs=0.01)
+        server_a._ctl_pair_confirm(_card(stage_two, decision="decline", code=""))  # noqa: SLF001
+    finally:
+        release.set()
+        thread.join(30)
+    assert isinstance(out.get("error"), types.MeshRefusal)
+
+
+def test_four_real_ceremonies_fill_the_cap_and_a_fifth_is_busy(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: the cap counts REAL parked ceremonies (the counter is never set by hand):
+    four joins held in stage 1 take four slots, the fifth is ``pairing_busy`` and
+    spends nothing, and every slot frees when the four end."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    minted = [
+        _mint_invite(server_a, store.load(record.network_id, server_a.root)) for _ in range(5)
+    ]
+    release, _typed = _hold_the_joiner(monkeypatch)
+    joins = [
+        _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+        for token, envelope in minted[:4]
+    ]
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline and server_a._pair_parked < 4:  # noqa: SLF001
+            time.sleep(0.05)
+        assert server_a._pair_parked == relay.PAIR_PARKED_CEREMONY_CAP  # noqa: SLF001
+        token, envelope = minted[4]
+        with pytest.raises(types.MeshRefusal) as excinfo:
+            _join(server_b, host=host, port=port, token=token, envelope=envelope)
+        assert excinfo.value.code == "pairing_busy"
+        fifth = store.load(record.network_id, server_a.root).invite(envelope.invite_id)
+        assert fifth is not None and fifth.state == "minted" and fifth.attempts == 0
+    finally:
+        # End the four: let the joiners type, then decline each stage-2 card.
+        release.set()
+        declined: set[str] = set()
+        deadline = time.time() + 30
+        while time.time() < deadline and any(thread.is_alive() for thread, _out in joins):
+            for row in server_a._ctl_pair_pending({}):  # noqa: SLF001 — stage 2 only
+                if row["invite_id"] in declined:
+                    continue
+                server_a._ctl_pair_confirm(_card(row, decision="decline", code=""))  # noqa: SLF001
+                declined.add(row["invite_id"])
+            time.sleep(0.05)
+        for thread, _out in joins:
+            thread.join(5)
+    deadline = time.time() + 10
+    while time.time() < deadline and server_a._pair_parked:  # noqa: SLF001
+        time.sleep(0.05)
+    assert server_a._pair_parked == 0  # noqa: SLF001
+
+
+def test_a_legacy_decline_naming_sas_mismatch_consumes_as_before(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N2: the listener believes ``sas_mismatch`` only when the budget is spent. A
+    legacy y/N frame that copies ``reason: sas_mismatch`` is a decline: it consumes
+    the invite and spends no attempt, as it did before the card path existed."""
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    release, _typed = _hold_the_joiner(monkeypatch)
+    release.set()
+    thread, out = _join_in_thread(server_b, host=host, port=port, token=token, envelope=envelope)
+    try:
+        row = _wait_row(server_a, types.PAIR_STAGE_AWAITING_CONFIRMATION)
+        server_a._ctl_pair_confirm(  # noqa: SLF001
+            {"invite_id": row["invite_id"], "decision": "decline", "reason": "sas_mismatch"}
+        )
+    finally:
+        thread.join(30)
+    assert isinstance(out.get("error"), types.MeshRefusal)
+    invite = store.load(record.network_id, server_a.root).invite(row["invite_id"])
+    assert invite is not None and invite.state == "consumed", "a decline was retried"
+    assert invite.attempts == 0, "a decline spent an attempt"

@@ -942,7 +942,9 @@ def pair_ready_frame(*, req: int, typed_sas: str) -> dict[str, Any]:
     return {"op": "net_pair_ready", "req": req, "sas": typed_sas}
 
 
-def pair_abort_frame(*, req: int, reason: str, detail: str = "") -> dict[str, Any]:
+def pair_abort_frame(
+    *, req: int, reason: str, detail: str = "", spent: bool = False
+) -> dict[str, Any]:
     """The inviter's refusal of a pairing, with the SENTENCE it refused with.
 
     ``reason`` is the machine code and stays the contract; ``detail`` is the refusing
@@ -960,6 +962,12 @@ def pair_abort_frame(*, req: int, reason: str, detail: str = "") -> dict[str, An
     text = " ".join(str(detail or "").split())[:PAIR_ABORT_DETAIL_MAX]
     if text:
         frame["detail"] = text
+    if spent:
+        # ADDITIVE, AND ONLY WHEN TRUE (QA round 1, Q3): the refusing device consumed
+        # the invite, so the joiner's remedy must not say "run it again with the SAME
+        # token". ``reason`` stays the contract an older joiner keys on; a build that
+        # does not know this key keeps its old (retry) sentence.
+        frame["spent"] = True
     return frame
 
 
@@ -1221,7 +1229,16 @@ PAIRING_REMEDIES: dict[str, str] = {
 }
 
 
-def refusal_from_pairing(reason: str, *, detail: str = "") -> PairingRefusal:
+#: The remedy when the refusing device says the invite is SPENT (``spent`` on the
+#: abort frame): the SAME-token advice of ``sas_mismatch``/``timeout`` would send the
+#: person round a loop the inviter has already closed.
+PAIRING_SPENT_REMEDY = (
+    "this invitation is used up: mint a fresh invite on the inviting device and pair "
+    "with that one"
+)
+
+
+def refusal_from_pairing(reason: str, *, detail: str = "", spent: bool = False) -> PairingRefusal:
     """Map a pair-phase abort reason onto a refusal a CLI can print.
 
     The sentence is composed from three things, in this order: what the refusing
@@ -1247,6 +1264,8 @@ def refusal_from_pairing(reason: str, *, detail: str = "") -> PairingRefusal:
     if remote and remote not in base:
         base = f"{base} — {remote}"
     remedy = PAIRING_REMEDIES.get(reason, "")
+    if spent and reason in ("sas_mismatch", "timeout"):
+        remedy = PAIRING_SPENT_REMEDY
     return PairingRefusal(reason, f"{base}. {remedy}" if remedy else base)
 
 

@@ -21,7 +21,9 @@ themselves to verify (design §3.4-B, deferred) and app-required invites (out of
 
 WHAT AN ATTESTATION BINDS (security review 60334a0b4c12, A4). The table key is
 ``(SCOPE, "<side>:<invite_id>:<nonce>", act)`` and the content is ``{"code": [code],
-"shares": sorted(shares), "deadline": [<int seconds>]}``:
+"shares": sorted(shares), "deadline": [<int seconds>]}``, where an inviter admit
+MUST carry an explicit ``shares`` list (``[]`` shares nothing; absent is refused on the
+frame, on the HTTP body and by the relay — S-R1-1) and every other answer carries none:
 - ``side`` + ``invite_id``: which card;
 - ``nonce``: the per-ceremony, per-stage tag on the card row
   (``types.new_pairing_nonce``) — a retry of the invite, or the inviter's stage-1 →
@@ -92,6 +94,22 @@ def content(code: str, shares: list[str] | None, deadline: int) -> dict[str, lis
     }
 
 
+def shares_shape_ok(side: str, act: str, shares: Any) -> bool:
+    """Whether ``shares`` has the one shape this answer may carry (S-R1-1).
+
+    An INVITER's admit (``respond``) must carry an explicit list — possibly empty,
+    which shares nothing — because that list is exactly what the relay will serve:
+    ``content`` binds ``[]`` for both "empty" and "absent", so if absence were allowed
+    here an attestation of "share nothing" could be spent by a body that omitted the
+    key and fell through to a default. Every other answer (a decline, any joiner
+    answer) shares nothing, so it carries no list or an empty one. The route applies
+    this same function to the body, so the app's frame and the HTTP body agree.
+    """
+    if side == "inviter" and act == "respond":
+        return isinstance(shares, list) and all(isinstance(key, str) for key in shares)
+    return shares is None or shares == []
+
+
 def validate_frame(frame: dict[str, Any]) -> app_attest.AttestedRow | str:
     """``app_attest.FrameValidator`` for ``{"op": "mesh_pairing_attest", ...}``.
 
@@ -112,10 +130,9 @@ def validate_frame(frame: dict[str, Any]) -> app_attest.AttestedRow | str:
     elif code not in (None, ""):
         return "bad-frame"
     shares = frame.get("shares")
-    if shares is None:
-        shares = []
-    if not (isinstance(shares, list) and all(isinstance(key, str) for key in shares)):
+    if not shares_shape_ok(side, act, shares):
         return "bad-frame"
+    shares = list(shares or [])
     deadline = frame.get("deadline")
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
         return "bad-frame"

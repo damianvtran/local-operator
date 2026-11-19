@@ -12,10 +12,13 @@ into card rows and carries a card's answer to the one place that decides it:
 - joiner side (``PendingJoin``, written by the ``join --park`` process): the answer is
   written through ``network.pairing_answers``, the same writer the CLI uses.
 
-READS NEVER WRITE. Listing is folded from the relay (``net_pair_pending
-include_stages``) or, when no relay answers, from the files — read-only, unlike
-``store.pending_pairings`` which clears expired rows — the same discipline as
-``approval_rows``. Nothing here creates a directory on a machine in no network.
+READS NEVER WRITE (security review round 1, S-R1-5). Listing reads the parked
+records straight from their files and changes nothing: no expiry pruning (the relay's
+``net_pair_pending`` goes through ``store.pending_pairings``, which deletes expired rows
+— so the listing no longer asks it), no quarantine of an unreadable file, no directory
+created on a machine in no network. Pruning stays with the record owners: the relay's
+listener and ``lop network confirm`` for inviter rows, the parker for joiner rows. The
+relay is the only writer of inviter rows, so its files ARE its view.
 
 THE ANSWER IS GATED BY AN APP ATTESTATION (``network.pairing_attest``), consumed
 BEFORE anything is compared, so a bearer-only POST (an agent) is 403
@@ -44,12 +47,33 @@ JOINER_WAITING = "waiting_for_other_device"
 _OFFER_KEYS = ("key", "label", "kind", "share")
 
 
+def _joins_from_files(root: Path | None) -> list[PendingJoin]:
+    """Every parked join record on disk, oldest first, clearing and quarantining NOTHING.
+
+    ``store.pending_joins`` reads through ``store.pending_join``, which quarantines a
+    malformed file — a write. The card listing and the answer path are reads up to the
+    answer itself, so they skip such a file instead (S-R1-5).
+    """
+    from local_operator.network import store
+
+    found: list[PendingJoin] = []
+    for path in sorted(store.pending_dir(root).glob("*.joining.json")):
+        data = store._read_json(path)  # noqa: SLF001 — read-only sibling of pending_join
+        if not isinstance(data, dict):
+            continue
+        try:
+            found.append(PendingJoin.from_json(data))
+        except (TypeError, ValueError):
+            continue
+    return sorted(found, key=lambda row: row.issued_at)
+
+
 def _bound_store(root: Path | None) -> Any:
     """The store calls ``pairing_answers`` makes, bound to THIS backend's root."""
     from local_operator.network import store
 
     return SimpleNamespace(
-        pending_joins=lambda: store.pending_joins(root),
+        pending_joins=lambda: _joins_from_files(root),
         join_answer=lambda invite_id: store.join_answer(invite_id, root),
         save_join_answer=lambda answer: store.save_join_answer(answer, root),
     )
@@ -80,32 +104,16 @@ def _inviter_from_files(root: Path | None, now: float) -> list[PendingPairing]:
 
 
 def inviter_records(root: Path | None, *, now: float | None = None) -> list[PendingPairing]:
-    """Every open inviter ceremony, both stages: the relay's view, else the files."""
+    """Every open inviter ceremony, both stages, read from the relay's own files.
+
+    Files, not ``net_pair_pending``: that op lists through ``store.pending_pairings``,
+    which deletes expired rows, and a GET must not mutate (S-R1-5). An expired row is
+    simply not shown; the relay's listener removes it when its ceremony ends.
+    """
     moment = time.time() if now is None else now
     if not _has_pending_dir(root):
         return []
-    from local_operator.server.utils import desktop_mesh
-
-    try:
-        live = desktop_mesh._call(  # noqa: SLF001 — the plane's one relay client
-            root, "net_pair_pending", timeout=5.0, include_stages=True
-        )
-    except MeshRefusal:
-        live = None
-    rows = live.get("value") if isinstance(live, dict) else None
-    if not isinstance(rows, list):
-        return _inviter_from_files(root, moment)
-    out: list[PendingPairing] = []
-    for data in rows:
-        if not isinstance(data, dict):
-            continue
-        try:
-            row = PendingPairing.from_json(data)
-        except (TypeError, ValueError):
-            continue
-        if row.is_open(moment):
-            out.append(row)
-    return out
+    return _inviter_from_files(root, moment)
 
 
 def joiner_records(root: Path | None) -> list[PendingJoin]:
@@ -128,6 +136,17 @@ def first_open_pairing_id(root: Path | None) -> str | None:
 
 
 def _offers(state: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    """The card's offer block, in ONE vocabulary for both sides (QA round 1, Q2).
+
+    The inviter's record says ``sent`` for "a list went out", empty or not, while the
+    joiner's says ``listed``/``empty``; the card reports the joiner's words for both,
+    so "nothing offered" reads ``empty`` on either card and a renderer keys on the
+    state rather than on ``items.length``. Every other state passes through.
+    """
+    from local_operator.network.credentials import offers as offers_mod
+
+    if state == offers_mod.OWNER_SENT:
+        state = offers_mod.OFFER_LISTED if items else offers_mod.OFFER_EMPTY
     return {
         "state": state,
         "items": [{key: item.get(key) for key in _OFFER_KEYS} for item in items or []],
@@ -200,8 +219,13 @@ def pairing_rows(root: Path | None, service: Any) -> dict[str, Any]:
                 "network_id": join.network_id,
                 "network_name": join.network_name,
                 "peer_device_id": join.inviter_device_id,
-                "peer_name": join.inviter_name,
-                "role": "",
+                # The inviter's device NAME (QA round 1, Q1): new tokens carry it
+                # (``invite.mint``); a token from an older inviter carried its id in
+                # this field, which reads as no name at all rather than as a name.
+                "peer_name": (
+                    join.inviter_name if join.inviter_name != join.inviter_device_id else ""
+                ),
+                "role": join.role,
                 "code": join.sas,
                 "fingerprint": join.fingerprint,
                 "offers": _offers(join.offer_state, list(join.offers)),
@@ -269,6 +293,15 @@ def answer(
         raise MeshRefusal("no_pending_pairing", "that pairing is no longer waiting here")
     if not nonce or nonce != row["nonce"]:
         raise MeshRefusal("pairing_expired", "that pairing card is out of date")
+    if not pairing_attest.shares_shape_ok(side, pairing_attest.act_for(decision), shares):
+        # BEFORE THE ATTESTATION IS SPENT (S-R1-1): an inviter admit names its share
+        # list explicitly (``[]`` = share nothing); any other answer names none. The
+        # app's frame is held to the same shape, so an honest app never meets this.
+        raise MeshRefusal(
+            "bad_request",
+            "an inviter's approval must list the credentials to share (an empty list "
+            "shares none), and no other answer may list any",
+        )
     if side == "inviter" and row["stage"] != PAIR_STAGE_AWAITING_CONFIRMATION:
         raise MeshRefusal("pairing_not_ready", "the other device has not typed this code yet")
     now = time.time()
@@ -295,8 +328,10 @@ def answer(
             "nonce": nonce,
             "answered_by": "desktop",
         }
-        if shares is not None:
-            fields["shares"] = list(shares)
+        if decision == "admit":
+            # EXACTLY the attested list, always present: the relay refuses a code
+            # answer without one rather than defaulting to the whole offer.
+            fields["shares"] = list(shares or [])
         reply = desktop_mesh._call(root, "net_pair_confirm", timeout=10.0, **fields)  # noqa: SLF001
         status = str(reply.get("status") or "sent")
         left = int(reply.get("attempts_left") or 0)

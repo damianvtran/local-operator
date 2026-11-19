@@ -163,3 +163,92 @@ def test_the_tool_copy_names_the_app_and_no_confirm_command() -> None:
     assert "lop network join --confirm" not in text
     assert "512s left" in text
     assert "lop network join --confirm" not in (net_tool.__doc__ or "")
+
+
+def _bound(root: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        pending_joins=lambda: store.pending_joins(root),
+        join_answer=lambda i: store.join_answer(i, root),
+        save_join_answer=lambda a: store.save_join_answer(a, root),
+    )
+
+
+def test_card_strikes_are_forgotten_when_the_ceremony_ends(root: Path) -> None:
+    """N4: the strikes map shrinks. An answered ceremony's entry goes with the answer,
+    and an entry for a ceremony that is no longer parked goes on the next answer."""
+    pairing_answers._strikes.clear()  # noqa: SLF001 — process-wide; start from empty
+    first = _park(root, invite_id="i_first")
+    outcome = pairing_answers.answer_card(
+        _bound(root),
+        first.invite_id,
+        decision="admit",
+        code="000000",
+        nonce=first.nonce,
+        answered_by="desktop",
+    )
+    assert outcome.status == "sas_mismatch"
+    assert (first.invite_id, first.nonce) in pairing_answers._strikes  # noqa: SLF001
+    outcome = pairing_answers.answer_card(
+        _bound(root),
+        first.invite_id,
+        decision="admit",
+        code=CODE,
+        nonce=first.nonce,
+        answered_by="desktop",
+    )
+    assert outcome.status == "waiting_for_other_device"
+    assert pairing_answers._strikes == {}, "an answered ceremony kept its strikes"  # noqa: SLF001
+
+    gone = _park(root, invite_id="i_gone")
+    pairing_answers.answer_card(
+        _bound(root),
+        gone.invite_id,
+        decision="admit",
+        code="000000",
+        nonce=gone.nonce,
+        answered_by="desktop",
+    )
+    store.clear_pending_join(gone.invite_id, root)  # its window closed / parker ended
+    other = _park(root, invite_id="i_other")
+    pairing_answers.answer_card(
+        _bound(root),
+        other.invite_id,
+        decision="admit",
+        code="000000",
+        nonce=other.nonce,
+        answered_by="desktop",
+    )
+    assert set(pairing_answers._strikes) == {(other.invite_id, other.nonce)}  # noqa: SLF001
+    pairing_answers._strikes.clear()  # noqa: SLF001
+
+
+def test_a_spent_invite_refusal_drops_the_same_token_advice() -> None:
+    """Q3: when the inviting device consumed the invite (``spent`` on the abort frame)
+    the remedy is a fresh invite, not "run it again with the SAME token"."""
+    from local_operator.network import handshake as hs_mod
+
+    frame = hs_mod.pair_abort_frame(req=0, reason="sas_mismatch", detail="attempts spent")
+    assert "spent" not in frame, "the key is additive and only present when true"
+    assert hs_mod.pair_abort_frame(req=0, reason="sas_mismatch", spent=True)["spent"] is True
+    retry = str(hs_mod.refusal_from_pairing("sas_mismatch", detail="x"))
+    used = str(hs_mod.refusal_from_pairing("sas_mismatch", detail="x", spent=True))
+    assert "SAME token" in retry
+    assert "SAME token" not in used and "mint a fresh invite" in used
+
+
+def test_a_minted_invite_names_the_inviter_by_its_device_name() -> None:
+    """Q1: the envelope carries the inviter's own member-row name when no listener name
+    was set, so the joiner's card shows a name rather than a device id."""
+    from local_operator.network import invite as invite_mod
+    from local_operator.network import wire
+
+    record = types.NetworkRecord(network_id="n_" + "5" * 24, name="home-net")
+    record.self_device_id = "d_" + "e" * 32
+    record.members.append(types.MemberRecord(device_id=record.self_device_id, name="studio-mac"))
+    material = wire.b64u(b"\x05" * 32)
+    minted = invite_mod.mint(record, material, role="drive")
+    assert minted.envelope.inviter_name == "studio-mac"
+    record.members.clear()
+    assert invite_mod.mint(record, material, role="drive").envelope.inviter_name == (
+        record.self_device_id
+    )

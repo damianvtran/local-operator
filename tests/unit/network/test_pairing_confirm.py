@@ -152,7 +152,19 @@ def test_a_decline_through_the_relay_never_admits(
         decision = store.pair_decision("i_abc123", root)
         assert decision is not None and decision.matched is False
 
-        # And an "admit that did not match" is impossible by construction.
+        # THE DECISION IS TERMINAL (security review round 1, S-R1-2): a second answer
+        # to the same ceremony is refused and the decline stands.
+        with pytest.raises(types.MeshRefusal) as excinfo:
+            server._ctl_pair_confirm(  # noqa: SLF001
+                {"invite_id": "i_abc123", "decision": "admit", "matched": True}
+            )
+        assert excinfo.value.code == "pairing_expired"
+        kept = store.pair_decision("i_abc123", root)
+        assert kept is not None and kept.decision == "decline"
+
+        # And an "admit that did not match" is impossible by construction (a fresh
+        # ceremony: the listener clears the decision when one ends).
+        store.clear_pair_decision("i_abc123", root)
         server._ctl_pair_confirm(  # noqa: SLF001
             {"invite_id": "i_abc123", "decision": "admit", "matched": True, "answered_by": "human"}
         )

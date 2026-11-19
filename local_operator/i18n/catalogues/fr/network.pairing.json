@@ -1,7 +1,7 @@
 {
-  "network.pairing.refusal.expired": "Cette association n'est plus ouverte : rien n'a été approuvé. Lancez une nouvelle association depuis l'autre appareil.",
-  "network.pairing.refusal.mismatch": "{count, plural, =0 {Ce code ne correspond pas à celui de l'autre appareil, et il ne reste plus aucune tentative.} one {Ce code ne correspond pas à celui de l'autre appareil. Il reste # tentative.} other {Ce code ne correspond pas à celui de l'autre appareil. Il reste # tentatives.}}",
-  "network.pairing.refusal.needs_app": "Pour approuver l'association d'un appareil ici, il faut l'application Local Operator signée sur un Mac. Rien n'a été approuvé. Vous pouvez toujours répondre depuis un terminal sur cet appareil.",
-  "network.pairing.refusal.no_pending": "Aucun appareil n'attend de s'associer à celui-ci avec cette invitation.",
-  "network.pairing.refusal.not_ready": "L'autre appareil n'a pas encore saisi le code de cet appareil : il n'y a donc rien à confirmer. Attendez qu'il le fasse, puis réessayez."
+  "network.pairing.refusal.expired": "Cet appairage n’est plus ouvert : rien n’a été approuvé. Lancez un nouvel appairage depuis l’autre appareil.",
+  "network.pairing.refusal.mismatch": "{count, plural, =0 {Ce code ne correspond pas à celui de l’autre appareil, et il ne reste plus aucune tentative.} one {Ce code ne correspond pas à celui de l’autre appareil. Il reste # tentative.} other {Ce code ne correspond pas à celui de l’autre appareil. Il reste # tentatives.}}",
+  "network.pairing.refusal.needs_app": "Pour approuver ici l’appairage d’un appareil, il faut l’application Local Operator signée sur un Mac. Rien n’a été approuvé. Vous pouvez toujours répondre depuis un terminal sur cet appareil.",
+  "network.pairing.refusal.no_pending": "Aucun appareil n’attend d’être appairé à celui-ci avec cette invitation.",
+  "network.pairing.refusal.not_ready": "L’autre appareil n’a pas encore saisi le code de cet appareil : il n’y a donc rien à confirmer. Attendez qu’il le fasse, puis réessayez."
 }

@@ -134,9 +134,14 @@ and `lop tunnel setup --json`, not mesh admission.
    the OTHER device shows. On the joining device the person types the inviter's code;
    once the inviter's card has the joiner's transcription, the person there types the
    joiner's code and approves (the share list can only be reduced). Nothing needs a
-   terminal. A wrong code keeps the card open and says how many attempts are left
-   (three per invite, shared with every other way of answering); the window is what is
-   left of the invite, at most ten minutes. Answering a card needs the signed app on
+   terminal. A wrong code keeps the card open and says how many attempts are left.
+   On the inviting device that is the invite's own budget of three, which wrong
+   transcriptions on the wire spend too; on the joining device it is the card's own
+   three strikes, which `lop network join --confirm` does not share and a restart of
+   `lop serve` resets. Once an answer has decided the pairing, or the attempts are
+   spent, every later answer is refused. The window is what is left of the invite, at
+   most ten minutes, counted once from when the pairing started: both stages of the
+   inviting card share that one deadline. Answering a card needs the signed app on
    a Mac; on another host the card shows the code but cannot be answered there
    (`answer_unavailable: "unsupported_host"`), and the terminal fallback below applies.
 

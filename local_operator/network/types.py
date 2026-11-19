@@ -1577,7 +1577,8 @@ class MemberRecord:
 #: The two stages of an INVITER's pairing record (the Mesh approvals card, design §3.1).
 #: ``awaiting_joiner``: the ceremony is parked but the joiner's person has not yet
 #: typed this device's code there, so the inviter's person has nothing to answer
-#: (the card shows the code and a Decline only). ``awaiting_confirmation``: the
+#: (the card shows the code; every answer to it is refused ``pairing_not_ready``
+#: and expiry ends it). ``awaiting_confirmation``: the
 #: joiner's transcription arrived and matched; this side's person may now answer.
 #: A record written before stages existed reads as ``awaiting_confirmation``, which
 #: is exactly what it was.
@@ -1655,6 +1656,13 @@ class PendingPairing:
     #: Per-ceremony, per-stage freshness tag an app attestation binds
     #: (:func:`new_pairing_nonce`). ``""`` on a pre-schema-3 record.
     nonce: str = ""
+    #: WHICH CEREMONY wrote this record: one value for both stages, minted once by the
+    #: pair listener (security review round 1, S-R1-3). The record is keyed by invite
+    #: only, and a retryable refusal releases the invite BEFORE the refusing thread's
+    #: cleanup runs, so a second ceremony can park the same key in between; cleanup
+    #: removes a record (and a :class:`PairDecision`) only when this matches its own.
+    #: ``""`` on a record from before this field.
+    ceremony: str = ""
     schema: int = 3
 
     def seconds_left(self, now: float | None = None) -> float:
@@ -1695,6 +1703,12 @@ class PairDecision:
     #: this and INTERSECTS it with the offer actually sent, so an out-of-band write
     #: cannot widen the ceremony either.
     shares: list[str] = field(default_factory=list)
+    #: The :attr:`PendingPairing.ceremony` this answers, stamped by the relay from
+    #: the live record it answered under the record lock. The decision poll ignores a
+    #: decision for ANOTHER ceremony, the terminal-decision latch refuses a second
+    #: answer to the same one, and cleanup removes only its own. ``""`` = an
+    #: out-of-band or pre-field write, read as "the ceremony parked now".
+    ceremony: str = ""
     schema: int = 2
 
     def to_json(self) -> dict[str, Any]:
@@ -1779,6 +1793,9 @@ class PendingJoin:
     #: (:func:`new_pairing_nonce`); ``""`` on a record parked by an older build,
     #: which the Mesh approvals card then shows but cannot answer.
     nonce: str = ""
+    #: The invite's role, from the token's envelope, so the joiner's card can say
+    #: "as <role>" (QA round 1, Q1). ``""`` on a record parked by an older build.
+    role: str = ""
     schema: int = 2
 
     def seconds_left(self, now: float | None = None) -> float:

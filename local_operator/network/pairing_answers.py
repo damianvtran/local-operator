@@ -16,7 +16,9 @@ the other screen correctly. The comparison that decides is the inviter's, on the
 nothing to the peer and leaves the ceremony open.
 
 CARD STRIKES. The card counts its own wrong codes per ceremony (``PAIR_CARD_STRIKES``)
-and declines at the bound, so the joiner card behaves like the inviter's. The count is
+and declines at the bound, so the joiner card behaves like the inviter's. They are the
+CARD's strikes only: ``lop network join --confirm`` keeps its own retry rule, and the
+count is forgotten when the ceremony ends (answered, declined, or no longer parked). The count is
 in THIS process's memory, deliberately: it has no security value (this device already
 knows the code), and writing it into the ``PendingJoin`` file would race the parker,
 which rewrites that same file with its outcome. A ``lop serve`` restart resets it.
@@ -102,6 +104,22 @@ class CardOutcome:
     attempts_left: int
 
 
+def _prune_strikes(
+    live: set[tuple[str, str]] | None = None, *, ended: tuple[str, str] | None = None
+) -> None:
+    """Forget the strikes of ceremonies that are over (review round 1, N4).
+
+    ``live`` is every ``(invite_id, nonce)`` still parked and answerable; ``ended`` is
+    the ceremony this call just answered for good. Without this the map grew by one
+    entry per wrongly-answered joiner ceremony for the life of ``lop serve``.
+    """
+    with _strikes_lock:
+        for key in [
+            key for key in _strikes if (live is not None and key not in live) or key == ended
+        ]:
+            del _strikes[key]
+
+
 def strikes_left(invite_id: str, nonce: str) -> int:
     with _strikes_lock:
         return max(0, PAIR_CARD_STRIKES - _strikes.get((invite_id, nonce), 0))
@@ -133,7 +151,9 @@ def answer_card(
         raise MeshRefusal(
             "no_pending_pairing", "no pairing is parked on this device for that invite"
         )
-    live = {r.invite_id for r in live_parked_joins(store, alive=alive)}
+    parked = live_parked_joins(store, alive=alive)
+    live = {r.invite_id for r in parked}
+    _prune_strikes({(r.invite_id, r.nonce) for r in parked})
     if invite_id not in live or not row.nonce or nonce != row.nonce:
         raise MeshRefusal(
             "pairing_expired",
@@ -143,17 +163,23 @@ def answer_card(
         # Already answered (a double click, or the CLI got there first): report the
         # wait rather than writing a second answer the parker would never read.
         return CardOutcome("waiting_for_other_device", strikes_left(invite_id, nonce))
+    key = (invite_id, nonce)
     if decision != "admit":
+        left = strikes_left(invite_id, nonce)
         submit(store, row, decision="decline", code="", answered_by=answered_by)
-        return CardOutcome("refused", strikes_left(invite_id, nonce))
+        _prune_strikes(ended=key)
+        return CardOutcome("refused", left)
     if not parked_code_matches(row, code):
         with _strikes_lock:
-            spent = _strikes.get((invite_id, nonce), 0) + 1
-            _strikes[(invite_id, nonce)] = spent
+            spent = _strikes.get(key, 0) + 1
+            _strikes[key] = spent
         left = max(0, PAIR_CARD_STRIKES - spent)
         if left == 0:
             submit(store, row, decision="decline", code="", answered_by=answered_by)
+            _prune_strikes(ended=key)
             return CardOutcome("refused", 0)
         return CardOutcome("sas_mismatch", left)
+    left = strikes_left(invite_id, nonce)
     submit(store, row, decision="admit", code=code, answered_by=answered_by)
-    return CardOutcome("waiting_for_other_device", strikes_left(invite_id, nonce))
+    _prune_strikes(ended=key)
+    return CardOutcome("waiting_for_other_device", left)
