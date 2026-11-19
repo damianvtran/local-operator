@@ -1004,8 +1004,6 @@ export type MessageParams = {
   "wire.login.bedrock.choice_default_prompt": { "count": string; "default": string };
   "wire.login.bedrock.choice_invalid": undefined;
   "wire.login.bedrock.choice_prompt": { "count": string };
-  "wire.login.bedrock.connected": { "label": string };
-  "wire.login.bedrock.connected_unverified": { "label": string; "reason": string };
   "wire.login.bedrock.context_unreadable": { "detail": string };
   "wire.login.bedrock.field_hint": undefined;
   "wire.login.bedrock.kind_assume_role": undefined;

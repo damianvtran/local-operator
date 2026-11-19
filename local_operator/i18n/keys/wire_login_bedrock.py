@@ -41,14 +41,6 @@ def choice_prompt(*, count: str) -> Msg:
     return Msg("wire.login.bedrock.choice_prompt", {"count": count})
 
 
-def connected(*, label: str) -> Msg:
-    return Msg("wire.login.bedrock.connected", {"label": label})
-
-
-def connected_unverified(*, label: str, reason: str) -> Msg:
-    return Msg("wire.login.bedrock.connected_unverified", {"label": label, "reason": reason})
-
-
 def context_unreadable(*, detail: str) -> Msg:
     return Msg("wire.login.bedrock.context_unreadable", {"detail": detail})
 

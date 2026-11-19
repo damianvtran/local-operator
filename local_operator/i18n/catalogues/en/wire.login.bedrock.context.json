@@ -39,16 +39,6 @@
     "role": "terminal prompt",
     "tone": "plain, short, actionable"
   },
-  "wire.login.bedrock.connected": {
-    "note": "{label} is a non-translated connection label like 'dev · us-east-1'.",
-    "role": "success message",
-    "tone": "plain, short, actionable"
-  },
-  "wire.login.bedrock.connected_unverified": {
-    "note": "{reason} is another full sentence.",
-    "role": "success message",
-    "tone": "plain, short, actionable"
-  },
   "wire.login.bedrock.context_unreadable": {
     "note": "{detail} is parser output in English; keep verbatim.",
     "role": "warning",

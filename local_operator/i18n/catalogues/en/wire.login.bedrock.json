@@ -7,8 +7,6 @@
   "wire.login.bedrock.choice_default_prompt": "Enter a number from 1 to {count} (empty for {default}): ",
   "wire.login.bedrock.choice_invalid": "Enter one of the listed numbers.",
   "wire.login.bedrock.choice_prompt": "Enter a number from 1 to {count} (empty to cancel): ",
-  "wire.login.bedrock.connected": "Amazon Bedrock connected: {label}.",
-  "wire.login.bedrock.connected_unverified": "Amazon Bedrock saved without verification: {label}. {reason}",
   "wire.login.bedrock.context_unreadable": "Your AWS configuration could not be read: {detail}",
   "wire.login.bedrock.field_hint": "Enter submits; Esc cancels Bedrock setup.",
   "wire.login.bedrock.kind_assume_role": "assumed role",
