@@ -1362,9 +1362,10 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/network/workset_transfer.py::_write_json_atomic",
         "os.replace",
-        "Publishes this call's mkstemp .tmp-* FILE over a bundle sidecar or a lop- "
-        "cloned/lop-arrived marker inside a repository's .git; os.replace rejects a "
-        "directory target.",
+        "Publishes this call's mkstemp .tmp-* FILE over a bundle sidecar, a lop- "
+        "cloned/lop-arrived marker or a lop-moved.json marker inside a repository's "
+        ".git, or a <config>/network/workset-departed/<sid>.json record; os.replace "
+        "rejects a directory target.",
     ),
     (
         "local_operator/network/workset_transfer.py::_write_json_atomic",
@@ -1391,8 +1392,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.rename",
         "No-replace publish of a freshly built clone/restore staging tree to a target "
         "that must not exist (renameat2 RENAME_NOREPLACE / lexists); cannot replace "
-        "or remove an existing directory, and primary_path_refusal keeps targets out "
-        "of dot-dirs and the config root.",
+        "or remove an existing directory. The target is a primary that passed "
+        "primary_path_refusal (no dot-dirs, not the config root), a path under it, or "
+        "a linked worktree git already registers for that primary.",
     ),
     (
         "local_operator/network/workset_transfer.py::_rmdir_quiet",
@@ -1416,15 +1418,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/network/workset_transfer.py::remove_own_clone",
         "shutil.rmtree",
-        "Rollback of a clone THIS move published: contained_path under home, a lop- "
-        "cloned.json marker naming this session, lease epoch and path; clone targets "
-        "pass primary_path_refusal, so never under the config root or sessions/.",
+        "Rollback of a clone THIS move published: the target must itself pass "
+        "primary_path_refusal with the config root forbidden (checked inside, before "
+        "any removal), so never under the config root or sessions/, and carry a lop- "
+        "cloned.json marker naming this session, lease epoch and path.",
     ),
     (
         "local_operator/network/workset_transfer.py::restore",
         "shutil.rmtree",
         "Removes only restore()'s own mkdtemp .lop-restore-* staging dir beside a "
-        "target that passed primary_path_refusal, when the publish did not happen.",
+        "target under a primary that passed primary_path_refusal, or beside a linked "
+        "worktree git already registers for it, when the publish did not happen.",
     ),
     (
         "local_operator/network/mobility.py::_arrival_resume_note",

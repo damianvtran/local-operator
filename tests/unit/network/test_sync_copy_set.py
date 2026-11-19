@@ -504,9 +504,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``CLONE_MARKER`` ('lop-cloned.json') and ``ARRIVED_MARKER`` ('lop-arrived.json') "
         "are written inside a moved REPOSITORY's git dir (``<repo>/.git/`` or a linked "
         "worktree's admin dir) on the destination, to recognise a clone/restore this "
-        "move made. They are never an entry of a session directory; the working-set "
-        "staging trees live under ``<config>/network/`` beside ``sessions/``, so session "
-        "sync neither carries nor excludes them.",
+        "move made. They are classified here, and never WRITTEN into a session "
+        "directory (the working-set staging trees live under ``<config>/network/`` "
+        "beside ``sessions/``), but they may travel inside a session tree that holds a "
+        "``.git/`` copy. That is inert: a marker is only ever READ at a primary vetted "
+        "by ``primary_path_refusal`` or a linked worktree git registers for it.",
     ),
     "local_operator/network/routing_sync.py": (
         1,

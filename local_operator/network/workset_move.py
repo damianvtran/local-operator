@@ -79,8 +79,11 @@ JOURNAL_VERSION: Final = 1
 #: Destination free-space rule (design §8.4): bundle + unpacked objects + checkout.
 FREE_SPACE_FACTOR: Final = 3
 
-_HEX64: Final = re.compile(r"^[0-9a-f]{64}$")
-_DIGEST: Final = re.compile(r"^sha256:([0-9a-f]{64})$")
+#: Anchored by ``fullmatch`` at every use, never ``match`` with ``$`` (security review
+#: #4245 round 6, S-4): ``$`` also matches before a trailing newline, so a digest
+#: ``sha256:<hex>\n`` would pass the shape check and only the hash compare refused it.
+_HEX64: Final = re.compile(r"[0-9a-f]{64}")
+_DIGEST: Final = re.compile(r"sha256:([0-9a-f]{64})")
 _SHA: Final = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 #: Next contiguous offset served per (session, lease, to_device, digest). A request at
@@ -741,7 +744,7 @@ def _prune_artifacts(out: Path, *, keep: Sequence[str]) -> None:
         return
     for child in children:
         stem = child.name.removesuffix(".json")
-        if not _HEX64.match(stem) or stem in wanted or child.is_symlink():
+        if not _HEX64.fullmatch(stem) or stem in wanted or child.is_symlink():
             continue
         try:
             child.unlink()
@@ -840,7 +843,7 @@ def serve_fetch(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) -
     journal, refusal = _authorised_journal(server, link, frame, session_id)
     if refusal is not None or journal is None:
         return refusal or _refused("refused", "no working set", session_id)
-    match = _DIGEST.match(str(frame.get("digest") or ""))
+    match = _DIGEST.fullmatch(str(frame.get("digest") or ""))
     staged = {str(a.get("digest")): n for n, a in (journal.get("artifacts") or {}).items()}
     if match is None or str(frame.get("digest")) not in staged:
         return _refused("unknown_item", "that artifact is not part of this move", session_id)
@@ -1386,7 +1389,7 @@ def destination_transfer(
         if art is None:
             continue
         digest = str(art.get("digest") or "")
-        if not _DIGEST.match(digest):
+        if not _DIGEST.fullmatch(digest):
             raise WorksetTransferRefused(
                 "working_set_transfer_failed", "the owner named a malformed artifact"
             )
@@ -1426,7 +1429,7 @@ def destination_transfer(
                         "working_set_transfer_failed", "the re-plan carried nothing"
                     )
                 digest = str(again.get("digest") or "")
-                if not _DIGEST.match(digest):
+                if not _DIGEST.fullmatch(digest):
                     raise WorksetTransferRefused(
                         "working_set_transfer_failed", "the owner named a malformed artifact"
                     )
@@ -1594,12 +1597,16 @@ def discard_incoming(root: Path | str, session_id: str, *, home: Path | None = N
     (``engine.remove_own_clone``); anything else stays.
     """
     if home is not None:
+        from local_operator.network import workset
         from local_operator.network import workset_transfer as engine
 
         try:
             record = _read_json(incoming_staging(root, session_id) / CLONED_JOURNAL) or {}
         except ValueError:
             record = {}
+        # S-3 (round 6): the same destination policy a clone target passed, re-read
+        # here so ``remove_own_clone`` vets every journal row itself.
+        roots = workset.restore_roots(Path(root))
         for clone in record.get("clones") or []:
             if not isinstance(clone, dict):
                 continue
@@ -1609,6 +1616,8 @@ def discard_incoming(root: Path | str, session_id: str, *, home: Path | None = N
                     str(clone.get("path") or ""),
                     session_id=str(clone.get("session_id") or ""),
                     lease_epoch=str(clone.get("lease_epoch") or ""),
+                    config_root=Path(root),
+                    roots=roots,
                 )
             except OSError:
                 logger.warning("workset: could not remove the clone this move made", exc_info=True)
@@ -1711,7 +1720,7 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
     if not waiting:
         # Every artifact is in a repository now; drop the bundles, keep the record.
         for child in directory.iterdir():
-            if _HEX64.match(child.name) or child.name.endswith(".part"):
+            if _HEX64.fullmatch(child.name) or child.name.endswith(".part"):
                 child.unlink(missing_ok=True)
     _plain_audit(
         server,

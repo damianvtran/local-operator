@@ -265,8 +265,9 @@ def test_s1c_only_a_clone_this_move_made_is_removed(
     other = rig.dst_home / "mine"
     git(tmp_path, "clone", "-q", str(rig.origin), str(other))  # the user's own, unmarked
 
-    assert not wt.remove_own_clone(rig.dst_home, "~/proj", session_id=SID, lease_epoch="e2")
-    assert not wt.remove_own_clone(rig.dst_home, "~/mine", session_id=SID, lease_epoch=EPOCH)
+    vet = {"config_root": tmp_path / "root", "roots": ("~",)}
+    assert not wt.remove_own_clone(rig.dst_home, "~/proj", session_id=SID, lease_epoch="e2", **vet)
+    assert not wt.remove_own_clone(rig.dst_home, "~/mine", session_id=SID, lease_epoch=EPOCH, **vet)
     assert (rig.dst_home / "proj").is_dir() and other.is_dir()
 
     staging = workset_move.incoming_staging(tmp_path / "root", SID)
@@ -284,6 +285,66 @@ def test_s1c_only_a_clone_this_move_made_is_removed(
     workset_move.discard_incoming(tmp_path / "root", SID, home=rig.dst_home)
     assert not (rig.dst_home / "proj").exists()
     assert other.is_dir()
+    assert not staging.exists()
+
+
+def _plant_marked_session(home: Path, rel: str) -> Path:
+    """A session directory that carries a forged ``.git/lop-cloned.json`` naming SID,
+    EPOCH and its own path — the half of the rollback check a peer can supply."""
+    target = home / rel.removeprefix("~/")
+    (target / ".git").mkdir(parents=True)
+    (target / "session.json").write_text("{}")
+    (target / ".git" / wt.CLONE_MARKER).write_text(
+        json.dumps({"session_id": SID, "lease_epoch": EPOCH, "path": rel})
+    )
+    return target
+
+
+def test_s3_remove_own_clone_refuses_a_marked_session_dir(tmp_path: Path) -> None:
+    """Security review #4245 round 6, S-3: a planted marker under ``sessions/`` is not
+    enough — ``remove_own_clone`` vets the path itself (red before the fix: True, and
+    the session directory was gone)."""
+    home = tmp_path / "home"
+    config = home / ".local-operator"
+    rel = "~/.local-operator/sessions/abc123"
+    session_dir = _plant_marked_session(home, rel)
+    assert wt.primary_path_refusal(home, rel, roots=("~",), forbid=[config])
+
+    removed = wt.remove_own_clone(
+        home, rel, session_id=SID, lease_epoch=EPOCH, config_root=config, roots=("~",)
+    )
+    assert removed is False
+    assert (session_dir / "session.json").is_file()
+
+    # The config root is refused even where it is not under a dot directory.
+    plain_config = home / "lopcfg"
+    plain_rel = "~/lopcfg/sessions/abc123"
+    plain_dir = _plant_marked_session(home, plain_rel)
+    assert not wt.remove_own_clone(
+        home,
+        plain_rel,
+        session_id=SID,
+        lease_epoch=EPOCH,
+        config_root=plain_config,
+        roots=("~",),
+    )
+    assert (plain_dir / "session.json").is_file()
+
+
+def test_s3_discard_incoming_never_removes_a_marked_session_dir(tmp_path: Path) -> None:
+    """The real caller: a ``cloned.json`` row naming a marked session directory under
+    the config root leaves it in place; the move's own staging is still swept."""
+    home = tmp_path / "home"
+    config = home / ".local-operator"
+    rel = "~/.local-operator/sessions/abc123"
+    session_dir = _plant_marked_session(home, rel)
+    staging = workset_move.incoming_staging(config, SID)
+    staging.mkdir(parents=True)
+    (staging / workset_move.CLONED_JOURNAL).write_text(
+        json.dumps({"clones": [{"path": rel, "session_id": SID, "lease_epoch": EPOCH}]})
+    )
+    workset_move.discard_incoming(config, SID, home=home)
+    assert (session_dir / "session.json").is_file()
     assert not staging.exists()
 
 
@@ -965,3 +1026,19 @@ def test_r6_a_crash_after_restore_is_resumed_as_idempotent(tmp_path: Path) -> No
         "~/proj/.worktrees/feat",
     )
     assert facts(rig.dst_home / "proj" / ".worktrees" / "feat") == facts(rig.worktree)
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r\n", "x"])
+def test_s4_digest_shapes_are_exact(suffix: str) -> None:
+    """Security review #4245 round 6, S-4: the artifact-name shape checks match the
+    whole name. ``$`` also matched before a trailing newline, so ``sha256:<hex>\\n``
+    passed the shape check and only the later hash compare refused it."""
+    hexdigest = "a" * 64
+    assert workset_move._DIGEST.fullmatch("sha256:" + hexdigest)
+    assert workset_move._HEX64.fullmatch(hexdigest)
+    assert not workset_move._DIGEST.fullmatch("sha256:" + hexdigest + suffix)
+    assert not workset_move._HEX64.fullmatch(hexdigest + suffix)
+    # The previous anchoring, kept as the measured contrast: it admitted "\n".
+    import re
+
+    assert (re.match(r"^[0-9a-f]{64}$", hexdigest + suffix) is not None) is (suffix == "\n")

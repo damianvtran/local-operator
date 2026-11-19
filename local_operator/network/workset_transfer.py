@@ -141,6 +141,11 @@ _CLONE_TEST_CONFIG: tuple[str, ...] = ()
 #: ``<worktree git-dir>/lop-arrived.json`` on a worktree ``restore`` published. They
 #: name the session and move, so a rollback removes only a clone THIS move made and a
 #: retry recognises its own earlier work instead of reporting a conflict or a duplicate.
+#: Session sync classifies both names (``test_sync_copy_set``): no lop code writes one
+#: into a session directory, yet one may travel inside a session tree that holds a
+#: ``.git/`` copy, so a marker is only ever READ at a primary that passed
+#: ``primary_path_refusal`` (or a linked worktree git registers for it) and never
+#: trusted on its own (security review #4245 round 6, S-2/S-3).
 CLONE_MARKER: Final = "lop-cloned.json"
 ARRIVED_MARKER: Final = "lop-arrived.json"
 #: Where an arrival fetches the bundle's snapshot refs (review N1). NOT ``REF_ROOT``:
@@ -1481,13 +1486,36 @@ def _clone_marker(target: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def remove_own_clone(home: Path, home_rel: str, *, session_id: str, lease_epoch: str) -> bool:
+def remove_own_clone(
+    home: Path,
+    home_rel: str,
+    *,
+    session_id: str,
+    lease_epoch: str,
+    config_root: Path,
+    roots: Sequence[str],
+) -> bool:
     """Rollback half of S1(c): remove a primary ONLY if this move's W1 cloned it.
 
     The marker must name this session AND this lease epoch AND this path: a clone an
     earlier, committed move made (a different epoch) or any tree without the marker
     is never touched. Returns whether it removed the tree.
+
+    WHY IT RE-VETS THE PATH (security review #4245 round 6, S-3). The only caller
+    reads ``home_rel`` from the move's own ``cloned.json``, which session sync cannot
+    write, and W1 cloned only paths that passed ``primary_path_refusal``. That is two
+    layers held by the CALLER, while the marker half is peer-suppliable (a synced
+    session tree may carry a ``.git/lop-cloned.json``). ``contained_path`` alone admits
+    dot-components, so a forged journal row naming ``~/.local-operator/sessions/<id>``
+    with a planted marker would have been removed. This function therefore enforces
+    its own allow-list reason: the target must pass ``primary_path_refusal`` with the
+    config root forbidden — the same test a clone target had to pass — before anything
+    is removed. ``config_root``/``roots`` are required so no caller can skip it. A
+    narrowed ``mesh.move.working_set_roots`` since the clone leaves the tree in place:
+    a rollback may only ever under-remove.
     """
+    if primary_path_refusal(home, home_rel, roots=roots, forbid=[config_root]):
+        return False
     try:
         target = contained_path(home, home_rel)
     except ContainmentError:
