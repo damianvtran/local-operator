@@ -23,7 +23,9 @@ Behaviour by model id / prompt (so negative paths are reproducible):
 * model id containing ``denied``  -> 403 ``AccessDeniedException`` "You don't
   have access to the model with the specified model ID."
 * model id containing ``iamdeny`` -> 403 ``AccessDeniedException`` naming a
-  ``foundation-model/`` resource ARN (an IAM policy scoped to other models)
+  ``foundation-model/`` resource ARN "because no identity-based policy
+  allows" it (the real IAM shape, which names the ARN even when the identity
+  has no Bedrock permission at all)
 * model id containing ``missing`` -> 404 ``ResourceNotFoundException``
 * model id containing ``throttle`` -> 429 ``ThrottlingException``
 * prompt containing ``MIDSTREAM`` -> a text delta, then an exception frame
@@ -199,7 +201,9 @@ def make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                         "message": (
                             "User: arn:aws:iam::123456789012:user/qa is not authorized to "
                             "perform: bedrock:InvokeModelWithResponseStream on resource: "
-                            "arn:aws:bedrock:us-east-1::foundation-model/x with an explicit deny"
+                            "arn:aws:bedrock:us-east-1::foundation-model/x because no "
+                            "identity-based policy allows the "
+                            "bedrock:InvokeModelWithResponseStream action"
                         )
                     },
                     "AccessDeniedException",

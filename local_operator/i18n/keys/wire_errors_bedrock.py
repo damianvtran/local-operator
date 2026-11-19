@@ -33,6 +33,10 @@ def credentials_rejected(*, region: str) -> Msg:
     return Msg("wire.errors.bedrock.credentials_rejected", {"region": region})
 
 
+def iam_denied(*, action: str, resource: str) -> Msg:
+    return Msg("wire.errors.bedrock.iam_denied", {"action": action, "resource": resource})
+
+
 def invalid_connection(*, detail: str) -> Msg:
     return Msg("wire.errors.bedrock.invalid_connection", {"detail": detail})
 

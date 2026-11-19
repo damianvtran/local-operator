@@ -50,7 +50,12 @@ An explicit profile connection ignores ambient `AWS_ACCESS_KEY_ID`/`AWS_SECRET_A
 
 Local Operator never runs `aws` or prompts during a turn. An expired SSO or
 `aws login` session fails before any request is sent, with the command to run
-(`aws sso login --profile <name>` or `aws login --profile <name>`).
+(`aws sso login --profile <name>` or `aws login --profile <name>`). Such a
+failure does not block the stored connection: credentials are looked up again
+on every attempt, so the next turn after you sign in works straight away. A
+network failure while looking up credentials (SSO portal, STS or instance
+metadata unreachable) is treated as temporary and retried; when connecting, the
+connection is saved unverified instead of refused.
 
 ## Region
 
@@ -115,8 +120,15 @@ Rows built from the first-party prices, checked against the AWS Price List
 | `ValidationException` "input is too long" | classified as a context-length incident; compaction applies as for Anthropic (gated by the shared token estimate, not by this error) |
 | `ResourceNotFoundException` | the model or profile is not in that Region; try `global.` or a geographic prefix |
 | `AccessDeniedException` "access to the model" | enable model access in the Bedrock console. The credential stays usable for other models |
-| `AccessDeniedException` (IAM) naming one `foundation-model/` or `inference-profile/` resource ARN | per-model request error, not an auth failure: the policy denies that model (often a cross-Region profile routing to a Region the policy omits). The credential stays usable for other models |
+| `AccessDeniedException` (IAM) naming one `foundation-model/`, `inference-profile/` or `application-inference-profile/` resource ARN | per-model request error, not an auth failure: the message names the IAM action and resource your AWS admin has to grant (often a cross-Region profile routing to a Region the policy omits, or an identity with no Bedrock permission at all). The credential stays usable for other models |
 | `AccessDeniedException` (IAM, no model resource), `UnrecognizedClient`, `InvalidSignature`, `ExpiredToken` | authentication error |
+
+Per-model errors (`ResourceNotFoundException` and both per-model
+`AccessDeniedException` rows) on the model you chose stop the turn with that
+model's error; they do not move on to your fallback models. They depend on the
+model, not on the request, so a fallback might work, but the error you need to
+act on is the one for the model you picked. On a fallback model they move on to
+the next fallback as usual.
 
 ## Testing without AWS
 

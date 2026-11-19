@@ -552,3 +552,63 @@ def test_preflight_without_credentials_names_bedrock_env_switches(
     assert "local-operator login bedrock" in err
     assert "AWS_BEARER_TOKEN_BEDROCK" in err
     assert "LOP_BEDROCK_AUTH=ambient" in err
+
+
+# -- round-2 remediation: R2-1 IAM copy -------------------------------------------
+
+# The real shape (zed-industries/zed#53960): a principal with NO Bedrock
+# permission still gets the inference-profile ARN named in the deny.
+_IAM_NO_POLICY = (
+    "User: arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev/qa is not "
+    "authorized to perform: bedrock:InvokeModelWithResponseStream on resource: "
+    "arn:aws:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-sonnet-4-6 "
+    "because no identity-based policy allows the bedrock:InvokeModelWithResponseStream action"
+)
+
+
+def test_iam_deny_names_action_and_resource_not_console_model_access() -> None:
+    """R2-1: an IAM deny gets IAM copy; the console copy is only for model access."""
+    from local_operator.providers.bedrock.errors import provider_error_for
+    from local_operator.providers.failover import is_rotation_eligible
+
+    err = provider_error_for(
+        "AccessDeniedException",
+        _IAM_NO_POLICY,
+        403,
+        model="eu.anthropic.claude-sonnet-4-6",
+        region="eu-central-1",
+    )
+    text = str(err)
+    assert err.kind == "request" and not err.auth_error and not is_rotation_eligible(err)
+    assert (
+        "bedrock:InvokeModelWithResponseStream on "
+        "arn:aws:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-sonnet-4-6." in text
+    )
+    assert "IAM" in text
+    assert "console" not in text.split("(", 1)[0]
+
+    console = provider_error_for(
+        "AccessDeniedException",
+        "You don't have access to the model with the specified model ID.",
+        403,
+        model="anthropic.claude-x",
+        region="us-east-1",
+    )
+    assert "Amazon Bedrock console" in str(console) and console.kind == "request"
+
+
+def test_application_inference_profile_and_explicit_deny_are_iam_scoped() -> None:
+    from local_operator.providers.bedrock.errors import provider_error_for
+
+    err = provider_error_for(
+        "AccessDeniedException",
+        "User: arn:aws:iam::1:user/qa is not authorized to perform: bedrock:InvokeModel on "
+        "resource: arn:aws:bedrock:us-east-1:1:application-inference-profile/abc123 "
+        "with an explicit deny in an identity-based policy",
+        403,
+    )
+    assert err.kind == "request" and not err.auth_error
+    assert (
+        "bedrock:InvokeModel on arn:aws:bedrock:us-east-1:1:application-inference-profile/abc123"
+        in str(err)
+    )

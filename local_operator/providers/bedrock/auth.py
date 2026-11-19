@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 from collections import OrderedDict
@@ -52,6 +53,47 @@ SIGNING_NAME = "bedrock"
 _SESSION_CACHE_MAX = 16
 _session_lock = threading.Lock()
 _sessions: "OrderedDict[str, Any]" = OrderedDict()
+
+_log = logging.getLogger(__name__)
+_botocore_quieted = False
+
+
+class _BotocoreToDebug(logging.Handler):
+    """Re-log botocore records on our logger at DEBUG, message only.
+
+    The traceback is dropped on purpose: botocore's mandatory-refresh failure
+    logs ``exc_info=True`` (~40 lines), and the SAME failure already reaches
+    the user as one classified ``ProviderError`` sentence.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            _log.debug("botocore %s: %s", record.levelname, record.getMessage())
+        except Exception:  # noqa: BLE001 - logging must never break resolution
+            pass
+
+
+def _quiet_botocore_logging() -> None:
+    """Keep botocore's own log lines off the user's terminal (QA #4270 Q3).
+
+    botocore logs at INFO on every resolution ("Found credentials in shared
+    credentials file: ...") and at WARNING with a traceback when a refresh
+    fails. Under ``lop login`` / ``lop exec`` the root handler writes those to
+    stderr between our own lines. Bedrock is the only botocore user in this
+    process, so the ``botocore`` logger tree is detached from the root
+    (``propagate=False``), raised to WARNING (no INFO record is even built)
+    and forwarded to our DEBUG log for diagnosis. Idempotent; it runs before
+    the first botocore session is created.
+    """
+    global _botocore_quieted
+    if _botocore_quieted:
+        return
+    logger = logging.getLogger("botocore")
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    if not any(isinstance(h, _BotocoreToDebug) for h in logger.handlers):
+        logger.addHandler(_BotocoreToDebug())
+    _botocore_quieted = True
 
 
 @dataclass(frozen=True)
@@ -89,6 +131,7 @@ def _session_for(conn: Connection) -> Any:
     design §2.8) — exactly the isolation an operator with production keys in
     their shell needs.
     """
+    _quiet_botocore_logging()
     import botocore.session
 
     key = f"{conn.method}:{conn.profile or ''}"

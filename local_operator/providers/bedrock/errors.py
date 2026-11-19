@@ -63,6 +63,25 @@ def _prewire(text: str) -> "ProviderError":
     )
 
 
+def _unresolved(text: str) -> "ProviderError":
+    """A pre-wire failure of the botocore CHAIN (SSO/``aws login`` cache, profile,
+    ambient lookup): labelled ``auth`` for the reader, but NOT rotation-eligible.
+
+    ``auth_error=True`` would make the failover rotate, and rotation writes a
+    60 s ``auth_credential_blocks`` row on the stored connection. Nothing about
+    the row is wrong here -- the chain is re-read on every attempt -- so after
+    the user follows the remedy (``aws sso login``) the very next turn must
+    resolve again instead of hitting the block and reading "rate limit or
+    quota exceeded" (QA round 2, Q8). ``auth_error=False`` with no status and
+    ``retryable=False`` is exactly ``is_rotation_eligible() is False``; the
+    failover then hands over to the fallback chain like any other
+    non-retryable provider failure.
+    """
+    return _provider_error(
+        None, text, retryable=False, auth_error=False, kind="auth", request_sent=False
+    )
+
+
 def no_credentials_text() -> str:
     """How to turn Bedrock on: the bearer env var, the ambient switch, a stored row.
 
@@ -78,9 +97,16 @@ def no_credentials_text() -> str:
 
 
 def no_credentials_error(conn: Connection | None = None) -> "ProviderError":
-    if conn is not None and conn.method == "profile" and conn.profile:
-        return _prewire(_text(_keys().profile_no_credentials(profile=conn.profile)))
-    return _prewire(no_credentials_text())
+    """No credentials. With ``conn`` this is a botocore-chain lookup that came
+    back empty (re-read every attempt, so no rotation -- see :func:`_unresolved`);
+    without one (no key, an unparseable stored key, an unset bearer env var) the
+    old rotating shape is kept so a broken stored row still yields to a sibling.
+    """
+    if conn is None:
+        return _prewire(no_credentials_text())
+    if conn.method == "profile" and conn.profile:
+        return _unresolved(_text(_keys().profile_no_credentials(profile=conn.profile)))
+    return _unresolved(no_credentials_text())
 
 
 def secret_missing_error() -> "ProviderError":
@@ -111,16 +137,31 @@ def _login_command(conn: Connection | None) -> str:
 
 
 def classify_credential_error(exc: BaseException, conn: Connection | None) -> "ProviderError":
-    """botocore resolution exception -> pre-wire auth ``ProviderError``.
+    """botocore resolution exception -> pre-wire ``ProviderError``.
 
     Matched by class NAME (not isinstance) so this module never imports
     botocore itself and stays importable on the cold path.
+
+    None of these rotate (see :func:`_unresolved`). A NETWORK failure while
+    resolving (SSO portal, STS, IMDS or a proxy unreachable) is not a verdict
+    on the credential at all: design §5.5 makes it transient/unverified, so it
+    is retryable -- ``check.check_connection`` turns that into ``valid=None``
+    and the connect flow stores the row as unverified instead of refusing it.
     """
-    names = {cls.__name__ for cls in type(exc).__mro__}
+    names = _exception_names(exc)
     profile = (conn.profile if conn else None) or "default"
+    if names & _NETWORK_ERRORS:
+        detail = str(exc).strip() or type(exc).__name__
+        return _provider_error(
+            None,
+            _text(_keys().credential_resolution_failed(detail=detail)),
+            retryable=True,
+            kind="transient",
+            request_sent=False,
+        )
     if names & {"LoginTokenLoadError", "LoginError"}:
         # ``aws login`` (login_session) profiles: same shape as SSO, other command.
-        return _prewire(
+        return _unresolved(
             _text(
                 _keys().session_expired(profile=profile, command=f"aws login --profile {profile}")
             )
@@ -128,15 +169,40 @@ def classify_credential_error(exc: BaseException, conn: Connection | None) -> "P
     if names & {"SSOTokenLoadError", "UnauthorizedSSOTokenError", "SSOError"} or (
         "TokenRetrievalError" in names and "sso" in str(exc).lower()
     ):
-        return _prewire(
+        return _unresolved(
             _text(_keys().session_expired(profile=profile, command=_login_command(conn)))
         )
     if "ProfileNotFound" in names:
-        return _prewire(_text(_keys().profile_not_found(profile=profile)))
+        return _unresolved(_text(_keys().profile_not_found(profile=profile)))
     if "NoCredentialsError" in names or "PartialCredentialsError" in names:
         return no_credentials_error(conn)
     detail = str(exc).strip() or type(exc).__name__
-    return _prewire(_text(_keys().credential_resolution_failed(detail=detail)))
+    return _unresolved(_text(_keys().credential_resolution_failed(detail=detail)))
+
+
+# botocore's transport failures: ``ConnectionError`` (EndpointConnectionError,
+# ConnectTimeoutError, ProxyConnectionError, SSLError) and ``HTTPClientError``
+# (ReadTimeoutError, ConnectionClosedError). The builtin ``ConnectionError``
+# shares the name and is a network failure too. ``TimeoutError`` covers a raw
+# socket timeout surfacing from a credential_process or container endpoint.
+_NETWORK_ERRORS = frozenset({"ConnectionError", "HTTPClientError", "TimeoutError"})
+
+
+def _exception_names(exc: BaseException) -> set[str]:
+    """Class names across ``exc`` and its cause/context chain.
+
+    botocore's refresh path can re-raise a transport failure wrapped in its own
+    error; the chain is where the network cause survives. Bounded and
+    cycle-safe.
+    """
+    names: set[str] = set()
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        seen.add(id(current))
+        names.update(cls.__name__ for cls in type(current).__mro__)
+        current = current.__cause__ or current.__context__
+    return names
 
 
 # -- wire errors ---------------------------------------------------------------
@@ -188,15 +254,46 @@ _MODEL_RESOURCE = re.compile(
     re.IGNORECASE,
 )
 
+# The action and resource AWS names in an IAM deny, so the remedy can say
+# exactly what to grant: "... is not authorized to perform:
+# bedrock:InvokeModelWithResponseStream on resource: arn:...:inference-profile/x
+# because no identity-based policy allows ...". The ARN ends at whitespace;
+# trailing punctuation is trimmed by the caller.
+_IAM_DENY_PARTS = re.compile(
+    r"not authorized to perform:\s*(?P<action>\S+)\s+on resource:\s*(?P<resource>arn:\S+)",
+    re.IGNORECASE,
+)
 
-def _model_access_denied(message: str) -> bool:
+
+def _console_model_access(message: str) -> bool:
+    """The per-model console setting ("You don't have access to the model ...").
+
+    Deliberately NOT the IAM shape: AWS names the model ARN in every IAM
+    invoke deny, including a principal with no Bedrock permission at all, so
+    an ARN alone does not mean "enable model access in the console" (review
+    round 2, R2-1). The remedy for an IAM deny is an IAM grant.
+    """
     lowered = message.lower()
     return (
         "access to the model" in lowered
         or "model access" in lowered
-        or ("not authorized to invoke this model" in lowered)
-        or bool(_MODEL_RESOURCE.search(message))
+        or "not authorized to invoke this model" in lowered
     )
+
+
+def _iam_model_deny(message: str, model: str) -> tuple[str, str] | None:
+    """``(action, resource)`` for an IAM deny scoped to a model/profile ARN.
+
+    When AWS reworded the sentence but still named a model ARN, the deny stays
+    model-scoped (no credential block) and the copy falls back to the invoke
+    action family and the requested model.
+    """
+    if not _MODEL_RESOURCE.search(message):
+        return None
+    match = _IAM_DENY_PARTS.search(message)
+    if match is None:
+        return "bedrock:InvokeModel*", model or "this model"
+    return match.group("action"), match.group("resource").rstrip(".,;:)")
 
 
 def provider_error_for(
@@ -231,7 +328,20 @@ def provider_error_for(
             kind="auth",
         )
     if kind_key == "accessdeniedexception":
-        if _model_access_denied(message):
+        iam_scoped = _iam_model_deny(message, model)
+        if iam_scoped is not None:
+            # Scoped to one model/profile ARN: the same identity may still be
+            # allowed other models (or other destination Regions), so no
+            # credential block (auth_error=False, kind=request). The words
+            # name the IAM action and resource to grant.
+            action, resource = iam_scoped
+            return ProviderError(
+                status or 403,
+                f"{_text(_keys().iam_denied(action=action, resource=resource))} ({shown})",
+                auth_error=False,
+                kind="request",
+            )
+        if _console_model_access(message):
             # Per-model console setting: the credential is FINE for other
             # models, so never block it (auth_error=False).
             return ProviderError(

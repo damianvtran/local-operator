@@ -259,3 +259,141 @@ def test_sigv4_matches_botocore_for_a_colon_model_id(monkeypatch) -> None:
     ours = bauth.sign_headers(resolved, "POST", url, body, ours_base)
     assert ours["Authorization"] == theirs
     assert ours["X-Amz-Security-Token"] == "session-token"
+
+
+# -- round-2 remediation: Q8, #4270-Q2, #4270-Q3 ---------------------------------
+
+
+def test_expired_sso_does_not_block_the_stored_connection(tmp_path, monkeypatch) -> None:
+    """Q8: expired SSO -> user runs ``aws sso login`` -> the immediate retry resolves.
+
+    Mirrors the failover driver, which calls ``rotate_sibling`` (and so writes
+    the 60 s ``auth_credential_blocks`` row) only when ``is_rotation_eligible``.
+    Before the fix the SSO failure was ``auth_error=True``: the row was blocked
+    and the retry read "rate limit or quota exceeded" with 0 requests sent.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.failover import is_rotation_eligible
+
+    descriptor = "bedrock://profile?name=sso&region=us-west-2"
+    base = tmp_path / "lop"
+    base.mkdir()
+    store = AuthStore(base / "auth.db", config_dir=base)
+    try:
+        row = store.upsert_credential("bedrock", {"type": "api_key", "key": descriptor})
+        # 1. expired/missing SSO cache token: classified, nothing sent.
+        with pytest.raises(bauth.BedrockCredentialError) as caught:
+            bauth.resolve_sync(descriptor)
+        err = caught.value.provider_error
+        assert err.kind == "auth" and err.request_sent is False
+        assert "aws sso login --profile sso" in str(err)
+        if is_rotation_eligible(err):
+            store.rotate_sibling("bedrock", None, err, api_key=descriptor)
+        assert store._conn.execute("SELECT * FROM auth_credential_blocks").fetchall() == []
+
+        # 2. `aws sso login` refreshed the cache: botocore now yields role creds.
+        from botocore.credentials import Credentials
+
+        class _Session:
+            def get_credentials(self):
+                return Credentials("ASIAFRESH", "secret", "session-token")
+
+        monkeypatch.setattr(bauth, "_session_for", lambda conn: _Session())
+        # 3. the immediate retry: the stored row is served and resolves.
+        assert asyncio.run(store.get_api_key("bedrock")) == row.data["key"]
+        resolved = bauth.resolve_sync(descriptor)
+        assert resolved.credentials.access_key == "ASIAFRESH"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("class_name", "kwargs"),
+    [
+        ("EndpointConnectionError", {"endpoint_url": "https://portal.sso.us-east-1.amazonaws.com"}),
+        ("ConnectTimeoutError", {"endpoint_url": "https://sts.amazonaws.com"}),
+        ("ReadTimeoutError", {"endpoint_url": "http://169.254.169.254"}),
+        ("ConnectionClosedError", {"endpoint_url": "https://sts.amazonaws.com"}),
+        ("ProxyConnectionError", {"proxy_url": "http://proxy.invalid:3128", "error": "refused"}),
+    ],
+)
+def test_network_failure_during_resolution_is_transient(class_name, kwargs) -> None:
+    """#4270-Q2 / design §5.5: unreachable SSO/STS/IMDS is not a credential verdict."""
+    import botocore.exceptions as be
+
+    from local_operator.providers.failover import is_server_side_failure
+
+    exc = getattr(be, class_name)(**kwargs)
+    error = berrors.classify_credential_error(exc, bconn.parse("bedrock://profile?name=sso"))
+    assert error.retryable and error.kind == "transient" and error.request_sent is False
+    assert not error.auth_error
+    # Rotation deprioritises (never blocks) on a transient failure.
+    assert is_server_side_failure(error)
+
+
+def test_wrapped_network_failure_is_still_transient() -> None:
+    import botocore.exceptions as be
+
+    try:
+        try:
+            raise be.EndpointConnectionError(endpoint_url="https://sts.amazonaws.com")
+        except be.EndpointConnectionError as inner:
+            raise RuntimeError("refresh failed") from inner
+    except RuntimeError as outer:
+        error = berrors.classify_credential_error(outer, None)
+    assert error.retryable and error.kind == "transient"
+
+
+def test_check_reports_network_failure_during_resolution_as_unverified(monkeypatch) -> None:
+    """#4270-Q2 through ``check_connection``: valid=None, so connect stores it unverified."""
+    import botocore.exceptions as be
+
+    from local_operator.providers.bedrock import check as bcheck
+
+    def offline(key, values=None):
+        conn = bconn.parse(key)
+        try:
+            raise be.EndpointConnectionError(
+                endpoint_url="https://portal.sso.us-east-1.amazonaws.com"
+            )
+        except be.EndpointConnectionError as exc:
+            raise bauth.BedrockCredentialError(
+                berrors.classify_credential_error(exc, conn)
+            ) from exc
+
+    monkeypatch.setattr(bauth, "resolve_sync", offline)
+    result = asyncio.run(
+        bcheck.check_connection("bedrock://profile?name=sso&region=us-east-1", timeout=5.0)
+    )
+    assert result.valid is None and result.reason
+
+
+def test_botocore_logging_never_reaches_the_terminal() -> None:
+    """#4270-Q3: no "Found credentials in ..." INFO line, no refresh traceback."""
+    import io
+    import logging
+
+    stream = io.StringIO()
+    terminal = logging.StreamHandler(stream)
+    terminal.setLevel(logging.INFO)
+    root = logging.getLogger()
+    previous = root.level
+    root.addHandler(terminal)
+    root.setLevel(logging.INFO)
+    try:
+        resolved = bauth.resolve_sync("bedrock://profile?name=dev&region=us-east-1")
+        assert resolved.credentials.access_key == "AKIDDEVPROFILE"
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            logging.getLogger("botocore.credentials").warning(
+                "Refreshing temporary credentials failed during mandatory refresh period",
+                exc_info=True,
+            )
+    finally:
+        root.removeHandler(terminal)
+        root.setLevel(previous)
+    output = stream.getvalue()
+    assert "Found credentials" not in output
+    assert "Refreshing temporary credentials" not in output
+    assert "Traceback" not in output

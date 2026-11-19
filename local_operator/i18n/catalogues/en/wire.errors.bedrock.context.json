@@ -29,6 +29,11 @@
     "role": "provider error sentence shown in the transcript and on failed sign-in",
     "tone": "diagnostic, names the remedy"
   },
+  "wire.errors.bedrock.iam_denied": {
+    "note": "An IAM policy denied this identity one Bedrock action on one model or inference-profile ARN (not the console model-access setting). {action} is an IAM action like bedrock:InvokeModelWithResponseStream and {resource} an AWS ARN; keep both verbatim. 'IAM' is AWS's product term; keep it.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
   "wire.errors.bedrock.invalid_connection": {
     "note": "{detail} is a short English technical reason. 'Connect Bedrock again' means sign in to the provider again.",
     "role": "provider error sentence shown in the transcript and on failed sign-in",

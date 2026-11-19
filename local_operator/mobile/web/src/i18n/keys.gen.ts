@@ -679,6 +679,7 @@ export type MessageParams = {
   "wire.errors.bedrock.credential_resolution_failed": { "detail": string };
   "wire.errors.bedrock.credential_timeout": { "seconds": number };
   "wire.errors.bedrock.credentials_rejected": { "region": string };
+  "wire.errors.bedrock.iam_denied": { "action": string; "resource": string };
   "wire.errors.bedrock.invalid_connection": { "detail": string };
   "wire.errors.bedrock.model_access": { "model": string; "region": string };
   "wire.errors.bedrock.model_unavailable": { "model": string; "region": string };

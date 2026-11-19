@@ -5453,6 +5453,13 @@ async def _stream_with_failover_events(
                 # frame the reported slot holds. Gate strictly on kind=="request"
                 # (not "unknown": a bare-status gateway failure may be transient
                 # and a fallback can survive it).
+                #
+                # Accepted consequence (PR #4266 review R2-2): Bedrock's per-model
+                # refusals -- ResourceNotFound and an AccessDenied scoped to one
+                # model ARN -- are also kind=="request", so on the primary they
+                # stop the turn here rather than walking the fallback chain,
+                # although another model might serve. The user gets the error
+                # for the model they chose; docs/providers/BEDROCK.md says so.
                 if exc.kind == "request" and is_primary:
                     raise exc
                 break  # non-retryable for this provider
