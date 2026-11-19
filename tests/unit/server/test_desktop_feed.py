@@ -1367,8 +1367,57 @@ def _monitor(root: Path, session_id: str, *, dormant: bool = False) -> Path | No
     )
 
 
+def _watch_target(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
+    """The path an ``os.stat``/``os.lstat``/``os.scandir`` call names, as text, or None.
+
+    ``Path.stat`` and ``Path.iterdir`` pass their own path positionally; the
+    ``os`` signatures also accept it by keyword (all three spell it ``path``),
+    and an ``int`` is an already-open DESCRIPTOR rather than a path — one that
+    has no name to attribute, so it is not counted into any scope (an
+    UNATTRIBUTABLE call, not a hidden one: ``_io_watch`` counts it separately
+    rather than dropping it, see ``scandir_unattributable``). Nothing here calls
+    back into ``os.stat`` (``abspath`` is pure string work plus ``getcwd``),
+    because a resolver that stat'd would count itself.
+
+    One spelling this does NOT model: a ``dir_fd``-relative call, whose path is
+    resolved against that descriptor rather than the cwd. ``abspath`` would
+    attribute it to the cwd instead, so it surfaces as an off-scope path — loud
+    and in the wrong scope rather than silently miscounted, which is the right
+    direction for a counter whose failure mode is a false pass. No product path
+    stats or scans relative to a ``dir_fd`` today (review round 1, N1/N2).
+    """
+    raw = args[0] if args else kwargs.get("path")
+    if raw is None or isinstance(raw, int):
+        return None
+    if isinstance(raw, bytes):
+        return os.fsdecode(raw)
+    try:
+        return os.fspath(raw)
+    except TypeError:
+        return None
+
+
+def _within(path: str, scope: str) -> bool:
+    """Whether ``path`` is ``scope`` itself or sits underneath it.
+
+    ``scope`` may be the filesystem root, where the obvious ``scope + os.sep``
+    spells ``"//"`` and a root scope then counts NOTHING beneath it — the silent
+    zero this module's docstrings treat as a failure mode, not a pass (QA round
+    1, Q2). Stripping the trailing separator first makes ``"/"`` behave like any
+    other scope.
+    """
+    if path == scope:
+        return True
+    return path.startswith(scope.rstrip(os.sep) + os.sep)
+
+
 @contextlib.contextmanager
-def _io_watch(registry_dir: Path, *, reads_under: Path | None = None) -> Iterator[dict[str, Any]]:
+def _io_watch(
+    registry_dir: Path,
+    *,
+    reads_under: Path | None = None,
+    stats_under: Path | None = None,
+) -> Iterator[dict[str, Any]]:
     """Count the filesystem calls one block makes, and which files it read.
 
     The counting pattern ``tests/unit/session/test_catalog_scan_cost.py`` uses for
@@ -1383,6 +1432,22 @@ def _io_watch(registry_dir: Path, *, reads_under: Path | None = None) -> Iterato
     default counter would report a zero it could not have made non-zero. Both
     callers pass it explicitly; there is no default scope that silently counts
     nothing.
+
+    ``stats_under`` makes the stat budget ATTRIBUTABLE, which the bare integer
+    is not (a flake: #4230's gate counted 9 against a budget of 8 with nothing
+    in the failure able to say whose stat it was). Patching ``os.stat`` is
+    PROCESS-WIDE, so the wrapper sees every stat any thread in this xdist worker
+    makes — a background tailer, a logging rotation check, another fixture's
+    cleanup — and a path-blind count charges them all to the block under test.
+    With a scope, ``stat_scoped``/``lstat_scoped``/``scandir_scoped`` and their
+    ``*_scoped_paths`` name exactly the paths the block touched inside it, so the
+    assertion can be about the feed's OWN four groups and a foreign caller costs
+    nothing. ``scandir`` is scoped by the same mechanism rather than left as a
+    bare count (review round 1, R2): its patch is equally process-wide, and a
+    path-blind count made the tick's "it walked nothing of its own" claim a
+    statement about every thread in the worker. The unscoped ``stat``/``lstat``
+    totals stay as they were for the callers that only ask "did anything happen
+    at all" (the authoring probe).
     """
     counts: dict[str, Any] = {
         "stat": 0,
@@ -1390,7 +1455,17 @@ def _io_watch(registry_dir: Path, *, reads_under: Path | None = None) -> Iterato
         "scandir": 0,
         "record_reads": 0,
         "scandir_paths": [],
+        "stat_paths": [],
+        "lstat_paths": [],
+        "stat_scoped": 0,
+        "lstat_scoped": 0,
+        "scandir_scoped": 0,
+        "scandir_unattributable": 0,
+        "stat_scoped_paths": [],
+        "lstat_scoped_paths": [],
+        "scandir_scoped_paths": [],
     }
+    scope = os.path.abspath(stats_under) if stats_under is not None else None
     originals: dict[str, Any] = {}
     for name in ("stat", "lstat", "scandir"):
         real = getattr(os, name)
@@ -1399,8 +1474,33 @@ def _io_watch(registry_dir: Path, *, reads_under: Path | None = None) -> Iterato
         def wrap(real: Callable[..., Any] = real, name: str = name) -> Any:
             def counting(*args: Any, **kwargs: Any) -> Any:
                 counts[name] += 1
-                if name == "scandir" and args:
-                    counts["scandir_paths"].append(str(args[0]))
+                if name == "scandir":
+                    # The SAME attribution the stat side gets (review round 1,
+                    # R2). Patching ``os.scandir`` is process-wide exactly like
+                    # ``os.stat``, so a bare count charged every directory walk
+                    # any thread in this xdist worker made to the block under
+                    # test — the flake class the stat scope removed, left
+                    # standing for the one counter that gates the avatar probe.
+                    # No path argument means ".", which is attributable.
+                    target = _watch_target(args, kwargs) if (args or "path" in kwargs) else "."
+                    if target is None:
+                        # An int descriptor names no path: counted, not dropped,
+                        # so an unattributable walk can never read as zero.
+                        counts["scandir_unattributable"] += 1
+                    else:
+                        spelled = os.path.abspath(target)
+                        counts["scandir_paths"].append(spelled)
+                        if scope is not None and _within(spelled, scope):
+                            counts["scandir_scoped"] += 1
+                            counts["scandir_scoped_paths"].append(spelled)
+                    return real(*args, **kwargs)
+                target = _watch_target(args, kwargs)
+                if target is not None:
+                    spelled = os.path.abspath(target)
+                    counts[f"{name}_paths"].append(spelled)
+                    if scope is not None and _within(spelled, scope):
+                        counts[f"{name}_scoped"] += 1
+                        counts[f"{name}_scoped_paths"].append(spelled)
                 return real(*args, **kwargs)
 
             return counting
@@ -2118,22 +2218,95 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     _tick(feed)
     _queued(subscription)
 
-    # All FIVE probes are gated shut, so what is measured is the DOORBELL's cost:
-    # the catalogue probe legitimately walks the sessions directory at 1 Hz, the
-    # authoring probe stats the profile and team rows at 1 Hz, and including either
-    # would measure a different claim.
-    feed._catalogue_probed_at = time.monotonic()
-    feed._status_probed_at = time.monotonic()
-    feed._authoring_probed_at = time.monotonic()
-    feed._asks_probed_at = time.monotonic()
-    feed._approvals_probed_at = time.monotonic()
-    feed._voice_probed_at = time.monotonic()
-    with _io_watch(feed._registry_dir) as counts:
+    # ALL EIGHT 1 Hz probes are gated shut, so what is measured is the
+    # DOORBELL's cost: the catalogue probe legitimately walks the sessions
+    # directory, the authoring probe stats the profile and team rows, the
+    # code-requests probe scans the code_requests directory, and any of them in
+    # the window would measure a different claim. THE AVATAR PROBE IS ONE OF
+    # THEM (a readdir of the agents root plus one stat per agent): it rides the
+    # priming tick above by luck — ``_avatar_probed_at`` starts at 0, so the
+    # first tick probes and arms the 1 s clock — and on a loaded machine where
+    # the gap between that tick and this one crossed the interval it would probe
+    # HERE instead, inside the measured window. Gating it makes the exclusion
+    # explicit rather than a property of how fast the lines in between happen to
+    # run.
+    #
+    # ARMED INTO THE FUTURE, NOT AT ``now`` (review round 1, R1). Every gate
+    # compares ``now - probed_at`` against a ONE-SECOND interval, so a stamp of
+    # ``time.monotonic()`` buys exactly one second of cover: a gap longer than
+    # that between these arms and the ``_io_watch`` block — an xdist worker
+    # descheduled under load, the machine the stat witnesses fail on — re-opens
+    # all seven and the tick measures the probes instead of the doorbell
+    # (reproduced: 1.05 s injected here gave stat 16, scandir 6, record_reads 1).
+    # A stamp 30 s ahead shuts BOTH polarities however slow the machine is: the
+    # ``>= interval`` probes (catalogue, authoring, code requests, asks) see a
+    # negative elapsed time, and the ``< interval`` early returns (status,
+    # approvals, avatar) see one too. That is not extra loading or a sleep — it
+    # removes the test's dependence on how fast the lines in between run.
+    future = time.monotonic() + 30
+    feed._catalogue_probed_at = future
+    feed._status_probed_at = future
+    feed._authoring_probed_at = future
+    feed._asks_probed_at = future
+    feed._approvals_probed_at = future
+    feed._avatar_probed_at = future
+    # The seventh (review round 1, R3): gated by the priming tick like the
+    # avatar probe, reached unconditionally from ``_tick``, and it scandirs
+    # ``root/code_requests`` — under the store, so an expired clock puts a
+    # product walk inside the window and fails ``scandir_scoped``.
+    feed._code_requests_probed_at = future
+    # The eighth: the voice probe (per-session voice slot), also a 1 Hz gate that
+    # must not open inside the measured window.
+    feed._voice_probed_at = future
+    with _io_watch(feed._registry_dir, stats_under=root) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
-    assert counts["stat"] + counts["lstat"] <= 8, counts
+    # THE BUDGET, NAMED PATH BY PATH. Eight is a real constant: the attention
+    # store and its two journal sidecars (3, ``_db_fingerprint``), ``run/mobile``
+    # (1), ``config.yml`` (1), ``notifications.db`` and its two sidecars (3). A
+    # bare ``<= 8`` could not say WHOSE stat it charged, so it failed as a flake
+    # when another thread in this xdist worker stat'd something during the window
+    # (#4230's gate counted 9). The scoped count is the real claim; the integer
+    # below is the design's own number, kept as the secondary pin.
+    expected = sorted(
+        os.path.abspath(root / name)
+        for name in (
+            "attention.db",
+            "attention.db-wal",
+            "attention.db-journal",
+            "run/mobile",
+            "config.yml",
+            "notifications.db",
+            "notifications.db-wal",
+            "notifications.db-journal",
+        )
+    )
+    # The literals above are the feed's wiring, not a transcription that could
+    # drift from it: if a store moved, this names the move before the set below
+    # reads as the feed having stat'd something it never stats.
+    assert {
+        os.path.abspath(feed.store.path),
+        os.path.abspath(feed._registry_dir),
+        os.path.abspath(feed.config_path),
+        os.path.abspath(feed.notifications.path),
+    } == {
+        os.path.abspath(root / "attention.db"),
+        os.path.abspath(root / "run/mobile"),
+        os.path.abspath(root / "config.yml"),
+        os.path.abspath(root / "notifications.db"),
+    }
+    assert sorted(counts["stat_scoped_paths"] + counts["lstat_scoped_paths"]) == expected, counts
+    assert counts["stat_scoped"] + counts["lstat_scoped"] <= 8, counts
     assert counts["record_reads"] == 0, counts
-    assert counts["scandir"] == 0, counts
+    # SCOPED, like the stats (review round 1, R2). The bare ``counts["scandir"]``
+    # was process-wide and path-blind: any thread in this xdist worker that
+    # walked a directory during the tick failed this test with a number that
+    # named no path (reproduced with a foreign ``os.scandir("/usr")``: scandir 2,
+    # both paths ``/usr``, while the stat side stayed exactly on the 8). The
+    # claim is about the FEED's walks under the store — the avatar and catalogue
+    # probes' readdirs are what the gates above hold shut — so a scoped zero is
+    # the same statement with attribution, and a foreign walk costs nothing.
+    assert counts["scandir_scoped"] == 0, counts
     asyncio.run(feed.close())
 
 
