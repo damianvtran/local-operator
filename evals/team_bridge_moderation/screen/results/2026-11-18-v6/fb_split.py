@@ -10,11 +10,16 @@ import collections
 import json
 import os
 import sys
+from typing import Any
 
 # Reuse class_gate.py's outcome() (committed beside this file) so both scripts
 # classify a trial identically; only its definitions run, not its argv-driven body.
+# The definitions run in an explicit namespace and outcome() is bound from it, so
+# the name is visible to static analysis (CI's pyright rejects a bare-exec name).
 _GATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "class_gate.py")
-exec(open(_GATE).read().split("base_path, cand_path")[0])
+_gate_ns: dict[str, Any] = {}
+exec(open(_GATE).read().split("base_path, cand_path")[0], _gate_ns)
+outcome = _gate_ns["outcome"]
 
 trials = [json.loads(line) for line in open(sys.argv[1])]
 corpus = {}
@@ -30,7 +35,7 @@ for t in trials:
     if r is None or r["label"] != "legit":
         continue
     m = "Sonnet" if "sonnet" in t["model_route"] else "Opus"
-    o = outcome(t, r["body"])  # noqa: F821 - defined by the exec above
+    o = outcome(t, r["body"])
     if o == "x":
         continue
     k = (m, t["template"])
