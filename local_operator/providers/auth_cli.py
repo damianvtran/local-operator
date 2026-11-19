@@ -101,7 +101,9 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     if wants_api_key:
         prompt = "Paste your API key here (empty to cancel): "
     elif wants_credential:
-        prompt = "Paste credential or file path (empty to cancel): "
+        # "input hidden": nothing echoes while a key is pasted, so without it
+        # a correct paste looks like a dead terminal (agent review R2-2).
+        prompt = "Paste credential or file path (input hidden; empty to cancel): "
     else:
         prompt = "Paste the code here (empty to cancel): "
     # A prompt opened AFTER the browser/paste race is decided is a follow-up
@@ -118,14 +120,26 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         Piped stdin is read whole (bounded) so ``cat sa.json | lop login
         google-vertex-sa`` works. On a terminal, echo is turned off -- the JSON
         carries a private key that must not land in scrollback -- and lines are
-        gathered until the pasted object parses, a blank line, EOF or the cap.
-        Echo is toggled with TCSANOW, not getpass's TCSAFLUSH, which would
-        discard the rest of a multi-line paste between lines.
+        gathered until the pasted object is complete, a blank line, EOF or the
+        cap.
+
+        On a POSIX terminal the read is NON-CANONICAL (``_read_tty_credential``)
+        because canonical mode cannot carry the value at all: the line
+        discipline caps one line at ``MAX_CANON`` (1024 bytes on macOS), and a
+        real key's ``private_key`` line is ~1.7 KiB, so the kernel dropped the
+        tail and the Enter with it and the login hung until Ctrl-C (QA Q4).
+        The ``readline`` loop below stays only as the fallback for a terminal
+        without ``termios`` (Windows) or a stdin with no real descriptor.
         """
         if not sys.stdin.isatty():
             print(prompt, end="", file=sys.stderr, flush=True)
             return sys.stdin.read(MAX_CREDENTIAL_PASTE_CHARS)
         print(prompt, end="", flush=True)
+        fd = _posix_tty_descriptor(sys.stdin)
+        if fd is not None:
+            value = _read_tty_credential(fd)
+            print()  # echo was off, so the user's Enter left no newline
+            return value
         with _echo_disabled():
             first = sys.stdin.readline()
             if not first:
@@ -352,6 +366,198 @@ def _echo_disabled() -> Iterator[None]:
         yield
     finally:
         termios.tcsetattr(fd, termios.TCSANOW, saved)
+
+
+def _posix_tty_descriptor(stream: Any) -> int | None:
+    """The descriptor of ``stream`` when it is a POSIX terminal, else ``None``.
+
+    ``None`` routes the caller to its line-based fallback: Windows (no
+    ``termios``) and stand-in streams with no real descriptor.
+    """
+    try:
+        import termios
+
+        fd = stream.fileno()
+        termios.tcgetattr(fd)
+    except Exception:  # noqa: BLE001 — not a POSIX terminal
+        return None
+    return fd
+
+
+#: Bracketed-paste markers a terminal wraps a paste in (when the mode is on);
+#: they frame the paste and are never part of the credential.
+_PASTE_MARKERS = ("\x1b[200~", "\x1b[201~")
+
+
+@contextlib.contextmanager
+def _noncanonical_no_echo(fd: int) -> Iterator[None]:
+    """Byte-at-a-time, unechoed reads on ``fd``; restores the attributes after.
+
+    ICANON off is the point: canonical mode limits one line to ``MAX_CANON``
+    and a service-account key does not fit (see ``_read_tty_credential``).
+    ECHO off keeps the private key out of scrollback. ISIG stays ON so Ctrl-C
+    is still SIGINT to the process -- this reader runs on a daemon thread
+    where a ``KeyboardInterrupt`` raised by the reader itself would be
+    swallowed, while the signal reaches the main thread's ``run_login`` cancel
+    path. ``VMIN=1, VTIME=0``: block for at least one byte, no timer, so a
+    slow typist and a fast paste behave alike. TCSANOW, never TCSAFLUSH, so
+    nothing already typed ahead is discarded.
+    """
+    import termios
+
+    saved = termios.tcgetattr(fd)
+    raw = list(saved)
+    # ICRNL/INLCR/IGNCR off: the reader sees CR and LF as sent. With ICRNL on
+    # a CRLF paste (a key file saved on Windows) arrives as two LFs, which is
+    # indistinguishable from the blank line that ends an unbalanced paste.
+    raw[0] = raw[0] & ~(termios.ICRNL | termios.INLCR | termios.IGNCR)
+    raw[3] = (raw[3] & ~(termios.ICANON | termios.ECHO)) | termios.ISIG
+    control = list(raw[6])
+    control[termios.VMIN] = 1
+    control[termios.VTIME] = 0
+    raw[6] = control
+    termios.tcsetattr(fd, termios.TCSANOW, raw)
+    try:
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, saved)
+
+
+def _json_object_end(text: str) -> int | None:
+    """Index just past the ``}`` that closes the object ``text`` opens, if any.
+
+    Braces inside JSON strings (a ``}`` in a description, escaped quotes) are
+    skipped, so completion does not depend on the paste ending with Enter.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _read_tty_credential(fd: int, limit: int = MAX_CREDENTIAL_PASTE_CHARS) -> str:
+    """Read a pasted credential from terminal ``fd`` without ``MAX_CANON``.
+
+    Canonical mode hands the kernel the line editing, and with it a hard
+    per-line ceiling (``MAX_CANON``, 1024 bytes on macOS): a real GCP key's
+    ~1.7 KiB ``private_key`` line overflowed it, the excess and the Enter were
+    dropped, and ``lop login google-vertex-sa`` hung silently (QA Q4). So the
+    line editing this needs is done here instead:
+
+    - Enter (``\\r`` or ``\\n``) finishes a SINGLE-LINE value -- a file path or
+      a key, anything whose first non-blank character is not ``{``. Enter on
+      nothing typed returns ``""``, the prompt's "empty to cancel".
+    - A value starting with ``{`` is a JSON object and keeps reading across
+      newlines until its braces balance outside strings, or a blank line.
+    - Backspace (DEL or BS) removes the last character; Ctrl-D ends input
+      (``EOFError`` when nothing was typed); a Ctrl-C byte -- only seen if
+      something cleared ISIG -- raises ``KeyboardInterrupt``.
+    - Bracketed-paste markers and other escape sequences (arrow keys) are
+      dropped: none can be part of a credential.
+
+    Stops at ``limit`` characters (the same cap the key-file loader applies),
+    leaving the oversize value for the loader to reject.
+    """
+    import codecs
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    chars: list[str] = []
+    escape = ""
+    previous = ""
+    with _noncanonical_no_echo(fd):
+        while len(chars) < limit:
+            try:
+                data = os.read(fd, 4096)
+            except OSError:  # EIO: the terminal hung up mid-read
+                data = b""
+            if not data:
+                if not chars:
+                    raise EOFError
+                return "".join(chars)
+            for char in decoder.decode(data):
+                after_cr = previous == "\r"
+                previous = char
+                if escape:
+                    escape += char
+                    # ESC [ <params> <final @..~> is one CSI sequence (paste
+                    # markers included); ESC + any other char is an Alt chord.
+                    if escape in _PASTE_MARKERS or len(escape) == 2 and char != "[":
+                        escape = ""
+                    elif len(escape) > 2 and "@" <= char <= "~":
+                        escape = ""
+                    continue
+                if char == "\x1b":
+                    escape = char
+                elif char == "\x03":
+                    raise KeyboardInterrupt
+                elif char == "\x04":
+                    if not chars:
+                        raise EOFError
+                    return "".join(chars)
+                elif char in "\x7f\x08":
+                    if chars:
+                        chars.pop()
+                elif char == "\n" and after_cr:
+                    continue  # CRLF is one newline, not a blank line
+                elif char in "\r\n":
+                    text = "".join(chars)
+                    if not text.strip() or not text.lstrip().startswith("{"):
+                        return text
+                    if not text.rsplit("\n", 1)[-1].strip():
+                        return text  # a blank line ends an unbalanced paste
+                    chars.append("\n")
+                elif char == "\t" or char >= " ":
+                    chars.append(char)
+            text = "".join(chars)
+            if text.lstrip().startswith("{"):
+                end = _json_object_end(text)
+                if end is not None:
+                    # Anything after the closing brace in this read (the
+                    # paste's trailing newline) is framing, not the value.
+                    if "\n" not in text[end:]:
+                        _consume_trailing_newline(fd)
+                    return text[:end]
+    return "".join(chars)
+
+
+def _consume_trailing_newline(fd: int, wait_s: float = 0.1) -> None:
+    """Swallow the Enter (and paste end marker) still in flight after a ``}``.
+
+    A paste is delivered in pieces (the pty input queue holds ~1 KiB), so the
+    closing brace can arrive in one read and its newline in the next. Left in
+    the queue, that newline would answer the NEXT prompt as "empty to cancel"
+    or land on the shell as a stray line -- and the kernel flags the restored
+    canonical mode PENDIN for it. Only whitespace and escape bytes are taken,
+    each within ``wait_s`` of the last: a paste's tail is one burst, and a
+    human typing ahead is not waited for.
+    """
+    import select
+
+    while select.select([fd], [], [], wait_s)[0]:
+        try:
+            byte = os.read(fd, 1)
+        except OSError:
+            return
+        if byte in (b"\r", b"\n") or not byte:
+            return
+        if byte not in b" \t\x1b[0123456789~":
+            return
 
 
 @contextlib.contextmanager
