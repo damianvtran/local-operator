@@ -15,7 +15,7 @@ import os
 import socket
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pytest
 
@@ -229,6 +229,47 @@ def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     from local_operator.network.credentials import github as github_mod
 
     monkeypatch.setattr(github_mod, "_resolve_program", lambda name, path=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_self_revoke_belt() -> Iterator[None]:
+    """No cell in this suite may leave a borrower self-revoke belt armed behind it.
+
+    ``github.borrowed_git_env`` arms ``_schedule_self_revoke``: a daemon
+    ``threading.Timer`` that DELETEs ``/installation/token`` at the grant's hold
+    end, against the module's base URL read AT FIRE TIME — the real
+    ``api.github.com`` once the cell's loopback/monkeypatch is gone. A cell
+    granting ``now + 600_000`` therefore fires ~600 s later on the same xdist
+    worker, inside whatever cell runs then; a cell elsewhere that patches
+    ``httpx.HTTPTransport`` process-wide (``remote_compute/test_cli_remote.py``'s
+    ``no_real_network``) counts that DELETE as its own and errors at teardown.
+    Measured on CI merge-gate shard ``test (3.12, 4)`` (runs 44390386888,
+    44411644252, 44417231649): every ERROR landed on the worker that had run
+    ``test_github_helper_diagnostic.py``'s borrow cell, whose belt leaked as a
+    ``Thread-N``. ``test_credentials_github.py`` cancels its own (PR #4017); this
+    covers every file here, present and future, the same way the pins above do.
+
+    Teardown-only: a belt that fires INSIDE its own cell (the self-revoke cells
+    shrink the window on purpose) still does its real loopback DELETE.
+    """
+    yield
+    cancel_leaked_self_revoke_belts()
+
+
+def cancel_leaked_self_revoke_belts() -> int:
+    """Cancel and reap every belt still pending; returns how many were cancelled.
+
+    Joined, not just cancelled: ``Timer.cancel`` only sets the flag, and the thread
+    lingering past teardown is the exact ``Thread-N`` the CI leak lines named.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    with github_mod._SELF_REVOKE_LOCK:
+        timers = list(github_mod._SELF_REVOKE_TIMERS.values())
+    cancelled = github_mod.cancel_pending_self_revokes()
+    for timer in timers:
+        timer.join(timeout=NET_WAIT_BUDGET_S)
+    return cancelled
 
 
 class _OfflineGithubTransport:
