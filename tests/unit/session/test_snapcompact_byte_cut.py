@@ -97,7 +97,32 @@ async def _grow(session: Session, groups: int, *, stamp: bool = False) -> None:
 
 
 def _band(settings: CompactionSettings) -> int:
+    """Where a byte-fired pass must land: the LANDING target.
+
+    This was ``WIRE_RECOVERY_BAND`` x trigger (12.8 MB) while the cut aimed at
+    the auto-continue gate's acceptance line; the two are separate figures now
+    and the cut aims at the lower one (8 MB on the default trigger).
+    """
+    return api.wire_landing_bytes(settings)
+
+
+def _acceptance_band(settings: CompactionSettings) -> int:
     return int(api.WIRE_RECOVERY_BAND * api.resolve_wire_bytes_trigger(settings))
+
+
+def _stamped_images(messages) -> int:
+    """Producer-stamped captures only: a snapcompact marker's archive frames
+    are images too, and they are not what these tests count."""
+    return sum(
+        1
+        for message in messages
+        for block in message.content
+        if isinstance(block, ImageContent) and block.captured_frame is not None
+    )
+
+
+def _dump(messages) -> list[dict]:
+    return [message.model_dump(mode="json") for message in messages]
 
 
 @pytest.mark.asyncio
@@ -228,7 +253,12 @@ async def test_a_run_of_screenshots_no_longer_compacts_every_tool_group(tmp_path
 
     assert fired, "a 36-frame run never compacted; the fixture proves nothing"
     gaps = [later - earlier for earlier, later in zip(fired, fired[1:])]
-    assert all(gap >= 3 for gap in gaps), f"passes fired on consecutive-ish groups: {fired}"
+    # Was ``>= 3`` while the cut aimed at the acceptance band (0.2 x 16 MB of
+    # room = 3.4 of these frames). At the landing target a pass keeps at most
+    # 8 MB, so ~8.5 frames fit before the next one (expected gap: 9). Six is
+    # asserted, not nine, to leave room for the archive a pass seats in front.
+    assert len(gaps) >= 1, f"only one pass fired, so no cadence was measured: {fired}"
+    assert all(gap >= 6 for gap in gaps), f"passes fired too close together: {fired}"
     await session.dispose()
 
 
@@ -259,3 +289,269 @@ async def test_advanced_cut_records_the_same_kept_observations_on_resume(tmp_pat
     resumed_kept = [m.model_dump(mode="json") for m in replayed if m.id in kept_ids]
     assert resumed_kept == live_kept
     assert [m["id"] for m in resumed_kept] == kept_ids
+
+
+# ---------------------------------------------------------------------------
+# The landing target (``thresholds.WIRE_LANDING_BAND``): a byte-fired pass
+# lands with real room under the trigger, keeps the newest frame exactly, and
+# leaves the prompt prefix alone on every turn where no pass fires.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_byte_fired_pass_leaves_room_for_at_least_eight_more_screenshots(tmp_path):
+    """The stated target, at the frame size this file's run observed.
+
+    Aiming at the acceptance band left 3.2 MB: 3.4 of these frames, so the
+    trigger re-fired every third or fourth tool group.
+    """
+    settings = CompactionSettings()
+    trigger = api.resolve_wire_bytes_trigger(settings)
+    session = _make_session(tmp_path, compaction_settings=settings)
+    await _grow(session, 20)
+
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan), f"no pass planned: {plan}"
+    assert (await session._run_compaction(plan, reason="mid-turn")).ran
+
+    residual = estimate_wire_bytes(session._render_history(list(session._context.messages)))
+    headroom = trigger - residual
+    assert headroom >= 8 * FRAME_B64, (
+        f"the pass left {headroom:,} bytes under the trigger: "
+        f"{headroom / FRAME_B64:.1f} screenshots before the next pass"
+    )
+    # ...and it still holds recent raw frames: the target is not "keep nothing".
+    kept_frames = sum(
+        1
+        for message in session._context.messages
+        for block in message.content
+        if isinstance(block, ImageContent) and len(block.data) == FRAME_B64
+    )
+    assert kept_frames >= 4, f"only {kept_frames} raw screenshots survived the pass"
+    # A pass that lands on target must clear the auto-continue gate's band.
+    assert api.cleared_wire_headroom(residual, settings) is True
+    assert session._cleared_wire_headroom(plan) is True
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_newest_frame_survives_a_byte_fired_pass_byte_for_byte(tmp_path):
+    """Full fidelity, not only presence: no re-encode, no downscale.
+
+    The newest observation is the one the model is about to act on, and a
+    visual-precision task reads coordinates off it.
+    """
+    session = _make_session(tmp_path, compaction_settings=CompactionSettings())
+    await _grow(session, 20)
+    newest = session._context.messages[-1]
+    # A payload no other frame has, so equality cannot be met by a neighbour.
+    distinct = "B" * FRAME_B64
+    newest.content[1] = ImageContent(data=distinct)
+    await session._persist_new_messages(session._context.messages)
+    before = newest.model_dump(mode="json")
+
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan)
+    assert (await session._run_compaction(plan, reason="mid-turn")).ran
+
+    survivor = next((m for m in session._context.messages if m.id == newest.id), None)
+    assert survivor is not None, "the current observation was summarized"
+    assert survivor.model_dump(mode="json") == before
+    rendered = session._render_history(list(session._context.messages))
+    assert rendered[-1].model_dump(mode="json") == before
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_rendered_prefix_is_not_rewritten_between_passes(tmp_path):
+    """Cache stability: on a turn where no pass fires, the request is the
+    previous request plus the new tool group, byte for byte.
+
+    The landing target buys its room at the pass (where the prefix is rewritten
+    anyway), never by re-encoding earlier frames on ordinary turns.
+    """
+    session = _make_session(tmp_path, compaction_settings=CompactionSettings())
+    events: list[object] = []
+    session.subscribe(events.append)
+    await session.seed_history([Message.user("play the game")])
+
+    def passes() -> int:
+        return sum(isinstance(event, CompactionEndEvent) for event in events)
+
+    previous: list[dict] | None = None
+    quiet_turns_after_first_pass = 0
+    for index in range(30):
+        assistant, tool = _group(index)
+        assistant.usage = Usage(input_tokens=1, output_tokens=1, context_tokens=30_000)
+        session._context.messages.extend([assistant, tool])
+        before = passes()
+        await session._on_turn_end(list(session._context.messages))
+        rendered = _dump(session._render_history(list(session._context.messages)))
+        if passes() > before:
+            previous = rendered  # a pass rewrites the prefix; start a new interval
+            continue
+        if previous is not None:
+            assert (
+                rendered[: len(previous)] == previous
+            ), f"group {index}: the prefix changed on a turn where no pass fired"
+            assert len(rendered) == len(previous) + 2
+            if before >= 1:
+                quiet_turns_after_first_pass += 1
+        previous = rendered
+
+    assert passes() >= 1, "the run never compacted; the fixture proves nothing"
+    assert quiet_turns_after_first_pass >= 2, "no two consecutive non-pass turns after a pass"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_token_fired_pass_in_an_image_session_keeps_the_acceptance_band(tmp_path):
+    """Byte pressure is the key, not "the session has images".
+
+    A pass the TOKEN term fired, on a request under the byte trigger, must do
+    exactly what it did before the landing target existed: the token-ruled cut
+    and capture elision against the acceptance band. Its kept window here sits
+    between the two figures (over 8 MB, under 12.8 MB), so applying the landing
+    target would elide superseded captures the pass keeps today.
+    """
+    settings = CompactionSettings(threshold_tokens=5_000, keep_recent_tokens=14_000)
+    trigger = api.resolve_wire_bytes_trigger(settings)
+    session = _make_session(tmp_path, compaction_settings=settings)
+    events: list[object] = []
+    session.subscribe(events.append)
+    await _grow(session, 14, stamp=True)  # 13.2 MB: under the 16 MB byte trigger
+
+    history = session._render_for_compaction()
+    assert estimate_wire_bytes(history) < trigger, "the fixture is over the byte trigger"
+    token_cut = api.find_cut_point(history, settings.keep_recent_tokens)
+
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan), f"the token term did not plan a pass: {plan}"
+    assert plan.cut == token_cut, "a pass with no byte pressure had its cut moved"
+    kept_bytes = estimate_wire_bytes(plan.llm_history[plan.cut :])
+    assert _band(settings) < kept_bytes <= _acceptance_band(settings), (
+        f"the kept window ({kept_bytes:,} bytes) is not between the landing target and the "
+        "acceptance band; the fixture cannot tell the two budgets apart"
+    )
+    assert session._capture_elision_budget(api, plan) == _acceptance_band(settings)
+    kept_captures = _stamped_images(plan.llm_history[plan.cut :])
+
+    assert (await session._run_compaction(plan, reason="context-window")).ran
+    assert (
+        _stamped_images(session._context.messages) == kept_captures
+    ), "a token-fired pass elided captures it kept before the landing target existed"
+    end = [event for event in events if isinstance(event, CompactionEndEvent)][-1]
+    assert end.trigger == "tokens"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pass_over_the_byte_trigger_elides_captures_to_the_landing_target(tmp_path):
+    """The other half of the key: over the byte trigger, the commit's elision
+    budget and the cut's projection of it are the same landing figure."""
+    settings = CompactionSettings()
+    session = _make_session(tmp_path, compaction_settings=settings)
+    await _grow(session, 20, stamp=True)
+
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan)
+    assert session._capture_elision_budget(api, plan) == _band(settings)
+    assert session._wire_landing_bytes(api, settings) == _band(settings)
+    assert session._wire_band_bytes(api, settings) == _acceptance_band(settings)
+    assert (await session._run_compaction(plan, reason="mid-turn")).ran
+    residual = estimate_wire_bytes(session._render_for_compaction())
+    assert residual <= _band(settings)
+    await session.dispose()
+
+
+def test_a_compaction_module_without_the_landing_resolver_keeps_the_old_band(tmp_path):
+    """A partial test double that predates ``wire_landing_bytes`` degrades to
+    the acceptance band instead of losing the byte-aware cut."""
+    from types import SimpleNamespace
+
+    double = SimpleNamespace(
+        resolve_wire_bytes_trigger=lambda settings: 1_000_000, WIRE_RECOVERY_BAND=0.8
+    )
+    session = Session.__new__(Session)
+    assert session._wire_landing_bytes(double, CompactionSettings()) == 800_000
+    off = SimpleNamespace(resolve_wire_bytes_trigger=lambda settings: 0, WIRE_RECOVERY_BAND=0.8)
+    assert session._wire_landing_bytes(off, CompactionSettings()) is None
+
+
+# ---------------------------------------------------------------------------
+# ``compaction_end`` says which size term fired, and the byte figures.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compaction_end_records_a_byte_fired_pass_and_its_byte_figures(tmp_path):
+    settings = CompactionSettings()
+    trigger = api.resolve_wire_bytes_trigger(settings)
+    session = _make_session(tmp_path, compaction_settings=settings)
+    events: list[object] = []
+    session.subscribe(events.append)
+    await _grow(session, 20)
+    planned_bytes = estimate_wire_bytes(session._render_for_compaction())
+
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan)
+    assert (await session._run_compaction(plan, reason="mid-turn")).ran
+
+    end = [event for event in events if isinstance(event, CompactionEndEvent)][-1]
+    assert end.success and end.reason == "mid-turn"
+    # 20 frames are ~24k tokens against a 400k token trigger: bytes alone fired.
+    assert end.trigger == "wire_bytes"
+    assert end.wire_bytes_trigger == trigger == 16_000_000
+    assert end.wire_bytes_before == planned_bytes > trigger
+    assert end.wire_bytes_after == estimate_wire_bytes(
+        session._render_history(list(session._context.messages))
+    )
+    assert end.wire_bytes_after <= _band(settings) < end.wire_bytes_before
+    # The token pair is untouched by the new fields.
+    assert end.tokens_before == plan.context_tokens and end.strategy == plan.strategy
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_end_on_a_manual_text_pass_names_no_size_term(tmp_path):
+    """A pass neither size term forced reads ``none``, with real byte figures."""
+    settings = CompactionSettings(keep_recent_tokens=200)
+    session = _make_session(tmp_path, compaction_settings=settings)
+    events: list[object] = []
+    session.subscribe(events.append)
+    await session.seed_history([Message.user("start")])
+    for index in range(30):
+        session._context.messages.append(Message.user(f"question {index} " + "detail " * 40))
+        session._context.messages.append(Message.assistant(f"answer {index} " + "word " * 40))
+    await session._persist_new_messages(session._context.messages)
+
+    plan = await session._plan_compaction(respect_threshold=False)  # manual /compact
+    assert isinstance(plan, _CompactionPlan)
+    assert (await session._run_compaction(plan, reason="manual")).ran
+
+    end = [event for event in events if isinstance(event, CompactionEndEvent)][-1]
+    assert end.trigger == "none"
+    assert end.wire_bytes_trigger == api.resolve_wire_bytes_trigger(settings)
+    assert 0 < end.wire_bytes_before < end.wire_bytes_trigger
+    assert end.wire_bytes_after > 0
+    await session.dispose()
+
+
+def test_compaction_end_fields_are_additive_and_default_to_absent_values():
+    """A host that builds or reads the event the old way is unaffected."""
+    legacy = CompactionEndEvent(reason="manual", success=True, tokens_before=100, tokens_after=50)
+    assert (legacy.trigger, legacy.wire_bytes_before, legacy.wire_bytes_after) == ("", 0, 0)
+    assert legacy.wire_bytes_trigger == 0
+    # A record written before the fields existed still validates.
+    old_row = {
+        "type": "compaction_end",
+        "reason": "mid-turn",
+        "success": True,
+        "strategy": "snapcompact",
+        "tokens_before": 34847,
+        "tokens_after": 28642,
+        "detail": None,
+    }
+    assert CompactionEndEvent.model_validate(old_row).trigger == ""
+    dumped = CompactionEndEvent(reason="mid-turn", success=False).model_dump()
+    assert dumped["trigger"] == "" and dumped["wire_bytes_trigger"] == 0

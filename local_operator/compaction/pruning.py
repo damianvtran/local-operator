@@ -919,9 +919,10 @@ def reclaim_captures_to_wire_budget(
     capture, text blocks, or tool pairing. General frame shedding
     (:func:`shed_frames_to_wire_budget`) stays a separate, later rung for the
     pressure this cannot clear. The caller derives ``budget`` (the byte
-    ceiling to land at-or-below) from the same wire trigger/recovery band the
-    auto-continue gate uses (``cleared_wire_headroom`` semantics), so both
-    sides measure with ONE ruler.
+    ceiling to land at-or-below) from the wire trigger and its landing band
+    (``thresholds.wire_landing_bytes``), which is never above the line the
+    auto-continue gate accepts (``cleared_wire_headroom``), so both sides
+    measure with ONE ruler.
 
     Behaviour mirrors the shed rung in the ways that matter:
 
