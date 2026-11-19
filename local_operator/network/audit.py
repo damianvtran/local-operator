@@ -710,7 +710,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.copy_wiped": frozenset({"credential_key", "act", "sub", "rows"}),
     "credential.marked": frozenset({"credential_key", "mark"}),
     "definitions_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
-    "mcp_defs_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
+    # `withdrawn`: mirrors removed because their origin turned the server off
+    # (mcpdefs' explicit-withdrawal exception) — names only, like the rest.
+    "mcp_defs_applied": frozenset({"installed", "updated", "withdrawn", "conflicts", "refused"}),
     "skills_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
     # `detail` here is the warm failure's own sentence (a string), not a nested map.
     "session.create.warm_failed": frozenset({"peer", "detail"}),

@@ -1409,6 +1409,9 @@ def _render(action: str, payload: dict[str, Any], *, show_removed: bool = False)
             withheld = str(row.get("withheld") or "")
             if withheld:
                 line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
+            # Same marker as the CLI's `state` for a server this device turned off.
+            if row.get("disabled") and not origin:
+                line += " — disabled: not sent; peers withdraw the copy they mirrored"
             lines.append(line)
         return lines or ["no user-scope MCP servers on this device"]
     if action == "member_rm":

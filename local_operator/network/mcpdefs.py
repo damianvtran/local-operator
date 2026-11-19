@@ -110,6 +110,24 @@ v1: a delete is indistinguishable from a partial view, so removals stay an
 operator act on either side, visible in ``state``. Last-writer-wins is
 deliberately NOT the policy, for the same reason definitions gives.
 
+THE ONE EXCEPTION: AN EXPLICIT WITHDRAWAL. A server the owner turned OFF
+(``disabledServers``, or its own ``enabled: false`` that ``enabledServers`` does
+not rescue — ``mcp.config.server_suppressed``, the connect path's own rule) is
+not sent: mirroring it would install and RUN on every peer a server its owner
+chose not to run. Leaving it out is not enough for a peer that already holds
+it, because absence still means nothing (the partial-view rule above stands).
+So the bundle carries ``withdrawn``: the NAMES (never config) the sender has
+turned off. A receiver removes a name only when all three hold — the name is
+in that list, its index says the copy was mirrored FROM THIS SENDER, and the
+copy on disk still hashes to the recorded ``landed`` digest — and drops the
+index entry with it. An
+authored entry, an edited mirror, or another device's mirror is never removed;
+it is reported as a conflict by name. Re-enabling the server on the owner puts
+it back in ``servers``, and the next sync installs it as a normal mirror. An
+older receiver ignores the unknown key (``bundle_rows`` reads only
+``kind``/``version``/``servers``); an older sender sends no list, so nothing is
+withdrawn.
+
 THE OPS
 =======
 
@@ -675,17 +693,57 @@ def _authored_locally(root: Path, name: str, row: Mapping[str, Any]) -> bool:
     return str(recorded.get("digest") or "") != definitions.digest_of(row)
 
 
+def _suppressed_names(document: Mapping[str, Any] | None) -> set[str]:
+    """The names this document turns off, by the connect path's own resolver.
+
+    Delegated to ``mcp.config.suppressed_server_names`` rather than re-parsed:
+    "does the owner run this server" must have ONE answer, and a mirror rule
+    that disagreed with the connect path is how a disabled server came to run
+    on every peer.
+    """
+    from local_operator.mcp import config as mcp_config
+
+    return mcp_config.suppressed_server_names(document)
+
+
 def local_rows(root: Path) -> list[dict[str, Any]]:
-    """This device's AUTHORED user-scope servers, as canonical rows."""
+    """This device's AUTHORED, ENABLED user-scope servers, as canonical rows.
+
+    A server the owner turned off is not a row: sending it would install it on
+    every peer, where nothing says "off" (the install-wide lists never travel),
+    so it would RUN there. :func:`local_withdrawn` names it instead.
+    """
     document, _problem = _read_document(root)
+    suppressed = _suppressed_names(document)
     out: list[dict[str, Any]] = []
     for name, raw in sorted(_entries_of(document).items()):
         if not isinstance(raw, Mapping):
+            continue
+        if str(name) in suppressed:
             continue
         row = server_row(str(name), raw)
         if _authored_locally(root, str(name), row):
             out.append(row)
     return out
+
+
+def local_withdrawn(root: Path) -> list[str]:
+    """The names this device turns off, for the bundle's ``withdrawn`` list.
+
+    NAMES ONLY — never a config byte — and only names the product's writers
+    accept (``SERVER_NAME_RE``, the rule a receiver re-checks), sorted for a
+    stable digest and capped at :data:`MAX_MCP_ROWS` like the rows. Not limited
+    to names this device declares: a ``disabledServers`` entry is a name-level
+    tombstone, and the receiver's provenance check (mirrored FROM THIS SENDER)
+    is what keeps a list entry from touching anything the sender never sent.
+    """
+    from local_operator.mcp import config as mcp_config
+
+    document, _problem = _read_document(root)
+    names = sorted(
+        name for name in _suppressed_names(document) if mcp_config.SERVER_NAME_RE.match(name)
+    )
+    return names[:MAX_MCP_ROWS]
 
 
 def _size_refusal(size: int) -> str:
@@ -715,6 +773,10 @@ def local_bundle(root: Path) -> dict[str, Any]:
         "origin_device": device_id,
         "servers": [],
         "withheld": [],
+        # The explicit-withdrawal exception to "absence means nothing" (module
+        # docstring): names the owner turned off, so a peer can drop the copy
+        # it mirrored from here. Older receivers ignore the key.
+        "withdrawn": local_withdrawn(root),
     }
     for row in local_rows(root)[:MAX_MCP_ROWS]:
         label = withheld_label(row)
@@ -724,7 +786,9 @@ def local_bundle(root: Path) -> dict[str, Any]:
             )
             continue
         bundle["servers"].append(row)
-    size = _checked_size(bundle["servers"])
+    # The withdrawn names count against the same cap: it bounds the payload, not
+    # one of its lists (<= MAX_MCP_ROWS names of <= 100 characters each).
+    size = _checked_size(bundle["servers"]) + _checked_size(bundle["withdrawn"])
     if size > MAX_MCP_BUNDLE_BYTES:
         raise MeshRefusal("bundle_too_large", _size_refusal(size))
     bundle["digest"] = hashlib.sha256(
@@ -795,6 +859,10 @@ def state_rows(root: Path) -> list[dict[str, Any]]:
     """
     document, _problem = _read_document(root)
     index = definitions.read_index(root)
+    # ``disabled``: the owner turned the row off, so a push sends its name in
+    # ``withdrawn`` instead of the row — said here before a push, the same
+    # honesty ``withheld`` gives a row that will not travel.
+    suppressed = _suppressed_names(document)
     rows: list[dict[str, Any]] = []
     presence: dict[str, bool | None] = {}
     for name, raw in sorted(_entries_of(document).items()):
@@ -820,6 +888,7 @@ def state_rows(root: Path) -> list[dict[str, Any]]:
                 "digest": definitions.digest_of(row),
                 "refs": refs,
                 "withheld": withheld_label(row),
+                "disabled": str(name) in suppressed,
             }
         )
     return rows
@@ -913,6 +982,41 @@ def bundle_rows(bundle: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[d
     return rows[:MAX_MCP_ROWS], refused
 
 
+def bundle_withdrawn(bundle: Mapping[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    """``(names, refused)`` from a bundle's ``withdrawn`` list, each name re-checked.
+
+    An ABSENT list is an older sender's bundle and withdraws nothing — never
+    inferred from the rows it left out. Names are validated the way row names
+    are (``SERVER_NAME_RE``); anything else is refused BY a bounded rendering of
+    itself, so a malformed entry is visible without echoing an unbounded string.
+    Read to :data:`MAX_MCP_ROWS` + 1 entries and capped like the rows.
+    """
+    from local_operator.mcp import config as mcp_config
+
+    raw = bundle.get("withdrawn")
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], [
+            {"kind": "server", "name": "", "reason": "its withdrawn list is not a list of names"}
+        ]
+    names: list[str] = []
+    refused: list[dict[str, Any]] = []
+    for item in raw[: MAX_MCP_ROWS + 1]:
+        if not isinstance(item, str) or not mcp_config.SERVER_NAME_RE.match(item):
+            refused.append(
+                {
+                    "kind": "server",
+                    "name": _bounded_text(item, 100),
+                    "reason": "its withdrawn name is not one this device's writers accept",
+                }
+            )
+            continue
+        if item not in names:
+            names.append(item)
+    return names[:MAX_MCP_ROWS], refused
+
+
 def apply_bundle(root: Path, bundle: Mapping[str, Any], *, origin_device: str) -> dict[str, Any]:
     """Install what this device does not have; report what it will not touch.
 
@@ -933,15 +1037,17 @@ def _apply_bundle_locked(
     from local_operator.mcp import config as mcp_config  # SERVER_NAME_RE: the name rule
 
     rows, refused = bundle_rows(bundle)
+    withdrawn, withdrawn_refused = bundle_withdrawn(bundle)
     summary: dict[str, Any] = {
         "installed": [],
         "updated": [],
         "unchanged": [],
         "conflicts": [],
-        "refused": list(refused),
+        "refused": [*refused, *withdrawn_refused],
+        "withdrawn": [],
         "digests": {},
     }
-    if not rows and not refused:
+    if not rows and not summary["refused"] and not withdrawn:
         return summary
     document, problem = _read_document(root)
     if document is None:
@@ -1001,9 +1107,34 @@ def _apply_bundle_locked(
             summary["digests"][name] = definitions.digest_of(row)
             if outcome != "unchanged":
                 changed = True
+    sent = {str(row.get("name") or "") for row in rows}
+    index_dirty = False
+    for name in withdrawn:
+        if name in sent:
+            # A compliant sender never both sends and withdraws a name; which
+            # half it meant cannot be told, so neither wins by inference.
+            summary["refused"].append(
+                {
+                    "kind": "server",
+                    "name": name,
+                    "reason": "the same bundle both sends and withdraws it",
+                }
+            )
+            continue
+        verdict = _withdraw_row(name, origin, index, servers)
+        if verdict is None:
+            continue
+        outcome, extra = verdict
+        if outcome == "withdrawn":
+            changed = True
+            index_dirty = True
+        elif outcome == "index_only":
+            index_dirty = True
+            continue
+        summary[outcome].append({"kind": "server", "name": name, **extra})
     if changed:
         _write_document(root, document)
-    if any(summary[key] for key in ("installed", "updated")):
+    if index_dirty or any(summary[key] for key in ("installed", "updated")):
         _assert_inside_root(definitions.index_path(root), root)
         definitions.write_index(root, index)
     return summary
@@ -1094,6 +1225,63 @@ def _apply_row(
         "at": _now(),
     }
     return ("updated" if current is not None else "installed"), {}
+
+
+def _withdraw_row(
+    name: str, origin: str, index: dict[str, Any], servers: dict[str, Any]
+) -> tuple[str, dict[str, Any]] | None:
+    """One withdrawn name's decision: ``withdrawn``, a conflict, or nothing to do.
+
+    REMOVAL NEEDS PROOF THE COPY IS THE SENDER'S, UNTOUCHED: an index entry
+    whose ``origin`` is this sender (the authenticated link's device, never the
+    bundle's self-description) AND a copy on disk that still hashes to the
+    recorded ``landed`` digest. Anything else is somebody's own server — an
+    authored entry, another device's mirror, an operator's edit — and a delete
+    here would destroy it on the strength of a name, so it is a conflict by name.
+
+    Returns ``None`` when this device holds nothing under the name from this
+    sender (nothing to remove, nothing to report), and ``("index_only", {})``
+    when only a stale index entry of this sender's remains (its copy was already
+    deleted here): the entry is dropped so the provenance stops claiming a
+    mirror that is gone. The caller holds the lock and mutates nothing else.
+    """
+    recorded = _recorded(index, name)
+    current_raw = servers.get(name)
+    if recorded is None:
+        if current_raw is None:
+            return None
+        return "conflicts", {
+            "reason": "this device authored an MCP server by that name, so it was not withdrawn",
+            "origin": origin,
+        }
+    if str(recorded.get("origin") or "") != origin:
+        if current_raw is None:
+            return None
+        return "conflicts", {
+            "reason": (
+                "that name was mirrored here from another device, so this sender "
+                "cannot withdraw it"
+            ),
+            "origin": str(recorded.get("origin") or ""),
+        }
+    section = index.get(INDEX_SECTION)
+    if current_raw is None:
+        if isinstance(section, dict):
+            section.pop(name, None)
+        return "index_only", {}
+    landed = str(recorded.get("landed") or "")
+    if (
+        not isinstance(current_raw, Mapping)
+        or not landed
+        or (definitions.digest_of(server_row(name, current_raw)) != landed)
+    ):
+        return "conflicts", {
+            "reason": "the copy of that name here has local edits, so it was not withdrawn"
+        }
+    del servers[name]
+    if isinstance(section, dict):
+        section.pop(name, None)
+    return "withdrawn", {}
 
 
 def _now() -> float:
@@ -1188,7 +1376,10 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         for row in bundle["servers"]
         if remote_servers.get(str(row["name"])) != definitions.digest_of(row)
     ]
-    if not missing:
+    # Only names the peer HOLDS are worth a withdrawal: a name it never had
+    # needs no request, and the peer still decides whether its copy is ours.
+    withdraw = [name for name in bundle.get("withdrawn") or [] if name in remote_servers]
+    if not missing and not withdraw:
         return {
             "ok": True,
             "code": "in_sync",
@@ -1207,6 +1398,8 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         "origin_device": bundle.get("origin_device") or "",
         "servers": missing,
     }
+    if withdraw:
+        outbound["withdrawn"] = withdraw
     try:
         reply = link.request(
             {
@@ -1232,13 +1425,27 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
     summary: dict[str, Any] = summary_in if isinstance(summary_in, dict) else {}
     conflicts = list(summary.get("conflicts") or [])
     refused = list(summary.get("refused") or [])
+    withdrawn = list(summary.get("withdrawn") or [])
     ok = not conflicts and not refused
+    parts = []
+    if missing or not withdraw:
+        parts.append(
+            f"sent {len(missing)} MCP server "
+            f"{'definition' if len(missing) == 1 else 'definitions'}"
+        )
+    if withdraw:
+        # From the PEER's answer, never from what was asked: an older peer
+        # ignores the list, and claiming a withdrawal it never made would be
+        # the false success this module refuses elsewhere.
+        parts.append(
+            f"withdrew {len(withdrawn)} of {len(withdraw)} disabled "
+            f"{'server' if len(withdraw) == 1 else 'servers'}"
+        )
     return {
         "ok": ok,
         "code": "applied" if ok else "conflict",
         "message": (
-            f"sent {len(missing)} MCP server "
-            f"{'definition' if len(missing) == 1 else 'definitions'}"
+            "; ".join(parts)
             if ok
             else "that device would not take every MCP server: "
             + _describe_rows([*conflicts, *refused])
@@ -1248,6 +1455,7 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         "installed": summary.get("installed") or [],
         "updated": summary.get("updated") or [],
         "unchanged": summary.get("unchanged") or [],
+        "withdrawn": withdrawn,
         "conflicts": conflicts,
         "refused": refused,
         "withheld": bundle.get("withheld") or [],
@@ -1311,6 +1519,9 @@ def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[
                             ],
                             "updated": [
                                 str(row.get("name") or "") for row in summary.get("updated") or []
+                            ],
+                            "withdrawn": [
+                                str(row.get("name") or "") for row in summary.get("withdrawn") or []
                             ],
                             "conflicts": [
                                 str(row.get("name") or "") for row in summary.get("conflicts") or []
@@ -1385,9 +1596,12 @@ def mesh_tick_step(step_server: "RelayServer", device_id: str) -> str:
     blocked = definitions.unholdable_capability(step_server, device_id, "net_mcp_defs")
     if blocked:
         return f"skipped:no_{blocked}"
-    if not local_bundle(step_server.root)["servers"]:
-        # NOTHING TO SEND, NOTHING TO ASK: v1 is push-only (no delete propagation),
-        # so a device with no user-scope servers can never change what the peer
+    bundle = local_bundle(step_server.root)
+    # A device with only DISABLED servers still has something to say: a peer
+    # may hold a mirror it must withdraw, so a non-empty ``withdrawn`` dials.
+    if not bundle["servers"] and not bundle["withdrawn"]:
+        # NOTHING TO SEND, NOTHING TO ASK: absent an explicit withdrawal there is
+        # no delete propagation, so a device with no servers can never change what the peer
         # holds, and a dial per member per minute to discover that would bill for
         # a question already known. The on-demand `push` still asks — its per-peer
         # report is the evidence an operator reads.
