@@ -20,7 +20,11 @@ import pytest
 
 from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
-from local_operator.library.store import STATE_LAST_RECONCILE, IndexUnavailable, LibraryStore
+from local_operator.library.store import (
+    STATE_LAST_RECONCILE,
+    IndexUnavailable,
+    LibraryStore,
+)
 from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
