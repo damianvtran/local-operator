@@ -79,7 +79,10 @@ def seal_credential(credential: dict[str, Any], base: Path | None) -> dict[str, 
     if SECRET_FIELD in credential:
         secret = _secret_text(credential[SECRET_FIELD])
         key = credential.get("key")
-        conn = bconn.parse(key) if bconn.is_descriptor(key) else None
+        # The caller need not invent a placeholder ref: the ref is minted
+        # below, so a descriptor like ``bedrock://access-key?region=us-east-2``
+        # (no ref yet) is accepted here and only here.
+        conn = bconn.parse(key, require_ref=False) if bconn.is_descriptor(key) else None
         method = conn.method if conn is not None else "api-key"
         if method not in ("api-key", "access-key"):
             raise ValueError(f"a {method} Bedrock connection carries no secret")
@@ -134,5 +137,8 @@ def identity_key(credential: dict[str, Any]) -> str | None:
     if conn.method == "access-key":
         account = credential.get("account_id")
         if isinstance(account, str) and account:
-            return f"bedrock:access-key:{account}"
+            # Region is part of the identity, as for profiles: the same key
+            # pair saved for two Regions is two connections, and re-saving one
+            # must never replace (and delete the sealed ref of) the other.
+            return f"bedrock:access-key:{account}@{region}"
     return None

@@ -1768,6 +1768,11 @@ def is_auth_error(error: BaseException) -> bool:
     return False
 
 
+#: Providers whose auth failures are not fixed by replacing a single API key
+#: (multi-method connections whose errors name their own remedy).
+_NO_CREDENTIAL_UPDATE_HINT = frozenset({"bedrock"})
+
+
 def auth_recovery_hint(provider: str | None) -> str:
     """The local remedies for an authentication failure, as one clause.
 
@@ -1778,6 +1783,16 @@ def auth_recovery_hint(provider: str | None) -> str:
     copy-pasteable), generic otherwise. The ``/login`` form is the TUI's; the
     shell forms work anywhere.
     """
+    if provider in _NO_CREDENTIAL_UPDATE_HINT:
+        # Bedrock auth errors already carry the method-specific remedy (`aws
+        # sso login`, IAM permission, ...) and no `<PROVIDER>_API_KEY` exists
+        # for it: offering `credential update <BEDROCK_API_KEY>` names a
+        # variable nothing reads and is wrong advice for SSO/IAM failures.
+        # The login flow is the one remedy that applies to every method.
+        return (
+            f"To fix: `/login {provider}` in the TUI, `local-operator login "
+            f"{provider}` from a shell."
+        )
     if provider:
         return (
             f"To fix: `/login {provider}` in the TUI, `local-operator login "
@@ -2349,6 +2364,15 @@ def is_rotation_eligible(error: BaseException) -> bool:
     other account — so it is not here, and nothing rotates on it.
     """
     if not isinstance(error, ProviderError):
+        return False
+    if error.kind == "request" and not error.auth_error and not error.retryable:
+        # A raiser that EXPLICITLY classified a 403 as a request refusal
+        # (Bedrock's per-model access denial: console model access, or an IAM
+        # policy scoped to one model/inference-profile ARN) is saying the
+        # credential is fine for other models. The bare-403 clause below must
+        # not override that: rotating would block the whole credential for
+        # every model. A 403 constructed without an explicit kind derives
+        # ``kind="auth"`` in ``_classify_fields``, so first-party paths are unchanged.
         return False
     return error.retryable or error.auth_error or error.status in (401, 403)
 

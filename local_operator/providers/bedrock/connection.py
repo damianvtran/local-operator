@@ -116,16 +116,22 @@ class Connection:
         )
 
     def scope_key(self) -> str:
-        """Non-secret identity for caches: method/profile/region, never a ref or key.
+        """Non-secret identity for caches: method plus profile or key fingerprint.
 
-        A raw key contributes only a short fingerprint so two different raw
-        keys do not share a discovery cache entry.
+        The Region is NOT included; callers (``discovery.catalogue_scope``)
+        prepend the resolved Region. Never contains a secret or a raw ref:
+        a raw key and a sealed ref each contribute only a short SHA-256
+        fingerprint, so two different keys in one Region (possibly in two
+        AWS accounts) never share a discovery listing.
         """
-        if self.raw_key:
-            import hashlib
+        import hashlib
 
+        if self.raw_key:
             fp = hashlib.sha256(self.raw_key.encode("utf-8")).hexdigest()[:12]
             return f"api-key:{fp}"
+        if self.ref:
+            fp = hashlib.sha256(self.ref.encode("utf-8")).hexdigest()[:12]
+            return f"{self.method}:{self.profile or ''}:{fp}"
         return f"{self.method}:{self.profile or ''}"
 
 
@@ -153,12 +159,18 @@ def format_descriptor(
     return f"{SCHEME}{method}{suffix}"
 
 
-def parse(key: str) -> Connection:
+def parse(key: str, *, require_ref: bool = True) -> Connection:
     """Parse a stored/env key into a :class:`Connection`. Raises :class:`DescriptorError`.
 
     A string without the scheme is a raw Bedrock API key (bearer). Unknown
     query keys are refused rather than ignored, so a typo cannot silently
     drop the Region and send a request to the fallback one.
+
+    ``require_ref=False`` is ONLY for the seal hook (``store.seal_credential``),
+    which receives a not-yet-sealed ``api-key``/``access-key`` descriptor plus
+    the secret and mints the ref itself; a ref that IS present must still
+    match ``REF_PATTERN``. Every resolver/delete path keeps the default, so a
+    persisted sealed descriptor without a valid ref is always refused.
     """
     if not isinstance(key, str) or not key.strip():
         raise DescriptorError("empty Bedrock credential")
@@ -179,7 +191,7 @@ def parse(key: str) -> Connection:
         raise DescriptorError(f"invalid AWS Region {region!r}")
     ref = params.get("ref") or None
     if method in ("api-key", "access-key"):
-        if not ref or not REF_PATTERN.fullmatch(ref):
+        if (ref is None and require_ref) or (ref is not None and not REF_PATTERN.fullmatch(ref)):
             raise DescriptorError("Bedrock descriptor ref is missing or outside BEDROCK_SECRET_*")
     elif ref is not None:
         raise DescriptorError(f"a {method} connection carries no secret ref")

@@ -17937,6 +17937,14 @@ def _preflight_api_key(
     key_name = env_key_name(canonical)
     credential_hint = f", `local-operator credential update {key_name}`" if key_name else ""
     env_hint = f", or set {key_name} in the environment" if key_name else ""
+    # Bedrock has no single key variable (env_key_name is None) and several
+    # ways to connect; name them (AWS_BEARER_TOKEN_BEDROCK, the ambient switch
+    # for headless workers) from the same catalogued copy the runtime uses.
+    provider_hint = ""
+    if canonical == "bedrock":
+        from local_operator.providers.bedrock.errors import no_credentials_text
+
+        provider_hint = f" {no_credentials_text()}"
 
     if not require_key:
         # Interactive start: name the fact and the remedies, then let the app
@@ -17948,7 +17956,8 @@ def _preflight_api_key(
             paint(
                 f"Warning: no credentials are configured for hosting platform "
                 f"'{hosting}'. Starting anyway — run `/login {canonical}` in the "
-                f"TUI, `local-operator login {canonical}` from a shell{env_hint}.",
+                f"TUI, `local-operator login {canonical}` from a shell{env_hint}."
+                f"{provider_hint}",
                 WARNING,
                 stream=sys.stderr,
             ),
@@ -17963,7 +17972,7 @@ def _preflight_api_key(
         paint(
             f"Error: {subject} is required for hosting platform '{hosting}' but "
             f"is not configured. Set it via `local-operator login {canonical}`"
-            f"{credential_hint}, or the environment.",
+            f"{credential_hint}, or the environment.{provider_hint}",
             ERROR,
             stream=sys.stderr,
         ),

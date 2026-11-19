@@ -168,3 +168,56 @@ def test_importing_registry_and_clients_leaves_botocore_unloaded() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().splitlines()[-1] == "False"
+
+
+def test_same_access_key_in_two_regions_keeps_both_rows_and_refs(tmp_path: Path) -> None:
+    """R3/Q2: Region is part of the access-key identity, like the profile branch."""
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        refs = []
+        for region in ("us-east-1", "eu-west-1"):
+            row = store.upsert_credential(
+                "bedrock",
+                {
+                    "type": "api_key",
+                    "source": "login",
+                    # Placeholder ref (replaced by the seal) keeps this test about
+                    # identity only, independent of the Q6 ref-minting change.
+                    "key": f"bedrock://access-key?region={region}&ref=BEDROCK_SECRET_{'0' * 32}",
+                    "account_id": "access-key:" + "AKIDFAKE",  # no Region in account_id
+                    "secret": {"access_key_id": "AKIDFAKE", "secret_access_key": PAIR_SECRET},
+                },
+            )
+            refs.append(bconn.parse(row.data["key"]).ref)
+        rows = store.list_credentials("bedrock", include_disabled=True)
+        assert sorted(bconn.parse(r.data["key"]).region for r in rows) == ["eu-west-1", "us-east-1"]
+        names = _secret_names(tmp_path)
+        assert all(any(ref in name for name in names) for ref in refs)
+    finally:
+        store.close()
+
+
+def test_seal_mints_the_ref_for_an_unsealed_access_key_descriptor(tmp_path: Path) -> None:
+    """Q6: no placeholder ref needed; the hook mints a fresh BEDROCK_SECRET_ ref."""
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        row = store.upsert_credential(
+            "bedrock",
+            {
+                "type": "api_key",
+                "key": "bedrock://access-key?region=us-east-2",
+                "account_id": ACCOUNT,
+                "secret": {"access_key_id": "AKIDFAKE", "secret_access_key": PAIR_SECRET},
+            },
+        )
+        conn = bconn.parse(row.data["key"])
+        assert conn.region == "us-east-2" and conn.ref and bconn.REF_PATTERN.fullmatch(conn.ref)
+        # Persisted/resolver paths still refuse a sealed descriptor without a ref.
+        import pytest
+
+        with pytest.raises(bconn.DescriptorError):
+            bconn.parse("bedrock://access-key?region=us-east-2")
+        with pytest.raises(bconn.DescriptorError):
+            bconn.parse("bedrock://access-key?region=us-east-2&ref=OTHER", require_ref=False)
+    finally:
+        store.close()

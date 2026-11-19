@@ -156,3 +156,17 @@ def test_check_unresolvable_credentials_is_rejected(monkeypatch) -> None:
     monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK")
     result = _check(lambda r: httpx.Response(200, json={}))
     assert result.valid is False
+
+
+def test_two_sealed_keys_in_one_region_never_share_a_listing() -> None:
+    """R2: the scope carries a short ref fingerprint, so accounts never cross."""
+    ref_a = "BEDROCK_SECRET_" + "a" * 32
+    ref_b = "BEDROCK_SECRET_" + "b" * 32
+    for method in ("api-key", "access-key"):
+        a = bdisc.listing_cache_key(f"bedrock://{method}?region=us-east-1&ref={ref_a}")
+        b = bdisc.listing_cache_key(f"bedrock://{method}?region=us-east-1&ref={ref_b}")
+        assert a != b
+        # Stable for one connection, and the scope never exposes the ref itself.
+        assert a == bdisc.listing_cache_key(f"bedrock://{method}?region=us-east-1&ref={ref_a}")
+        scope = bdisc.catalogue_scope(f"bedrock://{method}?region=us-east-1&ref={ref_a}")
+        assert scope is not None and ref_a not in scope and "a" * 32 not in scope

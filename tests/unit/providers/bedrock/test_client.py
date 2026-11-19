@@ -8,6 +8,7 @@ the HTTP error table.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -315,6 +316,28 @@ async def test_mid_stream_exception_frames_raise(frame_type, kind, retryable) ->
             True,
             False,
         ),
+        # R1/Q1: an IAM deny naming ONE model / inference-profile ARN is
+        # model-scoped: the credential still works for other models.
+        (
+            403,
+            "AccessDeniedException",
+            "User: arn:aws:iam::123456789012:user/qa is not authorized to perform: "
+            "bedrock:InvokeModelWithResponseStream on resource: "
+            "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-opus-5-5",
+            "request",
+            False,
+            False,
+        ),
+        (
+            403,
+            "AccessDeniedException",
+            "User: arn:aws:sts::123456789012:assumed-role/worker/x is not authorized to "
+            "perform: bedrock:InvokeModelWithResponseStream on resource: "
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-x",
+            "request",
+            False,
+            False,
+        ),
         (
             400,
             "ValidationException",
@@ -427,3 +450,105 @@ def test_region_sentinel_is_never_the_first_party_url() -> None:
 
     assert bclient.region_sentinel("us-east-1") != ANTHROPIC_API_URL
     assert BedrockAnthropicClient(region="us-east-1")._base_url == "bedrock-runtime:us-east-1"
+
+
+# -- round-1 remediation: rotation, recovery hint, no-credential preflight ---------
+
+_IAM_MODEL_DENY = (
+    "User: arn:aws:iam::123456789012:user/qa is not authorized to perform: "
+    "bedrock:InvokeModelWithResponseStream on resource: "
+    "arn:aws:bedrock:us-east-1::foundation-model/x with an explicit deny"
+)
+
+
+def test_model_scoped_deny_is_not_rotation_eligible_but_bare_deny_is() -> None:
+    """R1/Q1: rotation (and so the 60 s credential block) must skip a per-model deny."""
+    from local_operator.providers.bedrock.errors import provider_error_for
+    from local_operator.providers.failover import ProviderError, is_rotation_eligible
+
+    scoped = provider_error_for("AccessDeniedException", _IAM_MODEL_DENY, 403)
+    console = provider_error_for(
+        "AccessDeniedException",
+        "You don't have access to the model with the specified model ID.",
+        403,
+    )
+    bare = provider_error_for(
+        "AccessDeniedException",
+        "User is not authorized to perform: bedrock:InvokeModelWithResponseStream",
+        403,
+    )
+    assert not is_rotation_eligible(scoped)
+    assert not is_rotation_eligible(console)
+    assert is_rotation_eligible(bare)
+    # First-party control: a 403 with no explicit kind still derives auth and rotates.
+    assert is_rotation_eligible(ProviderError(403, "forbidden"))
+
+
+def test_next_turn_on_allowed_model_is_not_blocked_after_model_scoped_deny(
+    tmp_path, monkeypatch
+) -> None:
+    """R1/Q1 through the real AuthStore: the deny leaves no credential block behind.
+
+    Mirrors the failover driver: it calls ``rotate_sibling`` only when
+    ``is_rotation_eligible``. The bare (credential-wide) deny is the control
+    that DOES block, so the assertion is not vacuous.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.bedrock.errors import provider_error_for
+    from local_operator.providers.failover import is_rotation_eligible
+
+    # The env tier would outrank the stored row; this test is about the row.
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK")
+
+    def run(message: str) -> list[tuple[int, str]]:
+        base = tmp_path / str(abs(hash(message)))
+        base.mkdir()
+        store = AuthStore(base / "auth.db", config_dir=base)
+        try:
+            row = store.upsert_credential("bedrock", {"type": "api_key", "key": "fake-bedrock-key"})
+            err = provider_error_for("AccessDeniedException", message, 403)
+            if is_rotation_eligible(err):
+                store.rotate_sibling("bedrock", None, err, api_key=row.data["key"])
+            resolved = asyncio.run(store.get_api_key("bedrock"))
+            blocks = store._conn.execute(
+                "SELECT credential_id, block_scope FROM auth_credential_blocks"
+            ).fetchall()
+            if not blocks:
+                # A later turn on an allowed model resolves the stored row itself.
+                assert resolved == row.data["key"]
+            return blocks
+        finally:
+            store.close()
+
+    assert run(_IAM_MODEL_DENY) == []
+    assert run("User is not authorized to perform: bedrock:InvokeModel") != []
+
+
+def test_bedrock_auth_recovery_hint_names_no_phantom_key_variable() -> None:
+    """Q3: no ``credential update <BEDROCK_API_KEY>`` -- nothing reads that name."""
+    from local_operator.providers.failover import auth_recovery_hint
+
+    hint = auth_recovery_hint("bedrock")
+    assert "BEDROCK_API_KEY" not in hint and "credential update" not in hint
+    assert "login bedrock" in hint
+    # Other providers keep the key-replacement remedy.
+    assert "credential update <OPENAI_API_KEY>" in auth_recovery_hint("openai")
+
+
+def test_preflight_without_credentials_names_bedrock_env_switches(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Q4: the no-credential error names AWS_BEARER_TOKEN_BEDROCK and the ambient switch."""
+    import os
+
+    from local_operator import cli
+
+    for name in list(os.environ):
+        if name.startswith(("AWS_", "LOP_BEDROCK")):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert cli._preflight_api_key("bedrock", tmp_path / ".local-operator") == 1
+    err = capsys.readouterr().err
+    assert "local-operator login bedrock" in err
+    assert "AWS_BEARER_TOKEN_BEDROCK" in err
+    assert "LOP_BEDROCK_AUTH=ambient" in err

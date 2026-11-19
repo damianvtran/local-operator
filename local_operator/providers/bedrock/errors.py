@@ -25,6 +25,7 @@ provider's diagnostic, like every other provider's error text).
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from local_operator.providers.bedrock.connection import Connection
@@ -62,16 +63,24 @@ def _prewire(text: str) -> "ProviderError":
     )
 
 
+def no_credentials_text() -> str:
+    """How to turn Bedrock on: the bearer env var, the ambient switch, a stored row.
+
+    Shared by the runtime pre-wire error and the CLI's "no credentials"
+    preflight, so a D6 user whose ``AWS_PROFILE`` was deliberately ignored is
+    pointed at the explicit ``LOP_BEDROCK_AUTH=ambient`` switch on both paths.
+    """
+    return _text(
+        _keys().no_credentials(
+            bearer_env="AWS_BEARER_TOKEN_BEDROCK", auth_env="LOP_BEDROCK_AUTH=ambient"
+        )
+    )
+
+
 def no_credentials_error(conn: Connection | None = None) -> "ProviderError":
     if conn is not None and conn.method == "profile" and conn.profile:
         return _prewire(_text(_keys().profile_no_credentials(profile=conn.profile)))
-    return _prewire(
-        _text(
-            _keys().no_credentials(
-                bearer_env="AWS_BEARER_TOKEN_BEDROCK", auth_env="LOP_BEDROCK_AUTH=ambient"
-            )
-        )
-    )
+    return _prewire(no_credentials_text())
 
 
 def secret_missing_error() -> "ProviderError":
@@ -165,12 +174,28 @@ _DEFAULT_STATUS = {
 }
 
 
+# An IAM deny that names one model or inference-profile ARN ("... is not
+# authorized to perform: bedrock:InvokeModelWithResponseStream on resource:
+# arn:aws:bedrock:us-west-2::foundation-model/...") is scoped to that resource:
+# the usual cause is a cross-Region profile routing to a destination Region the
+# policy does not list, or a worker role allowed only some models. The same
+# credential still works for other models, so it must not be treated as a
+# credential failure (which would block the whole connection for every model).
+# A bare "not authorized to perform" without such a resource stays auth.
+_MODEL_RESOURCE = re.compile(
+    r"on resource:\s*arn:[^\s]*:(?:foundation-model|inference-profile|"
+    r"application-inference-profile)/",
+    re.IGNORECASE,
+)
+
+
 def _model_access_denied(message: str) -> bool:
     lowered = message.lower()
     return (
         "access to the model" in lowered
         or "model access" in lowered
         or ("not authorized to invoke this model" in lowered)
+        or bool(_MODEL_RESOURCE.search(message))
     )
 
 

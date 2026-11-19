@@ -1132,10 +1132,13 @@ USAGE_FILL_EVENT = "lop.usage_fill"
 
 
 def _encode_json_body(body: Any) -> bytes:
-    """JSON bytes exactly as ``httpx`` encodes ``json=`` (0.28 ``encode_json``).
+    """JSON bytes exactly as ``httpx`` 0.28 encodes ``json=`` (its ``encode_json``).
 
     Kept identical so moving the Anthropic client from ``json=`` to explicit
     ``content=`` bytes (needed for request signing) changed nothing on the wire.
+    The byte-for-byte claim holds for httpx 0.28 only: 0.27's ``encode_json``
+    used plain ``json.dumps`` (spaces, ``ensure_ascii=True``), so under the
+    ``httpx>=0.27`` floor the JSON is equivalent but the bytes may differ.
     """
     return json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"

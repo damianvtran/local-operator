@@ -112,10 +112,11 @@ Rows built from the first-party prices, checked against the AWS Price List
 | `ThrottlingException`, `ServiceQuotaExceededException` | quota (retryable, rotates connections) |
 | `ServiceUnavailable`, `InternalServer`, `ModelNotReady`, `modelStreamErrorException` | transient (retryable) |
 | `ModelTimeoutException` | timeout (retryable) |
-| `ValidationException` "input is too long" | context overflow, so compaction runs |
+| `ValidationException` "input is too long" | classified as a context-length incident; compaction applies as for Anthropic (gated by the shared token estimate, not by this error) |
 | `ResourceNotFoundException` | the model or profile is not in that Region; try `global.` or a geographic prefix |
 | `AccessDeniedException` "access to the model" | enable model access in the Bedrock console. The credential stays usable for other models |
-| `AccessDeniedException` (IAM), `UnrecognizedClient`, `InvalidSignature`, `ExpiredToken` | authentication error |
+| `AccessDeniedException` (IAM) naming one `foundation-model/` or `inference-profile/` resource ARN | per-model request error, not an auth failure: the policy denies that model (often a cross-Region profile routing to a Region the policy omits). The credential stays usable for other models |
+| `AccessDeniedException` (IAM, no model resource), `UnrecognizedClient`, `InvalidSignature`, `ExpiredToken` | authentication error |
 
 ## Testing without AWS
 
