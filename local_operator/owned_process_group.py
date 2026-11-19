@@ -1596,7 +1596,20 @@ class OwnedGroup:
                 self._terminal_result = self.last
                 return self.last
             for pid in live:
-                parent, group, sid = self.identity(pid)
+                try:
+                    view = self.identity(pid)
+                except Unknown as exc:
+                    view, failure = None, exc
+                else:
+                    failure = Unknown("actual parent/PG/SID unavailable")
+                # A provider answering None (or any non-triple) instead of raising
+                # is the same "unreadable" fact; unpacking it used to TypeError
+                # out of the proof instead of reaching a named refusal.
+                if not (isinstance(view, tuple) and len(view) == 3):
+                    if self._live_member_departed(pid, deadline):
+                        continue
+                    raise failure
+                parent, group, sid = view
                 if (group, sid) != (self.pgid, self.sid):
                     raise Unknown("member outside the recorded group/session")
             # The witness must still hold at the END of the proof.
@@ -1831,6 +1844,77 @@ class OwnedGroup:
                 return False
             return False
         return True
+
+    def _live_member_departed(self, pid, deadline):
+        """Whether a member sampled LIVE, whose identity read then failed, has left.
+
+        WHY THIS EXISTS. `refresh` samples members, then re-reads each live one's
+        parent/PG/SID. A healthy fast-forking command's child can exit and be
+        reaped in that gap: `/proc/<pid>/stat` answers ENOENT,
+        `resources._linux_ppid_pgid` maps it to None, `kernel_identity` raises
+        "actual parent/PG/SID unavailable", and the wrapper reported exit 126
+        (cleanup unproven) for a child that exited 0 with nothing signalled
+        (main jobs 134939000460 and 135515724004,
+        test_a_healthy_gate_survives_spawn_churn_and_records_its_group). That is
+        the same bug class `_departed` and `_rerunnable` cure one step earlier.
+
+        The member may be dropped from the identity proof only under ALL of:
+
+        - it is neither the leader nor the pgid (the witness is never amnestied);
+        - a FRESH complete strict census (`_members`, which raises on incomplete
+          visibility, inside the same deadline) no longer lists it -- a zombie or
+          a still-running member is still listed, so this refuses both;
+        - `getpgid(pid)` then raises ProcessLookupError (the kernel agrees it is
+          gone; a reused pid returns a number and refuses), via the injected
+          departure probe when one is given; an injected sampler without one
+          grants nothing, exactly as in `_departed`;
+        - `/proc/self` names our pid (C10): the census and getpgid must describe
+          the same pid namespace. Platforms without `/proc` keep refusing.
+
+        THE LATE-FORK QUESTION. A child the departed member forked before dying
+        is in our group and therefore in the fresh census; it is not proved here
+        and need not be: a live-member VERIFIED authorises only a signal to the
+        whole group (which reaches it), and every later verdict re-runs the full
+        census->sample proof. That is the same window a fork right after this
+        loop already has. Anything else -- an identity failure for a pid still
+        listed, an unreadable census, an unexpected probe answer -- refuses.
+        """
+        if pid in (self.leader, self.pgid):
+            return False
+        probe = self._departure
+        if probe is None:
+            if self.samples is not None:
+                # An injected sampler carries no trustworthy kernel facts.
+                return False
+            probe = os.getpgid
+        try:
+            own = (self._proc_self or (lambda: os.readlink("/proc/self")))()
+        except Exception:  # noqa: BLE001 - an unreadable namespace grants nothing
+            return False
+        if own != str(os.getpid()):
+            return False
+        # Unknown from an incomplete census propagates: it is a refusal on its own.
+        fresh = self._members(deadline)
+        if pid in fresh:
+            return False
+        try:
+            probe(pid)
+        except ProcessLookupError:
+            # Recorded under `vanished` so it inherits that key's lifecycle: popped
+            # per refresh, per discarded cycle and on refusal, and published in the
+            # run record beside the proof it belongs to.
+            self.probe.setdefault("vanished", []).append(
+                {
+                    "pid": pid,
+                    "reason": "identity-unreadable",
+                    "getpgid": "ProcessLookupError",
+                    "census": "absent-after-identity",
+                }
+            )
+            return True
+        except Exception:  # noqa: BLE001 - anything but ESRCH is not departure
+            return False
+        return False
 
     def signal(self, signum, *, deadline):
         result = self.refresh(deadline=deadline)

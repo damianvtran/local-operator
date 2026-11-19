@@ -874,3 +874,113 @@ def test_a_foreign_birth_beats_an_unreadable_census():
     assert verdict.status == "REFUSED", verdict.reason
     assert verdict.refusal_class == "pin_lost", verdict.reason
     assert kernel.sent == []
+
+
+# ---------------------------------------------------------------------------
+# A LIVE member that is reaped between its sample and its identity re-read.
+#
+# Main jobs 134939000460 and 135515724004 (3.12) failed
+# test_a_healthy_gate_survives_spawn_churn_and_records_its_group with rc 126 and
+# `finally-refresh refused: Unknown:actual parent/PG/SID unavailable`: a churn
+# child sampled live exited before `kernel_identity` read /proc/<pid>/stat, and
+# `refresh` refused a healthy run. These worlds replay that order
+# deterministically; the departure rule must still refuse every shape that is
+# not a proven, kernel-confirmed departure.
+# ---------------------------------------------------------------------------
+
+
+def _identity_race_world(*, reap=True, answer="raise", census_complete=True):
+    """Member 20 is sampled live; its FIRST identity read fails.
+
+    ``reap`` pops its row at that moment (the child exited and was reaped), so a
+    fresh census no longer lists it; ``reap=False`` keeps it live (negative
+    control). ``answer`` picks a raising provider or one returning None. When
+    ``census_complete`` is False every census after the failure is incomplete.
+    """
+    kernel = Kernel()
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "churn-child")
+    failed = {"n": 0}
+
+    def racing_identity(pid):
+        if pid == 20 and not failed["n"]:
+            failed["n"] += 1
+            if reap:
+                kernel.reap(20)
+            if answer == "none":
+                return None
+            raise owned.Unknown("actual parent/PG/SID unavailable")
+        return kernel.identity(pid)
+
+    def census(pgid, deadline):
+        pids = kernel.census(pgid, deadline)
+        complete = census_complete or not failed["n"]
+        return owned.AuthoritativeCensus(
+            tuple(pids), complete, pgid in set(kernel.rows), "" if complete else "fixture-gap"
+        )
+
+    def departure(pid):
+        # The kernel's answer: a reaped pid is ESRCH, a present one has a group.
+        if pid not in kernel.rows:
+            raise ProcessLookupError(pid)
+        return kernel.rows[pid][1]
+
+    cap = kernel.cap()
+    cap.identity = racing_identity
+    cap.census = census
+    cap._departure = departure
+    cap._proc_self = lambda: str(os.getpid())
+    return kernel, cap, failed
+
+
+def test_a_live_member_reaped_before_its_identity_read_is_departed_not_refused():
+    kernel, cap, failed = _identity_race_world()
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert failed["n"] == 1, "the race was never exercised"
+    assert verdict.status == "VERIFIED", verdict.reason
+    assert [row["pid"] for row in cap.probe["vanished"]] == [20]
+    assert cap.probe["vanished"][0]["reason"] == "identity-unreadable"
+    assert kernel.sent == []
+
+
+def test_a_provider_returning_none_for_a_reaped_member_is_departed_not_a_type_error():
+    kernel, cap, _ = _identity_race_world(answer="none")
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "VERIFIED", verdict.reason
+
+
+@pytest.mark.parametrize("answer", ["raise", "none"])
+def test_an_unreadable_identity_for_a_member_still_listed_refuses(answer):
+    """NEGATIVE CONTROL: the census still lists 20 -- it is alive, not departed."""
+    kernel, cap, failed = _identity_race_world(reap=False, answer=answer)
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert failed["n"] == 1
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "unproven", verdict.reason
+    assert "actual parent/PG/SID unavailable" in verdict.reason
+    assert "vanished" not in cap.probe
+
+
+def test_an_incomplete_census_after_the_identity_failure_refuses():
+    """NEGATIVE CONTROL: absence from a census that cannot vouch is not departure."""
+    kernel, cap, _ = _identity_race_world(census_complete=False)
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert "census incomplete" in verdict.reason
+    assert "vanished" not in cap.probe
+
+
+def test_a_departed_identity_without_kernel_esrch_refuses():
+    """NEGATIVE CONTROL: census absence alone is not enough; getpgid must say ESRCH."""
+    kernel, cap, _ = _identity_race_world()
+    cap._departure = lambda pid: kernel.leader + 99  # a reused pid in another group
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert "actual parent/PG/SID unavailable" in verdict.reason
+
+
+def test_an_injected_sampler_without_a_departure_probe_grants_nothing():
+    """NEGATIVE CONTROL: same convention as `_departed` -- no probe, no amnesty."""
+    kernel, cap, _ = _identity_race_world()
+    cap._departure = None
+    verdict = cap.refresh(deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
