@@ -301,6 +301,8 @@ async def test_inherit_mode_eval_worker_keeps_the_parent_environment(
     assert report["provider_key"] is True
     assert report["path"] is True
     assert report["ungranted"] == UNGRANTED_SENTINEL
+    # The agent-descent marker rides every mode (#4251 S-1).
+    assert report["agent_shell"] == "1"
 
 
 @pytest.mark.asyncio
@@ -320,13 +322,14 @@ async def test_allowlist_mode_eval_worker_loses_the_provider_key(
     assert report["ungranted"] is None
     assert report["path"] is True
     assert report["home"] is True
-    # The eval worker has never received ``NON_INTERACTIVE_ENV`` (that contract
-    # belongs to the bash tool, and this change does not widen the worker's
-    # injections), so the strict mode leaves it with the safe set and the scrub
-    # fd alone. Asserted rather than left implicit: a deployment reading "the
-    # strict mode gives the child the safe set plus the injections" should see
-    # which injections that actually is on this path.
-    assert report["agent_shell"] is None
+    # The eval worker does not receive ``NON_INTERACTIVE_ENV`` (that contract
+    # belongs to the bash tool), but it DOES carry the agent-descent marker: a
+    # cell's `subprocess.run(["lop", ...])` is an agent's call, and the marker's
+    # absence let `lop team-bridge holds` hand held bodies to a cell (#4251
+    # security review S-1). Asserted rather than left implicit: a deployment
+    # reading "the strict mode gives the child the safe set plus the injections"
+    # should see which injections that actually is on this path.
+    assert report["agent_shell"] == "1"
     assert report["names"] > 0
 
 
