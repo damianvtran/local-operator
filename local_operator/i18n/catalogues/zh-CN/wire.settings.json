@@ -425,7 +425,7 @@
   "wire.settings.network_max_handshakes.label": "并发握手数",
   "wire.settings.network_max_handshakes_per_source.help": "单个地址可同时持有的未认证连接数。该值始终低于并发握手数上限，任何单一地址都无法将其占满；超出部分在accept时即被丢弃，不回任何应答帧。",
   "wire.settings.network_max_handshakes_per_source.label": "每来源握手数",
-  "wire.settings.network_first_byte_timeout_s.help": "新连接在被关闭前可保持静默的秒数。计入握手时限之内，而非额外叠加。设为 0 即关闭。",
+  "wire.settings.network_first_byte_timeout_s.help": "新连接在被关闭前可保持静默的秒数。计入握手时限之内，而非额外叠加。设为0即关闭。",
   "wire.settings.network_first_byte_timeout_s.label": "首字节超时",
   "wire.settings.network_port.help": "对等设备拨号的端口；不带端口的endpoint默认使用它。",
   "wire.settings.network_port.label": "mesh端口",

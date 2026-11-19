@@ -423,7 +423,7 @@
   "wire.settings.network_listen_address.label": "کنکشن قبول کرنے کا ایڈریس",
   "wire.settings.network_max_handshakes.help": "غیر تصدیق شدہ کنکشنز جو ریلے ایک وقت میں رکھے۔ پیئرنگ کوڈ لکھنے کے سیکنڈز تک ایک رکھتی ہے؛ حد سے زیادہ کنکشن قبول کے وقت بغیر جوابی فریم کے حذف ہوتا ہے۔",
   "wire.settings.network_max_handshakes.label": "ہم وقت ہینڈ شیکس",
-  "wire.settings.network_max_handshakes_per_source.help": "غیر تصدیق شدہ کنکشنز جو ایک ہی پتہ ایک وقت میں رکھ سکے۔ یہ ہم وقت ہینڈ شیکس کی حد سے کم رکھی جاتی ہے تاکہ کوئی اکیلا پتہ پوری حد نہ بھر سکے؛ اس سے زیادہ کنکشن قبول کے وقت بغیر جوابی فریم کے حذف ہوتا ہے۔",
+  "wire.settings.network_max_handshakes_per_source.help": "غیر تصدیق شدہ کنکشنز جو ایک ہی ایڈریس ایک وقت میں رکھ سکے۔ یہ ہم وقت ہینڈ شیکس کی حد سے کم رکھی جاتی ہے تاکہ کوئی اکیلا ایڈریس پوری حد نہ بھر سکے؛ اس سے زیادہ کنکشن قبول کے وقت بغیر جوابی فریم کے حذف ہوتا ہے۔",
   "wire.settings.network_max_handshakes_per_source.label": "فی ماخذ ہینڈ شیکس",
   "wire.settings.network_first_byte_timeout_s.help": "نیا کنکشن بند ہونے سے پہلے کتنے سیکنڈ خاموش رہ سکتا ہے۔ یہ ہینڈ شیک کی وقت کی حد کے اندر شمار ہوتا ہے، اس میں اضافہ نہیں ہوتا۔ 0 اسے بند کر دیتا ہے۔",
   "wire.settings.network_first_byte_timeout_s.label": "پہلے بائٹ کی مہلت",
