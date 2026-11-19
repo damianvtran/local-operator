@@ -306,3 +306,26 @@ def test_the_closed_offline_header_says_open_not_close_and_reopen() -> None:
     # The open card keeps the body line: there the retry IS close and reopen.
     body = _open(_answer(_item("unavailable", reason="offline")))._build_content(110).plain
     assert "Couldn't reach Radient — close and reopen to retry" in body
+
+
+def test_an_open_offline_card_header_does_not_contradict_its_body() -> None:
+    """QA Q1 (#4277): "open to retry" is only for the CLOSED card.
+
+    On an open card the header sits right above the body's "close and reopen
+    to retry", so it keeps the string main showed there (the body line), and it
+    follows the card through both directions of the toggle.
+    """
+    offline = _answer(_item("unavailable", reason="offline"))
+    block = TeamBridgeBlock("(no preview available)", {"name": "Ola"}, body_loader=_no_load)
+    block.apply_card_body(offline, verified=True)
+    assert "open to retry" in block._build_content(110).plain.splitlines()[0]
+    block.toggle_expanded()
+    header = block._build_content(110).plain.splitlines()[0]
+    assert "Couldn't reach Radient — close and reopen to retry" in header
+    assert "— open to retry" not in header
+    block.toggle_expanded()
+    closed = block._build_content(110).plain.splitlines()[0]
+    assert "Couldn't reach Radient — open to retry" in closed
+    # Opened before the answer lands: the header is built open from the start.
+    opened = _open(offline)
+    assert "— open to retry" not in opened._build_content(110).plain.splitlines()[0]

@@ -3632,6 +3632,14 @@ class TeamBridgeBlock(PeerMessageBlock):
 
     def _after_toggle(self) -> None:
         super()._after_toggle()
+        if self._card_body is not None:
+            # The header's state line depends on whether the card is open (the
+            # offline retry advice, D8 / #4277 Q1), and ``_snippet`` is only
+            # rebuilt when an answer lands, so a toggle re-derives it. The base
+            # repaints right after this hook.
+            header = self._header_text(self._card_body)
+            if header:
+                self._snippet = header
         if self._expanded:
             self._maybe_load_body()
 
@@ -3816,9 +3824,13 @@ class TeamBridgeBlock(PeerMessageBlock):
             return _bt(tui_bridge_card.body_not_member())
         if reason == "offline":
             # The body line's retry is "close and reopen"; on the collapsed
-            # header the card is already closed, so it says "open" (D8).
+            # header the card is already closed, so it says "open" (D8). An
+            # OPEN card's header sits right above that body line, so it keeps
+            # the body's wording rather than contradicting it (#4277 Q1).
             return _bt(
-                tui_bridge_card.header_offline() if header else tui_bridge_card.body_offline()
+                tui_bridge_card.header_offline()
+                if header and not self._expanded
+                else tui_bridge_card.body_offline()
             )
         if reason == "deleted":
             return _bt(tui_bridge_card.body_deleted())
