@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import local_operator.harness.loop as loop_module
 import local_operator.session.session as session_module
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -489,18 +490,54 @@ async def run_case(case, tmp_path, monkeypatch):
         # new actual user prompt must neither inherit acceptance nor rerun work.
         scripts = [batch(call("qa_effect")), final("QA_FRESH_AFTER_ABORT"), final()]
 
+    if case == "queued-user":
+        # Force the startup/poll ordering that exposed the old outer-start
+        # steering race, without starving CPUs or guessing a spawn duration.
+        # The first real interrupt poll releases startup; the eval worker and
+        # bridge remain real, and the existing deadlock guard bounds a broken
+        # poll hook rather than turning an absent receipt into success.
+        startup_allowed = asyncio.Event()
+        spawn = eval_tool._spawn
+        peek_interrupt = loop_module.AgentLoop._peek_interrupt
+
+        async def delayed_spawn(*args, **kwargs):
+            await startup_allowed.wait()
+            return await spawn(*args, **kwargs)
+
+        def release_startup(config):
+            startup_allowed.set()
+            return peek_interrupt(config)
+
+        monkeypatch.setattr(eval_tool, "_spawn", delayed_spawn)
+        monkeypatch.setattr(loop_module.AgentLoop, "_peek_interrupt", staticmethod(release_startup))
+
     provider = RecordingProvider(scripts, timeline)
     session = make_session(directory, provider, tools=custom, cwd=str(home), has_ui=True)
     assert any(t.name == "no_reply" for t in session._tools), "actual inventory missing no_reply"
     queued = False
 
+    if case == "queued-user":
+        execute_eval = custom[-1].execute
+
+        async def queue_before_eval_settles(*args, **kwargs):
+            nonlocal queued
+            result = await execute_eval(*args, **kwargs)
+            # The worker has actually run its identity prefix and nested
+            # no_reply, but the enclosing eval result has not reached the
+            # harness's terminal quiet-acceptance barrier. Queue real user
+            # ingress HERE: outer tool-start can interrupt slow kernel startup
+            # and produce a legitimate skipped result with no worker receipt.
+            # This is deliberately before root tool-end, not after acceptance.
+            queued = True
+            session.steer("QA queued actual user", message_id="qa-queued-user")
+            return result
+
+        custom[-1].execute = queue_before_eval_settles
+
     def observe(event):
         nonlocal queued
         events.append(event)
         timeline.append({"kind": "event", "event": serialized(event)})
-        if case == "queued-user" and isinstance(event, ToolExecutionStartEvent) and not queued:
-            queued = True
-            session.steer("QA queued actual user", message_id="qa-queued-user")
         if case == "cancel-and-fresh" and isinstance(event, ToolExecutionStartEvent) and not queued:
             queued = True
             session.abort()
@@ -646,6 +683,30 @@ async def run_case(case, tmp_path, monkeypatch):
         else:
             assert not accepted, "refusal/error/forged request falsely accepted"
             assert len(provider.requests) >= 2
+        if case == "queued-user":
+            assert startup_allowed.is_set(), "controlled startup never crossed the interrupt poll"
+            assert queued, "real user ingress was not exercised"
+            quiet_results = [
+                event
+                for event in events
+                if isinstance(event, ToolExecutionEndEvent) and event.tool_name == "no_reply"
+            ]
+            assert len(quiet_results) == 1 and not quiet_results[0].is_error
+            assert quiet_results[0].result.details.get("quiet_request_pending") is True
+            assert all(not root.is_error for root in roots), "enclosing eval did not complete"
+            queued_input = "QA queued actual user"
+            assert sum(getattr(row, "text", "") == queued_input for row in session.history()) == 1
+            assert not session._has_awaiting_user(), "queued user was left unhandled"
+            assert any(
+                queued_input in str(getattr(row, "text", ""))
+                for request in provider.requests[1:]
+                for row in request.messages
+            ), "queued user never reached a follow-up provider request"
+            assert any(
+                getattr(row, "role", None) == "assistant"
+                and "QA_FINAL_SENTINEL" in str(getattr(row, "text", ""))
+                for row in session.history()
+            ), "queued user received no visible answer"
         if case == "wrapped-exception":
             quiet_results = [
                 event
