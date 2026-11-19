@@ -20,6 +20,8 @@ from pathlib import Path
 
 from bedrock_fake_server import _isolated_env, serve
 
+from local_operator.agent_shell import harness_child_env
+
 # The fixture module already primes this source root; imports stay above code.
 REPO = Path(__file__).resolve().parents[1]
 
@@ -35,7 +37,12 @@ async def sdk_call(model: str) -> None:
         SessionSpec,
         open_session,
     )
+    from local_operator.tui.notify import notifications_enabled
 
+    # This is the real child, not its parent's ambient environment: fail before
+    # opening a session if a future smoke builder drops notification isolation.
+    assert not notifications_enabled(), "SDK smoke child must not notify the operator"
+    print("SDK child notifications: disabled", flush=True)
     home = Path(os.environ["HOME"])
     roots = SessionRoots(
         config_dir=home / ".local-operator", agent_home=home / "agent", cwd=Path.cwd()
@@ -69,7 +76,7 @@ def smoke() -> int:
                     for signed in (False, True):
                         work = root / f"{surface}-{index}-{int(signed)}"
                         work.mkdir()
-                        env = _isolated_env(work, endpoint)
+                        env = harness_child_env(_isolated_env(work, endpoint))
                         fakebin = work / "bin"
                         fakebin.mkdir()
                         aws = fakebin / "aws"

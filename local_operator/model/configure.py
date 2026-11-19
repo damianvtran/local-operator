@@ -31,6 +31,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
@@ -3041,20 +3042,17 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
     """
     bucket = int(time.time() // DEFAULT_TTL_S)
     info = _paint_memo.get((provider, model_id, bucket))
-    # SHALLOW copies, and the isolation they give is exactly what a deep copy
-    # gave: every ``ModelInfo`` field is a scalar (float/int/str/bool/None --
-    # ``test_paint_resolution_isolates_the_memo_with_a_shallow_copy`` pins that),
-    # so a caller assigning a field on its copy still cannot reach the memo or
-    # the registry row, and there is no nested container to share. What the
-    # deep copy cost was pydantic's ``__deepcopy__`` walk on every call, and
-    # this is called once per usage COMPONENT on every roster tick: at 16
-    # children the parent's 50 ms coalescer priced ~113 components per tick,
-    # and the deep copies were ~0.2 s of every second of that loop's CPU
-    # (``scripts/bench_subagent_fanout.py --profile``), paid on the same
-    # thread that runs every child's turn.
+    hit = info is not None
     if info is None:
-        return _registry_fallback(provider, model_id).model_copy(), False
-    return info.model_copy(), True
+        info = _registry_fallback(provider, model_id)
+    # Keep pydantic's whole-model deep walk off the roster tick: scalar-only
+    # providers still take exactly the shallow-copy path. Bedrock carries nested
+    # discovery/profile facts, however, and sharing those would let one caller
+    # corrupt the memo's capability decisions. Copy only that payload, without
+    # normalising unknown models into invented Claude capabilities.
+    if info.bedrock_metadata is not None:
+        return info.model_copy(update={"bedrock_metadata": deepcopy(info.bedrock_metadata)}), hit
+    return info.model_copy(), hit
 
 
 #: The effort ladder the PROVIDER'S OWN listing stated for a model, keyed the

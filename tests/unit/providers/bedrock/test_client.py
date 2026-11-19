@@ -535,23 +535,32 @@ def test_bedrock_auth_recovery_hint_names_no_phantom_key_variable() -> None:
     assert "credential update <OPENAI_API_KEY>" in auth_recovery_hint("openai")
 
 
-def test_preflight_without_credentials_names_bedrock_env_switches(
+def test_preflight_without_credentials_defers_explicit_invocation_to_aws_chain(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    """Q4: the no-credential error names AWS_BEARER_TOKEN_BEDROCK and the ambient switch."""
+    """Preflight cannot know the SDK chain; explicit routing is not a census opt-in."""
     import os
 
     from local_operator import cli
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.bedrock.connection import bedrock_env_key
+    from local_operator.providers.controller import ProviderController
 
     for name in list(os.environ):
         if name.startswith(("AWS_", "LOP_BEDROCK")):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert cli._preflight_api_key("bedrock", tmp_path / ".local-operator") == 1
-    err = capsys.readouterr().err
-    assert "local-operator login bedrock" in err
-    assert "AWS_BEARER_TOKEN_BEDROCK" in err
-    assert "LOP_BEDROCK_AUTH=ambient" in err
+    assert cli._preflight_api_key("bedrock", tmp_path / ".local-operator") is None
+    assert capsys.readouterr().err == ""
+    assert bedrock_env_key() is None
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        controller = ProviderController(store)
+        assert not controller.is_usable("bedrock")
+        assert "bedrock" not in (controller.usable_providers() or set())
+        assert not store.list_credentials("bedrock")
+    finally:
+        store.close()
 
 
 # -- round-2 remediation: R2-1 IAM copy -------------------------------------------

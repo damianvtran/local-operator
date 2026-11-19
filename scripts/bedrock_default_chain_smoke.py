@@ -22,6 +22,8 @@ from pathlib import Path
 from bedrock_converse_smoke import MODELS, PROOF, PROOF_TEXT, REPO
 from bedrock_fake_server import _isolated_env, _State, make_handler
 
+from local_operator.agent_shell import harness_child_env
+
 
 def smoke() -> int:
     scratch = Path(os.environ["LOCAL_OPERATOR_SCRATCHPAD"])
@@ -98,7 +100,9 @@ def smoke() -> int:
                 no_role = case == "none"
                 work = root / f"{surface}-{case}"
                 work.mkdir()
-                env = _isolated_env(work, f"http://127.0.0.1:{servers[0].server_port}")
+                env = harness_child_env(
+                    _isolated_env(work, f"http://127.0.0.1:{servers[0].server_port}")
+                )
                 env.pop("AWS_BEARER_TOKEN_BEDROCK")
                 env.pop("AWS_REGION")
                 env.update(
