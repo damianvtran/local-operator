@@ -402,23 +402,10 @@ def test_s16_a_granted_owner_cannot_skip_the_binding(tmp_path: Path) -> None:
     assert not (home / "src").exists()
 
 
-def _arrived_pending(server: Any, authority: str) -> None:
-    plan = wt.RestorePlan(
-        session_id=SID,
-        n=0,
-        bundle_digest="sha256:" + "0" * 64,
-        path="~/proj/.worktrees/feat",
-        primary="~/proj",
-        remote_url="",
-        head="a" * 40,
-        index="b" * 40,
-        worktree="c" * 40,
-        branch="feat",
-        upstream_merge=None,
-        src_device="d_src",
-        is_primary=False,
-        fresh_clone=False,
-    )
+def _arrived_pending(
+    server: Any, authority: str, paths: tuple[str, ...] = ("~/proj/.worktrees/feat",)
+) -> None:
+    plans = [_plan(n, path) for n, path in enumerate(paths)]
     directory = workset_move.arrived_dir(server.root, SID)
     directory.mkdir(parents=True)
     (directory / "pending.json").write_text(
@@ -427,7 +414,7 @@ def _arrived_pending(server: Any, authority: str) -> None:
                 "session_id": SID,
                 "from_device": "d_src",
                 "lease_epoch": EPOCH,
-                "plans": [asdict(plan)],
+                "plans": [asdict(plan) for plan in plans],
                 "left_behind": [],
                 "restored": {},
                 "import": {
@@ -440,6 +427,25 @@ def _arrived_pending(server: Any, authority: str) -> None:
                 },
             }
         )
+    )
+
+
+def _plan(n: int, path: str) -> wt.RestorePlan:
+    return wt.RestorePlan(
+        session_id=SID,
+        n=n,
+        bundle_digest="sha256:" + str(n) * 64,
+        path=path,
+        primary="~/proj",
+        remote_url="",
+        head="a" * 40,
+        index="b" * 40,
+        worktree="c" * 40,
+        branch="feat",
+        upstream_merge=None,
+        src_device="d_src",
+        is_primary=False,
+        fresh_clone=False,
     )
 
 
@@ -467,6 +473,52 @@ def test_g_the_restore_rechecks_the_grant(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(workset_move, "import_granted", lambda *_a, **_k: True)
     workset_move.restore_arrived(server, SID)
     assert called == ["~/proj/.worktrees/feat"]
+
+
+@pytest.mark.parametrize("revoke_after_first", [True, False])
+def test_g_a_revoke_mid_restore_stops_the_rows_not_yet_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revoke_after_first: bool
+) -> None:
+    """The grant is re-read before EACH row, not once per restore: a revoke landing
+    after row 1 restored keeps row 1 and leaves row 2 staged (``import_not_granted``),
+    never published; a re-grant and the next resume finish it. Control: no revoke
+    restores both."""
+    server, _home = _dest(tmp_path)
+    granted = [True]
+    called: list[str] = []
+    monkeypatch.setattr(workset_move, "import_granted", lambda *_a, **_k: granted[0])
+
+    def fake_restore(_dir: Path, plan: wt.RestorePlan, **_kw: Any) -> wt.RestoreReport:
+        called.append(plan.path)
+        if revoke_after_first:
+            granted[0] = False  # the operator revokes `workset_import` mid-restore
+        return wt.RestoreReport("restored", plan.path)
+
+    monkeypatch.setattr(wt, "restore", fake_restore)
+    first, second = "~/proj/.worktrees/one", "~/proj/.worktrees/two"
+    _arrived_pending(server, workset_move.IMPORT_BY_GRANT, paths=(first, second))
+
+    out = workset_move.restore_arrived(server, SID)
+
+    assert out is not None
+    rows = [(r["state"], r["reason"]) for r in out["worktrees"]]
+    if not revoke_after_first:
+        assert called == [first, second]
+        assert rows == [("restored", ""), ("restored", "")]
+        assert out["state"] == "restored"
+        return
+    assert called == [first]
+    assert rows == [("restored", ""), ("pending_restore", "import_not_granted")]
+    assert out["state"] == "pending_restore"
+    # Row 2's bundle stays staged for the re-grant (only a fully restored set drops it).
+    assert (workset_move.arrived_dir(server.root, SID) / "pending.json").is_file()
+
+    granted[0] = True
+    revoke_after_first = False  # the re-grant: fake_restore no longer revokes
+    called.clear()
+    again = workset_move.restore_arrived(server, SID)
+    assert called == [second]  # row 1 is not redone
+    assert again is not None and again["state"] == "restored"
 
 
 def test_g_a_pending_journal_without_its_import_record_restores_nothing(

@@ -1657,13 +1657,19 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
     home = home_of(server)
     roots = workset.restore_roots(Path(server.root))
     restored: dict[str, Any] = dict(pending.get("restored") or {})
-    allowed = _import_still_authorised(server, pending)
     for raw in pending.get("plans") or []:
         key = str(raw.get("n"))
         if key in restored and restored[key].get("state") != "pending_restore":
             continue
         plan = engine.RestorePlan(**raw)
-        if not allowed:
+        # The authority is re-read at EACH row's boundary, immediately before this row
+        # touches the tree, not once for the whole set: one restore can run for a while
+        # (several worktrees, each a bundle fetch-and-checkout), and a `workset_import`
+        # revoke landing mid-way must stop every row that has not started yet. Rows
+        # already restored stay restored (their writes are done and recorded); the
+        # rest stay staged as ``pending_restore`` / ``import_not_granted`` so a
+        # re-grant and the next resume finish them from the same bundles.
+        if not _import_still_authorised(server, pending):
             # A revoke between the fetch and the restore stops the writes; the bundle
             # stays staged, so a re-grant and the next resume restore it.
             restored[key] = asdict(
