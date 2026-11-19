@@ -99,9 +99,7 @@ def test_a_transcript_mention_alone_lists_the_worktree_as_mentioned_never_planne
 
 
 @pytest.mark.parametrize("codec", ["gzip", "zstd"])
-def test_a_compressed_transcripts_mention_is_still_read(
-    root: Path, rig: Rig, codec: str
-) -> None:
+def test_a_compressed_transcripts_mention_is_still_read(root: Path, rig: Rig, codec: str) -> None:
     """CI guards (round 1): the mention scan reads through the archive-aware
     resolver, so a session the compression pass archived (``.zst`` as well as
     ``.gz``) seeds the same ``mentioned`` row as a plain one — before the fix the
