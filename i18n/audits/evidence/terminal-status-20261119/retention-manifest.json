@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "note": "Integration retention index, not a translation/audit/eligibility assertion. Originals retained byte-for-byte; all source verdicts untouched.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/verified-handoffs.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/terminal-status-verified-handoffs.json",
+      "sha256": "51d04bd36c38d239496d1d95cd83b2921cd927cb86e2cd431f8d0d2e05fe4543"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/verified-handoffs-r2.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/terminal-status-verified-handoffs-r2.json",
+      "sha256": "28371676977373d2d462dd863b83abe4b573a623ddb638360d01e7c5fbcc7a51"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-verified-handoffs-current.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/terminal-status-verified-handoffs-current.json",
+      "sha256": "c4cd7a064921a31f585cd8ef58527318ab7330eef059c39ab5b5ef02c5dcaf55"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/retention2-handoff.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-handoff.json",
+      "sha256": "fb4cbbc5ec2e26fab811065b39034f1e0fb4ed409a39ffd738836f86f79ae178"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-append-results.json",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-append-results.json",
+      "sha256": "8d3ba0f9591a4b8504b9867469145a5bc1537aca754217eb1084e5dcbdf6fd9f"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-generate.log",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-generate.log",
+      "sha256": "a16485fa94960eec33a41731b198bcb6dcee223c0fab7ad8bb12bb6d6ff9e5b7"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-generate-check.log",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-generate-check.log",
+      "sha256": "c91c2da8e7e8ceea51a0d4dd1f7b571900a3ee07f1e7d6b85575e76e69d70aad"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-catalogues-check.log",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-catalogues-check.log",
+      "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-targeted.log",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-targeted.log",
+      "sha256": "14a1a5f4f093ddbaeb885f8c8f7f7239a287a513f396ff79cc2948a9eb42635e"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-targeted-command-status.log",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-targeted-command-status.log",
+      "sha256": "4e465771c06dbc206f823f176d713b0a33d82b17d81a1d469c7b7867e4856d81"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-production-smoke.json",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-production-smoke.json",
+      "sha256": "c90fb5f23b8dddd487a880bf16eb01a74ae0d84afaacc1e3c9ecf90d83a3c185"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal_status_smoke.py",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal_status_smoke.py",
+      "sha256": "af2dd3df8a54e71b192200c20ce6639ddf9531eba19d20bca867ec6e1d8dd72c"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/run_terminal_targeted.py",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/run_terminal_targeted.py",
+      "sha256": "0260fe5cd3fe9edc1f7c91b0a857bcb874caafc87ba0c7784baa6d60fa43c015"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/terminal-status-20261119/terminal-status-history-proof.json",
+      "original_path": "/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/terminal-status-history-proof.json",
+      "sha256": "ed3de95b47db8097b22ab7172a1f456614b8b402c30ac862ed34a95a02108571"
+    }
+  ],
+  "manifests": [
+    "i18n/audits/evidence/fr/wire.session_status/ts-fr1/retention-manifest.json",
+    "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/retention-manifest.json",
+    "i18n/audits/evidence/es/wire.session_status/ts1/retention-manifest.json",
+    "i18n/audits/evidence/ru/wire.session_status/tsrua1/retention-manifest.json",
+    "i18n/audits/evidence/vi/wire.session_status/ts1a7a/retention-manifest.json",
+    "i18n/audits/evidence/hi/wire.session_status/hi-a1-a7fd/retention-manifest.json",
+    "i18n/audits/evidence/ur/wire.session_status/tsu1/retention-manifest.json",
+    "i18n/audits/evidence/es/wire.session_status/ts2er/retention-manifest.json",
+    "i18n/audits/evidence/ru/wire.session_status/ts2er/retention-manifest.json",
+    "i18n/audits/evidence/hi/wire.session_status/ts2-5f0a/retention-manifest.json",
+    "i18n/audits/evidence/ur/wire.session_status/ts2-5f0a/retention-manifest.json",
+    "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/retention-manifest.json",
+    "i18n/audits/evidence/vi/wire.session_status/ts2a7a/retention-manifest.json",
+    "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/retention-manifest.json",
+    "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/retention-manifest.json",
+    "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/retention-manifest.json"
+  ],
+  "validation": "i18n/audits/evidence/terminal-status-20261119/retention-validation.json"
+}

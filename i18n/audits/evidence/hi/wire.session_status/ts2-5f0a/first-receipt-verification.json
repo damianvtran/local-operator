@@ -1,0 +1,39 @@
+{
+  "locale": "hi",
+  "first_receipt_path": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/receipt.json",
+  "first_receipt_sha256": "e4232f083067efc3bc91e9394d5237c4078f124766871e9bf62e3e562ed3e556",
+  "first_receipt_expected_sha_source": "Provided delegation",
+  "input_binding_verified": true,
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81",
+  "first_status": "passed",
+  "first_auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-hi-audit",
+    "session": "a7fd23e84898",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model field",
+    "fallback_used": false,
+    "independent_from_translator_session": "8c6e64f5562b",
+    "independent_from_translator": true,
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "second_independent_report_sha256": "deed73fc539ee19708a5e5b6248fadaaf8c67377d9af13b13e1a4536c1d30756",
+  "report_frozen_before_first_receipt_read": true,
+  "agreement_with_first": true,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-vi-hi-ur-second-audit",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "8c6e64f5562b",
+    "independent_from_first_auditor_session": "a7fd23e84898",
+    "independent_from_translator": true
+  }
+}
