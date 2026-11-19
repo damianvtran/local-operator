@@ -6,7 +6,7 @@
   "browser.site_approval.refused_bad_signature": "节点上的浏览器拒绝了此回答：你的签名与节点上安装的操作者密钥不匹配。未批准任何内容。如果你的操作者密钥已更换，在节点上重新运行`lop browser setup --node --repair --authorised-by '<who, when>'`，然后让智能体重新询问。",
   "browser.site_approval.refused_expired": "在你的回答送达节点上的浏览器之前，此网站请求已过期。智能体需要重新询问。",
   "browser.site_approval.refused_unreachable": "你的回答无法送达节点上的浏览器。未批准任何内容；稍后重试。",
-  "browser.site_approval.refused_outcome_unknown": "节点上的浏览器没有确认你的回答，因此它可能已生效，也可能没有。请勿再次回答此卡片：智能体的 await_access 会直接读取浏览器，在节点上运行 `lop browser sites` 可查看此站点已保存的决定。",
+  "browser.site_approval.refused_outcome_unknown": "节点上的浏览器没有确认你的回答，因此它可能已生效，也可能没有。请勿再次回答此卡片：智能体的await_access会直接读取浏览器，在节点上运行`lop browser sites`可查看此站点已保存的决定。",
   "browser.site_approval.card_title": "{device}请求打开网站——在你自己的电脑上签署回答",
   "browser.site_approval.refused_card_mismatch": "你的电脑未签署此回答：卡片上的文字与它将批准的网站不符。未批准任何内容。如果两台机器运行的是同一版本的Local Operator，应视为节点上可能遭到篡改：不要重试，并告知运行该智能体的人。否则，将两台机器都更新后，让智能体重新询问。",
   "browser.site_approval.refused_no_approver": "节点上的浏览器没有可用来校验回答的操作者密钥，因此无法批准网站。未批准任何内容。原因是节点上没有操作者锚点（/etc/local-operator/operators/<uid>.json），或节点上存有你的操作者密钥文件。安装锚点，或从节点上移除该密钥文件，然后在节点上运行`lop browser setup --node --repair --authorised-by '<who, when>'`：它会根据已安装的锚点重新派生浏览器的锚点。",
