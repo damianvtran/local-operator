@@ -111,8 +111,16 @@ class LoginOperation:
     launch_url: str | None = None
     #: True when the open paste prompt is a FALLBACK beside a browser flow that
     #: is still the primary path (``paste_code_flow`` without a required paste).
-    #: Fixed per provider at start, so it is also true before the prompt opens.
+    #: Fixed per provider at start, so it is also true before the prompt opens;
+    #: cleared once the browser/paste race has been decided, because any prompt
+    #: a provider opens AFTER that (Vertex asking for a project ID) is required.
     input_optional: bool = False
+    #: Set when the fallback paste prompt was answered or cancelled, i.e. the
+    #: callback race is over; cleared by ``on_input_rejected`` because a
+    #: rejected paste is re-offered as the SAME optional fallback.
+    paste_race_over: bool = field(default=False, repr=False)
+    #: Last ``on_progress`` narration: a post-auth prompt's question.
+    last_progress: str | None = field(default=None, repr=False)
     #: What the successful sign-in wrote to config (``defaults_applied`` in the
     #: snapshot), filled BEFORE ``state`` becomes ``succeeded`` so a poller that
     #: sees success sees it too.
@@ -432,11 +440,34 @@ class DesktopAuth:
             if expires_in and expires_in > 0:
                 op.deadline = min(time.monotonic() + float(expires_in), op.deadline)
 
+        def on_progress(message: str) -> None:
+            # Narration the provider controls (not upstream HTTP bodies, which
+            # go through on_warning/errors), surfaced so a post-auth prompt shows
+            # its actual question. Bounded so a long line cannot bloat polling.
+            if op.abandoned or not message:
+                return
+            text = str(message).strip()[:240]
+            op.last_progress = text
+            op.message = text
+
+        def on_input_rejected() -> None:
+            op.paste_race_over = False
+
         def on_warning(_message: str) -> None:
             # Provider errors can include HTTP bodies or a rejected paste.
             # Relay an actionable state, never those uncontrolled strings.
             if not op.abandoned:
                 op.message = "Sign-in could not use that response. Check it and try again."
+
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # This is a required configuration step after OAuth, not another
+            # optional code paste. Publish the explicit field label instead of
+            # inferring a question from provider progress narration.
+            op.paste_race_over = True
+            # Desktop rejects empty /input submissions; its cancel endpoint is
+            # the way out. Do not reuse CLI's empty-to-cancel instruction here.
+            op.last_progress = field
+            return await on_input()
 
         async def on_input() -> str | None:
             if op.abandoned:
@@ -444,8 +475,13 @@ class DesktopAuth:
                 # flows' own "declined", so they end as cancelled.
                 return None
             pending = asyncio.get_running_loop().create_future()
+            my_prompt_id = str(uuid.uuid4())
+            if op.paste_race_over:
+                # The fallback prompt already lost or answered the race, so this
+                # one is a REQUIRED follow-up after authorization.
+                op.input_optional = False
             op.pending_input = pending
-            op.prompt_id = str(uuid.uuid4())
+            op.prompt_id = my_prompt_id
             if op.input_optional:
                 # The browser is still the primary path; the prompt is only the
                 # fallback. Staying ``waiting`` keeps the renderer on the browser
@@ -455,26 +491,42 @@ class DesktopAuth:
                 op.message = OPTIONAL_PASTE_MESSAGE
             else:
                 op.state = "input_required"
-                op.message = "Paste the key or sign-in response requested by this provider."
+                op.message = (
+                    op.last_progress
+                    if op.paste_race_over and op.last_progress
+                    else "Paste the key or sign-in response requested by this provider."
+                )
             op.ready.set()
             try:
                 return await pending
             finally:
-                op.pending_input = None
-                op.prompt_id = None
-                # Only a PROMPT state goes back to ``waiting``. A flow that ends
-                # (timeout, denied callback, success) cancels this prompt task
-                # without awaiting it, so this ``finally`` can run AFTER ``_run``
-                # has already written the terminal state -- and an unconditional
-                # reset turned "expired"/"failed" into a live-looking
-                # ``waiting`` the renderer kept polling (QA round 1, Q1).
-                if op.state == "input_required":
-                    op.state = "waiting"
+                # Answered or cancelled, the fallback's race is decided either
+                # way (``_await_code`` now awaits the cancelled reader before
+                # ``exchange_token``, so this lands before any follow-up prompt).
+                op.paste_race_over = True
+                # Only clear the prompt THIS call opened: a cancelled earlier
+                # prompt unwinding late must never wipe a newer one, which left
+                # Desktop answering 409 to a live follow-up question.
+                if op.prompt_id == my_prompt_id:
+                    op.pending_input = None
+                    op.prompt_id = None
+                    # Only a PROMPT state goes back to ``waiting``. A flow that
+                    # ends (timeout, denied callback, success) cancels this
+                    # prompt task without awaiting it, so this ``finally`` can
+                    # run AFTER ``_run`` has already written the terminal state
+                    # -- and an unconditional reset turned "expired"/"failed"
+                    # into a live-looking ``waiting`` the renderer kept polling
+                    # (QA round 1, Q1).
+                    if op.state == "input_required":
+                        op.state = "waiting"
 
         callbacks = LoginCallbacks(
             on_auth_url=on_url,
+            on_progress=on_progress,
             on_warning=on_warning,
+            on_input_rejected=on_input_rejected,
             on_manual_code_input=on_input if definition.accepts_paste_prompt else None,
+            on_setup_input=on_setup_input if not definition.local_setup else None,
             on_flow_details=on_flow_details,
         )
         from local_operator.providers.controller import ProviderController

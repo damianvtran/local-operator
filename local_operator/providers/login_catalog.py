@@ -90,6 +90,9 @@ DESCRIPTIONS: dict[str, str] = {
     "zai": "Paste a Z.AI (GLM) API key",
     "zai-oauth": "Sign in with your Z.AI coding plan",
     "google": "Paste a Google AI Studio (Gemini) API key",
+    "google-vertex": "Sign in with Google Cloud (SSO / OAuth) for Vertex AI",
+    "google-vertex-key": "Paste a Vertex AI API key (express or service-account-bound)",
+    "google-vertex-sa": "Paste a GCP service account JSON key or file path",
     "mistral": "Paste a Mistral API key",
     "openrouter": "Paste an OpenRouter key; hundreds of models",
     "alibaba": "Paste an Alibaba Cloud DashScope key (Qwen)",
@@ -158,6 +161,9 @@ PICKER_DESCRIPTIONS: dict[str, str] = {
     "zai": "Paste a Z.AI (GLM) key",
     "zai-oauth": "Z.AI coding plan, browser sign-in",
     "google": "Paste a Google AI Studio key",
+    "google-vertex": "Google Cloud SSO/OAuth for Vertex AI",
+    "google-vertex-key": "Paste a Vertex AI API key",
+    "google-vertex-sa": "Paste a GCP service account JSON",
     "mistral": "Paste a Mistral key",
     "openrouter": "Paste an OpenRouter key",
     "alibaba": "Paste an Alibaba DashScope key",
@@ -207,6 +213,9 @@ PICKER_LABELS: dict[str, str] = {
     "zai": "Z.AI key",
     "zai-oauth": "Z.AI plan",
     "google": "Google AI",
+    "google-vertex": "Vertex AI",
+    "google-vertex-key": "Vertex API key",
+    "google-vertex-sa": "Vertex SA JSON",
     "mistral": "Mistral",
     "openrouter": "OpenRouter",
     "alibaba": "DashScope",
@@ -348,6 +357,7 @@ DEVICE_CODE_ALTERNATIVES: dict[str, str] = {
     "anthropic": "anthropic-key",
     "radient": "radient-key",
     "zai-oauth": "zai",
+    "google-vertex": "google-vertex-key",
 }
 
 

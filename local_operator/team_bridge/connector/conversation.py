@@ -66,7 +66,9 @@ from ..client import (
     SCREENING_TEMPLATE_V3_SHA256,
     SCREENING_TEMPLATE_V4_SHA256,
     SCREENING_TEMPLATE_V5_PIN,
+    SCREENING_TEMPLATE_V6_PIN,
     SCREENING_VERSION_V5,
+    SCREENING_VERSION_V6,
     BridgeRefusal,
     agent_file_reads_capability,
     screening_template_v4_usable,
@@ -1422,11 +1424,19 @@ def _text_admit_template(result: Any) -> str | None:
     renders nothing) keeps the omitted shape.
     """
 
+    rendered = getattr(result, "rendered_template_sha256", None)
     if (
         getattr(result, "rendered_version", None) == SCREENING_VERSION_V5
-        and getattr(result, "rendered_template_sha256", None) == SCREENING_TEMPLATE_V5_PIN
+        and rendered == SCREENING_TEMPLATE_V5_PIN
     ):
         return SCREENING_TEMPLATE_V5_PIN
+    # v6 is v5's successor in the hub's ``screening_addressed`` slot (holds triage
+    # 2026-11-18); the hub accepts its pinned hash on a text-only admit the same way.
+    if (
+        getattr(result, "rendered_version", None) == SCREENING_VERSION_V6
+        and rendered == SCREENING_TEMPLATE_V6_PIN
+    ):
+        return SCREENING_TEMPLATE_V6_PIN
     return None
 
 

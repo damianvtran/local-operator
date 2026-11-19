@@ -517,6 +517,18 @@ _AMBIENT_VARS = (
     "GOOGLE_API_KEY",
     "GOOGLE_AI_STUDIO_API_KEY",
     "GEMINI_API_KEY",
+    # Google Vertex AI: the GCP project/location name real cloud resources a
+    # developer's shell points at, the OAuth client pair is a credential, and
+    # the token-URI overrides are ESCAPE HATCHES that waive the pinned
+    # token-endpoint check the suite asserts.
+    "GOOGLE_CLOUD_PROJECT",
+    "VERTEX_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "VERTEX_LOCATION",
+    "GOOGLE_VERTEX_OAUTH_CLIENT_ID",
+    "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET",
+    "GOOGLE_VERTEX_TOKEN_URI",
+    "GOOGLE_VERTEX_ALLOW_CUSTOM_TOKEN_URI",
     "XAI_API_KEY",
     "KIMI_API_KEY",
     "MOONSHOT_API_KEY",

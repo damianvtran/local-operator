@@ -1,0 +1,119 @@
+{
+  "locale": "ru",
+  "namespace": "providers.vertex_prompts",
+  "audit_date": "2026-11-19",
+  "key_count": 4,
+  "audit_kind": "primary-independent-translation-audit",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "02e2a562a33a",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "541740ac0ac6",
+    "actual_model_source": "Host model-switch event: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "541740ac0ac6",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19",
+    "identity_source": "manager task brief; completed 16:19:22Z"
+  },
+  "source_audit_revision": "416ca8b9acbd6aafc02211dd25f8b9d1dcb214e3",
+  "working_tree_inputs": true,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/providers.vertex_prompts.json",
+      "sha256": "27eea2d21975bd655a616bb412364c855c753c8256eed8a1fa42cc83869d10ae"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/providers.vertex_prompts.context.json",
+      "sha256": "3cd3aea2a7d54c979bfd3bdbbaa46da061c4a5a99ad02c3075ce8ca23cfdf916"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/providers.vertex_prompts.json",
+      "sha256": "cfcb52a7f46ff674ed6ee702d1652ba3a2f3124ac7db7842717269cae822ffbf"
+    }
+  },
+  "artifacts": {
+    "audit.log": {
+      "path": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/audit.log",
+      "sha256": "026b4c52ebe624b4ecf59e48a442c84bf4453a7e59c010b7087adceec6144f40"
+    },
+    "report.md": {
+      "path": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/report.md",
+      "sha256": "05a9ff3925f31271ddb1541eb48e1f965369c9ee0295b0b02afdc9c051599095"
+    },
+    "secondary-report.json": {
+      "path": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/secondary-report.json",
+      "sha256": "523ad23652a88c9d6f382e335ed93e3a4f69914188106bf6da7f1da5849061e0"
+    },
+    "secondary-validator.log": {
+      "path": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/secondary-validator.log",
+      "sha256": "d038b615673118da78a1cd54f7bc26de6b8339a34b2ca28968fd668ae28ae0ab"
+    },
+    "secondary-mechanical-and-render.log": {
+      "path": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/secondary-mechanical-and-render.log",
+      "sha256": "8fb0ab8ed8565da1ccb6a1e56cd2a13f5f72b3072f6f42fd76e170b9c2e33a88"
+    },
+    "ledger-append.log": {
+      "path": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/ledger-append.log",
+      "sha256": "c3f1d4eb0656ab8eb4d4668e34309b4e942cce9610fd92683f7f3def245c55bf"
+    },
+    "audit-probe.py.txt": {
+      "path": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/audit-probe.py.txt",
+      "sha256": "f2383478e2a774f58d44798f2577b5547f999b55abb1486150ac24f8071b9002"
+    }
+  },
+  "measurements": {
+    "providers.vertex_prompts.field.project_id": {
+      "chars": 34,
+      "cells": 34
+    },
+    "providers.vertex_prompts.field.service_account": {
+      "chars": 46,
+      "cells": 46
+    },
+    "providers.vertex_prompts.hint.required": {
+      "chars": 59,
+      "cells": 59
+    },
+    "providers.vertex_prompts.prompt.field": {
+      "chars": 46,
+      "cells": 46
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/report.md",
+  "execution_log": "i18n/audits/evidence/ru/providers.vertex_prompts/vp1-02e2/audit.log",
+  "second_audit": {
+    "source": "secondary-report.json (byte-identical retained report)",
+    "auditor": {
+      "agent": "i18n-auditor (vertex-i18n-audit-secondary)",
+      "session": "03178f8c9cba",
+      "model": "openai/gpt-6.1-sol",
+      "actual_model_source": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 after provider quota failure, before semantic audit execution.",
+      "independent_from_translator_session": "541740ac0ac6"
+    },
+    "status": "passed",
+    "source_sha256": "27eea2d21975bd655a616bb412364c855c753c8256eed8a1fa42cc83869d10ae",
+    "all_target_hashes_verified": true,
+    "report_sha256": "523ad23652a88c9d6f382e335ed93e3a4f69914188106bf6da7f1da5849061e0"
+  },
+  "rendered_evidence_claimed": false,
+  "append_verification": {
+    "expected_history_sha256_before": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "preserved_existing_rows": 0,
+    "appended_rows": 1,
+    "receipt_byte_sha256": "b7ea726cb7b79133a04353204f6024c5fbd8e094a892bf82c2e06101521a71f9",
+    "history_path": "i18n/audit-history/ru/providers.vertex_prompts.json"
+  }
+}

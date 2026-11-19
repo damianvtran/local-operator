@@ -123,6 +123,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-calls", type=int, help="hard cap on physical screen calls, retries included"
     )
     parser.add_argument("--organization", default=DEFAULT_ORGANIZATION)
+    parser.add_argument(
+        "--addressed",
+        default="",
+        choices=("", "direct", "thread", "everyone", "ambient"),
+        help=(
+            "routing default for rows without an 'addressed' field, needed by a template with "
+            "an {{addressed}} slot (bridge-screen-v5/v6); 'direct' is the strictest reading"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the plan; make no call")
     parser.add_argument(
         "--resume",
@@ -248,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             max_calls=args.max_calls,
             organization=args.organization,
+            addressed=args.addressed,
         )
     except sb.PlanError as error:
         print(f"plan refused: {error}", file=sys.stderr)
