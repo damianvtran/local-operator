@@ -207,7 +207,9 @@ def test_busy_receipt_through_the_real_local_control_socket(
 
 @pytest.mark.parametrize("unrelated_publication", [None, "session", "root"])
 def test_a_turn_admitted_between_final_scan_and_supervisor_is_serialized(
-    devices: Devices, monkeypatch: pytest.MonkeyPatch, unrelated_publication: str | None  # noqa: F811
+    devices: Devices,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    unrelated_publication: str | None,
 ) -> None:
     """Reviewer R1-B1's exact interleaving, with no mock at the registry/fence seam."""
     server_a, server_b, record = _rig(devices, monkeypatch)
@@ -262,7 +264,9 @@ def test_a_turn_admitted_between_final_scan_and_supervisor_is_serialized(
                 pid=os.getpid(),
                 kind="daemon",
                 session_id=(
-                    "unrelated-restart-01" if unrelated_publication == "session" else "bu5y-restart-01"
+                    "unrelated-restart-01"
+                    if unrelated_publication == "session"
+                    else "bu5y-restart-01"
                 ),
                 conversation_name="unrelated idle heartbeat",
                 cwd=str(server_a.root),
