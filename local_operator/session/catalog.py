@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.messages import Msg
 from local_operator.info.model import format_duration
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session import temporary
@@ -82,12 +83,10 @@ class CatalogEntry:
     #: that build entries positionally, keep working unchanged.
     completion_token: str = ""
     anchor_id: str = ""
-    #: WHY the outcome is an error, when the store carries a reason — the
-    #: harness-authored cause sentence for a cut-off, or the provider's own
-    #: message for a provider error. Appended to the sidebar's two error
-    #: spellings so a row reports a cause instead of only a class. Additive and
-    #: defaulted, so every existing construction site (including the positional
-    #: ones in the sidebar tests) keeps working unchanged.
+    #: Original diagnostic, unchanged from attention storage. Known harness
+    #: causes select localized summaries; arbitrary provider prose is NOT a
+    #: translation parameter. Unknown provider diagnostics retain their legacy
+    #: English row pending a separate, useful-detail-preserving UI contract.
     completion_reason: str = ""
     #: Set ONLY on rows from the hidden subagent population.
     #:
@@ -464,12 +463,12 @@ class CatalogEntry:
             return "Working"
         if self.shows_completion_mark:
             if self.completion_kind == "error":
-                return self._error_label("Unseen error")
+                return self._error_label(unseen=True)
             if self.completion_kind in {"interrupted", "retired"}:
-                return self._stop_label("Unseen interruption")
-            return {"interrupted": "Unseen interruption"}.get(
-                self.completion_kind, "Unseen completion"
-            )
+                return self._stop_label(unseen=True)
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(wire_session_status.unseen_completion())
         # Follows ``row_state_mark``'s precedence EXACTLY, so the tooltip can
         # never name a different state from the glyph beside it. The glyph is a
         # single character and the description is where a user finds out what it
@@ -527,85 +526,94 @@ class CatalogEntry:
             # the vocabulary for one fact across two surfaces; the receipt's
             # word is the established one, so this follows it rather than
             # asking the receipt to move.
-            count = self.row.wakes
-            return f"Stopped ({count} wake{'s' if count != 1 else ''} dormant)"
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(wire_session_status.dormant(count=self.row.wakes))
         if self.completion_token:
             if self.completion_kind == "error":
-                return self._error_label("Error")
+                return self._error_label()
             if self.completion_kind in {"interrupted", "retired"}:
-                return self._stop_label("Interrupted")
-            return {"interrupted": "Interrupted"}.get(self.completion_kind, "Complete")
-        return "Recent"
+                return self._stop_label()
+            from local_operator.i18n.keys import wire_session_status
 
-    def _stop_label(self, base: str) -> str:
-        """``Interrupted``/``Unseen interruption`` plus the rung, when it escalated.
+            return _terminal_label(wire_session_status.complete())
+        from local_operator.i18n.keys import wire_session_status
 
-        The half of design round 1's D1 that the classification change left
-        open. The kind was already right — a stop the operator asked for paints
-        ``⊘`` in the interrupted ink rather than ``✗`` — but the reason reached
-        no surface, so a rung-3 SIGKILL and a rung-1 request produced
-        byte-identical rows and the tooltip said nothing the operator could act
-        on. :func:`incidents.stop_rung_phrase` is the phrase and it is empty for
-        the plain request rung, deliberately: this row's own word already says
-        the user stopped it, and ``/stop`` is exactly what rung 1 is.
+        return _terminal_label(wire_session_status.recent())
 
-        The same budget rule as :meth:`_error_label` — one logical line, no
-        parenthetical stack — and the same tolerance: an empty reason returns
-        the spelling BYTE-IDENTICAL to today's, so every pre-taxonomy record and
-        every plain stop renders exactly as it always has.
+    def _stop_label(self, *, unseen: bool = False) -> str:
+        """Select complete messages by state, never interpolate an English base.
 
-        THE RETIRED ARM (design round 2, D3) suffixes with the cause that
-        actually produced the row, not a stop rung: in this app ``Interrupted``
-        means the OPERATOR stopped the thing (the rung phrases read "killed by
-        /stop"), and a build drain has no operator act behind it — the label
-        must not misattribute agency. Same suffix pattern, same warning ink and
-        status code; only the words gain the cause.
+        Retirement is an update action, not an operator stop. Legacy attribution
+        is decoded only at incidents' existing stored-English boundary; unknown
+        provenance stays a truthful generic interruption. Raw reasons remain on
+        the completion record, independent of the localized label.
         """
-        from local_operator.incidents import stop_rung_phrase
+        from local_operator.i18n.keys import wire_session_status as keys
+        from local_operator.incidents import stop_rung_from_reason
 
         if self.completion_kind == "retired":
-            # Backend-composed and printed verbatim by every client (the sidebar
-            # contract forbids re-deriving status), so the cause is keyed like
-            # ``scheduled_label``. ``base`` is the row's already-composed word.
-            from local_operator.i18n.keys import wire_session_status
-            from local_operator.i18n.messages import render
+            return _terminal_label(keys.unseen_retirement() if unseen else keys.retired())
+        rung, command = stop_rung_from_reason(self.completion_reason or "")
+        if rung == "sigterm":
+            message = (
+                keys.unseen_signal_stop(command=command or "none")
+                if unseen else keys.signal_stop(command=command or "none")
+            )
+        elif rung == "sigkill":
+            message = (
+                keys.unseen_forced_kill(command=command or "none")
+                if unseen else keys.forced_kill(command=command or "none")
+            )
+        else:
+            message = keys.unseen_interruption() if unseen else keys.interrupted()
+        return _terminal_label(message)
 
-            message = wire_session_status.retired_label(base=base)
-            return render(message.code, dict(message.params), locale=_label_locale())
-        phrase = stop_rung_phrase(self.completion_reason or "")
-        return f"{base} — {phrase}" if phrase else base
+    def _error_label(self, *, unseen: bool = False) -> str:
+        """Localize known harness causes without losing external diagnostics.
 
-    def _error_label(self, base: str) -> str:
-        """``Error``/``Unseen error`` plus the reason, when there is one.
-
-        The ONE-LINE BUDGET IS THE ROW, not the tooltip, and the earlier wording
-        here said the opposite (design round 1, D6, which measured it): the
-        ``Tooltip`` widget WRAPS — an error row renders 36×5 and 36×6 cells and
-        the longest sentence winds over four rows above the id line — so a
-        claim that the tooltip truncates was the justification for dropping a
-        parenthetical that would in fact fit. What the sidebar cannot afford is
-        the ROW's single description cell, and what the reason is trimmed to is
-        therefore its first SENTENCE: the parenthetical DETAIL
-        (``runtime-retired`` carries a build pair — ``(0.54.11@b133eba →
-        0.54.12@402af7f)`` — which is useful in the incident card the model
-        reads and noise in a list of sessions) is dropped for brevity, not for
-        clipping. An empty reason leaves the spelling BYTE-IDENTICAL to today's,
-        which is what keeps every pre-taxonomy record and every completion
-        unchanged.
+        Unknown provider prose retains the entire legacy English row, rather
+        than mixing a translated prefix with an untranslated reason or silently
+        dropping the desktop's only diagnostic. That path is unresolved i18n
+        programme work, NOT a fully localized message or accepted exception.
+        CLI WHY (incidents.outcome_summary) keeps its separate contract.
         """
-        reason = (
-            self.completion_reason.strip().splitlines()[0].strip()
-            if self.completion_reason.strip()
-            else ""
-        )
-        if not reason:
-            return base
-        sentence = reason.split(" (", 1)[0].rstrip()
-        if len(sentence) > 160:
-            # A provider's own message can be a paragraph; the tooltip cannot
-            # grow a second line for it.
-            sentence = sentence[:157].rstrip() + "…"
-        return f"{base} — {sentence}"
+        from local_operator.i18n.keys import wire_session_status as keys
+        from local_operator.incidents import cause_from_reason
+
+        cause = cause_from_reason(self.completion_reason or "")
+        if cause:
+            message = (
+                keys.unseen_error_cause(cause=cause.replace("-", "_"))
+                if unseen else keys.error_cause(cause=cause.replace("-", "_"))
+            )
+        elif self.completion_reason.strip():
+            return _legacy_external_error_label(self.completion_reason, unseen=unseen)
+        else:
+            message = keys.unseen_error() if unseen else keys.error()
+        return _terminal_label(message)
+
+
+def _legacy_external_error_label(reason: str, *, unseen: bool) -> str:
+    """Retain the pre-extraction external-detail contract byte for byte.
+
+    The desktop list/feed have no separate reason field. Localizing this path
+    needs a reviewed diagnostic-access contract, outside this bounded slice;
+    generic replacement would erase useful information from those interfaces.
+    Do not pass this raw prose as a supposedly translated message parameter.
+    """
+    base = "Unseen error" if unseen else "Error"
+    sentence = reason.strip().splitlines()[0].strip().split(" (", 1)[0].rstrip()
+    if len(sentence) > 160:
+        sentence = sentence[:157].rstrip() + "…"
+    return f"{base} — {sentence}"
+
+
+def _terminal_label(message: Msg) -> str:
+    """Use the catalogue's config-owned locale for backend labels, not UI state."""
+    from local_operator.i18n.messages import render
+
+    return render(message.code, dict(message.params), locale=_label_locale())
 
 
 def waiting_label(jobs: int, subagents: int = 0) -> str:

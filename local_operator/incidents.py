@@ -1191,6 +1191,22 @@ def stop_rung_phrase(reason: str) -> str:
     return ""
 
 
+def stop_rung_from_reason(reason: str) -> tuple[str, str]:
+    """Recover escalation and technical actor at the existing legacy boundary.
+
+    Stored reasons are English historical records, never localized labels. Keep
+    their decoder here so localized consumers receive semantic tokens rather
+    than parsing an English phrase (or re-parsing translated UI copy).
+    """
+    detail = _stop_detail_from_reason(reason)
+    for rung, label in STOP_RUNG_LABELS.items():
+        if rung not in ESCALATED_STOP_RUNGS or not detail.startswith(f"{label} by "):
+            continue
+        command = detail[len(label) + len(" by ") :].split(f", {KILLER_PID_LABEL} ", 1)[0]
+        return rung, command
+    return "", ""
+
+
 def outcome_summary(reason: str) -> str:
     """One line explaining how a session's last turn ended, for a LIST column.
 
