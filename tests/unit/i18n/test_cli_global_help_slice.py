@@ -500,7 +500,7 @@ def _without_post_base_hosting_choices(node):
     return node
 
 
-def _hosting_choices(module):
+def _hosting_choices(module) -> ast.List:
     (call,) = [
         node
         for node in ast.walk(module)
@@ -509,7 +509,12 @@ def _hosting_choices(module):
         and node.func.attr == "add_argument"
         and _is_hosting_call(node)
     ]
-    return next(kw.value for kw in call.keywords if kw.arg == "choices")
+    choices = next(kw.value for kw in call.keywords if kw.arg == "choices")
+    # Callers mutate the returned node in place (dropping or appending choices), so
+    # the declared ast.List return type is load-bearing: narrowing here keeps those
+    # `.elts` accesses resolvable for static checks instead of an opaque ast.expr.
+    assert isinstance(choices, ast.List)
+    return choices
 
 
 def test_post_base_hosting_normalization_preserves_the_original_tree():
