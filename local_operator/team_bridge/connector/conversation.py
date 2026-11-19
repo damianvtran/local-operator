@@ -1785,6 +1785,64 @@ async def handle_conversation_available(
                     )
 
         if recovery is not None:
+            if recovery in ("images_admitted", "text_admitted"):
+                # A lost admit response can leave a real local screen receipt but
+                # no reservation. Recovery must commit the SAME body obligation
+                # before waking, just like the ordinary admission path. A hub
+                # context grant alone is not a local receipt and cannot mint one.
+                proof = store.receipt_for_message(owner, message_id)
+                if (
+                    proof is None
+                    or proof.get("verdict") != "allow"
+                    or proof.get("body_sha256") != served_digest
+                    or proof.get("creator_generation") != owner.enrollment_generation
+                ):
+                    return await held("receipt_unavailable")
+                if recovery == "text_admitted":
+                    # A closed image screen is also returned for a reject or a
+                    # missing blob. Only the admitted history read proves text;
+                    # the classification body read above intentionally cannot.
+                    page = await client.conversation_messages(
+                        ref.conversation_id,
+                        tenant_id=owner.tenant_id,
+                        endpoint_id=owner.endpoint_id,
+                        after_seq=ref.conversation_seq - 1,
+                        limit=1,
+                        access=access,
+                    )
+                    rows = page.get("messages") if isinstance(page, Mapping) else None
+                    if not isinstance(rows, list) or len(rows) != 1:
+                        return await held("admission_unverified")
+                    row = rows[0]
+                    if (
+                        not isinstance(row, Mapping)
+                        or row.get("id") != message_id
+                        or row.get("seq") != ref.conversation_seq
+                        or row.get("body") != body_text
+                    ):
+                        return await held("admission_unverified")
+                recorded = _record_body_reservation(
+                    store, owner, ref, body_hash=body_hash, designation=designation
+                )
+                if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
+                    return await held(recorded)
+                # Reuse the reply guard's exact live owner/session/consent fence;
+                # a replay can neither revive a retired row nor change its owner.
+                if store.admitted_inbound_reservation_readonly(
+                    owner, in_reply_to_message_id=message_id, designated_session=designation
+                ) is None:
+                    return await held("receipt_unavailable")
+                if store.body_card_status(owner, ref.conversation_id, message_id) in (
+                    CARD_POSTED,
+                    CARD_SETTLED,
+                ):
+                    terminal = True
+                    return {
+                        "action": "duplicate",
+                        "message_id": message_id,
+                        "conversation_id": ref.conversation_id,
+                        "reservation": "already_recorded",
+                    }
             detail = await _hand_off_card(
                 owner, metadata, ref, session_id=designation, config_dir=config_dir
             )
@@ -1793,6 +1851,13 @@ async def handle_conversation_available(
             # delete and the flush, so the coalescer's ``_settle`` retires it,
             # never this cleanup.
             terminal = not card_is_buffered(detail)
+            if recovery in ("images_admitted", "text_admitted") and terminal:
+                try:
+                    store.mark_body_card_posted(
+                        owner, ref.conversation_id, message_id, now=time.time()
+                    )
+                except StoreRefused:
+                    logger.warning("bridge: card posted mark refused code=store_refused")
             if recovery in ("rejected", "unadmitted"):
                 return {
                     "action": "delivered_unadmitted",
