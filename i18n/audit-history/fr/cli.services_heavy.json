@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "cli.services_heavy",
-  "history_sha256": "3d6f92796f90aa504a9bc0f0c76d37efc87aa1e1d9423e30005245055d4952cc",
+  "history_sha256": "1d096ed3ce724a6ed25771a9931c5ac8b45333db5cc26743f367ea2268a6943b",
   "entries": [
     {
       "locale": "fr",
@@ -28,6 +28,31 @@
       },
       "status": "passed",
       "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target fr/cli.services_heavy.json sha256 be65ebb3e3d006a6fbb936f81e3002926e3390c8ee06f2b859b8cea6274a0ba1 (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. C1 (MINOR, fixed by auditor): prose spaces before : and ; and inside « » were U+0020; replaced with U+202F per fr style guide (heavy_description, timeout, holder, no_command; code spans untouched). C2 (MINOR, fixed by auditor): status «l’ancienneté» (reads as seniority) -> «la durée de détention» to match the context note (age = how long the holder has held the slot). Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "1254b434c7f9718087a858a65481f58ccf48f63cb1b7385ae57883de1baf4bbf",
+      "translator": {
+        "agent": "coder agent (lopdev team; commits 677e51c23 + remediation a8bfabbd1)",
+        "model": "anthropic/claude-opus-5-5 (per remediation comment #issuecomment-7003591943)",
+        "fallback": "unknown",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 2 session 79d6b80e07ba); wrote no locale value",
+        "session": "79d6b80e07ba",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 2 for PR #4279 (feat/run-bounded-start-by) at head a8bfabbd1, 2026-11-19. Target fr/cli.services_heavy catalogue_sha256 f7074f088df26081e20085810c31c742223ef28ea07219485fc61de1ff188380. New keys audited: start_by, late_start, not_start_by. Round 2 re-audit of the round-1 failure I1, fixed in a8bfabbd1: start_by and late_start now carry U+202F before ':' and ';' (value idx 40/183 and 16/100), byte-identical to the round-1 corrected strings by codepoint compare; no other byte changed. Placeholders {start_by} {now} {late} {value} and literals start-by, epoch, ISO-8601, Z, the example timestamp and 79 preserved; no stray Cc/Cf/NBSP. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4279 '### i18n audit — round 1' (#issuecomment-7003508546) and '### i18n audit — round 2'."
     }
   ]
 }

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "cli.services_heavy",
-  "history_sha256": "419cc12e153d0c6a46f62bc114c81136ad3a385a20509100cf7f3930748b2c50",
+  "history_sha256": "bdc4fc32edb70e2c7f46c158a765d601f87b3d890278ca58bc054bdb397c7b55",
   "entries": [
     {
       "locale": "zh-CN",
@@ -28,6 +28,31 @@
       },
       "status": "passed",
       "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target zh-CN/cli.services_heavy.json sha256 99a73ff9793d3d8c5e0f32c7ed734ff328341dde55f4b358f85f0e2e8ca7bdc8 (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. N1 (NIT, not changed): timeout «最长时间（秒）（默认：…）» stacks two parentheticals; kept because （秒） is established catalogue precedent (15 occurrences). 请 used on the next-step bodies (heavy_description, no_command) per style guide. Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "1254b434c7f9718087a858a65481f58ccf48f63cb1b7385ae57883de1baf4bbf",
+      "translator": {
+        "agent": "coder agent (lopdev team; commits 677e51c23 + remediation a8bfabbd1)",
+        "model": "anthropic/claude-opus-5-5 (per remediation comment #issuecomment-7003591943)",
+        "fallback": "unknown",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 2 session 79d6b80e07ba); wrote no locale value",
+        "session": "79d6b80e07ba",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 2 for PR #4279 (feat/run-bounded-start-by) at head a8bfabbd1, 2026-11-19. Target zh-CN/cli.services_heavy catalogue_sha256 1bea6034d1cc7c5f328b064a5b2e40aef16e1b88a396648709f154d0b1bacfc3. New keys audited: start_by, late_start, not_start_by. Round 2 re-audit of the round-1 failure I2, fixed in a8bfabbd1: start_by, late_start and not_start_by have no space between CJK and Latin/digit/placeholder runs (only the Latin-Latin space in 'start-by {start_by}' remains), byte-identical to the round-1 corrected strings by codepoint compare. Placeholders {start_by} {now} {late} {value} and literals start-by, epoch, ISO-8601, Z, the example timestamp and 79 preserved; no stray Cc/Cf/NBSP. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4279 '### i18n audit — round 1' (#issuecomment-7003508546) and '### i18n audit — round 2'."
     }
   ]
 }
