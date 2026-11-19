@@ -5960,6 +5960,10 @@ class Session:
         # session's own context exists. This pass cannot cover a capability that
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
+        # Observe authority before the initial merge so a grant arriving before
+        # the first prompt remains a transition. Inventory replacement is not an
+        # authority change: unchanged authority must preserve refresh_tools exactly.
+        self._notify_authority_available = self._notify_tool_callable() is not None
         self._merge_capability_tools()
         # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
         # below must see the whole inventory it narrows.
@@ -19207,8 +19211,30 @@ class Session:
             return None
         return self._notify_inbox
 
+    def _reconcile_notify_tool(self) -> None:
+        """Apply external authority changes at the next turn's inventory boundary.
+
+        The CLI writes a sidecar, not this owner's in-memory tool list. Only an
+        observed authority transition may change inventory: unchanged authority
+        must not undo a caller's exact refresh_tools replacement. Rescue only
+        notify through declaration filtering; cached invocations independently
+        recheck revocation, so this observation is never a permission cache.
+        """
+        available = self._notify_tool_callable() is not None
+        if available == self._notify_authority_available:
+            return
+        self._notify_authority_available = available
+        present = any(tool.name == "notify" for tool in self._tools)
+        if available:
+            if not present:
+                self._merge_capability_tools(("notify",))
+        elif present:
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name != "notify"], republish=False
+            )
+
     def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
-        """The door the ``notify`` TOOL is built on: the inbox door, minus agent-spawned sessions.
+        """The deliberate-notify door: inbox reachability plus reporting authority.
 
         WHY A SEPARATE DOOR (review round 1, R1-2 / QA Q1): the agent-spawned
         exclusion first sat in :meth:`_notify_inbox_callable`, which
@@ -19221,10 +19247,18 @@ class Session:
         door = self._notify_inbox_callable()
         if door is None or self._session_was_agent_spawned():
             return None
-        return door
+        return self._notify_authorized_item
+
+    async def _notify_authorized_item(self, **kwargs: Any) -> str:
+        # Tool contexts can outlive an operator revocation. Recheck the same
+        # authority at invocation, not just when constructing the inventory.
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return "Notification authority is unavailable; report to your delegating agent."
+        return await door(**kwargs)
 
     def _session_was_agent_spawned(self) -> bool:
-        """Whether ANOTHER AGENT started this session, so it reports to that agent.
+        """Whether this session still reports to the agent that started it.
 
         OPERATOR RULE (2026-11-13): "child/reviewer/QA sessions never notify the
         operator directly." A delegated child (``_job_id``) and a hidden run
@@ -19234,7 +19268,9 @@ class Session:
         * a ``sessions spawn`` workstream (``origin.json`` =
           ``resume.ORIGIN_AGENT_WORKSTREAM``, the spawn tool's default) — listed
           so the operator can watch it, but its findings go back to the agent
-          that spawned it, which decides whether the operator needs an item;
+          that spawned it, which decides whether the operator needs an item.
+          An explicit local standalone-notification grant can change this
+          reporting policy without changing the spawn provenance;
         * a session placed here at another device's request (a ``peer``
           placement) whose stamp does NOT positively say the operator started
           it (``remote_attention.origin_is_operator_started``): an AGENT's
@@ -19263,7 +19299,10 @@ class Session:
             from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp
 
             if session_origin(Path(directory)) == ORIGIN_AGENT_WORKSTREAM:
-                return True
+                from local_operator.notifications.authority import granted
+
+                if not granted(Path(directory)):
+                    return True
             stamp_file = Path(directory) / MESH_STAMP_NAME
             if not stamp_file.is_file():
                 return False
@@ -20019,6 +20058,42 @@ class Session:
                     "needs_user": needs_user,
                 },
             )
+            # A notify-requested delivery owes a durable inbox entry as well as
+            # the completion signal. The normal-priority item deliberately does
+            # NOT banner: this run's already-finalized completion owns the OS
+            # route. High explicit notify items retain their own delivery ladder.
+            # Use the tool's authority gate, not the broader gate-item door, so
+            # delegated agents cannot turn a wake into operator attention.
+            if (
+                kind == "complete"
+                and notify
+                and self._run_notify_requested
+                and not self._run_notified
+                and messages
+                and isinstance(messages[-1], Message)
+            ):
+                door = self._notify_tool_callable()
+                if door is not None:
+                    try:
+                        from local_operator.tui.notify import scrub_banner_text
+
+                        text = scrub_banner_text(
+                            self._redact_tool_result_text(messages[-1].text)
+                        ).strip()
+                        if text:
+                            await door(
+                                title=text.splitlines()[0],
+                                body=text,
+                                priority="normal",
+                                key=f"completion:{token}",
+                                links=[],
+                                anchor_id=anchor,
+                                raise_banner=False,
+                            )
+                    except Exception:  # noqa: BLE001 — preserve completion on an inbox outage
+                        logger.warning(
+                            "notify: could not persist delivery completion", exc_info=True
+                        )
             try:
                 # BOUNDED WAIT, NOT A BOUNDED THREAD: ``wait_for`` cancels our
                 # await, but a running worker thread cannot be killed. The
@@ -22379,6 +22454,9 @@ class Session:
             # turn, so the schema the model sees is consistent for the whole
             # turn (see ``_reconcile_web_tools`` for why not on the tick).
             self._reconcile_web_tools()
+            # Local CLI grants/revocations are external to this live owner;
+            # apply them before either prompt inventory or wire tools freeze.
+            self._reconcile_notify_tool()
             # This turn has published nothing yet, so the first provider call
             # below captures the inventory as it stands NOW — with the web-tool
             # reconcile above already applied — and every later call in the turn

@@ -4702,6 +4702,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
     ),
+    # -- notification authority: fixed sidecar, never the session directory ----
+    (
+        "local_operator/notifications/authority.py::set_grant",
+        "os.replace",
+        "Replaces only notification-authority.json with its sibling mkstemp file; "
+        "file-to-directory replacement fails without removing the directory",
+    ),
+    (
+        "local_operator/notifications/authority.py::set_grant",
+        "os.unlink",
+        "Cleans only its own mkstemp staging file; unlink cannot remove a directory",
+    ),
     # -- harness_import: private import bookkeeping under <config>/imports ----
     # These writers are called only with `<config>/imports/{snapshots,...}`,
     # `<config>/imports/.lock`, and the target session's OWN sidecars

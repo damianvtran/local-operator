@@ -62,6 +62,7 @@ def _entry_owners() -> dict[str, str]:
     from local_operator.fork import FORK_BOUNDARY_NAME
     from local_operator.memory import SESSION_EXPORT_NAME
     from local_operator.monitors.arm import MONITOR_LOCK_NAME
+    from local_operator.notifications.authority import GRANT_NAME
     from local_operator.profile_scope import PROFILE_BACKUPS_DIRNAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
@@ -100,6 +101,7 @@ def _entry_owners() -> dict[str, str]:
 
     return {
         PROFILE_BACKUPS_DIRNAME: "profile_scope",
+        GRANT_NAME: "notifications.authority",
         TRANSCRIPT_FILENAME: "session.transcript",
         SESSION_EXPORT_NAME: "memory",
         TITLE_SIDECAR_NAME: "resume",
@@ -2196,6 +2198,28 @@ def test_a_copy_does_not_carry_the_store_of_an_unreferenced_blob(tmp_path: Path)
     assert (dest / "attachments" / f"{used}.bin").is_file()
     assert (dest / "attachments" / f"{used}.json").is_file()
     assert not (dest / "attachments" / f"{unused}.bin").exists()
+
+
+def test_notification_authority_is_not_transferred_to_a_same_id_replica(tmp_path: Path) -> None:
+    from local_operator.notifications.authority import GRANT_NAME, granted, set_grant
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+
+    source = tmp_path / "owner"
+    session_id = "c0ffee123456"
+    directory = source / "sessions" / session_id
+    mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    set_grant(directory, allow=True, reason="synthetic operator request")
+    assert granted(directory)
+    # Session-id binding alone cannot protect a same-id peer replica. Exercise
+    # the real transport, not merely membership in the exclusion dictionary.
+    sync.assert_complete(directory)
+    destination = tmp_path / "holder" / session_id
+    sync.sync_from(source, session_id, ask=_ask(source), into=destination)
+    assert (destination / "origin.json").is_file()
+    assert not (destination / GRANT_NAME).exists()
+    assert not granted(destination)
+    assert granted(directory)
 
 
 def test_copy_instance_versions_stay_in_the_device_local_ledger(tmp_path: Path) -> None:

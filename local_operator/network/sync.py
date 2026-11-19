@@ -378,6 +378,9 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    # Authority is local routing policy, not portable session content. Even a
+    # same-id replica must not inherit permission to interrupt on another host.
+    "notification-authority.json": "operator notification grant applies only on the issuing device",
     ".file-provenance": "owner-local witnesses; replicas/imports cannot issue proofs",
     ".file-provenance.initialized.json": "origin-local incarnation; never copied/rebuilt",
     "profile-backups": "origin-local before-images; never portable approval or action authority",

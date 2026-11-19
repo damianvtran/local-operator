@@ -107,6 +107,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "internal executed-receipt verification discriminator, never rendered",
     ),
+    # This local operator-entered audit explanation is persisted with the
+    # notification grant. It is not a peer refusal token or mesh-rendered reason.
+    ("local_operator/cli.py", "sessions_notifications_command", "reason"): (
+        1,
+        "operator-entered local notification-authority audit explanation, not a mesh code",
+    ),
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),
