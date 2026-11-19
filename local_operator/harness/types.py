@@ -2894,18 +2894,22 @@ class ToolContext(BaseModel):
     #: (review R4-1). Bound beside
     #: :attr:`withdraw_site_asks`, ``None`` where it is.
     site_ask_lapses: Callable[[str], int] | None = None
-    #: A ``task`` SUBAGENT's site-card door (security review 60334): a child is
+    #: THE SITE-CARD DOOR (security review 60334). A ``task`` subagent is
     #: built without an ask handler, so it has no queue and :attr:`enqueue_ask`
-    #: is ``None``. ``enqueue_site_card(facts, timeout, tool_call_id="")`` takes
-    #: ONLY a typed ``site_approval.SiteAccessFacts`` (never a question) and
-    #: hands it to the nearest live ancestor whose queue exists, which rebuilds
-    #: the canonical signed card itself and binds it to this child and request.
-    #: Returns the ask receipt shape (``{"ok", "details"/"error"}``; a refusal
-    #: carrying ``"no_ancestor": True`` means no ancestor can queue it). Bound
-    #: on a child with no queue of its own; ``None`` everywhere else, where
-    #: :attr:`enqueue_ask` is the door. On such a child
-    #: :attr:`withdraw_site_asks` and :attr:`site_ask_lapses` are bound to the
-    #: ancestor too, scoped to THIS child's cards.
+    #: is ``None``. ``enqueue_site_card(facts, timeout, tool_call_id="",
+    #: cancel=None)`` takes ONLY a typed ``site_approval.SiteAccessFacts``
+    #: (never a question) and hands it to the session whose queue holds the
+    #: family's cards (this session's own, else the nearest live ancestor's),
+    #: which rebuilds the canonical signed card itself and binds it to this
+    #: requester and request. ``cancel`` is the tool's ``cancel_access``
+    #: closure for the entry, kept for teardown and for a shared card's deny.
+    #: Returns the ask receipt shape (``{"ok", "details"/"error"}``);
+    #: ``"shared": True`` means the request was bound as a waiter on the open
+    #: card another family member raised for the origin; ``"no_ancestor":
+    #: True`` means no session up the tree can queue it. Bound where this
+    #: session can queue an ask itself and on a subagent with no queue;
+    #: ``None`` elsewhere. :attr:`withdraw_site_asks` and
+    #: :attr:`site_ask_lapses` reach the same queue.
     enqueue_site_card: Callable[..., Mapping[str, Any]] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.

@@ -27502,18 +27502,15 @@ async def _node_site_access(
             details={**details, "state": "none"},
         )
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
-    # A ``task`` SUBAGENT has no queue of its own (it is built without an ask
-    # handler), so it raises the card through its nearest ancestor's queue
-    # (security review 60334). It hands over only the typed facts of this
-    # reply; the ancestor rebuilds the card and binds it to this child and
-    # entry. A top-level session keeps ``enqueue_ask``, unchanged.
-    child_door: Any = (
-        getattr(context, "enqueue_site_card", None)
-        if context is not None and not callable(enqueue)
-        else None
-    )
+    # THE SITE-CARD DOOR (security review 60334): the session hands over only
+    # the typed facts of this reply, and the queue that holds the family's
+    # cards (its own, or a ``task`` subagent's nearest ancestor's) rebuilds the
+    # card and binds it to this requester and entry — one card per origin,
+    # later requesters bound as waiters on it. ``enqueue_ask`` alone (a
+    # context without the door) keeps the plain path.
+    site_door: Any = getattr(context, "enqueue_site_card", None) if context is not None else None
     entry_id = str(result.get("entryId") or "")
-    if (not callable(enqueue) and not callable(child_door)) or not entry_id:
+    if (not callable(enqueue) and not callable(site_door)) or not entry_id:
         await _withdraw_entry()
         return _error(
             tool_call_id,
@@ -27588,13 +27585,14 @@ async def _node_site_access(
             withdraw_site(origin, keep_question_id=question_id)
         except Exception:  # noqa: BLE001 — the stale card's own timeout is the floor
             logger.debug("node site access: withdrawing a stale card failed", exc_info=True)
-    if callable(enqueue):
+    if not callable(site_door):
         outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
     else:
-        outcome = child_door(
+        outcome = site_door(
             site_approval.SiteAccessFacts.from_bridge_reply(result, origin),
             timeout_s,
             tool_call_id=tool_call_id,
+            cancel=_withdraw_entry,
         )
         if isinstance(outcome, Mapping) and outcome.get("no_ancestor"):
             # FAIL CLOSED, as a top-level session with no queue does — but
@@ -27644,6 +27642,30 @@ async def _node_site_access(
                 "need and why; do not retry request_access in a loop."
             ),
             details={**details, "approval": "card_refused", "state": "none"},
+        )
+    if receipt.get("shared"):
+        # Bound as a WAITER on the card another session in this agent family
+        # raised for the origin (S60334-2): one card on the operator's screen,
+        # and its answer resolves this request too.
+        return _text(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(
+                f"the operator already has an open card for {origin} on this node, raised "
+                "by another session working on the same task; your request is bound to "
+                "it. If they approve, it covers your request too. If they deny it, "
+                "await_access reports no live request and request_access then answers "
+                f"denied.\n{wait}\n"
+                "Do other work meanwhile; while this card is open, do not request the site again."
+            ),
+            details={
+                "origin": origin,
+                "state": "pending",
+                "approval": "signed",
+                "ask_id": ask_id,
+                "question_id": question_id,
+                "shared": True,
+            },
         )
     return _text(
         tool_call_id,
