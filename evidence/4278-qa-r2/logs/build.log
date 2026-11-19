@@ -1,0 +1,96 @@
+[run_bounded] memory budget 5120 MiB (explicit, capped by inherited); sampled owned child group and escaped descendants
+[run_bounded] span run_id=run-20d65e1346c3 wrapper_pid=2477009 pgid=2477011 utc=2026-11-19T09:38:11Z command=env
+[run_bounded] record (spawn) run_id=run-20d65e1346c3 path=/home/ec2-user/.local-operator/sessions/eb00b020a26e/scratchpad/run-bounded-runs/run-20d65e1346c3.spawn.json
+
+> lop-mobile-web@0.1.0 prebuild
+> node scripts/generate-theme-css.mjs && node scripts/inline-mark.mjs
+
+Wrote /home/ec2-user/local-operator/.worktrees/bridge-card-phone-web/local_operator/mobile/web/src/styles/themes.generated.css — 31 themes, 29 roles each.
+src/lib/mark.ts regenerated (7211 bytes)
+
+> lop-mobile-web@0.1.0 build
+> node scripts/check-i18n.mjs && tsc -b && vite build
+
+relay i18n: 0 enforced fingerprint violation(s); 758 advisory legacy sink literal(s)
+[36mvite v6.4.3 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 293 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                            [39m[1m[2m  2.29 kB[22m[1m[22m[2m │ gzip:   1.21 kB[22m
+[2mdist/[22m[2massets/[22m[35mindex-B9rC7HLQ.css             [39m[1m[2m 70.57 kB[22m[1m[22m[2m │ gzip:  15.88 kB[22m
+[2mdist/[22m[2massets/[22m[36mRVARI57O-CXmrUIiS.js           [39m[1m[2m  0.16 kB[22m[1m[22m[2m │ gzip:   0.15 kB[22m
+[2mdist/[22m[2massets/[22m[36mV44WA6U7-C71kFjQ2.js           [39m[1m[2m  0.38 kB[22m[1m[22m[2m │ gzip:   0.29 kB[22m
+[2mdist/[22m[2massets/[22m[36m5THPTBWS-D57irc_4.js           [39m[1m[2m  0.48 kB[22m[1m[22m[2m │ gzip:   0.30 kB[22m
+[2mdist/[22m[2massets/[22m[36mNT5JY5WP-DK49Hyh4.js           [39m[1m[2m  0.49 kB[22m[1m[22m[2m │ gzip:   0.35 kB[22m
+[2mdist/[22m[2massets/[22m[36mG3MDBVQH-EkdejvdW.js           [39m[1m[2m  0.56 kB[22m[1m[22m[2m │ gzip:   0.34 kB[22m
+[2mdist/[22m[2massets/[22m[36mG6GPDDNC-CRshg102.js           [39m[1m[2m  0.60 kB[22m[1m[22m[2m │ gzip:   0.43 kB[22m
+[2mdist/[22m[2massets/[22m[36mDKTLEL5E-B7ILCVTH.js           [39m[1m[2m  0.83 kB[22m[1m[22m[2m │ gzip:   0.40 kB[22m
+[2mdist/[22m[2massets/[22m[36m7XWI72E6-z8DgU87l.js           [39m[1m[2m  0.95 kB[22m[1m[22m[2m │ gzip:   0.50 kB[22m
+[2mdist/[22m[2massets/[22m[36m4LWW3ZNH-B6JhaFDw.js           [39m[1m[2m  0.97 kB[22m[1m[22m[2m │ gzip:   0.58 kB[22m
+[2mdist/[22m[2massets/[22m[36mYIK6JTN6-CRQJzAIE.js           [39m[1m[2m  1.44 kB[22m[1m[22m[2m │ gzip:   0.80 kB[22m
+[2mdist/[22m[2massets/[22m[36m7WLXJQOR-DQODvV5U.js           [39m[1m[2m  1.95 kB[22m[1m[22m[2m │ gzip:   0.94 kB[22m
+[2mdist/[22m[2massets/[22m[36mQQW2P742-BX9bO-jG.js           [39m[1m[2m  1.97 kB[22m[1m[22m[2m │ gzip:   1.06 kB[22m
+[2mdist/[22m[2massets/[22m[36m75JW6PN6-BuMX2IIu.js           [39m[1m[2m  2.17 kB[22m[1m[22m[2m │ gzip:   1.08 kB[22m
+[2mdist/[22m[2massets/[22m[36mFTXIJQGB-nrHdCfp7.js           [39m[1m[2m  2.58 kB[22m[1m[22m[2m │ gzip:   1.09 kB[22m
+[2mdist/[22m[2massets/[22m[36mEXE5EH6O-CBcsslkh.js           [39m[1m[2m  3.70 kB[22m[1m[22m[2m │ gzip:   1.73 kB[22m
+[2mdist/[22m[2massets/[22m[36mS63OEDPG-D-ErUYVn.js           [39m[1m[2m  4.08 kB[22m[1m[22m[2m │ gzip:   1.90 kB[22m
+[2mdist/[22m[2massets/[22m[36mY5LQLG3M-C4cclDH9.js           [39m[1m[2m  5.22 kB[22m[1m[22m[2m │ gzip:   2.54 kB[22m
+[2mdist/[22m[2massets/[22m[36mCGIZI67J-Bv_7xt14.js           [39m[1m[2m  5.45 kB[22m[1m[22m[2m │ gzip:   2.73 kB[22m
+[2mdist/[22m[2massets/[22m[36mHPNUA7RO-C524Y_4H.js           [39m[1m[2m  5.86 kB[22m[1m[22m[2m │ gzip:   2.89 kB[22m
+[2mdist/[22m[2massets/[22m[36mUGRSUGA2-D8exkMsQ.js           [39m[1m[2m  6.54 kB[22m[1m[22m[2m │ gzip:   3.10 kB[22m
+[2mdist/[22m[2massets/[22m[36mSG5TVYLW-C8upN8-R.js           [39m[1m[2m  7.19 kB[22m[1m[22m[2m │ gzip:   3.27 kB[22m
+[2mdist/[22m[2massets/[22m[36m6BEWHPQE-CxmqAvHC.js           [39m[1m[2m  7.62 kB[22m[1m[22m[2m │ gzip:   3.42 kB[22m
+[2mdist/[22m[2massets/[22m[36mGH6G3TJC-DXM_NBRz.js           [39m[1m[2m  7.74 kB[22m[1m[22m[2m │ gzip:   3.53 kB[22m
+[2mdist/[22m[2massets/[22m[36m24BXRY42-B7thbb1X.js           [39m[1m[2m  8.54 kB[22m[1m[22m[2m │ gzip:   3.82 kB[22m
+[2mdist/[22m[2massets/[22m[36m4FHPYW2L-DZskeyTT.js           [39m[1m[2m  9.15 kB[22m[1m[22m[2m │ gzip:   4.24 kB[22m
+[2mdist/[22m[2massets/[22m[36mLF3NJQAX-DVm-S74x.js           [39m[1m[2m  9.48 kB[22m[1m[22m[2m │ gzip:   4.29 kB[22m
+[2mdist/[22m[2massets/[22m[36mBGW36YJW-DlRm00G9.js           [39m[1m[2m 10.06 kB[22m[1m[22m[2m │ gzip:   4.89 kB[22m
+[2mdist/[22m[2massets/[22m[36mVINGRCPA-o3rlw8Wa.js           [39m[1m[2m 11.28 kB[22m[1m[22m[2m │ gzip:   4.89 kB[22m
+[2mdist/[22m[2massets/[22m[36mP67P66DB-DgIucFOu.js           [39m[1m[2m 11.91 kB[22m[1m[22m[2m │ gzip:   5.22 kB[22m
+[2mdist/[22m[2massets/[22m[36mWQ63CJYP-BOKXeIUI.js           [39m[1m[2m 12.27 kB[22m[1m[22m[2m │ gzip:   5.60 kB[22m
+[2mdist/[22m[2massets/[22m[36m6PIGVMFT-C8-U0_Mu.js           [39m[1m[2m 12.29 kB[22m[1m[22m[2m │ gzip:   3.17 kB[22m
+[2mdist/[22m[2massets/[22m[36mG76NGGFM-jyA-_Yri.js           [39m[1m[2m 12.86 kB[22m[1m[22m[2m │ gzip:   5.55 kB[22m
+[2mdist/[22m[2massets/[22m[36mPFLLLM7K-Ba98BCnw.js           [39m[1m[2m 13.68 kB[22m[1m[22m[2m │ gzip:   5.63 kB[22m
+[2mdist/[22m[2massets/[22m[36mVBUCM3YD-D_kRfYkF.js           [39m[1m[2m 13.72 kB[22m[1m[22m[2m │ gzip:   5.92 kB[22m
+[2mdist/[22m[2massets/[22m[36mJAD36DTZ-D5z9I6wK.js           [39m[1m[2m 14.80 kB[22m[1m[22m[2m │ gzip:   6.37 kB[22m
+[2mdist/[22m[2massets/[22m[36mN7OWWQHY-CyB1dVY3.js           [39m[1m[2m 14.90 kB[22m[1m[22m[2m │ gzip:   6.28 kB[22m
+[2mdist/[22m[2massets/[22m[36mLRZCOFJZ-BHLRr97S.js           [39m[1m[2m 15.40 kB[22m[1m[22m[2m │ gzip:   6.15 kB[22m
+[2mdist/[22m[2massets/[22m[36m5XYWFMKW-wuHMaqVw.js           [39m[1m[2m 16.89 kB[22m[1m[22m[2m │ gzip:   7.17 kB[22m
+[2mdist/[22m[2massets/[22m[36mN5NF2FGY-BR4zayB8.js           [39m[1m[2m 19.30 kB[22m[1m[22m[2m │ gzip:   7.54 kB[22m
+[2mdist/[22m[2massets/[22m[36mDNNCRC2E-CeBbllrm.js           [39m[1m[2m 20.76 kB[22m[1m[22m[2m │ gzip:   7.80 kB[22m
+[2mdist/[22m[2massets/[22m[36mWL6DNKX4-B2VyYaP9.js           [39m[1m[2m 21.29 kB[22m[1m[22m[2m │ gzip:   8.92 kB[22m
+[2mdist/[22m[2massets/[22m[36mJ77NQRCJ-E3hyBfLz.js           [39m[1m[2m 24.21 kB[22m[1m[22m[2m │ gzip:   9.90 kB[22m
+[2mdist/[22m[2massets/[22m[36mOT7W3RNY-CfNKDnrr.js           [39m[1m[2m 27.94 kB[22m[1m[22m[2m │ gzip:  11.50 kB[22m
+[2mdist/[22m[2massets/[22m[36mPVFCHRLY-CBIlQCeV.js           [39m[1m[2m 28.06 kB[22m[1m[22m[2m │ gzip:  11.70 kB[22m
+[2mdist/[22m[2massets/[22m[36mIX6Z2TVR-Cpcrax57.js           [39m[1m[2m 28.96 kB[22m[1m[22m[2m │ gzip:  11.32 kB[22m
+[2mdist/[22m[2massets/[22m[36mE67EBMDD-D8pVIrMs.js           [39m[1m[2m 30.44 kB[22m[1m[22m[2m │ gzip:  11.60 kB[22m
+[2mdist/[22m[2massets/[22m[36mHQRGC5D7-C_mJX6cV.js           [39m[1m[2m 32.18 kB[22m[1m[22m[2m │ gzip:  12.59 kB[22m
+[2mdist/[22m[2massets/[22m[36mV67O4WWV-DYojpgcA.js           [39m[1m[2m 35.08 kB[22m[1m[22m[2m │ gzip:  13.10 kB[22m
+[2mdist/[22m[2massets/[22m[36mEFYWJBJK-2wti9nLz.js           [39m[1m[2m 38.42 kB[22m[1m[22m[2m │ gzip:  16.57 kB[22m
+[2mdist/[22m[2massets/[22m[36mbundled.zh-CN.gen-BKcobynE.js  [39m[1m[2m 39.64 kB[22m[1m[22m[2m │ gzip:  10.89 kB[22m
+[2mdist/[22m[2massets/[22m[36mPUAMC4MJ-WUqTuACX.js           [39m[1m[2m 41.94 kB[22m[1m[22m[2m │ gzip:  15.83 kB[22m
+[2mdist/[22m[2massets/[22m[36mXOYAOB3S-Cyvzmg52.js           [39m[1m[2m 42.55 kB[22m[1m[22m[2m │ gzip:  16.14 kB[22m
+[2mdist/[22m[2massets/[22m[36m64PMEAB3-CHKSuzyX.js           [39m[1m[2m 44.92 kB[22m[1m[22m[2m │ gzip:  16.60 kB[22m
+[2mdist/[22m[2massets/[22m[36mbundled.es.gen-BnopiD9I.js     [39m[1m[2m 46.08 kB[22m[1m[22m[2m │ gzip:  11.60 kB[22m
+[2mdist/[22m[2massets/[22m[36mbundled.vi.gen-DtuPTxcu.js     [39m[1m[2m 46.96 kB[22m[1m[22m[2m │ gzip:  11.00 kB[22m
+[2mdist/[22m[2massets/[22m[36mbundled.fr.gen-DkqCy639.js     [39m[1m[2m 47.40 kB[22m[1m[22m[2m │ gzip:  11.76 kB[22m
+[2mdist/[22m[2massets/[22m[36mlazy-BEKgkIOA.js               [39m[1m[2m 50.68 kB[22m[1m[22m[2m │ gzip:  20.81 kB[22m
+[2mdist/[22m[2massets/[22m[36mbundled.ur.gen-BI5Ot0u3.js     [39m[1m[2m 55.36 kB[22m[1m[22m[2m │ gzip:  12.20 kB[22m
+[2mdist/[22m[2massets/[22m[36mbundled.ru.gen-kYTcohT2.js     [39m[1m[2m 62.16 kB[22m[1m[22m[2m │ gzip:  13.52 kB[22m
+[2mdist/[22m[2massets/[22m[36mbundled.hi.gen-B5_RPefb.js     [39m[1m[2m 69.05 kB[22m[1m[22m[2m │ gzip:  12.99 kB[22m
+[2mdist/[22m[2massets/[22m[36mindex-Ba1ZHc_q.js              [39m[1m[33m798.01 kB[39m[22m[2m │ gzip: 250.79 kB[22m
+[33m
+(!) Some chunks are larger than 600 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+[32m✓ built in 3.73s[39m
+
+> lop-mobile-web@0.1.0 postbuild
+> node scripts/check-bundle.mjs
+
+bundle ok: 556 classes for 406 tokens, 1 script(s), 1 stylesheet(s)
+[run_bounded] record (exit) run_id=run-20d65e1346c3 path=/home/ec2-user/.local-operator/sessions/eb00b020a26e/scratchpad/run-bounded-runs/run-20d65e1346c3.exit.json
+[run_bounded] env rc=0 wall=14.4s
+[run_bounded] contract=cleanup-required rc=0 cause=child-exit cleanup=proven-empty invocation_id=295de7adc0c340f89441c396b450b64a completion=/home/ec2-user/.local-operator/sessions/eb00b020a26e/scratchpad/run-bounded-runs/295de7adc0c340f89441c396b450b64a.completion.json

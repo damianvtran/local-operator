@@ -1,0 +1,705 @@
+{
+ "m1a_panelsBeforeOpen": 0,
+ "m1a_folds": 2,
+ "m1a_t250": [
+  "loading",
+  "loading",
+  "loading",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "empty"
+ ],
+ "m1a_t1100": [
+  "ready",
+  "loading",
+  "loading",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "empty"
+ ],
+ "m1a_t4500": [
+  "ready",
+  "ready",
+  "failed",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "empty"
+ ],
+ "m1a_rec": [
+  {
+   "ms": 25,
+   "states": []
+  },
+  {
+   "ms": 325,
+   "states": [
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading"
+   ]
+  },
+  {
+   "ms": 375,
+   "states": [
+    "loading",
+    "loading",
+    "loading",
+    "ready",
+    "ready",
+    "ready",
+    "loading",
+    "ready",
+    "loading",
+    "loading",
+    "loading"
+   ]
+  },
+  {
+   "ms": 400,
+   "states": [
+    "loading",
+    "loading",
+    "loading",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "empty"
+   ]
+  },
+  {
+   "ms": 850,
+   "states": [
+    "ready",
+    "loading",
+    "loading",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "empty"
+   ]
+  },
+  {
+   "ms": 2350,
+   "states": [
+    "ready",
+    "ready",
+    "failed",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "ready",
+    "empty"
+   ]
+  }
+ ],
+ "m1a_reqs": [
+  {
+   "entry": "e_admit",
+   "status": 404,
+   "t": 480119.36124
+  },
+  {
+   "entry": "e_long",
+   "status": 404,
+   "t": 480119.36152
+  },
+  {
+   "entry": "e_held",
+   "status": 404,
+   "t": 480119.361733
+  },
+  {
+   "entry": "e_heldt",
+   "status": 200,
+   "t": 480119.361912
+  },
+  {
+   "entry": "e_refused",
+   "status": 200,
+   "t": 480119.362078
+  },
+  {
+   "entry": "e_deleted",
+   "status": 200,
+   "t": 480119.362299
+  },
+  {
+   "entry": "e_offline",
+   "status": 200,
+   "t": 480119.36254
+  },
+  {
+   "entry": "e_coal",
+   "status": 200,
+   "t": 480119.36278
+  },
+  {
+   "entry": "e_n1",
+   "status": 200,
+   "t": 480119.362962
+  },
+  {
+   "entry": "e_n1neg",
+   "status": 200,
+   "t": 480119.36317
+  },
+  {
+   "entry": "e_empty",
+   "status": 200,
+   "t": 480119.363391
+  },
+  {
+   "entry": "e_admit",
+   "status": 200,
+   "t": 480119.871974
+  },
+  {
+   "entry": "e_long",
+   "status": 404,
+   "t": 480119.87221
+  },
+  {
+   "entry": "e_held",
+   "status": 404,
+   "t": 480119.872321
+  },
+  {
+   "entry": "e_long",
+   "status": 200,
+   "t": 480121.377262
+  },
+  {
+   "entry": "e_held",
+   "status": 404,
+   "t": 480121.377645
+  }
+ ],
+ "m1a_tally": {
+  "e_admit": [
+   404,
+   200
+  ],
+  "e_long": [
+   404,
+   404,
+   200
+  ],
+  "e_held": [
+   404,
+   404,
+   404
+  ],
+  "e_heldt": [
+   200
+  ],
+  "e_refused": [
+   200
+  ],
+  "e_deleted": [
+   200
+  ],
+  "e_offline": [
+   200
+  ],
+  "e_coal": [
+   200
+  ],
+  "e_n1": [
+   200
+  ],
+  "e_n1neg": [
+   200
+  ],
+  "e_empty": [
+   200
+  ]
+ },
+ "m1a_texts": [
+  "External message · untrusted content\n\nHello from Ola — can you check the release notes bef",
+  "External message · untrusted content\n\nRelease checklist\nLine 1: the quick brown fox jumps ",
+  "External message · untrusted content\n\nMessage body unavailable"
+ ],
+ "m1b_awayAfterFirst404ms": 1,
+ "m1b_reqs": [
+  {
+   "entry": "e_admit",
+   "status": 404,
+   "t": 480130.848925
+  },
+  {
+   "entry": "e_long",
+   "status": 404,
+   "t": 480130.849159
+  },
+  {
+   "entry": "e_held",
+   "status": 404,
+   "t": 480130.849291
+  },
+  {
+   "entry": "e_heldt",
+   "status": 200,
+   "t": 480130.849414
+  },
+  {
+   "entry": "e_refused",
+   "status": 200,
+   "t": 480130.849558
+  },
+  {
+   "entry": "e_deleted",
+   "status": 200,
+   "t": 480130.849696
+  },
+  {
+   "entry": "e_offline",
+   "status": 200,
+   "t": 480130.84985
+  },
+  {
+   "entry": "e_coal",
+   "status": 200,
+   "t": 480130.850047
+  },
+  {
+   "entry": "e_n1",
+   "status": 200,
+   "t": 480130.850206
+  },
+  {
+   "entry": "e_n1neg",
+   "status": 200,
+   "t": 480130.850364
+  },
+  {
+   "entry": "e_empty",
+   "status": 200,
+   "t": 480130.850538
+  }
+ ],
+ "m1b_tally": {
+  "e_admit": [
+   404
+  ],
+  "e_long": [
+   404
+  ],
+  "e_held": [
+   404
+  ],
+  "e_heldt": [
+   200
+  ],
+  "e_refused": [
+   200
+  ],
+  "e_deleted": [
+   200
+  ],
+  "e_offline": [
+   200
+  ],
+  "e_coal": [
+   200
+  ],
+  "e_n1": [
+   200
+  ],
+  "e_n1neg": [
+   200
+  ],
+  "e_empty": [
+   200
+  ]
+ },
+ "m1b_panelsAfterAway": 0,
+ "m1c_rec": [
+  {
+   "ms": 25,
+   "states": []
+  },
+  {
+   "ms": 325,
+   "states": [
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "loading",
+    "loading",
+    "loading",
+    "loading",
+    "loading"
+   ]
+  },
+  {
+   "ms": 350,
+   "states": [
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed",
+    "failed"
+   ]
+  }
+ ],
+ "m1c_reqs": [
+  {
+   "entry": "e_admit",
+   "status": 404,
+   "t": 480142.066802
+  },
+  {
+   "entry": "e_long",
+   "status": 404,
+   "t": 480142.067088
+  },
+  {
+   "entry": "e_held",
+   "status": 404,
+   "t": 480142.067278
+  },
+  {
+   "entry": "e_heldt",
+   "status": 404,
+   "t": 480142.067444
+  },
+  {
+   "entry": "e_refused",
+   "status": 404,
+   "t": 480142.067626
+  },
+  {
+   "entry": "e_deleted",
+   "status": 404,
+   "t": 480142.067803
+  },
+  {
+   "entry": "e_offline",
+   "status": 404,
+   "t": 480142.067976
+  },
+  {
+   "entry": "e_coal",
+   "status": 404,
+   "t": 480142.06817
+  },
+  {
+   "entry": "e_n1",
+   "status": 404,
+   "t": 480142.068366
+  },
+  {
+   "entry": "e_n1neg",
+   "status": 404,
+   "t": 480142.068577
+  },
+  {
+   "entry": "e_empty",
+   "status": 404,
+   "t": 480142.068764
+  }
+ ],
+ "m1c_tally": {
+  "e_admit": [
+   404
+  ],
+  "e_long": [
+   404
+  ],
+  "e_held": [
+   404
+  ],
+  "e_heldt": [
+   404
+  ],
+  "e_refused": [
+   404
+  ],
+  "e_deleted": [
+   404
+  ],
+  "e_offline": [
+   404
+  ],
+  "e_coal": [
+   404
+  ],
+  "e_n1": [
+   404
+  ],
+  "e_n1neg": [
+   404
+  ],
+  "e_empty": [
+   404
+  ]
+ },
+ "m1c_states": [
+  "failed",
+  "failed",
+  "failed",
+  "failed",
+  "failed",
+  "failed",
+  "failed",
+  "failed",
+  "failed",
+  "failed",
+  "failed"
+ ],
+ "lay_states": [
+  "ready",
+  "ready",
+  "failed",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "ready",
+  "empty"
+ ],
+ "d5": [
+  {
+   "i": 0,
+   "state": "ready",
+   "hidden": false,
+   "h": 138,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 354.5,
+   "nextTop": 364.5,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 1,
+   "state": "ready",
+   "hidden": false,
+   "h": 435,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 821.3,
+   "nextTop": 831.3,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 2,
+   "state": "failed",
+   "hidden": false,
+   "h": 61,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 913.5,
+   "nextTop": 923.5,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 3,
+   "state": "ready",
+   "hidden": false,
+   "h": 78,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 1023.1,
+   "nextTop": 1033.1,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 4,
+   "state": "ready",
+   "hidden": false,
+   "h": 61,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 1115.2,
+   "nextTop": 1125.2,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 5,
+   "state": "ready",
+   "hidden": false,
+   "h": 61,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 1207.4,
+   "nextTop": 1217.4,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 6,
+   "state": "ready",
+   "hidden": false,
+   "h": 78,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 1317,
+   "nextTop": 1327,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 7,
+   "state": "ready",
+   "hidden": false,
+   "h": 655,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 2002.9,
+   "nextTop": 2012.9,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 8,
+   "state": "ready",
+   "hidden": false,
+   "h": 265,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 2299.2,
+   "nextTop": 2309.2,
+   "gap": 10,
+   "nextText": "·\nOla · a DM\n\nExternal message · untrusted content"
+  },
+  {
+   "i": 9,
+   "state": "ready",
+   "hidden": false,
+   "h": 438,
+   "marginBottom": "10px",
+   "marginTop": "4px",
+   "bottom": 2769,
+   "nextTop": 2779,
+   "gap": 10,
+   "nextText": "·\na teammate"
+  },
+  {
+   "i": 10,
+   "state": "empty",
+   "hidden": true,
+   "h": 0,
+   "marginBottom": "0px",
+   "marginTop": "0px",
+   "bottom": 0,
+   "nextTop": null,
+   "gap": null,
+   "nextText": null
+  }
+ ],
+ "n1": [
+  {
+   "i": 8,
+   "toggle": "Show more",
+   "tail": "s long enough to sit past half the fold.",
+   "endsWithEllipsis": false,
+   "doubled": false
+  },
+  {
+   "i": 9,
+   "toggle": "Show more",
+   "tail": "word word word word word word word word…",
+   "endsWithEllipsis": true,
+   "doubled": false
+  }
+ ],
+ "empty": {
+  "count": 11,
+  "state": "empty",
+  "hidden": true,
+  "h": 0,
+  "display": "none",
+  "text": "",
+  "visiblePanelsAfterN1neg": 0
+ },
+ "d3_afterShowMore": "true",
+ "d3_before": {
+  "scrollTop": 1232,
+  "scrollHeight": 3792,
+  "clientHeight": 626,
+  "btnTop": 580,
+  "btnText": "Show less",
+  "expanded": "true",
+  "cardTop": -846,
+  "cardBottom": 633,
+  "cardInView": true,
+  "btnInView": true,
+  "vh": 844
+ },
+ "d3_after_frame": {
+  "scrollTop": 188,
+  "scrollHeight": 2748,
+  "clientHeight": 626,
+  "btnTop": 580,
+  "btnText": "Show more",
+  "expanded": "false",
+  "cardTop": 198,
+  "cardBottom": 633,
+  "cardInView": true,
+  "btnInView": true,
+  "vh": 844
+ },
+ "d3_after_settled": {
+  "scrollTop": 188,
+  "scrollHeight": 2748,
+  "clientHeight": 626,
+  "btnTop": 580,
+  "btnText": "Show more",
+  "expanded": "false",
+  "cardTop": 198,
+  "cardBottom": 633,
+  "cardInView": true,
+  "btnInView": true,
+  "vh": 844
+ }
+}

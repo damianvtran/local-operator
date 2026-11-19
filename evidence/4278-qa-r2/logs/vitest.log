@@ -1,0 +1,19 @@
+[run_bounded] memory budget 3072 MiB (explicit, capped by inherited); sampled owned child group and escaped descendants
+[run_bounded] span run_id=run-579de3d82a32 wrapper_pid=2481723 pgid=2481724 utc=2026-11-19T09:42:58Z command=npx
+[run_bounded] record (spawn) run_id=run-579de3d82a32 path=/home/ec2-user/.local-operator/sessions/eb00b020a26e/scratchpad/run-bounded-runs/run-579de3d82a32.spawn.json
+
+ RUN  v3.2.7 /home/ec2-user/local-operator/.worktrees/bridge-card-phone-web/local_operator/mobile/web
+
+ ✓ src/bridge-card-body.test.tsx (24 tests) 4998ms
+   ✓ bridge card on the transcript > re-asks a card whose row is not written yet, showing Loading, then the body (review M1)  507ms
+   ✓ bridge card on the transcript > says unavailable only after the not-yet retries run out, and never retries another 404  2011ms
+   ✓ bridge card on the transcript > abandons the not-yet re-ask when the row unmounts  2306ms
+
+ Test Files  1 passed (1)
+      Tests  24 passed (24)
+   Start at  09:42:59
+   Duration  6.30s (transform 450ms, setup 25ms, collect 663ms, tests 5.00s, environment 177ms, prepare 60ms)
+
+[run_bounded] record (exit) run_id=run-579de3d82a32 path=/home/ec2-user/.local-operator/sessions/eb00b020a26e/scratchpad/run-bounded-runs/run-579de3d82a32.exit.json
+[run_bounded] npx rc=0 wall=7.3s
+[run_bounded] contract=cleanup-required rc=0 cause=child-exit cleanup=proven-empty invocation_id=ca42d62966ae4eee91ada13b6975e9f1 completion=/home/ec2-user/.local-operator/sessions/eb00b020a26e/scratchpad/run-bounded-runs/ca42d62966ae4eee91ada13b6975e9f1.completion.json
