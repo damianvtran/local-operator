@@ -110,7 +110,9 @@ _ID_RE = {
 class IntegrationRefusal(Exception):
     """A typed, model-facing refusal. ``state`` is one of :data:`STATES`."""
 
-    def __init__(self, state: str, message: str, *, code: str = "", http_status: int = 0) -> None:
+    def __init__(
+        self, state: str, message: str, *, code: str = "", http_status: int | None = 0
+    ) -> None:
         super().__init__(message)
         self.state = state
         self.code = code
@@ -496,7 +498,7 @@ def ask_question(copy: AskCopy) -> tuple[dict[str, Any], str, str]:
         "chat:write.thread": _t(k.scope_chat_write_thread()),
     }
     lines = [head]
-    if copy.op in ("publish_app", "add_to_channel"):
+    if copy.op in ("publish_app", "add_to_channel", "create_hook", "mint_token", "rotate_token"):
         channels = ", ".join(f"#{c}" for c in copy.channels) or _t(k.ask_details_none())
         lines.append(_t(k.ask_details_channels(channels=channels)))
     if copy.scopes:
@@ -524,11 +526,12 @@ def ask_question(copy: AskCopy) -> tuple[dict[str, Any], str, str]:
     question = {
         "id": QUESTION_ID,
         "question": "\n".join(lines),
+        # Opening a consent card is not consent. Keep Enter on the safe action
+        # and do not recommend granting access; approval requires navigation.
         "options": [
-            {"label": affirm, "description": affirm_desc},
             {"label": decline, "description": decline_desc},
+            {"label": affirm, "description": affirm_desc},
         ],
-        "recommended": 0,
         "multi": False,
         "secret": False,
     }

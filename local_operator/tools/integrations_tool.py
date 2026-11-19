@@ -284,7 +284,10 @@ class _Run:
         self.p = params
         self.context = context
         self.client = client
-        self.seam = context.integration_consent
+        seam = context.integration_consent
+        if seam is None:
+            raise ValueError("integration consent must be bound before constructing a call")
+        self.seam = seam
         self.tenant = ""
         self.org = ""
 
@@ -328,7 +331,7 @@ class _Run:
                     "invalid", "create_hook needs channel_ids (installed channels)."
                 )
             payload = {
-                "name": p.name.strip(),
+                "name": (p.name or "").strip(),
                 "vendor": p.vendor,
                 "destinations": [{"match_labels": {}, "target_conversation_id": i} for i in ids],
             }
@@ -423,6 +426,7 @@ class _Run:
             secret_name=secret_name,
             credential=copy.credential,
             rotate=False,
+            snapshot={"revision": app.get("revision"), "channel_ids": channels, "scopes": scopes},
             extra={"app_id": app_id, "draft": True},
         )
 
@@ -448,6 +452,7 @@ class _Run:
         secret_name: str,
         credential: str,
         rotate: bool,
+        snapshot: dict[str, Any],
         extra: dict[str, Any] | None = None,
     ) -> ToolResult:
         from local_operator.team_bridge.integrations import (
@@ -462,6 +467,22 @@ class _Run:
             raise IntegrationRefusal(
                 "refused", "Radient did not return a matching confirmation commitment."
             )
+        revision = snapshot.get("revision")
+        prepared_revision = commitment.get("revision")
+        if (
+            type(revision) is not int
+            or revision < 1
+            or type(prepared_revision) is not int
+            or prepared_revision != revision
+        ):
+            # GET and prepare are separate requests. Another administrator may
+            # edit between them; that administrator's authority is not consent
+            # from this person to the new grant. Never file an old card against
+            # a newer commitment (including when revision metadata is missing).
+            raise IntegrationRefusal(
+                "refused",
+                "Radient's prepared revision does not match the reviewed app snapshot; retry.",
+            )
         question, affirm, decline = ask_question(copy)
         consent = {
             "action_key": key,
@@ -475,6 +496,9 @@ class _Run:
             "credential": credential,
             "rotate": rotate,
             "app_name": copy.app_name,
+            "review_version": 1,
+            "review_snapshot": snapshot,
+            "commitment_revision": prepared_revision,
             "affirm": affirm,
             "decline": decline,
         }
@@ -514,6 +538,23 @@ class _Run:
             raise IntegrationRefusal("refused", f"consent is unavailable: {outcome.detail}")
         if outcome.state == "granted":
             frozen = outcome.frozen
+            review = frozen.get("review_snapshot") or {}
+            revision = review.get("revision") if isinstance(review, dict) else None
+            if (
+                frozen.get("review_version") != 1
+                or type(revision) is not int
+                or revision < 1
+                or revision != frozen.get("commitment_revision")
+            ):
+                # An approval queued by an older host may omit destinations,
+                # inherited scopes, or bind a different displayed revision.
+                # Never grandfather that card into a credential mint. Lookup
+                # has consumed its answer; repeating the op obtains a fresh ask.
+                raise IntegrationRefusal(
+                    "refused",
+                    "This approval lacks a complete frozen grant review; "
+                    "repeat the operation with reask=true for a fresh approval.",
+                )
             # The frozen record IS the authority: its tenant/target/payload and
             # commitment are what the person saw; the key equality above is
             # what proves this call asks for that same action.
@@ -592,13 +633,24 @@ class _Run:
             "rotate_token": target.get("token_id", ""),
             "create_hook": payload.get("vendor", ""),
         }.get(p.op, "")
-        channels: list[str] = []
+        app = detail.get("app") or {}
+        channel_ids: list[str] = []
+        if p.op in ("mint_token", "rotate_token"):
+            # A token can address every installed channel, not a model's
+            # proposed subset. Installation changes bump the app revision, so
+            # the snapshot/prepare equality below fences concurrent changes.
+            channel_ids = [str(row["conversation_id"]) for row in detail.get("installations") or []]
+        elif p.op == "create_hook":
+            channel_ids = [str(row["target_conversation_id"]) for row in payload["destinations"]]
+        elif p.op == "add_to_channel":
+            channel_ids = [payload["conversation_id"]]
+        channels = await self.channel_names(channel_ids)
         if p.op == "add_to_channel":
-            channels = await self.channel_names([payload["conversation_id"]])
             subject = channels[0]
         if p.op == "publish_app":
             app = detail.get("app") or {}
-            channels = await self.channel_names(list(app.get("proposed_channel_ids") or []))
+            channel_ids = list(app.get("proposed_channel_ids") or [])
+            channels = await self.channel_names(channel_ids)
             spec = app.get("initial_credential") or {}
             credential = {"token": "app_token", "hook": "hook_secret"}.get(
                 str(spec.get("kind") or ""), ""
@@ -613,7 +665,19 @@ class _Run:
                 secret_name = preflight_secret_name(prior)
         scopes = list(payload.get("scopes") or [])
         if p.op == "publish_app":
-            scopes = list((detail.get("app") or {}).get("scopes") or [])
+            scopes = list(app.get("scopes") or [])
+        elif p.op == "rotate_token":
+            # Rotation inherits the existing token's immutable grant; request
+            # arguments contain neither that grant nor a trustworthy summary.
+            token = next(
+                (row for row in detail.get("tokens") or [] if row.get("id") == target["token_id"]),
+                None,
+            )
+            if token is None or not token.get("scopes"):
+                raise IntegrationRefusal(
+                    "refused", "Radient did not return the token's effective scopes."
+                )
+            scopes = list(token["scopes"])
         copy = AskCopy(
             op=p.op,
             app_name=app_name,
@@ -634,6 +698,11 @@ class _Run:
             secret_name=secret_name,
             credential=credential,
             rotate=rotate,
+            snapshot={
+                "revision": app.get("revision"),
+                "channel_ids": channel_ids,
+                "scopes": scopes,
+            },
             extra={"app_id": target["app_id"]},
         )
 

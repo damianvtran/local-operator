@@ -114,6 +114,7 @@ class FakeServer:
                     "id": APP,
                     "name": body["name"],
                     "status": "draft",
+                    "revision": 1,
                     "scopes": body["scopes"],
                 },
                 "commitment": self._commit("publish"),
@@ -125,6 +126,7 @@ class FakeServer:
                     "id": APP,
                     "name": "Alertmanager",
                     "status": self.app_status,
+                    "revision": 1,
                     "scopes": ["chat:write"],
                     "proposed_channel_ids": [CHANNEL],
                     "initial_credential": {"kind": "token"},
@@ -259,7 +261,7 @@ class Rig:
         return ToolContext(**fields)
 
     def call(self, **args: Any) -> dict[str, Any]:
-        result = asyncio.run(execute_integrations("call-1", args, context=self.context()))
+        result = asyncio.run(execute_integrations("call-1", args, None, None, self.context()))
         self.results.append(result)
         return dict(result.details or {})
 
@@ -331,7 +333,8 @@ def test_draft_files_one_human_ask_and_creates_nothing_live(rig: Rig) -> None:
     question = record["questions"][0]
     assert "Alertmanager" in question["question"] and "#alerts-prod" in question["question"]
     assert "RADIENT_APP_AM_TOKEN" in question["question"]
-    assert [o["label"] for o in question["options"]] == ["Approve and publish", "Cancel"]
+    assert [o["label"] for o in question["options"]] == ["Cancel", "Approve and publish"]
+    assert question.get("recommended") is None
 
 
 def test_publish_before_an_answer_reuses_the_queued_ask_and_calls_nothing(rig: Rig) -> None:

@@ -205,7 +205,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "music_status": "check or cancel a music job",
     "tags": "list/create/assign session tag categories",
     "harness_import": "import Claude Code/Codex/omp sessions and memory",
-    "integrations": "Radient org integration apps and tokens",
+    "integrations": "Team apps/tokens",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every
@@ -264,10 +264,7 @@ def render_deferred_tools_line(names: Collection[str]) -> str:
     for name in sorted(names):
         purpose = DEFERRED_TOOL_PURPOSES.get(name)
         entries.append(f"{name} ({purpose})" if purpose else name)
-    return (
-        "Schema on demand — call these directly by name, or read tool://<name> "
-        "for the parameters: " + ", ".join(entries) + "."
-    )
+    return "Schema on demand — call by name or read tool://<name>: " + ", ".join(entries) + "."
 
 
 __all__ = [
