@@ -1513,6 +1513,7 @@ async def test_recovery_requires_real_local_envelope(monkeypatch, tmp_path, proo
     access = SimpleNamespace(credential_id=1)
     wire = HubWire(hub)
     fetched = await conversation_mod._fetch_body(wire, ref, owner, access)
+    assert fetched is not None
     assert fetched.attachments is not None
     item = conversation_mod._screening_item(
         owner=owner,
@@ -1577,6 +1578,7 @@ async def test_recovery_rechecks_producer_fence_after_remote_proof(
     access = SimpleNamespace(credential_id=1)
     wire = HubWire(hub)
     fetched = await conversation_mod._fetch_body(wire, ref, owner, access)
+    assert fetched is not None
     assert fetched.attachments is not None
     item = conversation_mod._screening_item(
         owner=owner,
