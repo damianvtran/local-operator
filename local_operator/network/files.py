@@ -395,7 +395,12 @@ def _stamp_matches(info: os.stat_result, frame: dict[str, Any]) -> bool:
 
 
 def serve_file(
-    root: Path, session_id: str, frame: dict[str, Any], owner: str = "this device"
+    root: Path,
+    session_id: str,
+    frame: dict[str, Any],
+    owner: str = "this device",
+    *,
+    admit: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, Any]:
     """The owner's answer to one ``net_file_get`` phase. Raises :class:`MeshRefusal`.
 
@@ -443,7 +448,27 @@ def serve_file(
                 limit = min(FILE_CHUNK_BYTES, max(0, int(frame.get("limit") or FILE_CHUNK_BYTES)))
             except (TypeError, ValueError):
                 raise _refuse("bad_request", "a fetch needs an integer offset and limit") from None
-            span = _read_span(fd, offset, limit)
+            # Admit the owner-observed maximum span BEFORE reading/encoding any
+            # content for egress. A concurrent truncation or lost link may mean
+            # fewer bytes arrive: this is planned admission, never completion.
+            # Bound the read itself to that span even if the source later grows.
+            admitted = min(limit, max(0, info.st_size - offset))
+            if admit is None:
+                raise _refuse("audit_unavailable", "the owner cannot commit the file read audit")
+            reference = (
+                f"attachment:{source.attachment}"
+                if source.attachment
+                else "scratchpad://" + source.scope.relative_in(source.path).as_posix()
+            )
+            # Audit fallback names the canonical REFERENCE, never its contents:
+            # hashing this descriptor here would read protected bytes before admission.
+            # Use the real detail sanitizer (including its serialized JSON budget),
+            # not just a character count: short Unicode paths can expand in JSON.
+            from local_operator.network.audit import file_read_reference
+
+            reference = file_read_reference(reference, offset, admitted)
+            admit(reference, offset, admitted)
+            span = _read_span(fd, offset, admitted)
             return {
                 "offset": offset,
                 "bytes": len(span),
@@ -483,8 +508,35 @@ def make_handler(server: "RelayServer") -> Callable[["PeerLink", dict[str, Any]]
         # must not reach a path built from an empty id.
         if not session_id:
             raise _refuse("bad_request", "a file pull names the session it reads from")
+
+        def admit(reference: str, offset: int, admitted: int) -> None:
+            from local_operator.network.audit import AuditEvent
+
+            # Only the peer link authenticates WHO requested these bytes. The
+            # protocol has no trusted requesting-session identity; session_id
+            # is the OWNER session, never a claim about the requesting process.
+            if not server.audit.record_required(
+                AuditEvent(
+                    event="session_file_read_admitted",
+                    actor=_link.device_id,
+                    actor_kind="device",
+                    network_id=_link.network_id,
+                    epoch=_link.epoch,
+                    session_id=session_id,
+                    detail={
+                        "reference": reference,
+                        "admitted_bytes": admitted,
+                        "offset": offset,
+                        "decision": "allow",
+                    },
+                )
+            ):
+                raise _refuse("audit_unavailable", "the owner cannot commit the file read audit")
+
         try:
-            return serve_file(server.root, session_id, frame, server._own_label())  # noqa: SLF001
+            return serve_file(
+                server.root, session_id, frame, server._own_label(), admit=admit  # noqa: SLF001
+            )
         except sync.SyncRefused:
             # Belt: a containment refusal this module did not translate must still
             # leave as a named read refusal, never the relay's generic error with
