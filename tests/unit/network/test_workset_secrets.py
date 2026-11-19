@@ -84,9 +84,7 @@ def test_secret_shaped_content_in_unpushed_history_leaves_it_behind(rig: Rig) ->
 
 
 @pytest.mark.parametrize("attribute", ["*.txt -diff", "*.txt binary", "*.txt diff=hide"])
-def test_git_attributes_cannot_hide_history_content_from_the_scan(
-    rig: Rig, attribute: str
-) -> None:
+def test_git_attributes_cannot_hide_history_content_from_the_scan(rig: Rig, attribute: str) -> None:
     """Security S4 (round 1): ``.gitattributes`` turned the patch into "Binary files
     differ" (or a textconv rewrite) and the secret-shaped line was never scanned."""
     (rig.feat / ".gitattributes").write_text(attribute + "\n", encoding="utf-8")

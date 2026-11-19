@@ -61,8 +61,8 @@ import shutil
 import signal
 import socket
 import subprocess
-import threading
 import tempfile
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -866,8 +866,8 @@ def apply_probe(
     ``push`` / ``borrowing_github`` booleans and tool names that are values of
     :data:`TOOLCHAIN_MARKERS` are kept. The HTTPS spelling and the remedy command are
     rebuilt HERE from the URL this device sent and ``device_id`` (the destination's
-    mesh id — never its self-chosen name, security S10), so a hostile destination cannot write a command, markup or a terminal
-    escape onto the consent screen.
+    mesh id — never its self-chosen name, security S10), so a hostile destination
+    cannot write a command, markup or a terminal escape onto the consent screen.
 
     NOR DOES THE OWNER (security S11, round 3): on a recall ``block`` came from the
     remote owner, so every probe-owned field is dropped FIRST — before the

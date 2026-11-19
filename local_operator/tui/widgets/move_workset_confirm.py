@@ -238,9 +238,11 @@ class MoveWorkingSetConfirmScreen(ModalScreen[str]):
                 button.disabled = not event.value
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        ticked = bool(self.query_one("#move-workset-check", Checkbox).value) if (
-            self._consentable or self._without
-        ) else False
+        ticked = (
+            bool(self.query_one("#move-workset-check", Checkbox).value)
+            if (self._consentable or self._without)
+            else False
+        )
         if event.button.id == "move-workset-confirm":
             self.dismiss("confirm" if ticked else "")
         elif event.button.id == "move-workset-without":

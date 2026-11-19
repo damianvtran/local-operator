@@ -144,7 +144,6 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
-from local_operator.i18n.keys import tui_session_move_workset as _wsc_keys
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
@@ -152,6 +151,7 @@ from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_session_move_workset as _wsc_keys
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
 from local_operator.i18n.keys import tui_small as _small_keys
 from local_operator.i18n.keys import tui_sound as _sound_keys

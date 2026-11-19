@@ -314,8 +314,12 @@ async def test_the_consent_controls_stay_on_screen_with_a_long_summary(
         region = screen.region
         card = screen.query_one(".move-workset").content_region
         scroll = screen.query_one("#move-workset-summary")
-        for selector in ("#move-workset-title", "#move-workset-check", "#move-workset-confirm",
-                         "#move-workset-cancel"):
+        for selector in (
+            "#move-workset-title",
+            "#move-workset-check",
+            "#move-workset-confirm",
+            "#move-workset-cancel",
+        ):
             widget = screen.query_one(selector)
             box = widget.region
             assert box.height > 0, (selector, box)
@@ -436,9 +440,7 @@ def test_terminal_escapes_are_stripped_from_every_rendered_line() -> None:
     """S3: an ESC sequence in a remedy rewrote the lines above the CLI's y/N."""
     block = {
         **BLOCK,
-        "worktrees": [
-            {**BLOCK["worktrees"][0], "path": "~/proj/x\x1b[2K\r\x1b[1AALL CLEAR"}
-        ],
+        "worktrees": [{**BLOCK["worktrees"][0], "path": "~/proj/x\x1b[2K\r\x1b[1AALL CLEAR"}],
     }
     lines = workset_text.summary_lines(block, session=SESSION, device="peer")
     joined = "\n".join(lines)

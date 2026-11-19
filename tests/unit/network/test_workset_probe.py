@@ -490,9 +490,7 @@ def test_a_timed_out_probe_kills_its_whole_process_group(
     """R7: git's child (ssh / git-remote-https) used to outlive the timeout."""
     pidfile = tmp_path / "child.pid"
     fake = tmp_path / "git"
-    fake.write_text(
-        f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n", encoding="utf-8"
-    )
+    fake.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n", encoding="utf-8")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setattr(workset_probe, "GIT_PROBE_TIMEOUT_S", 1.0)
@@ -518,10 +516,18 @@ def test_the_probe_frame_carries_only_remotes_and_marker_names() -> None:
     """S6: no worktree path, no branch, one row per remote."""
     block = {
         "worktrees": [
-            {"path": "~/secret-client/a", "branch": "acme-deal", "remote_url": HTTPS,
-             "markers": ["go.mod"]},
-            {"path": "~/secret-client/b", "branch": "acme-2", "remote_url": HTTPS,
-             "markers": ["uv.lock", "not-a-marker"]},
+            {
+                "path": "~/secret-client/a",
+                "branch": "acme-deal",
+                "remote_url": HTTPS,
+                "markers": ["go.mod"],
+            },
+            {
+                "path": "~/secret-client/b",
+                "branch": "acme-2",
+                "remote_url": HTTPS,
+                "markers": ["uv.lock", "not-a-marker"],
+            },
         ]
     }
 
@@ -836,7 +842,9 @@ def test_a_hostile_owner_command_reaches_no_displayed_surface(
     from local_operator.network import workset, workset_text
     from local_operator.server.utils import desktop_mesh
     from local_operator.tui.app import OperatorApp
-    from local_operator.tui.widgets.move_workset_confirm import MoveWorkingSetConfirmScreen
+    from local_operator.tui.widgets.move_workset_confirm import (
+        MoveWorkingSetConfirmScreen,
+    )
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
     _server_a, server_b, _host, _port = pair

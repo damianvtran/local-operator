@@ -1261,9 +1261,9 @@ def compute_manifest(
     # one that is unreadable cannot refuse the move), they are not counted and not
     # digest inputs, and they never reach the destination's probe.
     mentioned = tuple(
-        sorted(
-            home_relative(c.path, home_path) for c in candidates if mention_only(c.sources)
-        )[:_MAX_MENTIONED]
+        sorted(home_relative(c.path, home_path) for c in candidates if mention_only(c.sources))[
+            :_MAX_MENTIONED
+        ]
     )
     candidates = [c for c in candidates if not mention_only(c.sources)]
     live = _live_cwds(Path(root), set(tree))

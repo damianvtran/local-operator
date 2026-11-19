@@ -7435,9 +7435,7 @@ def _offload(
         resume_reason = (
             "active"
             if arrival_was_active and not keep and not no_engage_on_arrival
-            else "asked"
-            if engage_on_arrival
-            else ""
+            else "asked" if engage_on_arrival else ""
         )
         if resume_reason:
             result_doc["resume_requested"] = {
