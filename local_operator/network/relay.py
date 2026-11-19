@@ -487,6 +487,7 @@ class PreauthLimiter:
         while len(self._buckets) > self.map_max:
             self._buckets.popitem(last=False)
 
+
 #: Reconcile grants: at most this many per device per network per hour. "I keep
 #: presenting an old epoch" is also what a replayed credential looks like.
 RECONCILE_MAX_PER_HOUR = 3

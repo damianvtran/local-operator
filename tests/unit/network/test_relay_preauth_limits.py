@@ -29,6 +29,11 @@ import pytest
 from local_operator.network import audit as audit_mod
 from local_operator.network import identity, relay
 from tests.unit.network import conftest as net_fixtures
+
+# Fixtures reach this module by import. ``devices`` is pulled through
+# ``request.getfixturevalue("devices")`` instead of as a parameter: a parameter would
+# shadow the imported binding (pyflakes F811), and renaming the import would rename the
+# fixture itself, because pytest names a fixture after the attribute it is found under.
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _pair,
     devices,
@@ -195,15 +200,16 @@ def test_the_source_map_is_bounded_under_a_spray_of_sources() -> None:
 
 @needs_second_source
 def test_an_idle_flood_from_one_source_cannot_starve_a_member_dial_from_another(
-    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """THE ACCEPTANCE CELL. Default settings (8 global, 3 per source): twenty
     silent connections from 127.0.0.1, then a REAL member handshake from
     127.0.0.2 while the flood is still open. Before the fix the flood held all
     eight global slots and this dial was dropped at the cap."""
-    server_a, server_b, host, port = devices
-    record, _host, _port = _pair(devices, monkeypatch)
+    two_relays = request.getfixturevalue("devices")
+    server_a, server_b, host, port = two_relays
+    record, _host, _port = _pair(two_relays, monkeypatch)
     cap = server_a.settings.max_handshakes_per_source
     assert cap < server_a.settings.max_handshakes
     flood = [_connect(host, port) for _ in range(20)]
@@ -273,13 +279,14 @@ def test_a_silent_connection_is_closed_at_the_first_byte_deadline(lone_relay: An
 
 @needs_second_source
 def test_a_member_whose_first_byte_is_late_but_inside_the_deadline_still_links(
-    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The timer bounds silence, not a handshake: a first byte at ~1 s (default
     deadline 2 s) is followed by the ordinary handshake budget, untouched."""
-    server_a, server_b, host, port = devices
-    record, _host, _port = _pair(devices, monkeypatch)
+    two_relays = request.getfixturevalue("devices")
+    server_a, server_b, host, port = two_relays
+    record, _host, _port = _pair(two_relays, monkeypatch)
     member = _connect(host, port, source=SECOND_SOURCE)
     time.sleep(1.0)
     link, reason = server_b.dial(
@@ -314,11 +321,12 @@ def test_churn_from_one_source_is_rate_limited_and_another_source_is_not(
 
 
 def test_an_established_link_is_unaffected_by_a_later_flood_from_its_own_address(
-    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server_a, server_b, host, port = devices
-    record, _host, _port = _pair(devices, monkeypatch)
+    two_relays = request.getfixturevalue("devices")
+    server_a, server_b, host, port = two_relays
+    record, _host, _port = _pair(two_relays, monkeypatch)
     link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
     assert link is not None, reason
     flood = [_connect(host, port) for _ in range(20)]
@@ -410,13 +418,16 @@ def unstarted_relay(root: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         real_release(source, **kwargs)
 
     monkeypatch.setattr(server._preauth, "release", recording_release)  # noqa: SLF001
-    server._handshake_slots = _RecordingSlots(server._handshake_slots, order)  # type: ignore[assignment]  # noqa: SLF001
+    recording_slots = _RecordingSlots(server._handshake_slots, order)
+    server._handshake_slots = recording_slots  # type: ignore[assignment]  # noqa: SLF001
     return server, order
 
 
 def _run_accept_once(server: relay.RelayServer, addr: Any) -> tuple[socket.socket, socket.socket]:
     ours, theirs = socket.socketpair()
-    server._listener = _ScriptedListener(server, ours, addr)  # type: ignore[assignment]  # noqa: SLF001
+    server._listener = _ScriptedListener(  # type: ignore[assignment]  # noqa: SLF001
+        server, ours, addr
+    )
     server._accept_loop()  # noqa: SLF001
     return ours, theirs
 
@@ -542,7 +553,10 @@ def test_a_hand_edited_string_reaches_validation_instead_of_crashing_the_reader(
     assert settings.first_byte_timeout_s == "soon"
     assert settings.max_handshakes_per_source == 2.5, "never silently truncated to 2"
     cap, wait, problems = relay.resolve_preauth_limits(settings)
-    assert (cap, wait) == (relay.DEFAULT_MAX_HANDSHAKES_PER_SOURCE, relay.DEFAULT_FIRST_BYTE_TIMEOUT_S)
+    assert (cap, wait) == (
+        relay.DEFAULT_MAX_HANDSHAKES_PER_SOURCE,
+        relay.DEFAULT_FIRST_BYTE_TIMEOUT_S,
+    )
     assert len(problems) == 2, problems
     assert relay._coerce_or_raw(int, 4.0) == 4  # noqa: SLF001
     assert relay._coerce_or_raw(int, "3") == 3  # noqa: SLF001
@@ -570,7 +584,8 @@ def test_a_socket_setup_failure_closes_the_socket_with_a_throttled_diagnostic(
     with caplog.at_level("WARNING", logger=relay.logger.name):
         for sock in socks:
             deadline = time.monotonic() + 5.0
-            assert server._await_first_byte(sock, ("203.0.113.5", 1), deadline) is False  # noqa: SLF001
+            got = server._await_first_byte(sock, ("203.0.113.5", 1), deadline)  # noqa: SLF001
+            assert got is False
     assert [s.closed for s in socks] == [1] * 5, "every socket is closed"
     lines = [r for r in caplog.records if "pre-auth socket setup failed" in r.getMessage()]
     assert len(lines) == 1, "one line per window, not one per connection"
