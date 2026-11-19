@@ -22,6 +22,7 @@ from local_operator.harness.types import ImageContent
 from local_operator.i18n.keys import tui_small as copy
 from local_operator.i18n.text import tr
 from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
+from local_operator.tui.bridge_card_body import card_body_loader
 from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.transcript import (
@@ -1557,6 +1558,12 @@ def project_settled_rows(
                                 bridge_card_text(details),
                                 bridge_card_sender(details),
                                 fold_width=fold_width,
+                                # Lazily fetched on first open; None (no local
+                                # journal) keeps today's receipt copy.
+                                body_loader=card_body_loader(
+                                    getattr(self, "_session", None),
+                                    str(getattr(message, "id", "")),
+                                ),
                             )
                         )
                         appended = True

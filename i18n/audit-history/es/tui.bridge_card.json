@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.bridge_card",
+  "history_sha256": "dc5047bb25fdb031fb38b2adc9b17bf842b2b7239f0a07a7b76973dc89bcba9d",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "769543b0ce36575906cd49adfd51447874caddd2e5d3c4118d9549143ed318a7",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 52fccdacba96)",
+        "session": "52fccdacba96",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, job 14b97e09e500; independent of the translator)",
+        "session": "14b97e09e500",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace tui.bridge_card (14 keys, bridge-body PR 1+2). Independent audit PASS, 0 unresolved blocker/major. Remaining nits deferred. Target es/tui.bridge_card.json sha256 c3cccb84ebe648c7bb2e4657d08fc91f94dfc67ff50f71e9a6617cc4d61d7c79. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "8c20c37b8880582d26fd5e50d633d995fa846200f5b670181ce69792b5654c5f",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 3cb35d7fd971)",
+        "session": "3cb35d7fd971",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, job 2d5a46e94264; independent of the translator)",
+        "session": "2d5a46e94264",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "r2: 3 changed + 4 added keys; 6 audited minors applied (PR #4238 design/review round 1 remediation: body.offline, body.show_more, body.show_less changed; body.held_transient, body.deleted, header.held_transient, header.open_to_load added). Independent audit PASS on all 7 locales, 0 blocker/major. Applied here: es body.offline. Target es/tui.bridge_card.json sha256 4af218539bd2ca64bb1381ea38bb199e185059617f89feda882ab405b024a99c. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    }
+  ]
+}

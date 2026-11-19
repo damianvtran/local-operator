@@ -9420,6 +9420,36 @@ class DesktopSessions:
             return await self._peer_file(session_id, digest, member_id=session_id)
         return result
 
+    async def bridge_card_body(self, session_id: str, entry_id: str) -> dict[str, Any]:
+        """The admitted body behind one inbound Team Bridge card (bridge-body §4).
+
+        Outside :meth:`session` for :meth:`attachment`'s reason: viewing a past
+        card must not start a runtime. The session gate is the same durable
+        user-session namespace check; the resolver then answers only for a
+        ``team_bridge_message`` row in that conversation, whose validated
+        receipt names the live owner (``other_account`` otherwise). A peer's
+        conversation has no local journal here and reads as unknown (404) —
+        the phone/desktop keep today's copy for it.
+
+        ``KeyError`` (404) for an unknown session or a row that is not a card.
+        """
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        if not SESSION_ID.fullmatch(session_id):
+            raise KeyError("Unknown session")
+        path = self.root / "sessions" / session_id
+        if not await asyncio.to_thread(lambda: path.is_dir() and is_user_session(path)):
+            raise KeyError("Unknown session")
+        try:
+            return await resolve_card_body(
+                self.root, session_id, entry_id, sessions_root=self.root / "sessions"
+            )
+        except CardBodyNotFound as missing:
+            raise KeyError("Unknown bridge card") from missing
+
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
 

@@ -2492,6 +2492,18 @@ class AuthStore:
             eligibility.clear(root)
         except Exception:  # noqa: BLE001 — a logout must not fail over the org hub
             logger.debug("org hub gate clear after logout failed", exc_info=True)
+        # Team Bridge display bodies are third-party text retained for the
+        # account that just left (bridge-body design §2: sign-out deletes
+        # them). Purging HERE, at the one sign-out hook both logout hosts and
+        # the desktop's account removal share, makes it eager rather than "on
+        # the next card view" (review R3 / QA Q1). All rows go: a remaining
+        # Radient login re-earns its own through the hub backfill.
+        try:
+            from local_operator.team_bridge.display_bodies import DisplayBodyStore
+
+            DisplayBodyStore(root).purge()
+        except Exception:  # noqa: BLE001 — a logout must not fail over display retention
+            logger.debug("bridge display purge after logout failed", exc_info=True)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Seal Muse secrets before metadata serialization; preserve other providers."""

@@ -1,0 +1,92 @@
+{
+  "tui.bridge_card.frame.untrusted": {
+    "note": "Framing line shown directly above an inbound Team Bridge message body in the terminal transcript. The body below it is text written by another person or agent and is NOT vetted: the line must read as a caution, not as an endorsement. Keep 'untrusted' strong.",
+    "role": "card framing label",
+    "tone": "neutral caution, terse"
+  },
+  "tui.bridge_card.body.loading": {
+    "note": "Shown in an expanded inbound Team Bridge card while its message body is being fetched (local store or Radient).",
+    "role": "transient status line",
+    "tone": "plain"
+  },
+  "tui.bridge_card.body.pending": {
+    "note": "The message passed screening but your agent has not been handed it yet (its turn has not run). Not an error.",
+    "role": "card body state",
+    "tone": "plain, reassuring"
+  },
+  "tui.bridge_card.body.held": {
+    "note": "The message was held by the operator's content screening and not shown to the agent. Never mention a reason or category; only that it is held.",
+    "role": "card body state",
+    "tone": "neutral, factual"
+  },
+  "tui.bridge_card.body.refused": {
+    "note": "Radient's moderation rejected this message for the agent. Never mention a reason or category; only that it was refused.",
+    "role": "card body state",
+    "tone": "neutral, factual"
+  },
+  "tui.bridge_card.body.not_admitted": {
+    "note": "This message was not admitted to the agent (it was never handed to it). Distinct from held/refused: no moderation decision is implied.",
+    "role": "card body state",
+    "tone": "neutral, factual"
+  },
+  "tui.bridge_card.body.unavailable": {
+    "note": "Generic fallback when the body cannot be shown for a reason without its own sentence.",
+    "role": "card body state",
+    "tone": "neutral"
+  },
+  "tui.bridge_card.body.signed_out": {
+    "note": "The body can only be shown while signed in to Radient (the product name 'Radient' is not translated).",
+    "role": "card body state",
+    "tone": "plain instruction"
+  },
+  "tui.bridge_card.body.other_account": {
+    "note": "The card arrived while a different Radient account was signed in, so its body is not shown to the current account. 'Radient' is a product name.",
+    "role": "card body state",
+    "tone": "neutral, factual"
+  },
+  "tui.bridge_card.body.not_member": {
+    "note": "Radient refused the read because the viewer is no longer a member of the conversation.",
+    "role": "card body state",
+    "tone": "neutral, factual"
+  },
+  "tui.bridge_card.body.offline": {
+    "note": "Radient could not be reached while loading this message body. The card is already open, so the retry is to close it and open it again (not 'expand again'). 'Radient' is a product name, not translated.",
+    "role": "card body state",
+    "tone": "plain"
+  },
+  "tui.bridge_card.body.show_more": {
+    "note": "Clickable toggle under a long inbound message that is cut off after 12 rows. {total} is the number of lines in the ORIGINAL message (not screen rows), so it is the same at any terminal width. Opening it shows the full message. A key hint ' · m' may be appended by the app; do not include it.",
+    "role": "clickable toggle label",
+    "tone": "plain, terse"
+  },
+  "tui.bridge_card.body.show_less": {
+    "note": "The same toggle once the full message is shown; clicking it cuts the message back to its first rows. A key hint ' · m' may be appended by the app; do not include it.",
+    "role": "clickable toggle label",
+    "tone": "plain, terse"
+  },
+  "tui.bridge_card.body.more_messages": {
+    "note": "A coalesced card groups several messages; only the first ones are shown. {count} is how many more are not shown here.",
+    "role": "overflow note",
+    "tone": "terse"
+  },
+  "tui.bridge_card.body.held_transient": {
+    "note": "Screening has not run yet or the message is still being delivered; nothing was decided and no person is reviewing it. Never imply moderation acted. 'your agent' is the operator's own AI agent.",
+    "role": "card body state",
+    "tone": "plain, reassuring"
+  },
+  "tui.bridge_card.body.deleted": {
+    "note": "The message was deleted on Radient after it arrived, so its text is no longer shown here.",
+    "role": "card body state",
+    "tone": "neutral, factual"
+  },
+  "tui.bridge_card.header.held_transient": {
+    "note": "Short form of tui.bridge_card.body.held_transient for the one-line collapsed card header (after the sender's name). Screening has not run yet; nothing was decided. Keep it short.",
+    "role": "collapsed card summary",
+    "tone": "plain, terse"
+  },
+  "tui.bridge_card.header.open_to_load": {
+    "note": "One-line collapsed card header (after the sender's name) when this machine has no local copy of the message text: opening (expanding) the card loads it from Radient. Imperative, short.",
+    "role": "collapsed card summary",
+    "tone": "plain instruction, terse"
+  }
+}

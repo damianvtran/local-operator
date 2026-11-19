@@ -20,7 +20,10 @@ transcript, the spool, SQLite, logs, traces, asides or compaction; it has no
 I/O at all, and its only failure channel is a typed refusal carrying counts,
 never message text. The call sites checked for that claim are recorded on PR
 #2867's slice report rather than restated here, because a comment claiming
-"this is safe everywhere" is exactly the kind of promise that rots.
+"this is safe everywhere" is exactly the kind of promise that rots. The FRAME
+text is never persisted; the raw admitted body is, in exactly one place: the
+display-only store written by ``PendingTurn.settle`` on a ``completed`` turn
+(``display_bodies``), which never re-enters a request as a frame.
 
 THE BUDGET IS AN INPUT. This module never guesses a model's window, a token
 count or a provider's headroom: ``BodyBudget.available_bytes`` is the caller's

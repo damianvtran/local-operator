@@ -4328,6 +4328,43 @@ async def child_attachment_waveform(
 
 
 @router.get(
+    "/v1/desktop/sessions/{session_id}/bridge-cards/{entry_id}/body",
+    response_model=CRUDResponse[Any],
+)
+async def bridge_card_body(
+    session_id: str,
+    request: Request,
+    response: Response,
+    entry_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")],
+):
+    """What one inbound Team Bridge card's messages are to THIS viewer.
+
+    ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
+    reason?}], more}`` (bridge-body design §4; feature key
+    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
+    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
+    markdown, present only when admitted. A READ: keyed by the transcript row
+    the caller can already page, so it cannot be used to probe message ids.
+    The display store and the hub's admitted-only history read are the only
+    sources; the screener's classification fetch (``/messages/{id}/body``) is
+    never used. Caching, SET vs SERVED (the same split as the owner-audit and
+    owner-invitation routes in ``desktop_team_bridge.py``): the route SETS
+    ``private, no-store`` (design §4) so it carries the body's contract
+    wherever the router is mounted, but the running core's app-wide
+    ``managed_desktop_boundary`` (server/app.py) rewrites every
+    ``/v1/desktop/`` answer to plain ``no-store``, which is what is SERVED.
+    That is no weaker -- ``no-store`` keeps third-party text out of every
+    cache, shared or private. The boundary is deliberately not taught to keep
+    a route's own value: that would change the served header of every
+    existing route that sets ``private, no-store``.
+    """
+    async with errors(request):
+        answer = reply(await host(request).bridge_card_body(session_id, entry_id))
+    response.headers["Cache-Control"] = "private, no-store"
+    return answer
+
+
+@router.get(
     "/v1/desktop/sessions/{session_id}/attachments/{digest}",
     # The image's own mime type is the response type, so the published contract
     # must not claim the CRUD JSON envelope its neighbours return. Declaring the

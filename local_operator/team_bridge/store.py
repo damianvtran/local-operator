@@ -4800,6 +4800,15 @@ class Store:
                     owner.enrollment_generation,
                 ),
             )
+        # Display-only bodies belong to the namespace that received them. An
+        # enrollment under any OTHER namespace (account switch, re-enrol on
+        # another tenant/endpoint/hub) must not inherit them; the same owner's
+        # re-commit (heal, generation bump) keeps its own. After the commit,
+        # never inside it: the display store is a separate file and a failed
+        # purge must not roll back authority.
+        from .display_bodies import DisplayBodyStore
+
+        DisplayBodyStore(self.config_dir).purge(keep_owner_key=_owner_key(owner))
 
     def invalidate(self, owner: OwnerSnapshot) -> int:
         """Fence pending results/claims and bump the generation. Returns it.
