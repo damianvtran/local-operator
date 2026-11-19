@@ -19,7 +19,18 @@ kernel table lookup that sends no packet and contacts no third party (security
 review 60334 Q5, the same constraint stage 1's ``uplink`` module follows). When
 the route check says a route EXISTS, nothing below runs — zero resolver calls
 — because a timeout or refusal over a working IPv4 path is the peer's answer,
-not a family problem.
+not a family problem. For a NAME the check first asks about an IPv4 DEFAULT
+route (a fixed route key, like :func:`network_key`'s), so a host with IPv4 also
+makes zero resolver calls for names; only without one is the name resolved to
+find out whether it is IPv4-only (review M1).
+
+ONE DEADLINE. Everything — first connect, route check, every ``getaddrinfo``
+and the synthesised connect — shares one absolute deadline taken when the dial
+started, so the fallback never makes a dial outlast the budget its caller
+gave. ``getaddrinfo`` has no timeout parameter, so each lookup runs in a
+short-lived daemon thread that is abandoned (not killed — it ends on its own at
+the system resolver's timeout) once the deadline passes; the dial then
+surfaces its ORIGINAL error (60334 S1).
 
 HOW IT SYNTHESISES — OS FIRST. (1) ``getaddrinfo(<v4 literal>, AF_INET6)``:
 macOS (and any resolver implementing RFC 7050 discovery itself) returns the
@@ -44,12 +55,14 @@ this network handed us, so:
   u-octet, and no synthesised address in loopback, link-local, multicast,
   unspecified, IPv4-mapped/compatible or site-local space; the well-known
   prefix 64:ff9b::/96 never carries a non-global IPv4 address, RFC 6052 §3.1);
-* a synthesised address is used ONLY TO DIAL. Trust is decided afterwards by
-  the mesh handshake exactly as for any other socket — the peer must prove its
-  device key and the network/epoch credential (``Handshake``), plus #4179's
-  listener proof where the peer carries it. A hostile resolver can therefore
-  at worst make a dial fail or route it to an impostor the handshake refuses;
-  it cannot make this device trust anyone.
+  The same validation applies to every source — an OS answer, the hint and
+  discovery alike (60334 S2);
+* a prefix is cached only once a dial through it has CONNECTED, and a cached
+  prefix whose dial fails is dropped, so the next attempt rediscovers instead
+  of reusing a stale or wrong hint (60334 S3);
+* a synthesised address is used ONLY TO DIAL. The fallback leaves the existing
+  handshake checks unchanged: the socket it returns goes through the same mesh
+  handshake as any other socket, and this module adds no trust of its own.
 
 FAIL-SAFE. Anything going wrong in the fallback (a resolver that raises, no
 prefix, an invalid one, the synthesised connect failing) surfaces the ORIGINAL
@@ -99,6 +112,11 @@ WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 
 #: Route key for the network-identity lookup only — no packet is sent to it.
 _V6_ROUTE_KEY = ("2001:4860:4860::8888", 53)
+
+#: Route key for "does this host have an IPv4 default route at all?", asked
+#: before resolving a NAME (review M1). A UDP connect to it is a kernel route
+#: lookup only; no packet leaves.
+_V4_ROUTE_KEY = "8.8.8.8"
 
 SOURCE_OS = "os"
 SOURCE_DISCOVERY = "ipv4only.arpa"
@@ -190,15 +208,30 @@ def validate_prefix(pref: Pref64, v4: ipaddress.IPv4Address) -> bool:
     return _usable_destination(embed(pref, v4))
 
 
+def _prefix_of(address: ipaddress.IPv6Address, length: int) -> Pref64:
+    keep = length // 8
+    return Pref64(ipaddress.IPv6Address(address.packed[:keep] + bytes(16 - keep)), length)
+
+
 def prefix_from_discovery(addresses: list[ipaddress.IPv6Address]) -> Pref64 | None:
-    """Locate the PREF64 in ``ipv4only.arpa``'s AAAA answers (RFC 7050 §3)."""
+    """Locate the PREF64 in ``ipv4only.arpa``'s AAAA answers (RFC 7050 §3).
+
+    A prefix's own bits can hold the 192.0.0.170 pattern at a second length, so
+    one answer may read as several candidate prefixes. RFC 7050 §3 resolves that
+    with 192.0.0.171: a candidate under which BOTH well-known addresses appear
+    wins; otherwise the first match (answer order, longest length first) does,
+    since a network answering with only one record leaves nothing to compare.
+    """
+    candidates: dict[Pref64, set[ipaddress.IPv4Address]] = {}
     for address in addresses:
         for length in PREFIX_LENGTHS:
-            if extract(address, length) in _WELL_KNOWN_IPV4:
-                keep = length // 8
-                prefix = ipaddress.IPv6Address(address.packed[:keep] + bytes(16 - keep))
-                return Pref64(prefix, length)
-    return None
+            found = extract(address, length)
+            if found is not None and found in _WELL_KNOWN_IPV4:
+                candidates.setdefault(_prefix_of(address, length), set()).add(found)
+    for pref, seen in candidates.items():
+        if seen == _WELL_KNOWN_IPV4:
+            return pref
+    return next(iter(candidates), None)
 
 
 # --- the network-scoped, in-memory hint ------------------------------------------
@@ -230,6 +263,16 @@ class _HintCache:
             return
         with self._lock:
             self._key, self._pref = key, pref
+
+    def drop(self, key: str | None, pref: Pref64) -> None:
+        """Forget ``pref`` if it is still the hint for ``key``.
+
+        Compare-and-clear: a concurrent dial may already have learned a fresh
+        prefix, and a failure seen through the old one says nothing about it.
+        """
+        with self._lock:
+            if self._key == key and self._pref == pref:
+                self._key, self._pref = None, None
 
     def clear(self) -> None:
         with self._lock:
@@ -290,12 +333,75 @@ def network_key() -> str | None:
     return str(ipaddress.IPv6Network((address, 64), strict=False))
 
 
+# --- the dial deadline -----------------------------------------------------------
+
+
+class _DeadlineExpired(Exception):
+    """The dial's budget ran out inside the fallback.
+
+    Deliberately NOT an ``OSError``: the OS-synthesis step swallows resolver
+    ``OSError``s as "the OS has nothing", and an expired budget must instead end
+    the whole fallback so the caller sees its original error.
+    """
+
+
+def _remaining(deadline: float | None) -> float | None:
+    """Seconds left before ``deadline``; raises once none are. ``None``: unbounded."""
+    if deadline is None:
+        return None
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise _DeadlineExpired
+    return left
+
+
+def _resolve(resolver: Resolver, deadline: float | None, *args: Any) -> list[tuple[Any, ...]]:
+    """``resolver(*args)``, abandoned once ``deadline`` passes (60334 S1).
+
+    ``getaddrinfo`` takes no timeout and cannot be interrupted, so the lookup
+    runs in a daemon thread and the dial stops waiting for it at the deadline.
+    An abandoned thread is harmless: it holds no lock or socket of ours, writes
+    only into a box nobody reads any more, and ends on its own when the system
+    resolver gives up (its own resolv.conf timeout), so a broken-DNS network
+    costs at most one such thread per lookup in flight — never an unbounded dial.
+    A blocking dial (``timeout=None``) keeps blocking semantics: called inline.
+    """
+    left = _remaining(deadline)
+    if left is None:
+        return resolver(*args)
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = resolver(*args)
+        except BaseException as exc:  # handed to the waiting dial, re-raised there
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, name="nat64-getaddrinfo", daemon=True)
+    thread.start()
+    thread.join(left)
+    if thread.is_alive():
+        raise _DeadlineExpired
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 # --- synthesis -------------------------------------------------------------------
 
 
-def _v6_answers(resolver: Resolver, host: str, port: int) -> list[ipaddress.IPv6Address]:
+@dataclass(frozen=True)
+class _Synthesis:
+    address: ipaddress.IPv6Address
+    source: str
+    pref: Pref64
+
+
+def _v6_answers(
+    resolver: Resolver, host: str, port: int, deadline: float | None = None
+) -> list[ipaddress.IPv6Address]:
     out: list[ipaddress.IPv6Address] = []
-    for info in resolver(host, port, socket.AF_INET6, socket.SOCK_STREAM):
+    for info in _resolve(resolver, deadline, host, port, socket.AF_INET6, socket.SOCK_STREAM):
         if info[0] != socket.AF_INET6:
             continue
         try:
@@ -305,6 +411,24 @@ def _v6_answers(resolver: Resolver, host: str, port: int) -> list[ipaddress.IPv6
     return out
 
 
+def _os_synthesis(answer: ipaddress.IPv6Address, v4: ipaddress.IPv4Address) -> Pref64 | None:
+    """The prefix under which the OS's ``answer`` is a valid synthesis of ``v4``.
+
+    The OS is held to the SAME rules as discovery and the hint (60334 S2):
+    ``answer`` must be exactly ``v4`` embedded at an RFC 6052 length under a
+    prefix ``validate_prefix`` accepts — so the well-known prefix never carries
+    a non-global IPv4 here either, and an arbitrary AAAA for the literal (not a
+    synthesis at all) can never redirect the dial.
+    """
+    for length in PREFIX_LENGTHS:
+        if extract(answer, length) != v4:
+            continue
+        pref = _prefix_of(answer, length)
+        if validate_prefix(pref, v4) and embed(pref, v4) == answer:
+            return pref
+    return None
+
+
 def synthesise(
     v4: ipaddress.IPv4Address,
     port: int,
@@ -312,17 +436,18 @@ def synthesise(
     resolver: Resolver,
     key: str | None,
     hints: _HintCache = HINTS,
-) -> tuple[ipaddress.IPv6Address, str] | None:
-    """An IPv6 address reaching ``v4`` through this network's NAT64, and its source.
+    deadline: float | None = None,
+) -> _Synthesis | None:
+    """An IPv6 address reaching ``v4`` through this network's NAT64, its source and prefix.
 
-    Raises whatever ``resolver`` raises; :func:`create_connection` turns that
-    into the original connect error.
+    Raises whatever ``resolver`` raises (or :class:`_DeadlineExpired`);
+    :func:`fallback` turns that into the original connect error. Caching is
+    the caller's: a discovered prefix is remembered only once a dial through it
+    has connected (see :func:`fallback`).
     """
-    # (1) The OS. Only an answer that really embeds ``v4`` at an RFC 6052 length
-    # counts: a resolver answering a literal with an arbitrary AAAA is not a
-    # synthesis, and must not redirect the dial.
+    # (1) The OS.
     try:
-        os_answers = _v6_answers(resolver, str(v4), port)
+        os_answers = _v6_answers(resolver, str(v4), port, deadline)
     except (OSError, UnicodeError):
         # glibc answers an IPv4 literal asked for AF_INET6 with EAI_ADDRFAMILY /
         # EAI_NONAME (it never synthesises; only DNS64 or macOS's resolver
@@ -330,23 +455,23 @@ def synthesise(
         # discovery below is exactly the case for it.
         os_answers = []
     for answer in os_answers:
-        if not _usable_destination(answer):
-            continue
-        if any(extract(answer, length) == v4 for length in PREFIX_LENGTHS):
-            return answer, SOURCE_OS
+        pref = _os_synthesis(answer, v4)
+        if pref is not None:
+            return _Synthesis(answer, SOURCE_OS, pref)
     # (2) A prefix already learned on THIS network.
     cached = hints.get(key)
     if cached is not None and validate_prefix(cached, v4):
-        return embed(cached, v4), SOURCE_HINT
+        return _Synthesis(embed(cached, v4), SOURCE_HINT, cached)
     # (3) RFC 7050 discovery.
-    pref = prefix_from_discovery(_v6_answers(resolver, _DISCOVERY_NAME, port))
+    pref = prefix_from_discovery(_v6_answers(resolver, _DISCOVERY_NAME, port, deadline))
     if pref is None or not validate_prefix(pref, v4):
         return None
-    hints.put(key, pref)
-    return embed(pref, v4), SOURCE_DISCOVERY
+    return _Synthesis(embed(pref, v4), SOURCE_DISCOVERY, pref)
 
 
-def _ipv4_only_target(host: str, port: int, resolver: Resolver) -> ipaddress.IPv4Address | None:
+def _ipv4_only_target(
+    host: str, port: int, resolver: Resolver, deadline: float | None = None
+) -> ipaddress.IPv4Address | None:
     """The IPv4 address to synthesise for, when ``host`` is IPv4-only; else ``None``."""
     try:
         parsed = ipaddress.ip_address(host)
@@ -358,7 +483,7 @@ def _ipv4_only_target(host: str, port: int, resolver: Resolver) -> ipaddress.IPv
         return None  # already IPv6: nothing to synthesise
     # A name. If it has ANY IPv6 answer the original connect already tried it
     # (``socket.create_connection`` walks every family), so leave it alone.
-    infos = resolver(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    infos = _resolve(resolver, deadline, host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
     families = {info[0] for info in infos}
     if families != {socket.AF_INET}:
         return None
@@ -376,13 +501,15 @@ def create_connection(
 ) -> socket.socket:
     """``socket.create_connection`` with a NAT64 fallback for IPv4-only targets.
 
+    ``timeout`` bounds the WHOLE dial, fallback included: one deadline is taken
+    here, before the first connect, and the fallback spends only what is left.
     The keyword hooks exist for tests (a fake resolver and route check); the
     defaults are looked up at call time so a test patching
     ``socket.create_connection`` still sees every dial.
     """
     connect = connector if connector is not None else socket.create_connection
     host, port = address
-    started = time.monotonic()
+    deadline = None if timeout is None else time.monotonic() + timeout
     try:
         return connect((host, port), timeout=timeout)
     except OSError as original:
@@ -390,7 +517,8 @@ def create_connection(
             host,
             port,
             original,
-            timeout=None if timeout is None else max(0.0, timeout - (time.monotonic() - started)),
+            timeout=timeout,
+            deadline=deadline,
             resolver=resolver,
             route_check=route_check,
             key_reader=key_reader,
@@ -407,35 +535,48 @@ def fallback(
     original: OSError,
     *,
     timeout: float | None,
+    deadline: float | None = None,
     resolver: Resolver | None = None,
     route_check: RouteCheck | None = None,
     key_reader: NetworkKey | None = None,
     connector: Connector | None = None,
+    hints: _HintCache = HINTS,
 ) -> socket.socket | None:
     """The synthesised connection after ``original`` failed, or ``None`` to re-raise it.
 
     PUBLIC so a dial site that builds and connects its own socket (rather than
     calling :func:`create_connection`) can hand its connect error here from its
     ``except OSError`` and get the same fallback — one implementation, however
-    the first connect was made.
+    the first connect was made. Such a site should pass ``deadline`` (a
+    ``time.monotonic()`` value taken before its own connect) so the fallback
+    shares the dial's budget; without one, ``timeout`` counts from this call.
+    ``None`` is returned — the caller re-raises ``original`` — whenever the
+    deadline passes, at any step.
     """
     resolver = resolver if resolver is not None else socket.getaddrinfo
     route_check = route_check if route_check is not None else ipv4_route
     key_reader = key_reader if key_reader is not None else network_key
     connect = connector if connector is not None else socket.create_connection
-    if timeout is not None and timeout <= 0:
-        return None
+    if deadline is None and timeout is not None:
+        deadline = time.monotonic() + timeout
     try:
         literal: ipaddress.IPv4Address | None = ipaddress.IPv4Address(host)
     except ValueError:
         literal = None
+    key: str | None = None
     try:
-        # A literal is gated on the route BEFORE any resolver call: with an IPv4
-        # route present the failure is the peer's own answer. A NAME must be
-        # resolved first (the route check takes an address, and handing it the
-        # name would make the "no-packet" lookup a DNS query); the original
-        # connect has just resolved it, so this is normally a cache hit.
-        v4 = literal if literal is not None else _ipv4_only_target(host, port, resolver)
+        _remaining(deadline)
+        if literal is None and route_check(_V4_ROUTE_KEY) is True:
+            # A NAME on a host with an IPv4 default route: whatever it resolves
+            # to has an IPv4 route, so the failure is the peer's answer. Asked
+            # before resolving so such hosts make no extra resolver call (M1).
+            return None
+        # A literal is gated on its own route before any resolver call. A name
+        # without an IPv4 default route must be resolved first (handing the
+        # name to the route check would turn the "no-packet" lookup into a DNS
+        # query); the original connect has just resolved it, so this is
+        # normally a cache hit, and it runs under the deadline regardless.
+        v4 = literal if literal is not None else _ipv4_only_target(host, port, resolver, deadline)
         if v4 is None:
             return None
         route = route_check(str(v4))
@@ -443,16 +584,32 @@ def fallback(
             return None
         if route is None and original.errno not in _NO_ROUTE_ERRNOS:
             return None
-        synthesised = synthesise(v4, port, resolver=resolver, key=key_reader())
+        key = key_reader()
+        synthesised = synthesise(
+            v4, port, resolver=resolver, key=key, hints=hints, deadline=deadline
+        )
+        if synthesised is None:
+            return None
+        left = _remaining(deadline)
+    except _DeadlineExpired:
+        return None
     except (OSError, UnicodeError, ValueError, IndexError):
         return None
-    if synthesised is None:
-        return None
-    target, source = synthesised
     try:
-        sock = connect((str(target), port), timeout=timeout)
+        sock = connect((str(synthesised.address), port), timeout=left)
     except OSError:
+        if synthesised.source == SOURCE_HINT:
+            # The cached prefix did not carry this dial: drop it so the next
+            # attempt rediscovers rather than retrying a stale or wrong hint
+            # forever (60334 S3 — e.g. a VPN keeping the same source /64 across
+            # physical networks). A closed peer port drops it too; the price is
+            # one ipv4only.arpa lookup on the next dial, under its deadline.
+            hints.drop(key, synthesised.pref)
         return None
+    if synthesised.source == SOURCE_DISCOVERY:
+        # Remembered only once it has carried a connection, so the hint never
+        # holds a prefix that has not worked on this network.
+        hints.put(key, synthesised.pref)
     # Source only: the caller's audit row already names the endpoint it dialled.
-    log.info("nat64 dial synthesis used (prefix source: %s)", source)
+    log.info("nat64 dial synthesis used (prefix source: %s)", synthesised.source)
     return sock
