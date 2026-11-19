@@ -16,8 +16,9 @@ from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from local_operator import settings_io
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
+from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
 from local_operator.providers import registry
 from local_operator.providers.auth_store import AuthStore
@@ -27,12 +28,15 @@ from local_operator.server.routes import (
     agents,
     auth,
     capabilities,
+    chat,
     config,
     credentials,
     jobs,
     schedules,
     settings,
+    sse,
 )
+from local_operator.server.utils.event_broker import EventBroker
 from tests.unit.providers.test_radient_account_retention import _verified_login_result
 
 TOKEN = "desktop-contract-test-token"
@@ -114,11 +118,18 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # exists. A schedule is delayed EXECUTION, so this router's gating is the
     # one that matters most.
     app.include_router(schedules.router)
+    # Mounted so the chat-family gate tests hit a REAL route: a chat turn is
+    # immediate execution, and without the router every assertion would pass
+    # on a 404 whether or not the boundary covers it.
+    app.include_router(chat.router)
+    app.include_router(sse.router)
     app.middleware("http")(managed_desktop_boundary)
     app.exception_handler(RequestValidationError)(desktop_validation_error)
     app.state.config_manager = ConfigManager(tmp_path)
     app.state.agent_registry = AgentRegistry(tmp_path)
     app.state.job_manager = JobManager()
+    app.state.event_broker = EventBroker()
+    app.state.env_config = EnvConfig(radient_api_base_url="https://api.radienthq.com/v1")
     # Never started: these tests assert on the HTTP boundary, and a running
     # APScheduler would fire `_trigger_agent_task` for real. The routes only
     # need `add_or_update_job`/`remove_job` to be callable.
@@ -237,6 +248,18 @@ def test_managed_gate_covers_every_legacy_route() -> None:
     assert all(reason.strip() for reason in _LEGACY_GATE_EXCEPTIONS.values())
 
 
+def _agent_edit_fields(**overrides: Any) -> AgentEditFields:
+    """An ``AgentEditFields`` with every field spelled out, unset ones ``None``.
+
+    The model's runtime defaults are all ``None``, but pyright treats each
+    ``Field(None, ...)`` as a required parameter; passing the full field map
+    (the ``tests/unit/test_delivery_guidance.py`` pattern) keeps the call
+    sites type-clean without changing what the registry receives.
+    """
+    names = AgentEditFields.model_fields
+    return AgentEditFields(**{name: overrides.get(name) for name in names})
+
+
 def _apiroutes(routes: Iterable[Any]) -> Iterator[APIRoute]:
     """Every :class:`APIRoute` the app publishes, nested routers included.
 
@@ -286,11 +309,20 @@ def _control_surface_routes() -> list[tuple[str, frozenset[str]]]:
     """
     from local_operator.server.app import _iter_routes
     from local_operator.server.routes import agents as agents_module
+    from local_operator.server.routes import chat as chat_module
     from local_operator.server.routes import jobs as jobs_module
     from local_operator.server.routes import schedules as schedules_module
 
     routes: list[tuple[str, frozenset[str]]] = []
-    for router in (agents_module.router, jobs_module.router, schedules_module.router):
+    # `chat` is here because its routes START AN AGENT TURN (create_operator ->
+    # handle_user_input, tools unattended); it once shipped outside every gated
+    # prefix, and this walk is what would have said so.
+    for router in (
+        agents_module.router,
+        jobs_module.router,
+        schedules_module.router,
+        chat_module.router,
+    ):
         routes.extend(_iter_routes(router.routes))
     return routes
 
@@ -2488,3 +2520,389 @@ def test_every_callback_login_accepts_the_desktop_opener():
         if "open_browser" not in inspect.signature(target).parameters:
             missing.append(provider.id)
     assert missing == []
+
+
+#: Names whose presence in a route module's namespace means its routes can START
+#: AN AGENT TURN: build an operator, run a user turn, or hand a prompt to the job
+#: processor that does. A server-built session runs tools unattended, so any
+#: route in such a module is execution, not a read.
+_TURN_STARTERS = frozenset(
+    {
+        "create_operator",
+        "handle_user_input",
+        "run_job_in_process_with_queue",
+        "run_agent_job_in_process_with_queue",
+    }
+)
+
+
+async def test_managed_gate_covers_every_route_that_can_start_an_agent_turn() -> None:
+    """Every app route whose module can start a turn is gated, or a recorded exception.
+
+    The prefix walk and the control-surface walk above only see the families
+    someone already listed; ``/v1/chat`` shipped outside all of them, and an
+    unauthenticated ``POST /v1/chat`` ran a bash tool call in managed posture.
+    This asks the question from the other end -- "which routes CAN execute?" --
+    by inspecting each endpoint's module for the turn-starting entry points, so
+    a new execution route in a new module is caught without anyone remembering
+    to list it. ``/v1/desktop/*`` is excluded only because its routers carry
+    ``require_desktop`` themselves (``test_managed_gate_covers_every_desktop_route``).
+    """
+    import sys
+
+    from local_operator.server.app import _LEGACY_GATE_EXCEPTIONS, _legacy_desktop_gated
+    from local_operator.server.app import app as application
+
+    # The exception list is pinned, not just validated: widening the bearer-less
+    # surface must be a deliberate edit to this assertion (QA round 1 showed an
+    # extra `POST /v1/chat/async` entry would otherwise pass the walk below).
+    assert set(_LEGACY_GATE_EXCEPTIONS) == {"POST /v1/chat/agents/{agent_id}/edit"}
+
+    turn_routes: list[tuple[str, str]] = []
+    for route in _apiroutes(application.routes):
+        if route.path.startswith("/v1/desktop/"):
+            continue
+        namespace = vars(sys.modules[route.endpoint.__module__])
+        if not _TURN_STARTERS & set(namespace):
+            continue
+        # APIRoute.methods is typed Optional; FastAPI always fills it for a
+        # published route, so an empty fallback only satisfies the checker.
+        for method in route.methods or ():
+            turn_routes.append((method, route.path))
+    # Guards the inspection itself: the chat family alone publishes five.
+    assert len(turn_routes) >= 5, f"found only {turn_routes}; the module inspection is wrong"
+
+    ungated = sorted(
+        f"{method} {path}"
+        for method, path in turn_routes
+        if not _legacy_desktop_gated(path.replace("{agent_id}", "agent-1"), method)
+        and f"{method} {path}" not in _LEGACY_GATE_EXCEPTIONS
+    )
+    assert not ungated, (
+        "these routes can start an agent turn (unattended tools) yet answer "
+        "without the desktop bearer in managed mode:\n  " + "\n  ".join(ungated)
+    )
+
+
+async def test_chat_routes_require_the_desktop_bearer(desktop, mock_create_operator, monkeypatch):
+    """The chat family in managed posture: no bearer, wrong bearer, foreign Origin.
+
+    The reported request was an unauthenticated ``POST /v1/chat``; the async and
+    agent-scoped siblings start the same turn, so each is asserted. The
+    right-bearer request must still be served -- the desktop app's own chat is
+    authenticated and must not notice this gate.
+    """
+    client, _ = desktop
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    body = {"hosting": "openai", "model": "gpt-4o", "prompt": "hi", "context": []}
+    paths = (
+        "/v1/chat",
+        "/v1/chat/async",
+        f"/v1/chat/agents/{agent_id}",
+        f"/v1/chat/agents/{agent_id}/async",
+    )
+    for path in paths:
+        no_bearer = await client.post(path, json=body, headers={"Authorization": ""})
+        assert no_bearer.status_code == 401, (path, no_bearer.status_code)
+        wrong = await client.post(path, json=body, headers={"Authorization": "Bearer " + "x" * 64})
+        assert wrong.status_code == 401, (path, wrong.status_code)
+        foreign = await client.post(path, json=body, headers={"Origin": "https://evil.example"})
+        assert foreign.status_code == 403, (path, foreign.status_code)
+
+    served = await client.post("/v1/chat", json=body)
+    assert served.status_code == 200, served.text
+    assert served.json()["result"]["response"] == "dummy operator response"
+
+
+async def test_turn_streams_require_the_desktop_bearer(desktop) -> None:
+    """The SSE streams a turn's output rides are gated with it, HEAD included."""
+    client, _ = desktop
+    for path in ("/v1/sse/jobs/job-1", "/v1/sse/messages/message-1"):
+        assert (await client.get(path, headers={"Authorization": ""})).status_code == 401, path
+        assert (await client.head(path, headers={"Authorization": ""})).status_code == 401, path
+        assert (
+            await client.get(path, headers={"Origin": "https://evil.example"})
+        ).status_code == 403, path
+    # Transport negotiation carries no content and stays open.
+    capabilities = await client.get("/v1/sse/capabilities", headers={"Authorization": ""})
+    assert capabilities.status_code == 200
+
+
+async def test_unmanaged_mode_keeps_the_chat_family_open(
+    desktop, mock_create_operator, monkeypatch
+) -> None:
+    """No desktop token: a standalone server's CLI/script chat contract is unchanged."""
+    client, _ = desktop
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN")
+    body = {"hosting": "openai", "model": "gpt-4o", "prompt": "hi", "context": []}
+    response = await client.post("/v1/chat", json=body, headers={"Authorization": ""})
+    assert response.status_code == 200, response.text
+
+
+async def test_inline_edit_exception_cannot_reach_tool_execution(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """The ONE chat route left open in managed posture never runs a tool.
+
+    ``POST /v1/chat/agents/{agent_id}/edit`` sits in ``_LEGACY_GATE_EXCEPTIONS``
+    because the desktop canvas calls it from the renderer without the bearer.
+    That is defensible only while the route is a single model completion, so
+    this drives it through the REAL ``create_operator``/``invoke_model`` with a
+    model that answers with a bash tool call and asserts: the request carries no
+    tools and ``tool_choice="none"``, no session (the thing that executes tools)
+    is ever built, and the tool call's side effect never happens.
+    """
+    import json as json_module
+
+    import local_operator.model.configure as configure_module
+    import local_operator.session.session as session_module
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.access import open_store
+
+    client, app = desktop
+    open_store(tmp_path, create=True)
+    store_provider_key("OPENAI_API_KEY", "sk-test-not-real", base=tmp_path)
+    agent = app.state.agent_registry.create_agent(
+        _agent_edit_fields(name="editor", current_working_directory=str(tmp_path))
+    )
+    sentinel = tmp_path / "edit-sentinel.txt"
+    requests: list[Any] = []
+
+    class _Scripted:
+        def __call__(self, request, signal):
+            requests.append(request)
+
+            async def gen():
+                yield StreamToolCallDelta(index=0, id="call_1", name="bash", argument_delta="")
+                yield StreamToolCallDelta(
+                    index=0,
+                    argument_delta=json_module.dumps({"command": f"echo X > {sentinel}"}),
+                )
+                yield StreamTextDelta(delta="no edits")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(configure_module, "create_stream_fn", lambda *a, **k: _Scripted())
+
+    def _no_session(*_args, **_kwargs):
+        raise AssertionError("the edit route built a tool-running session")
+
+    monkeypatch.setattr(session_module.Session, "__init__", _no_session)
+
+    response = await client.post(
+        f"/v1/chat/agents/{agent.id}/edit",
+        json={
+            "hosting": "openai",
+            "model": "gpt-4o",
+            "file_path": "notes.txt",
+            "file_content": "hello\n",
+            "edit_prompt": "tidy",
+        },
+        # Exactly what the renderer sends: no bearer, the file:// origin.
+        headers={"Authorization": "", "Origin": "null"},
+    )
+    # The exception is honoured (inline edit keeps working) ...
+    assert response.status_code == 200, response.text
+    # ... and it is a bare completion: no tools offered, none run.
+    assert requests, "the scripted model was never reached"
+    assert all(request.tools == [] and request.tool_choice == "none" for request in requests)
+    assert not sentinel.exists()
+
+
+def _edit_rig(app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[Any]]:
+    """An agent whose workspace holds a canary file, and a recording text-only model.
+
+    Also installs the production CORS pair (``CORSMiddleware`` echoing every
+    origin, then ``desktop_origin_cors`` outside it) in the same order as
+    ``server/app.py``, so the grant a browser would see is asserted, not assumed.
+    Must run before the fixture client's first request: Starlette builds the
+    middleware stack on first use.
+    """
+    from fastapi.middleware.cors import CORSMiddleware
+
+    import local_operator.model.configure as configure_module
+    from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.access import open_store
+    from local_operator.server.app import desktop_origin_cors
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.middleware("http")(desktop_origin_cors)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "inside.txt").write_text("WORKSPACE_CANARY\n", encoding="utf-8")
+    open_store(tmp_path, create=True)
+    store_provider_key("OPENAI_API_KEY", "sk-test-not-real", base=tmp_path)
+    agent = app.state.agent_registry.create_agent(
+        _agent_edit_fields(name="editor", current_working_directory=str(workspace))
+    )
+    requests: list[Any] = []
+
+    class _Scripted:
+        def __call__(self, request, signal):
+            requests.append(request)
+
+            async def gen():
+                yield StreamTextDelta(delta="no edits")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(configure_module, "create_stream_fn", lambda *a, **k: _Scripted())
+    return agent, requests
+
+
+def _edit_body(**overrides: Any) -> dict[str, Any]:
+    """The shipped renderer's body (`inline-edit.tsx`: buffer always sent)."""
+    body: dict[str, Any] = {
+        "hosting": "openai",
+        "model": "gpt-4o",
+        "file_path": "inside.txt",
+        "file_content": "hello\n",
+        "edit_prompt": "tidy",
+        "selection": None,
+        "attachments": [],
+    }
+    body.update(overrides)
+    return body
+
+
+def _sent_text(requests: list[Any]) -> str:
+    return repr([request.messages for request in requests])
+
+
+async def test_inline_edit_renderer_shape_still_works_without_the_bearer(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """The renderer's exact request (Origin null, or no Origin from a native relay)."""
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    url = f"/v1/chat/agents/{agent.id}/edit"
+
+    response = await client.post(
+        url, json=_edit_body(), headers={"Authorization": "", "Origin": "null"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers.get("access-control-allow-origin") == "null"
+
+    response = await client.post(url, json=_edit_body(), headers={"Authorization": ""})
+    assert response.status_code == 200, response.text
+    assert len(requests) == 2
+
+    preflight = await client.options(
+        url,
+        headers={
+            "Authorization": "",
+            "Origin": "null",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers.get("access-control-allow-origin") == "null"
+
+
+async def test_inline_edit_without_bearer_cannot_read_the_workspace(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """No buffer means a workspace read: refused without the bearer, before the model."""
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    response = await client.post(
+        f"/v1/chat/agents/{agent.id}/edit",
+        json=_edit_body(file_content=None),
+        headers={"Authorization": "", "Origin": "null"},
+    )
+    assert response.status_code == 403, response.text
+    assert requests == []
+    assert "WORKSPACE_CANARY" not in response.text
+
+
+async def test_inline_edit_without_bearer_refuses_browser_origins_and_grants_no_cors(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """A foreign Origin (or an Origin-less browser request) is refused with no grant."""
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    url = f"/v1/chat/agents/{agent.id}/edit"
+
+    response = await client.post(
+        url, json=_edit_body(), headers={"Authorization": "", "Origin": "https://evil.test"}
+    )
+    assert response.status_code == 403, response.text
+    assert "access-control-allow-origin" not in response.headers
+    assert "access-control-allow-credentials" not in response.headers
+
+    response = await client.post(
+        url, json=_edit_body(), headers={"Authorization": "", "Sec-Fetch-Site": "same-site"}
+    )
+    assert response.status_code == 403, response.text
+
+    preflight = await client.options(
+        url,
+        headers={
+            "Authorization": "",
+            "Origin": "https://evil.test",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert "access-control-allow-origin" not in preflight.headers
+    assert requests == []
+
+
+async def test_inline_edit_without_bearer_writes_no_attachment(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """``data:`` attachments are never persisted for a bearer-less caller."""
+    import base64
+
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    payload = "data:text/plain;base64," + base64.b64encode(b"x" * 16000).decode()
+    response = await client.post(
+        f"/v1/chat/agents/{agent.id}/edit",
+        json=_edit_body(attachments=[payload]),
+        headers={"Authorization": "", "Origin": "null"},
+    )
+    assert response.status_code == 200, response.text
+    uploads = tmp_path / "uploads"
+    assert not uploads.exists() or not any(uploads.iterdir())
+
+
+async def test_inline_edit_with_bearer_keeps_the_full_route(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """Bearer'd callers are unchanged: workspace read and attachment persistence."""
+    import base64
+
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    payload = "data:text/plain;base64," + base64.b64encode(b"attached").decode()
+    # The fixture client sends the bearer; no Origin, as from Electron main.
+    response = await client.post(
+        f"/v1/chat/agents/{agent.id}/edit",
+        json=_edit_body(file_content=None, attachments=[payload]),
+    )
+    assert response.status_code == 200, response.text
+    assert "WORKSPACE_CANARY" in _sent_text(requests)
+    assert len(list((tmp_path / "uploads").iterdir())) == 1
