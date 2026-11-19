@@ -17,7 +17,7 @@
   "wire.login.bedrock.kind_static": "Ключи доступа",
   "wire.login.bedrock.kind_web_identity": "Веб-удостоверение",
   "wire.login.bedrock.method_access_key": "Ключ доступа",
-  "wire.login.bedrock.method_access_key_desc": "Идентификатор ключа доступа IAM и секрет, при необходимости — токен сеанса; хранятся на этом устройстве в зашифрованном виде",
+  "wire.login.bedrock.method_access_key_desc": "Идентификатор ключа доступа IAM и секрет, при необходимости — токен сессии; хранятся на этом устройстве в зашифрованном виде",
   "wire.login.bedrock.method_ambient": "Учётные данные по умолчанию",
   "wire.login.bedrock.method_ambient_desc": "Переменные окружения, AWS_PROFILE или роль экземпляра, задачи или AgentCore (найдено: {sources})",
   "wire.login.bedrock.method_ambient_desc_none": "Переменные окружения, AWS_PROFILE или роль экземпляра, задачи или AgentCore (здесь ничего не найдено)",

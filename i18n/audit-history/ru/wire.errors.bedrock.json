@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.errors.bedrock",
-  "history_sha256": "578ab34365b8e17f5e5d26720a285aa5e73e1cab013052fbe695fb3fe20f3524",
+  "history_sha256": "f4d7fdc1061e8e5d05c39a3fd7adc27015f58286f912de7aa3e6fe065d5f453a",
   "entries": [
     {
       "locale": "ru",
@@ -139,6 +139,40 @@
       "status": "passed",
       "note": "PR #4270 (Bedrock interactive login) round 1: delta re-audit of wire.errors.bedrock after en moved b004444c47de -> bf06ba5e8571 by exactly 9 added keys (aws_cli_missing, connection_missing, context_failed, input_invalid, region_invalid, sso_busy, sso_headless, sso_not_applicable, use_aws_panel). Proved vs 11f330be58f8 (last audited pr4266-r1 rows): the 14 previously audited keys are value-identical in en, this locale and the en context sidecar; this locale adds exactly the same 9 keys. All 9 new keys read in full against en and context. Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: учётные данные per glossary; регион; сессия per style guide (Токен сессии, сессия продлевается); plural one/few/many/other with correct case in every arm (профиль/профиля/профилей/профиля); impersonal constructions per style guide. Findings: blocker 0, major 0. Native-speaker review and rendered-frame certification not claimed.",
       "round": "pr4270-r1"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "0da44c7082f44bedf3ca986d9b2db6696bea099e4125b78b0eb6f9efcf3fb6b2",
+      "context_sha256": "f104f6268dd7eed72e152417da96fc5a07e487a41a7cf00dc2ec30c4f26f6a00",
+      "target_sha256": "5482075324f01a29c81f4759bd9e2fe75c4e309857a4bceca226bff751091684",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane): job 2187788f7981 (iam_denied, base PR #4266 round 3) and job c1195a706c14, commit fc78a78d8fd6 (the 9 PR #4270 keys)",
+        "session": "2187788f7981, c1195a706c14",
+        "session_kind": "lopdev task subagent JOB ids, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session 350ecfa493e1; did not author the English (coder jobs 556253a34235 / 4de55f98f6fe) or the translations (jobs 32730d3d6997 / 48f1eebcc45e) and read no translator scratchpad",
+        "session": "350ecfa493e1",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 rebased onto base feat/bedrock-provider (6faa1a15724a / faec4beffb93): carry-forward receipt for the merged wire.errors.bedrock, en 0da44c7082f4 = exact union of two independently audited sets, proved byte-level here: (a) base en f3ea9f43f7f8 (pr4266-r3 receipt, adds iam_denied) — every base key is value-identical in current en, current en context sidecar and this locale, and this locale's base file hash equals that receipt's target_sha256; (b) removing iam_denied from current en / context / this locale and re-serialising reproduces exactly bf06ba5e8571 / c9dac394ce65 / this locale's pr4270-r1 target_sha256. Current en adds nothing beyond those two sets (24 keys = 14 + iam_denied + 9). No value was re-translated, so no new semantic surface; key set equals en; serialisation byte-identical to the canonical writer. Findings 0.",
+      "round": "pr4270-r2-merge"
     }
   ]
 }
