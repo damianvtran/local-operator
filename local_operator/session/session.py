@@ -3734,7 +3734,16 @@ class _SiteCardBinding:
     ``withdraw_on_failure`` is set by a teardown whose bounded wait ran out:
     the decision then withdraws the card itself if the extension refused it,
     so the record is ``answered`` exactly when the extension took the
-    decision and ``withdrawn`` exactly when it did not.
+    decision and ``withdrawn`` exactly when it did not. Only the OWNER's
+    teardown may set it (60334 R3-1): a waiter ending says nothing about the
+    owner's request, and a refused decision for a live owner leaves the card
+    open for the operator to answer again.
+
+    ``owner_entry_cancel`` rides with ``withdraw_on_failure`` (R3-2): the
+    owner's teardown could not cancel its extension entry while the card was
+    still bound to it (the rebind guard skips it), so the decision runs that
+    cancel itself after withdrawing, or the dead owner's entry would sit
+    pending at the extension until its TTL.
     """
 
     origin: str
@@ -3744,6 +3753,7 @@ class _SiteCardBinding:
     state: str = "open"
     settled: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
     withdraw_on_failure: bool = False
+    owner_entry_cancel: Callable[[], Awaitable[Any]] | None = None
 
 
 class Session:
@@ -14152,6 +14162,7 @@ class Session:
             binding.state = "deciding"
             binding.settled.clear()
             binding.withdraw_on_failure = False
+            binding.owner_entry_cancel = None
         committed = False
         try:
             proof = (
@@ -14224,6 +14235,7 @@ class Session:
                 return {"ok": True, "word": decision_word, "recorded": False}
             return {"ok": True, "word": decision_word, "state": str(result.get("state") or "")}
         finally:
+            owner_cancel: Callable[[], Awaitable[Any]] | None = None
             if binding is not None:
                 if committed:
                     binding.state = "closed"
@@ -14232,13 +14244,34 @@ class Session:
                         binding.owner(), binding.entry_id
                     )
                     binding.state = "open" if owner_live else "closed"
-                    if binding.withdraw_on_failure and self._site_cards.get(ask_id) is binding:
-                        # The teardown's bounded wait ran out and handed the
-                        # card to this decision: the extension refused it, so
-                        # the truthful record is ``withdrawn``.
+                    # ``not owner_live`` is defence in depth for R3-1: only the
+                    # owner's teardown sets the flag, but a card whose owner is
+                    # still waiting must never be withdrawn by a refusal.
+                    if (
+                        binding.withdraw_on_failure
+                        and not owner_live
+                        and self._site_cards.get(ask_id) is binding
+                    ):
+                        # The owner's teardown's bounded wait ran out and handed
+                        # the card to this decision: the extension refused it,
+                        # so the truthful record is ``withdrawn``.
                         binding.state = "closed"
                         self._withdraw_site_card(ask_id)
+                        if binding.owner_entry_cancel is not None:
+                            owner_cancel = self._guarded_site_cancel(
+                                binding.owner_entry_cancel,
+                                entry_id=binding.entry_id,
+                                stale_ask_id=ask_id,
+                                requester=None,
+                            )
+                    binding.owner_entry_cancel = None
                 binding.settled.set()
+            if owner_cancel is not None:
+                # After ``settled``: nothing waits on this cleanup (R3-2).
+                try:
+                    await asyncio.wait_for(owner_cancel(), timeout=5)
+                except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
+                    logger.debug("site decide: cancelling the owner's entry failed", exc_info=True)
 
     def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
         """TB-02 P1: the ONLY door a bridge request may be decided through.
@@ -15555,7 +15588,7 @@ class Session:
         host = self._site_card_ancestor()
         if host is not None:
             try:
-                await host._release_requester_cards(self, origins)
+                await host._release_requester_cards(self, origins, dict(entry_cancels))
             except Exception:  # noqa: BLE001 — the card's own timeout is the floor
                 logger.debug("site card teardown: withdrawing cards failed", exc_info=True)
         for entry_id, cancel in entry_cancels:
@@ -15571,7 +15604,12 @@ class Session:
             except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
                 logger.debug("site card teardown: cancelling an entry failed", exc_info=True)
 
-    async def _release_requester_cards(self, requester: Session, origins: set[str]) -> None:
+    async def _release_requester_cards(
+        self,
+        requester: Session,
+        origins: set[str],
+        entry_cancels: Mapping[str, Callable[[], Awaitable[Any]]] | None = None,
+    ) -> None:
         """HOST side of teardown: withdraw ``requester``'s cards for ``origins``
         and drop its waiter places. Identity, not lineage — the requester is
         already closed, and the lineage check would only skip the cleanup.
@@ -15617,8 +15655,12 @@ class Session:
                     "it will withdraw its card itself if the extension refuses it"
                 )
                 for binding in in_flight:
-                    if binding.state == "deciding":
+                    # Only a card this requester OWNS is handed over (R3-1):
+                    # ``in_flight`` also holds cards it merely waits on, and
+                    # their owners are still live.
+                    if binding.state == "deciding" and binding.owner() is requester:
                         binding.withdraw_on_failure = True
+                        binding.owner_entry_cancel = (entry_cancels or {}).get(binding.entry_id)
         for binding in self._site_cards.values():
             for entry_id, (ref, _facts) in list(binding.waiters.items()):
                 if ref() is requester or ref() is None:

@@ -114,6 +114,8 @@ class _Extension:
     extension applied it; ``after_apply`` after it applied but before the
     reply reaches the host (R2-1); ``cancel_gate`` holds every
     ``cancel_access`` until it is set, so a cell can park a teardown mid-way.
+    ``refuse`` makes the next submit come back unapplied with that reason
+    while the entry stays pending (a refusal the requester side cannot see).
     """
 
     def __init__(self, entry_id: str = VECTOR["entry_id"]) -> None:
@@ -124,6 +126,7 @@ class _Extension:
         self.before_decide: Any = None
         self.after_apply: Any = None
         self.cancel_gate: Any = None
+        self.refuse: str | None = None
         self.submitted: list[dict[str, Any]] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -195,6 +198,8 @@ class _Extension:
     async def _apply(self, params: dict[str, Any]) -> dict[str, Any]:
         if self.before_decide is not None:
             await self.before_decide()
+        if self.refuse is not None:
+            return {"applied": False, "reason": self.refuse}
         selected = self._entry_for(params["question_id"])
         if selected is None:
             return {"applied": False, "reason": "no_live_request"}
@@ -750,6 +755,68 @@ async def test_a_teardown_whose_wait_ran_out_leaves_the_record_to_the_decision(
     outcome = await _decide(root, ext, "approve")
     assert outcome["ok"] is True and ext.allowed is True
     assert _status(root, record["ask_id"]) == "answered"
+
+
+@pytest.mark.asyncio
+async def test_a_waiters_timed_out_teardown_leaves_a_live_owners_card_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60334 R3-1. Fails on 77972952d: a WAITER's teardown counted the shared
+    card as in flight, its wait ran out, and it handed the card to the
+    decision; the extension refused, and the decision withdrew a card whose
+    OWNER was still waiting on it."""
+    from local_operator.session.session import Session
+
+    monkeypatch.setattr(Session, "_SITE_TEARDOWN_DECIDE_WAIT_S", 0)
+    root, owner = _family(tmp_path)
+    waiter = _child_of(tmp_path, root, "sibling")
+    ext = _Extension()
+    assert not (await _browser("request_access", owner._build_tool_context(), ext)).is_error
+    assert not (await _browser("request_access", waiter._build_tool_context(), ext)).is_error
+    [record] = _open(root)
+    binding = root._site_cards[record["ask_id"]]
+    assert binding.owner() is owner
+
+    async def _waiter_ends_then_refuse() -> None:
+        await waiter.dispose()  # completes: its wait on the deciding card ran out
+        ext.refuse = "no_live_request"
+
+    ext.before_decide = _waiter_ends_then_refuse
+    outcome = await _decide(root, ext, "approve")
+    assert outcome["ok"] is False and ext.allowed is False, outcome
+    assert _status(root, record["ask_id"]) != "withdrawn"
+    assert [open_record["ask_id"] for open_record in _open(root)] == [record["ask_id"]]
+    assert root._site_cards.get(record["ask_id"]) is binding and binding.state == "open"
+    assert ext.entry_of(f"session:{owner.session_id}") in owner._pending_site_requests
+
+
+@pytest.mark.asyncio
+async def test_an_owners_timed_out_teardown_cancels_its_entry_when_the_decision_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60334 R3-2 / Q3-1. Fails on 77972952d: the owner's teardown skipped its
+    entry cancel because the deciding card still bound the entry, and the
+    decision's later withdraw never cancelled it, so the dead owner's entry
+    stayed pending at the extension."""
+    from local_operator.session.session import Session
+
+    monkeypatch.setattr(Session, "_SITE_TEARDOWN_DECIDE_WAIT_S", 0)
+    root, child = _family(tmp_path)
+    ext = _Extension()
+    assert not (await _browser("request_access", child._build_tool_context(), ext)).is_error
+    [record] = _open(root)
+
+    async def _owner_ends_then_refuse() -> None:
+        await child.dispose()  # completes: its wait ran out
+        assert ext.state == "pending", "the bound entry is left to the decision"
+        ext.refuse = "no_live_request"
+
+    ext.before_decide = _owner_ends_then_refuse
+    outcome = await _decide(root, ext, "approve")
+    assert outcome["ok"] is False and ext.allowed is False, outcome
+    assert _status(root, record["ask_id"]) == "withdrawn"
+    assert root._site_cards == {}
+    assert _cancelled_by(ext, child) and ext.state == "none"
 
 
 # --- one card per origin, bound per requester (S60334-2) ---------------------------------
