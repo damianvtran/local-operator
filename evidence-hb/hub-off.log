@@ -1,0 +1,3 @@
+{"method": "GET", "path": "/v1/me/memberships", "query": {}, "bearer": true, "status": 404}
+{"method": "GET", "path": "/v1/messaging/conversations/bcv_abcdefgh/messages", "query": {"tenant_id": "3f2a1111-2222-4333-8444-555566667777", "limit": "1", "before_seq": "111", "endpoint_id": "ep_1"}, "bearer": true, "status": 200, "before_seq": 111}
+{"method": "GET", "path": "/v1/messaging/conversations/bcv_abcdefgh/messages", "query": {"tenant_id": "3f2a1111-2222-4333-8444-555566667777", "limit": "1", "before_seq": "101", "endpoint_id": "ep_1"}, "bearer": true, "status": 200, "before_seq": 101}

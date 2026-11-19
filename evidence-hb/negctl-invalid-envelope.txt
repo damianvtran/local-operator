@@ -1,0 +1,72 @@
+## e_local
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_local001', 'conversation_id': 'bcv_abcdefgh', 'state': 'admitted', 'body': '**Hello** from Ola - can you check the _release_ notes befor', 'source': 'local'}
+## e_hub
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_hub00001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
+## e_hubbad
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_hubbad01', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
+## e_held
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_held0001', 'conversation_id': 'bcv_abcdefgh', 'state': 'held', 'hold': {'class': 'awaiting_review', 'held_for_s': 69}}
+## e_heldt
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_heldt001', 'conversation_id': 'bcv_abcdefgh', 'state': 'held', 'hold': {'class': 'transient', 'held_for_s': 70}}
+## e_pending
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_pend0001', 'conversation_id': 'bcv_abcdefgh', 'state': 'pending'}
+## e_refused
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_refu0001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
+## e_notadm
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_nadm0001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
+## e_deleted
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_dele0001', 'conversation_id': 'bcv_abcdefgh', 'state': 'admitted', 'body': 'later deleted on the hub', 'source': 'local'}
+## e_403
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_f4030001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'not_member'}
+## e_501
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_f5010001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'hub_unsupported'}
+## e_500
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_f5000001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
+## e_other
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 1 more 0
+  {'message_id': 'bcmsg_othr0001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'other_account'}
+## e_coal
+HTTP/1.1 200 OK
+cache-control: private, no-store
+items 20 more 3
+  {'message_id': 'bcmsg_coal0000', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
+  {'message_id': 'bcmsg_coal0001', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
+  {'message_id': 'bcmsg_coal0002', 'conversation_id': 'bcv_abcdefgh', 'state': 'unavailable', 'reason': 'offline'}
