@@ -27502,8 +27502,18 @@ async def _node_site_access(
             details={**details, "state": "none"},
         )
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    # A ``task`` SUBAGENT has no queue of its own (it is built without an ask
+    # handler), so it raises the card through its nearest ancestor's queue
+    # (security review 60334). It hands over only the typed facts of this
+    # reply; the ancestor rebuilds the card and binds it to this child and
+    # entry. A top-level session keeps ``enqueue_ask``, unchanged.
+    child_door: Any = (
+        getattr(context, "enqueue_site_card", None)
+        if context is not None and not callable(enqueue)
+        else None
+    )
     entry_id = str(result.get("entryId") or "")
-    if not callable(enqueue) or not entry_id:
+    if (not callable(enqueue) and not callable(child_door)) or not entry_id:
         await _withdraw_entry()
         return _error(
             tool_call_id,
@@ -27511,7 +27521,8 @@ async def _node_site_access(
             _node_no_approver_text(
                 origin,
                 "this session cannot queue an ask for the operator (no queued-ask "
-                "engine), so the card cannot be raised.",
+                "engine: no ask surface is attached, or the operator turned queued "
+                "asks off with LOP_ASK_NONBLOCKING=0), so the card cannot be raised.",
             ),
             details={**details, "state": "none"},
         )
@@ -27577,7 +27588,30 @@ async def _node_site_access(
             withdraw_site(origin, keep_question_id=question_id)
         except Exception:  # noqa: BLE001 — the stale card's own timeout is the floor
             logger.debug("node site access: withdrawing a stale card failed", exc_info=True)
-    outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    if callable(enqueue):
+        outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    else:
+        outcome = child_door(
+            site_approval.SiteAccessFacts.from_bridge_reply(result, origin),
+            timeout_s,
+            tool_call_id=tool_call_id,
+        )
+        if isinstance(outcome, Mapping) and outcome.get("no_ancestor"):
+            # FAIL CLOSED, as a top-level session with no queue does — but
+            # saying why: no session up this subagent's tree can show a card.
+            await _withdraw_entry()
+            return _error(
+                tool_call_id,
+                "browser",
+                _node_no_approver_text(
+                    origin,
+                    "this subagent has no ask queue of its own, and none of the "
+                    "sessions that delegated to it can queue an ask for the operator, "
+                    "so the card cannot be raised. Report the site to whoever "
+                    "delegated this work.",
+                ),
+                details={**details, "state": "none"},
+            )
     receipt: Mapping[str, Any] = outcome if isinstance(outcome, Mapping) else {}
     ask_details = receipt.get("details")
     ask_id = str(ask_details.get("ask_id") or "") if isinstance(ask_details, Mapping) else ""

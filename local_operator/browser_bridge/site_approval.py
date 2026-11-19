@@ -76,6 +76,7 @@ from __future__ import annotations
 import hashlib
 import struct
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -276,6 +277,74 @@ def site_ask_question(
         ),
         "site": binding,
     }
+
+
+@dataclass(frozen=True)
+class SiteAccessFacts:
+    """The typed facts ONE extension ``request_access`` reply carries on a node.
+
+    WHY A TYPE (security review 60334): a ``task`` subagent has no ask queue of
+    its own, so its site card is raised in the nearest ancestor's queue. The
+    ancestor door must not take a question, options or a pre-built card from
+    the child — "deriving a question ID alone is not sufficient
+    authentication" — so the only thing that crosses is this value object,
+    built in code from the extension's reply (never from model text). The
+    ancestor then rebuilds the complete canonical card itself with
+    :func:`site_ask_question` and its OWN node name, so the card a child raises
+    is byte-identical to the card a top-level session raises for the same
+    facts, and there is no field a child could use to put words on the
+    operator's screen.
+
+    ``entry_id`` is the request id: the extension's single-use
+    ``crypto.randomUUID`` entry the signed decision is bound to.
+    ``expires_at_ms`` is the entry's own deadline (epoch ms) when the extension
+    reported one.
+    """
+
+    origin: str
+    node_device_id: str
+    entry_id: str
+    scope: str = SITE_SCOPE
+    expires_at_ms: int | None = None
+
+    @classmethod
+    def from_bridge_reply(cls, result: Mapping[str, Any], origin: str) -> SiteAccessFacts:
+        """The facts of one ``request_access`` reply, read the same way
+        ``_node_site_access`` reads them for a top-level card."""
+        raw_expiry = result.get("expires_at")
+        return cls(
+            origin=origin,
+            node_device_id=str(result.get("node_device_id") or ""),
+            entry_id=str(result.get("entryId") or ""),
+            scope=str(result.get("scope") or SITE_SCOPE),
+            expires_at_ms=(
+                int(raw_expiry)
+                if isinstance(raw_expiry, (int, float)) and not isinstance(raw_expiry, bool)
+                else None
+            ),
+        )
+
+    @property
+    def question_id(self) -> str:
+        """The digest this request's card is bound to (bookkeeping only — the
+        ancestor never trusts it as proof; it rebuilds the card)."""
+        return site_question_id(
+            node_device_id=self.node_device_id,
+            entry_id=self.entry_id,
+            origin=self.origin,
+            scope=self.scope,
+        )
+
+    def card(self, *, node_name: str) -> dict[str, Any]:
+        """The canonical card for these facts: the SAME builder a top-level
+        session's ``request_access`` uses, so the two cannot drift."""
+        return site_ask_question(
+            origin=self.origin,
+            node_name=node_name,
+            node_device_id=self.node_device_id,
+            entry_id=self.entry_id,
+            scope=self.scope,
+        )
 
 
 def _card_words(*, origin: str, node_name: str, locale: str | None) -> dict[str, Any]:
