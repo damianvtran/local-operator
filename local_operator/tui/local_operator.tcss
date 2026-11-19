@@ -3252,6 +3252,99 @@ MovePickerScreen .move-picker {
     color: $lo-fg;
 }
 
+/* ── /move --to: the working-set confirmation ──────────────────────────── *
+ *
+ * The same content-sized card over the dimmed transcript as the `/move`
+ * picker above (one family of move surfaces), with the operator's required
+ * approval: a checkbox, and Move disabled until it is ticked. The summary is
+ * plain prose plus `~/` paths, so it wraps inside the card's 86-cell cap
+ * rather than scrolling sideways (docs/design/move-working-set.md §11.3). */
+MoveWorkingSetConfirmScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+/* PINNED CONTROLS (review D1/U1, round 1): the card is a column whose only
+ * flexible child is the summary scroll. Title, checkbox and buttons keep their
+ * own height and are painted at any terminal size; the summary is `height:
+ * auto` up to a row budget the screen measures (`_fit` in
+ * move_workset_confirm.py, which mirrors the numbers below) and scrolls. */
+MoveWorkingSetConfirmScreen .move-workset {
+    width: 86;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    background: $lo-overlay;
+    padding: 1 2;
+    layout: vertical;
+}
+
+#move-workset-title {
+    text-style: bold;
+    color: $lo-fg;
+}
+
+#move-workset-summary {
+    width: 100%;
+    height: auto;
+    color: $lo-fg;
+    background: $lo-overlay;
+    scrollbar-size-vertical: 1;
+}
+
+/* One Static per summary line with a per-line left padding (set from the
+ * line's own indent in Python), so a wrapped continuation keeps its hanging
+ * indent instead of falling back to column 0 (review D3). */
+.move-workset-line {
+    width: 100%;
+    height: auto;
+    color: $lo-fg;
+}
+
+/* No border here, because the stock `tall` border drew stray edge glyphs on the card's
+ * overlay. Focus still reads from the label's selection tint. The toggle's
+ * glyph is HIDDEN until ticked (the stock dim X read as already-ticked in the
+ * first capture), and the ticked state uses the accent, so the one state the
+ * operator must set is unambiguous at a glance. */
+#move-workset-check {
+    width: 100%;
+    height: auto;
+    border: none;
+    padding: 0 1;
+    background: $lo-overlay;
+}
+
+/* The label WRAPS (review D4): the device name the consent depends on is never
+ * cut to an ellipsis at a narrow width (`_WrappingCheckbox` reports the height). */
+#move-workset-check {
+    text-wrap: wrap;
+    text-overflow: fold;
+}
+
+/* The EMPTY box is `$lo-muted` (6.5:1 on `$lo-overlay`, over the 3:1 non-text
+ * floor of WCAG 1.4.11; the old `$lo-sunken` measured 1.37:1 and read as a
+ * smudge — review D5). Its glyph stays hidden (same colour) until ticked. */
+#move-workset-check > .toggle--button {
+    color: $lo-muted;
+    background: $lo-muted;
+}
+
+#move-workset-check.-on > .toggle--button {
+    color: $lo-bg;
+    background: $lo-accent;
+}
+
+#move-workset-buttons {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    align-horizontal: right;
+}
+
+#move-workset-buttons Button {
+    margin-left: 2;
+}
+
 
 /* ── /links: the URL picker ────────────────────────────────────────────── *
  *

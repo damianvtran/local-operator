@@ -96,12 +96,14 @@ from local_operator.i18n.keys import cli_services_heavy as _shv
 from local_operator.i18n.keys import cli_services_help as _sr
 from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_sessions_move_workset as _wsh
 from local_operator.i18n.keys import cli_skills_push as _sp
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import cli_update_help as _up
 from local_operator.i18n.keys import cli_wake_help as _wh
 from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.messages import render_resolved
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
@@ -1907,10 +1909,55 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # successful move (`sessions_move_command` returns the MOVE's status) — so on the
     # device that engaged the answer is only in `engagement.engaged`, and the help is
     # where a caller that never reads this comment finds that out.
-    move_parser.add_argument(
+    #
+    # `--engage-on-arrival` and `--no-engage-on-arrival` share a mutually exclusive
+    # group so argparse refuses the pair (exit 2) with its own conflict line, which
+    # `i18n.cli_failures.localise_failure` already renders in the user's language. A
+    # hand-written refusal in the command body would be a new untranslated legacy
+    # literal in cli.py, and the file's i18n ceiling may only fall.
+    engage_group = move_parser.add_mutually_exclusive_group()
+    engage_group.add_argument(
         "--engage-on-arrival",
         action="store_true",
         help=(_sh.move_engage_on_arrival().envelope(locale=help_locale)["text"]),
+    )
+    # THE OPT-OUT FROM THE ACTIVE-MOVE RESUME (docs/design/move-working-set.md §7.4): a
+    # conversation that was active when it moved is engaged on arrival by default and
+    # handed one continuation note; this flag keeps the old cold arrival. Its help
+    # lives in the fully translated working-set namespace, like the flags below.
+    engage_group.add_argument(
+        "--no-engage-on-arrival",
+        action="store_true",
+        help=_wsh.help_no_engage_on_arrival().envelope(locale=help_locale)["text"],
+    )
+    # THE WORKING-SET GATE (docs/design/move-working-set.md §11.2). A conversation
+    # that worked in git worktrees is refused by the owner until the user has seen
+    # what the move leaves behind: `--dry-run` shows it, an interactive terminal is
+    # prompted, a script passes the shown `working_set.scope_digest` back (or `--yes`
+    # to confirm whatever the current scope is), and `--without-working-set` is the
+    # explicit "leave it here". Help strings live in their own fully translated
+    # namespace so `cli.sessions_help`'s recorded coverage gaps do not grow.
+    move_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_wsh.help_dry_run().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--confirm-working-set",
+        metavar="DIGEST",
+        default="",
+        help=_wsh.help_confirm().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--without-working-set",
+        action="store_true",
+        help=_wsh.help_without().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help=_wsh.help_yes().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
@@ -7650,7 +7697,15 @@ def _sessions_move_words(
                 "The move itself succeeded — open the conversation there to start it."
             ]
         )
-    elif engage_on_arrival:
+        if engaged and engagement.get("reason") == "active":
+            # THE ACTIVE-MOVE RESUME (nobody passed --engage-on-arrival): say WHY it is
+            # live and that it was handed a note. Keyed, unlike the lines above, because
+            # it is new copy (AGENTS.md i18n: new user-visible text is keyed).
+            engage_lines.append(render_resolved(_wsh.receipt_resumed(device=target)))
+    elif engage_on_arrival or isinstance(result.get("resume_requested"), dict):
+        # ``resume_requested`` covers the ACTIVE-MOVE RESUME on an offload: the
+        # destination engages by default, nobody passed the flag, and saying nothing
+        # read as "nothing is running there" (UI #1978 QA Q-1). Same request, same line.
         # ASKED HERE, ANSWERED THERE. On an offload the receipt is the SOURCE's, and the
         # engage is the destination's own post-move work: this device settles on its own
         # durable progress and does not wait for the peer's runtime to start, so the
@@ -7751,34 +7806,126 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         )
         return 2
     wait_s = mobility.MOVE_MAX_WAIT_S if int(args.wait) < 0 else float(args.wait)
-    result = mobility.request_move(
-        session_id,
-        to=to,
-        keep=bool(args.keep),
-        wait_s=wait_s,
-        from_replica=bool(args.from_replica),
-        # ``--engage-on-arrival``: a flag on THIS verb, so the only callers that get
-        # the engaged arrival are the ones that asked for it. The TUI's own `/move`
-        # does not pass it and therefore still moves a conversation cold, which is
-        # today's behaviour and the behaviour every existing caller keeps.
-        engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
-        # ``--queue``: the explicit "move at the next safe point" request. Read
-        # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
-        # off, the same contract the parser's default gives it.
-        queue=bool(getattr(args, "queue", False)),
-        # ``bool(...)`` so a hand-rolled Namespace without the attribute gets the
-        # protective default (the source refuses; nothing is dropped silently).
-        drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
-    )
-    if getattr(args, "json", False):
+    as_json = bool(getattr(args, "json", False))
+    if bool(getattr(args, "dry_run", False)):
+        return _sessions_move_dry_run(session_id, to=to, as_json=as_json)
+
+    def _issue(confirm: str) -> dict[str, Any]:
+        return dict(
+            mobility.request_move(
+                session_id,
+                to=to,
+                keep=bool(args.keep),
+                wait_s=wait_s,
+                from_replica=bool(args.from_replica),
+                # ``--engage-on-arrival``: a flag on THIS verb, so the only callers that
+                # get the engaged arrival are the ones that asked for it. The TUI's own
+                # `/move` does not pass it and therefore still moves a conversation
+                # cold, which is today's behaviour and the behaviour every existing
+                # caller keeps.
+                engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+                # ``--no-engage-on-arrival``: the opt-out from the active-move resume
+                # (an ACTIVE conversation is engaged on arrival and handed one
+                # continuation note by default). Absent attribute reads False.
+                no_engage_on_arrival=bool(getattr(args, "no_engage_on_arrival", False)),
+                # ``--queue``: the explicit "move at the next safe point" request. Read
+                # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
+                # off, the same contract the parser's default gives it.
+                queue=bool(getattr(args, "queue", False)),
+                # ``bool(...)`` so a hand-rolled Namespace without the attribute gets
+                # the protective default (the source refuses; nothing is dropped
+                # silently).
+                drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
+                # The working-set consent (design §11.2): a digest the user was shown,
+                # or the explicit "leave it here". Neither → the owner refuses a
+                # conversation with worktrees and the branch below asks.
+                confirm_working_set=confirm,
+                without_working_set=bool(getattr(args, "without_working_set", False)),
+            )
+        )
+
+    given_digest = str(getattr(args, "confirm_working_set", "") or "")
+    result = _issue(given_digest)
+    code = str(result.get("code") or "")
+    block = result.get("working_set") if isinstance(result.get("working_set"), dict) else None
+    if (
+        not result.get("ok")
+        and code in ("working_set_unconfirmed", "working_set_changed")
+        and block is not None
+        and block.get("scope_digest")
+        and not as_json
+        and not bool(getattr(args, "yes", False))
+    ):
+        # THE PROBED BLOCK, NOT THE GATE'S (review R6 / UX U3, round 1). The owner's
+        # refusal carries the manifest but never the destination's answer (can it
+        # fetch/push each remote, which toolchains it lacks), which only the dry-run
+        # preflight asks for — so the y/N prompt and the non-tty refusal showed less
+        # than `--dry-run` and the TUI did. One preflight here fixes both; its digest
+        # is the one confirmed, because it is the list the user is shown. A preflight
+        # that fails keeps the gate's block: the move is still refused or confirmed
+        # against the owner's own manifest, never widened.
+        probed = dict(mobility.request_move(session_id, to=to, dry_run=True))
+        fresh = probed.get("working_set")
+        if probed.get("ok") and isinstance(fresh, dict) and fresh.get("scope_digest"):
+            block = fresh
+            result = {**result, "working_set": fresh}
+    if (
+        not result.get("ok")
+        and code in ("working_set_unconfirmed", "working_set_changed")
+        and block is not None
+        and block.get("scope_digest")
+    ):
+        # ONE CONFIRMATION ROUND, never a loop: the owner answered with the manifest,
+        # the user (or `--yes`) confirms THAT scope, and the move is re-issued with its
+        # digest. A scope that changes again in between is refused again and reported
+        # — the user then sees the fresh list on the next run. `--json` never prompts:
+        # a script gets the refusal document and passes the digest back itself.
+        digest = str(block["scope_digest"])
+        if bool(getattr(args, "yes", False)):
+            result = _issue(digest)
+        elif not as_json and sys.stdin.isatty() and sys.stdout.isatty():
+            # A mistyped `--confirm-working-set` is told apart from a list that moved
+            # (review U8): the owner can only say "this is not the current scope".
+            shown = "digest_mismatch" if (code == "working_set_changed" and given_digest) else code
+            try:
+                confirmed = _confirm_working_set(block, session_id=session_id, to=to, code=shown)
+            except KeyboardInterrupt:
+                # Ctrl-C at the prompt is a "no" (review U5): nothing was moved, so no
+                # traceback; 130 is the shell's own code for an interrupted command.
+                print(file=sys.stderr)
+                print(render_resolved(_wsh.aborted()), file=sys.stderr)
+                return 130
+            if confirmed:
+                result = _issue(digest)
+            else:
+                print(render_resolved(_wsh.aborted()), file=sys.stderr)
+                return 1
+    if as_json:
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
         return 0 if result.get("ok") else 1
-    lines = _sessions_move_words(
+    workset_lines = _sessions_move_workset_words(
         dict(result),
         session_id=session_id,
         to=to,
-        engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+        mistyped=bool(given_digest) and str(result.get("code") or "") == "working_set_changed",
     )
+    if (
+        not result.get("ok")
+        and str(result.get("code") or "") in mobility.WORKSET_REFUSAL_CODES
+        and workset_lines
+    ):
+        # ONE VOICE (review U4, round 1): the owner's `message` is its English relay
+        # fallback, written from the OWNER's side ("on this device" names the wrong
+        # machine on a recall). When the keyed summary renders, it alone speaks.
+        lines = workset_lines
+    else:
+        lines = _sessions_move_words(
+            dict(result),
+            session_id=session_id,
+            to=to,
+            engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+        )
+        lines.extend(workset_lines)
     if result.get("ok"):
         for line in lines:
             print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
@@ -7786,6 +7933,79 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     for line in lines:
         print(line, file=sys.stderr)
     return 1
+
+
+def _sessions_move_dry_run(session_id: str, *, to: str, as_json: bool) -> int:
+    """``lop sessions move <id> --to <peer> --dry-run``: the manifest, nothing moved.
+
+    Exit 0 when the owner answered (whatever the manifest holds), 1 on a refusal. The
+    JSON document is ``{ok, dry_run, session_id, confirmation_required, working_set}``;
+    a script confirms by passing ``working_set.scope_digest`` back.
+    """
+    import json as _json
+
+    from local_operator.network import mobility, workset_text
+
+    answer: dict[str, Any] = dict(mobility.request_move(session_id, to=to, dry_run=True))
+    if as_json:
+        print(_json.dumps(answer, indent=2, sort_keys=True, default=str))
+        return 0 if answer.get("ok") else 1
+    if not answer.get("ok"):
+        print(str(answer.get("message") or ""), file=sys.stderr)
+        return 1
+    raw = answer.get("working_set")
+    block: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    for line in workset_text.summary_lines(block, session=session_id, device=to):
+        print(line)  # i18n: ignore rendered from cli.sessions_move_workset keys
+    if answer.get("confirmation_required") and block.get("scope_digest"):
+        print(f"scope_digest: {block['scope_digest']}")  # i18n: ignore machine token
+    return 0
+
+
+def _confirm_working_set(block: dict[str, Any], *, session_id: str, to: str, code: str) -> bool:
+    """Show the working set and ask. Default NO: only an explicit y/yes confirms."""
+    from local_operator.network import workset_text
+
+    if code == "working_set_changed":
+        print(render_resolved(_wsh.changed()))
+    elif code == "digest_mismatch":
+        print(render_resolved(_wsh.digest_mismatch()))
+    for line in workset_text.summary_lines(block, session=session_id, device=to):
+        print(line)  # i18n: ignore rendered from cli.sessions_move_workset keys
+    try:
+        answer = input(workset_text.prompt_text(block, session=session_id, device=to))
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _sessions_move_workset_words(
+    result: dict[str, Any], *, session_id: str, to: str, mistyped: bool = False
+) -> list[str]:
+    """The working-set lines a move's text output adds (receipt or refusal).
+
+    ``mistyped``: the refusal answered a digest the user passed by hand, so its lead
+    line says the digest does not match rather than "the files changed" (U8)."""
+    from local_operator.network import workset_text
+
+    block = result.get("working_set")
+    if not isinstance(block, dict):
+        return []
+    if result.get("ok"):
+        sender = result.get("from_device")
+        source: dict[str, Any] = sender if isinstance(sender, dict) else {}
+        return workset_text.receipt_lines(
+            block, source=str(source.get("name") or source.get("device_id") or "")
+        )
+    code = str(result.get("code") or "")
+    lines = workset_text.summary_lines(block, session=session_id, device=to)
+    if mistyped:
+        lines.insert(0, render_resolved(_wsh.digest_mismatch()))
+    if code in ("working_set_unconfirmed", "working_set_changed"):
+        digest = str(block.get("scope_digest") or "")
+        keeper = workset_text.source_label(block, "?")
+        lines.append(render_resolved(_wsh.needs_confirmation(source=keeper, digest=digest)))
+    return lines
 
 
 def sessions_sync_command(args: argparse.Namespace) -> int:

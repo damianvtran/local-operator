@@ -112,6 +112,10 @@ MAX_DETAIL_VALUE_CHARS = 200
 #: so "an event nobody decided the shape of" cannot ship silently.
 EVENT_KINDS: frozenset[str] = frozenset(
     {
+        # A move's working set (move-working-set.md §8.3): the owner served its
+        # manifest, and a destination probed remotes at a peer's request.
+        "session.workset.preflight",
+        "session.workset.probe",
         # transport scope (§7.6 of mesh-transport-identity.md)
         "pairing_refused",
         "invite_minted",
@@ -815,6 +819,10 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # said (``policy``) and the per-run override when it was the flag that
     # stopped the roll (``flag``, empty when the policy did).
     "update_rollout_suppressed": frozenset({"via", "policy", "flag"}),
+    # A move's working set (move-working-set.md §8.3). Counts, host names and
+    # fixed result codes only — never a path, a URL path, userinfo or git output.
+    "session.workset.preflight": frozenset({"peer", "worktrees", "planned", "bytes", "excluded"}),
+    "session.workset.probe": frozenset({"peer", "hosts", "results", "refused"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second

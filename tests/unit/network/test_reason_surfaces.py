@@ -986,6 +986,21 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the browser host's page-program refusal token, read only to decide "
         "whether to attach the options list; never rendered to a person",
     ),
+    # The working-set probe (docs/design/move-working-set.md §3.4). ``apply_probe``
+    # reads the DESTINATION's ``detail`` only to test it against ``DETAIL_CODES``:
+    # a code outside that closed set becomes ``"error"`` (security S3), and the kept
+    # code lands in the block's ``clone_detail`` field, which no text surface
+    # renders. ``audit_summary`` reads the answer THIS device's ``run_probe`` just
+    # produced, to COUNT codes for the ``session.workset.probe`` audit row.
+    ("local_operator/network/workset_probe.py", "apply_probe", "detail"): (
+        1,
+        "the destination's detail CODE, allowlisted against DETAIL_CODES and kept as "
+        "a block field; never rendered to a person",
+    ),
+    ("local_operator/network/workset_probe.py", "audit_summary", "detail"): (
+        1,
+        "this device's own probe codes, counted into the probe audit row; not rendered",
+    ),
 }
 
 _ROOT = Path(local_operator.__file__).parent

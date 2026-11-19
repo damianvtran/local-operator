@@ -59,6 +59,11 @@ _AMBIENT_VARS = (
     # point the suite's remote-compute client at a real host; tests that cover
     # the override set their own loopback value.
     "LOP_REMOTE_COMPUTE_API_URL",
+    # The working-set probe's host allowlist (``network/workset_probe.py``)
+    # names REAL machines the probe may ssh into. A developer's value leaking
+    # in would widen the allowlist the host-policy tests assert on and could
+    # aim a probe at a real host; tests that cover the override set their own.
+    "LOCAL_OPERATOR_MOVE_PROBE_HOSTS",
     # The per-build runtime image root (``procname.runtime_root``) is resolved
     # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
