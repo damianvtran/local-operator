@@ -35,9 +35,9 @@ import re
 import shlex
 import signal
 import subprocess
-import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +64,9 @@ repo = field.repo
 #: it for ``lambda _: False`` (that fixture keeps its synthetic trees idle).
 _REAL_LIVE_CWD_INSIDE = prov._live_cwd_inside
 #: Likewise for the inventory itself, which that fixture stubs to ``()``.
-_REAL_CWD_ENTRIES = prov._cwd_entries
+# The historical test-(a) control predates the attributed inventory API; it
+# needs only _live_cwd_inside, so importing this file must not require that API.
+_REAL_CWD_ENTRIES = getattr(prov, "_cwd_entries", None)
 _REAL_READLINK = os.readlink
 _PROC_CWD = re.compile(r"/proc/\d+/cwd")
 
@@ -99,7 +101,8 @@ FIELD = [
 def live(monkeypatch: pytest.MonkeyPatch, home: Path) -> Iterator[list[int]]:
     """Real cwd inventory, fresh cache; every pid appended here is killed after."""
     monkeypatch.setattr(prov, "_live_cwd_inside", _REAL_LIVE_CWD_INSIDE)
-    monkeypatch.setattr(prov, "_cwd_entries", _REAL_CWD_ENTRIES)
+    if _REAL_CWD_ENTRIES is not None:
+        monkeypatch.setattr(prov, "_cwd_entries", _REAL_CWD_ENTRIES)
     monkeypatch.setattr(prov.os, "readlink", _readlink_skipping_unrelated_eacces)
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     pids: list[int] = []
@@ -583,73 +586,88 @@ def _wait_for_path(path: Path, pid: int, *, budget_s: float = 10.0) -> None:
     raise AssertionError(f"pid {pid} never armed {path}")
 
 
-def _delayed_exec_orphan(tree: Path, pids: list[int], fifo: Path, armed: Path) -> int:
-    """A process inside ``tree`` that has NOT yet exec'd ``sleep`` — deterministically.
+@contextmanager
+def _delayed_exec_holder(
+    tree: Path, fifo: Path, armed: Path
+) -> Iterator[tuple[subprocess.Popen[bytes], int]]:
+    """Keep the gated child in the runner's group, with an owned cleanup handle.
 
-    The child writes ``armed`` and then blocks reading ``fifo``, so "still
-    pre-exec" is an event the test observes rather than a race it hopes to win,
-    and the exec happens only when the test releases the fifo. No CPU spin: the
-    child sleeps in the kernel. The ``live`` fixture reaps it by exact pid
-    (``start_new_session`` makes it its own group leader, so a group kill takes
-    the whole tree).
+    This is deliberately NOT an orphan: detaching would escape the bounded
+    runner's group sweep if pytest were interrupted before fixture teardown.
+    Attribution tests below model a foreign caller separately; the cwd, pid and
+    executable observations remain real. Opening both FIFO ends before spawning
+    makes release nonblocking without a writer thread or a scheduling deadline.
     """
-    script = (
-        f"printf ok > {shlex.quote(str(armed))}; "
-        f"read -r _ < {shlex.quote(str(fifo))}; exec sleep 120"
-    )
-    proc = subprocess.Popen(["bash", "-c", script], cwd=tree, start_new_session=True)
-    pids.append(proc.pid)
-    return proc.pid
+    gate = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        script = (
+            f"printf ok > {shlex.quote(str(armed))}; "
+            f"read -r _ < {shlex.quote(str(fifo))}; exec sleep 120"
+        )
+        proc = subprocess.Popen(["bash", "-c", script], cwd=tree)
+        pgid = os.getpgid(proc.pid)
+        assert pgid == os.getpgrp(), "controlled holder escaped the runner group"
+        print(f"controlled holder pid={proc.pid} pgid={pgid}")
+        yield proc, gate
+    finally:
+        os.close(gate)
+        if proc is not None:
+            # Never signal the shared group here: only the retained child is ours.
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            print(f"reaped controlled holder pid={proc.pid} returncode={proc.returncode}")
 
 
 def test_wait_holding_waits_for_the_exec_the_assertion_names(
-    home: Path, repo: Path, live: list[int], tmp_path: Path
+    home: Path,
+    repo: Path,
+    live: list[int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression pin: the wait must not return on a pre-exec holder."""
     wt = _attr3880(home, repo)
     fifo = tmp_path / "exec-gate"
     os.mkfifo(fifo)
     armed = tmp_path / "armed"
-    pid = _delayed_exec_orphan(wt, live, fifo, armed)
-    _wait_for_path(armed, pid)
-    # Pre-exec, deterministically: the tree IS held, by something that is not sleep.
-    assert _fresh_holder(wt, pid, "bash") is True
-    assert _fresh_holder(wt, pid, _ORPHAN_COMMAND) is False
-    # That is exactly where the old any-hit wait returned.
-    released = threading.Event()
+    with _delayed_exec_holder(wt, fifo, armed) as (proc, gate):
+        pid = proc.pid
+        _wait_for_path(armed, pid)
+        assert _fresh_holder(wt, pid, "bash") is True
+        assert _fresh_holder(wt, pid, _ORPHAN_COMMAND) is False
+        # A synthetic caller with no family roots sees this controlled child as
+        # foreign, without lying about its real parent or escaping runner cleanup.
+        monkeypatch.setattr(prov, "_session_pids", lambda _: ({}, {}))
+        risk, reason = _rank(home, FIELD[1])
+        assert risk is Risk.HIGH, reason
+        assert f"pid {pid} bash (no session record; unknown process)" in reason, reason
+        fresh_holder = _fresh_holder
+        observed_preexec = False
 
-    def release() -> None:
-        time.sleep(0.2)
-        # Bounded, non-blocking open: a fixture that died must fail the wait on its
-        # own budget, never park this thread in ``open`` waiting for a reader.
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)  # ENXIO: no reader yet
-            except OSError:
-                time.sleep(0.02)
-                continue
-            try:
-                os.write(fd, b"\n")
-            finally:
-                os.close(fd)
-            released.set()
-            return
+        def observe_then_release(tree: Path, held: int, command: str) -> bool:
+            nonlocal observed_preexec
+            # The real uncached oracle must reject the gated executable BEFORE
+            # release. A slow scan cannot cross exec: only this callback owns the
+            # release. Returning its original False forces a subsequent scan.
+            found = fresh_holder(tree, held, command)
+            if not observed_preexec:
+                assert (tree, held, command) == (wt, pid, _ORPHAN_COMMAND)
+                assert not found, "gated holder unexpectedly reached exec"
+                observed_preexec = True
+                assert os.write(gate, b"\n") == 1
+            return found
 
-    writer = threading.Thread(target=release, daemon=True)
-    writer.start()
-    # Capture BOTH facts at the instant the wait returns, before the release can
-    # land: joining the writer first would let a broken (any-hit) wait look synced.
-    early = False
-    synced = False
-    try:
+        monkeypatch.setattr(f"{__name__}._fresh_holder", observe_then_release)
         _wait_holding(wt, pid)
-        early = not released.is_set()
-        synced = _fresh_holder(wt, pid, _ORPHAN_COMMAND)
-    finally:
-        writer.join(timeout=5)
-    assert not early, "the wait returned before the exec it was named for"
-    assert synced, "the wait returned while the fixture was still pre-exec"
+        # An actual old any-hit wait never calls this oracle and cannot release
+        # the gate. Reject it before a later scan or cleanup can conceal that fact.
+        assert observed_preexec, "the wait accepted a holder without checking its command"
+        assert fresh_holder(wt, pid, _ORPHAN_COMMAND)
+        risk, reason = _rank(home, FIELD[1])
+        assert risk is Risk.HIGH, reason
+        assert f"pid {pid} sleep (no session record; unknown process)" in reason, reason
 
 
 def test_wait_holding_refuses_a_holder_that_never_reaches_its_exec(
@@ -659,8 +677,9 @@ def test_wait_holding_refuses_a_holder_that_never_reaches_its_exec(
     wt = _attr3880(home, repo)
     fifo = tmp_path / "exec-gate"
     os.mkfifo(fifo)
-    pid = _delayed_exec_orphan(wt, live, fifo, tmp_path / "armed")
-    _wait_for_path(tmp_path / "armed", pid)
-    with pytest.raises(AssertionError, match=f"never showed {_ORPHAN_COMMAND}"):
-        _wait_holding(wt, pid, budget_s=0.5)
-    assert _fresh_holder(wt, pid, _ORPHAN_COMMAND) is False
+    with _delayed_exec_holder(wt, fifo, tmp_path / "armed") as (proc, _gate):
+        pid = proc.pid
+        _wait_for_path(tmp_path / "armed", pid)
+        with pytest.raises(AssertionError, match=f"never showed {_ORPHAN_COMMAND}"):
+            _wait_holding(wt, pid, budget_s=0.5)
+        assert _fresh_holder(wt, pid, _ORPHAN_COMMAND) is False
