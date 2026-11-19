@@ -1056,13 +1056,15 @@ async def _screen_images(
     owner: Any,
     access: Any,
     descriptors: tuple[AttachmentDescriptor, ...],
+    *,
+    purpose: str = "screen",
 ) -> list[Any]:
-    """Fetch each image with ``purpose=screen``, verify and bound it.
+    """Fetch each image for screening or recovery proof, verify and bound it.
 
-    These bytes exist ONLY to be classified: they ride the private carrier into
-    the isolated screening dispatch and are dropped with it. They are never
-    the bytes an agent sees — that is a separate ``purpose=context`` fetch
-    after allow (manager decision D1) — and never written anywhere.
+    Screening bytes ride the private carrier into the isolated dispatch. On
+    recovery, context bytes are verified only to rebuild the canonical local
+    envelope commitment; they are never dispatched to a screener or agent.
+    Neither path writes image bytes anywhere.
     Raises :class:`AttachmentRejected` (verification) or ``BridgeRefusal``
     (transport); the caller maps both to closed codes.
     """
@@ -1077,7 +1079,7 @@ async def _screen_images(
             descriptor.id,
             tenant_id=owner.tenant_id,
             endpoint_id=owner.endpoint_id,
-            purpose="screen",
+            purpose=purpose,
             access=access,
         )
         verified = await verify_and_bound(data, descriptor)
@@ -1786,6 +1788,9 @@ async def handle_conversation_available(
 
         if recovery is not None:
             if recovery in ("images_admitted", "text_admitted"):
+                fence_code = _producer_fence(store, owner, access, settings)
+                if fence_code:
+                    return await held(fence_code)
                 # A lost admit response can leave a real local screen receipt but
                 # no reservation. Recovery must commit the SAME body obligation
                 # before waking, just like the ordinary admission path. A hub
@@ -1821,6 +1826,54 @@ async def handle_conversation_available(
                         or row.get("body") != body_text
                     ):
                         return await held("admission_unverified")
+                # Recompute the canonical LOCAL envelope, not a fingerprint made
+                # from the old row. A context grant proves remote admission only:
+                # it cannot upgrade a text-only or different-image local verdict.
+                # Fetch/verify the context bytes without dispatching a screener.
+                from ..screening import ScreeningAttachments, validate_envelope
+
+                recovery_item = _screening_item(
+                    owner=owner,
+                    conversation_id=ref.conversation_id,
+                    message_id=message_id,
+                    body=body_text,
+                    body_hash=body_hash,
+                    sender=sender,
+                    **screening_routing(ref, display),
+                )
+                if recovery == "images_admitted":
+                    if not descriptors or fetched.attachments_hash is None:
+                        return await held("receipt_unavailable")
+                    try:
+                        recovery_images = await _screen_images(
+                            client, ref, owner, access, descriptors, purpose="context"
+                        )
+                    except AttachmentRejected:
+                        return await held("receipt_unavailable")
+                    recovery_item["attachments"] = ScreeningAttachments(
+                        attachments_hash=str(fetched.attachments_hash),
+                        images=tuple(recovery_images),
+                    )
+                # A file grant is independent of the image grant. If the exact
+                # file carrier cannot be verified, historical file authority must
+                # not be reconstructed from a remote image/text grant either.
+                if files_descriptors:
+                    if screened_files is None:
+                        return await held("receipt_unavailable")
+                    recovery_item["files"] = screened_files
+                elif files_descriptors is None:
+                    return await held("receipt_unavailable")
+                envelope, _error = validate_envelope(owner, recovery_item)
+                if envelope is None or proof.get("envelope_digest") != envelope.envelope_digest:
+                    return await held("receipt_unavailable")
+                # These awaits can outlive a disk disable, credential rotation,
+                # revocation or shutdown. The readonly reservation guard below
+                # does not replace the fresh producer authority check.
+                fence_code = _producer_fence(store, owner, access, settings)
+                if fence_code:
+                    return await held(fence_code)
+                if store.designated_session_for(owner) != designation:
+                    return await held("receipt_unavailable")
                 recorded = _record_body_reservation(
                     store, owner, ref, body_hash=body_hash, designation=designation
                 )
@@ -1828,9 +1881,12 @@ async def handle_conversation_available(
                     return await held(recorded)
                 # Reuse the reply guard's exact live owner/session/consent fence;
                 # a replay can neither revive a retired row nor change its owner.
-                if store.admitted_inbound_reservation_readonly(
-                    owner, in_reply_to_message_id=message_id, designated_session=designation
-                ) is None:
+                if (
+                    store.admitted_inbound_reservation_readonly(
+                        owner, in_reply_to_message_id=message_id, designated_session=designation
+                    )
+                    is None
+                ):
                     return await held("receipt_unavailable")
                 if store.body_card_status(owner, ref.conversation_id, message_id) in (
                     CARD_POSTED,
