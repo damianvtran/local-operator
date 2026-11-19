@@ -204,15 +204,27 @@ def test_a_ref_without_a_root_fact_records_unknown_never_root() -> None:
     from local_operator.team_bridge.types import ConversationFeedRef
 
     runtime = BridgeRuntime(None, None, TENANT, None, SESSION_ID)  # type: ignore[arg-type]
-    fields = dict(conversation_id=A, conversation_seq=3, mention=False, sender_kind="human")
-    runtime.note_presented(ConversationFeedRef(message_id=MA, **fields).validated())
+
+    # A typed helper rather than a ``**dict`` splat: a dict of mixed value
+    # types infers as ``dict[str, str | int]``, which pyright cannot match
+    # against each typed ConversationFeedRef field.
+    def ref(
+        message_id: str, *, thread_root_id: str | None = None, thread_root_known: bool = True
+    ) -> ConversationFeedRef:
+        return ConversationFeedRef(
+            conversation_id=A,
+            message_id=message_id,
+            conversation_seq=3,
+            mention=False,
+            sender_kind="human",
+            thread_root_id=thread_root_id,
+            thread_root_known=thread_root_known,
+        )
+
+    runtime.note_presented(ref(MA).validated())
+    runtime.note_presented(ref(MESSAGE_ID, thread_root_known=False).validated())
     runtime.note_presented(
-        ConversationFeedRef(message_id=MESSAGE_ID, thread_root_known=False, **fields).validated()
-    )
-    runtime.note_presented(
-        ConversationFeedRef(
-            message_id="bcmsg_replyrep", thread_root_id=ROOT, thread_root_known=False, **fields
-        ).validated()
+        ref("bcmsg_replyrep", thread_root_id=ROOT, thread_root_known=False).validated()
     )
     assert runtime.presented_placements == {
         MA: (A, ""),  # a hub-parsed ref: None IS the root fact
@@ -220,8 +232,8 @@ def test_a_ref_without_a_root_fact_records_unknown_never_root() -> None:
         "bcmsg_replyrep": (A, ROOT),  # a stated root always wins
     }
     # In-memory only: the persisted grammar never sees the flag.
-    unknown = ConversationFeedRef(message_id=MA, thread_root_known=False, **fields)
-    assert unknown.encode() == ConversationFeedRef(message_id=MA, **fields).encode()
+    unknown = ref(MA, thread_root_known=False)
+    assert unknown.encode() == ref(MA).encode()
 
 
 @pytest.mark.asyncio
