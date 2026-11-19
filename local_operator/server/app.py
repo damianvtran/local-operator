@@ -67,6 +67,7 @@ from local_operator.server.routes import (
     desktop_link_preview,
     desktop_mcp,
     desktop_mesh,
+    desktop_mesh_pairings,
     desktop_mobile_doctor,
     desktop_mobile_password,
     desktop_monitors,
@@ -414,6 +415,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `/health` said against the record it dialled from. Process-scoped and
     # random, never persisted — it identifies THIS process, not the install.
     app.state.instance_id = secrets.token_urlsafe(32)
+    # THE MESH PAIRING ATTESTATION LISTENER (`network.pairing_attest`): ONE per serve,
+    # at `<config>/run/attest/mesh-pairing.sock`, macOS only. Without it every pairing
+    # card answer is refused (`pairing_needs_app`) — fail closed, never a boot gate.
+    app.state.mesh_pairing_attest = None
+    try:
+        from local_operator.network import pairing_attest
+
+        app.state.mesh_pairing_attest = await pairing_attest.start_service(config_dir)
+    except Exception:  # noqa: BLE001 — additive, never a boot gate
+        logger.warning("mesh pairing attest listener not started", exc_info=True)
     # An announcer is what makes this process a DAEMON rather than merely an app
     # that happens to answer HTTP: `serve_command` announces the address it
     # bound, in-process for the daemon it serves and through the environment
@@ -759,6 +770,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Off-record panels belong to this HTTP lifetime, not the durable session.
         app.state.desktop_asides = None
         app.state.desktop_receipts = None
+        mesh_attest = getattr(app.state, "mesh_pairing_attest", None)
+        if mesh_attest is not None:
+            try:
+                await mesh_attest.close()
+            except Exception:  # noqa: BLE001 — teardown never raises
+                logger.debug("mesh pairing attest close failed", exc_info=True)
+            app.state.mesh_pairing_attest = None
         await app.state.scheduler_service.shutdown()
 
         app.state.config_manager = None
@@ -1355,6 +1373,10 @@ app.include_router(desktop_approvals.router)
 # their own router because `desktop_approvals.router`'s route set is a pinned contract.
 # Two-segment children of the same template family, so they collide with nothing above.
 app.include_router(desktop_credentials.router)
+# Mesh pairing cards for the Mesh approvals (`features.mesh_pairing`): `GET
+# /v1/desktop/mesh/pairings` and `.../{side}/{invite_id}/answer`. Their own router for
+# the same pinned-contract reason; the `/v1/desktop/mesh/` prefix collides with nothing.
+app.include_router(desktop_mesh_pairings.router)
 # The CODE-REQUEST surface (`features.code_requests`): the per-session read of which PRs
 # and MRs this conversation touched, and the refresh affordance. Registered after the
 # approvals block for the reason each block above gives — FastAPI matches in declaration

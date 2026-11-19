@@ -28,9 +28,10 @@ subprocess wrapper:
 * **No confirmation, ever — the second phase is the PERSON's, and this tool
   cannot answer a park at all.** Pairing is two people reading a code off each
   other's screens. ``join`` opens the ceremony, parks it and hands back the code
-  together with the sentence the user needs; the person then runs ``lop network join
-  --confirm <code>`` at their own terminal (or answers the inviter's ``lop network
-  confirm`` prompt), and ``_argv_for`` spells no ``--confirm`` anywhere — no field,
+  together with the sentence the user needs; the person then approves it in the app's
+  Mesh approvals by typing the code the other device shows (the terminal remains a
+  same-user fallback the person may use; this tool never names it to the model), and
+  ``_argv_for`` spells no ``--confirm`` anywhere — no field,
   no default, no branch that can produce one. The earlier revision took that code as
   a field on this tool, which is decorative rather than safe: the code both devices
   derive is the SAME digits, so a model holding the code it just printed can echo it
@@ -486,8 +487,8 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
             )
         # PHASE ONE parks the ceremony, which is what lets the code be handed to a
         # person: a pairing that only prompted would have nobody to prompt. Phase two
-        # is theirs to run at their own terminal (`lop network join --confirm <code>`),
-        # which is why no branch here spells it.
+        # is theirs — in the app's Mesh approvals, or the same-user terminal fallback —
+        # which is why no branch here spells a confirm.
         argv = ["network", "join", params.token.strip(), "--park"]
     elif action == "sessions":
         # THE SAME PREDICATE THE TIER READS (``_session_verbs``), so argv and the
@@ -829,9 +830,9 @@ async def _start_parked_join(argv: list[str]) -> tuple[int, str, str]:
     they are — so waiting for the process here would burn the turn and then kill the
     very process the answer has to reach (``_run_cli`` kills a timed-out child). The
     child is therefore started in its own session, its first complete JSON document is
-    read off stdout, and it is left holding the socket: the PERSON's own ``lop network
-    join --confirm <code>`` (or the inviter's ``lop network confirm`` prompt) is what
-    answers it, and it exits by itself at the end of its window.
+    read off stdout, and it is left holding the socket: the PERSON's answer (the app's
+    Mesh approvals card, or their own terminal fallback) is what answers it, and it
+    exits by itself at the end of its window.
 
     Nothing is left unreaped, but NOT because asyncio reaps it: that belief held only
     for a loop that outlives the child, and the harness runs each tool call under its
@@ -1250,9 +1251,10 @@ def _render(action: str, payload: dict[str, Any], *, show_removed: bool = False)
                 f"({payload.get('inviter') or 'the other device'})",
                 f"this device's code: {code_text}",
                 f"{payload.get('sentence')}",
-                f"{int(float(payload.get('seconds_left') or 0))}s left; nothing is "
-                "joined until the person confirms, and the confirmation has to come "
-                "from them.",
+                f"{int(float(payload.get('seconds_left') or 0))}s left; approve it in the "
+                "app's Mesh approvals by typing the code the other device shows. Nothing "
+                "is joined until the person confirms there; this tool cannot answer a "
+                "pairing.",
             ]
         # A finished ceremony's receipt. This tool cannot produce it — phase two is
         # the person's, run at their own terminal — but the CLI does report it, and a
@@ -1449,9 +1451,9 @@ def _hint(action: str) -> str:
         # survives is the property the two-phase pair exists to protect.
         return (
             "Pairing needs a person: `join` parks the ceremony and returns the code for "
-            "THEM to read out, and the second phase is theirs — `lop network join "
-            "--confirm <code>` at a terminal, or the inviter's own `lop network confirm` "
-            "prompt. This tool has no way to answer a pairing."
+            "THEM to read out, and the second phase is theirs — approve it in the app's "
+            "Mesh approvals by typing the code the other device shows (on both devices). "
+            "This tool has no way to answer a pairing."
         )
     if action in ("panic", "disconnect", "member_rm"):
         return (

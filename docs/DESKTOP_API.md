@@ -3018,6 +3018,100 @@ with this surface's own sentences (`wire.errors.notifications.*`, the
 `store_busy`, a full volume `507` `store_out_of_space`, and a store this process
 cannot read or open `500` `store_unavailable`.
 
+## Mesh pairing cards (`features.mesh_pairing`)
+
+Pairing two mesh devices from the app's Mesh approvals instead of a terminal. Both
+routes sit behind the desktop bearer (`require_desktop`) on their own router
+(`server/routes/desktop_mesh_pairings.py`); the logic is
+`server/utils/desktop_mesh_pairings.py`.
+
+**`GET /v1/desktop/mesh/pairings`** → `{pairings: [row, …]}`, oldest first, read-only
+(it never clears, quarantines or creates anything, and never asks the relay: inviter
+rows are read from the relay's own files). One row per open ceremony on THIS device:
+
+```json
+{"id": "inviter:<invite_id>", "side": "inviter|joiner",
+ "stage": "awaiting_joiner|awaiting_confirmation|waiting_for_other_device",
+ "invite_id": "…", "network_id": "…", "network_name": "…",
+ "peer_device_id": "…", "peer_name": "…", "role": "drive",
+ "code": "481926", "fingerprint": "…",
+ "offers": {"state": "listed|empty|absent|skipped_peer_unsupported|…", "items": [{"key","label","kind","share"}]},
+ "expires_at": 1763500000.0, "seconds_left": 512, "attempts_left": 3,
+ "nonce": "<hex>", "can_answer_here": false, "answer_unavailable": "unsupported_host"}
+```
+
+- `offers.state` is one vocabulary on both sides: `listed` (items to show) or `empty`
+  (nothing offered); `absent`/`skipped_peer_unsupported` mean one build cannot carry a
+  list. `peer_name` is the other device's name, `""` when an older token carried only
+  its id; `role` is the invite's role on both sides (`""` from an older joiner record).
+- `code` is THIS device's own derivation, shown for the person on the OTHER device to
+  type there. It is not a secret (it is in the park JSON already); the boundary is the
+  attestation below.
+- Inviter stages: `awaiting_joiner` (show the code, nothing to answer — answers are
+  refused `pairing_not_ready`), then `awaiting_confirmation` once the joiner's
+  transcription arrived and matched. Joiner stages: `awaiting_confirmation`, then
+  `waiting_for_other_device` after a local match. The card disappears when the
+  ceremony ends (answer, expiry, abandonment).
+- `attempts_left`: inviter = the invite's shared 3-attempt budget
+  (`invite.attempts`, also spent by wire mismatches and reconnects); joiner = the
+  card's own strike count (in-process, no security value).
+- `can_answer_here` is true only on a host with the app-attestation listener AND a
+  row in an answerable stage. `answer_unavailable`: `""`, `unsupported_host`
+  (not macOS), or `no_app_attestation` (macOS, listener failed to bind).
+- The window is `min(invite remaining, 600 s)` (`handshake.PAIR_PARK_CEILING_S`),
+  fixed ONCE when the ceremony starts: both inviter stages carry the same `expires_at`,
+  which also caps the attestation `deadline`. At
+  most 4 inviter ceremonies park per relay; a 5th joiner is refused `pairing_busy`,
+  which spends nothing.
+
+**`POST /v1/desktop/mesh/pairings/{side}/{invite_id}/answer`**
+body `{decision: "admit"|"decline", code, shares, nonce, deadline}` (strict). `shares`
+is REQUIRED on an inviter admit — exactly the keys to serve, `[]` serves none; there is
+no "absent = the whole offer" — and absent or `[]` on every other answer; anything else
+is `400 bad_request` before the attestation is spent.
+Order of checks — the order is the security property:
+
+1. the card must be live (`404 no_pending_pairing`); its `nonce` must match
+   (`409 pairing_expired`); an inviter card must be `awaiting_confirmation`
+   (`409 pairing_not_ready`);
+2. `deadline` (integer wall-clock seconds) must be in the future and no later than
+   the ceremony's `expires_at`;
+3. a matching **app attestation** must be consumed: key `("mesh-pairing",
+   "<side>:<invite_id>:<nonce>", respond|decline)`, content `{code: [code], shares:
+   sorted, deadline: [str]}`. None → `403 pairing_needs_app`, with NO attempt spent
+   and NO decision written. Single use; a non-matching body consumes nothing.
+4. inviter: the relay's `net_pair_confirm` with `code` — the RELAY compares against
+   its own derivation (caller `matched` is ignored), spends one attempt on a mismatch
+   inside the same lock as the stage check, and declines/consumes when the budget is
+   spent. Once the ceremony has a decision, or its budget is spent, every later answer
+   (card or terminal) is `409 pairing_answered` (outcome-neutral: the first answer
+   may have admitted the device) or, once the budget is spent, `409 pairing_expired`,
+   and nothing is overwritten. Only a decision stamped with the live ceremony
+   answers it; the stage-2 flip clears every other one. An onboarding run's
+   pre-approval is a separate one-shot record bound to the invite and the joiner's
+   mesh id, consumed at the flip after the wire code compare; a brand-new host (no
+   mesh id before its join) gets none and parks a normal card. Joiner: `network.pairing_answers.answer_card` (the CLI's own writer); it
+   never blocks on the other device.
+
+200 → `{status: "sent"|"waiting_for_other_device"|"refused", attempts_left}`.
+`409 sas_mismatch` carries `attempts_left` and leaves the card open. `503
+relay_unavailable` when the inviter relay cannot be asked. Messages are keyed
+(`network.pairing`); key on `code`.
+
+**Attestation (macOS only).** `lop serve` binds ONE listener at
+`<config>/run/attest/mesh-pairing.sock` (`network.pairing_attest`, #4132's verifier
+with a frame validator). The signed app's main process sends `{"op":
+"mesh_pairing_attest", side, invite_id, nonce, act, code, shares, deadline}` after its
+click-provenance gate, then forwards the POST. This is **desktop-API protection
+only**: it means an agent holding only the desktop bearer cannot answer a pairing
+through the app. It is not relay-level proof of a human — the same-user terminal
+fallback (`lop network confirm`, `lop network join --confirm`) remains and the relay
+cannot tell the two apart. Non-macOS hosts never downgrade: every answer is 403.
+
+Feed: the `approvals` frame ORs open pairing cards into `pending` and adds
+`pairing_id` (the oldest card's `id`, or `null`); the `open` frame adds
+`approvals_pairing_id`.
+
 ## The machine-wide event feed
 
 `GET /v1/desktop/events` — authenticated SSE, the same bearer/Origin boundary as

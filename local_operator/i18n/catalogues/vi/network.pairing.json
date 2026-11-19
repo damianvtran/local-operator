@@ -1,0 +1,8 @@
+{
+  "network.pairing.refusal.answered": "Lần ghép nối này không còn mở. Câu trả lời này chưa được ghi lại.",
+  "network.pairing.refusal.expired": "Lần ghép nối này không còn mở nên chưa có gì được phê duyệt. Hãy bắt đầu ghép nối mới từ thiết bị kia.",
+  "network.pairing.refusal.mismatch": "{count, plural, =0 {Mã đó không khớp với mã trên thiết bị kia và không còn lượt thử nào.} other {Mã đó không khớp với mã trên thiết bị kia. Còn # lượt thử.}}",
+  "network.pairing.refusal.needs_app": "Để phê duyệt việc ghép nối thiết bị tại đây, cần có ứng dụng Local Operator đã ký trên máy Mac. Chưa có gì được phê duyệt. Bạn vẫn có thể trả lời từ terminal trên thiết bị này.",
+  "network.pairing.refusal.no_pending": "Không có thiết bị nào đang chờ ghép nối với thiết bị này bằng lời mời đó.",
+  "network.pairing.refusal.not_ready": "Thiết bị kia chưa nhập mã của thiết bị này nên chưa có gì để xác nhận. Hãy đợi thiết bị đó nhập rồi thử lại."
+}
