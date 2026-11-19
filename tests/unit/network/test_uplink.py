@@ -538,11 +538,27 @@ def test_probe_evidence_reaches_the_uplink_reading_end_to_end(
 ) -> None:
     """Producer to consumer: local error and unstarted worker keep base; silence does not."""
 
+    class DialSocket:
+        """``relay._new_dial_socket``'s socket, with the connect outcome scripted."""
+
+        def __init__(self, connect: Any) -> None:
+            self.connect = connect
+
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
     def local_error(*_args: Any, **_kwargs: Any) -> socket.socket:
         raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
 
     def time_out(*_args: Any, **_kwargs: Any) -> socket.socket:
+        # Past the patched floor below: an issued dial unanswered that long (R3-1).
+        time.sleep(0.06)
         raise TimeoutError("timed out")
+
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.05)
 
     def rows_for(attempts: list[Any]) -> list[dict[str, Any]]:
         # The doctor row shape (relay._probe_member): ``dial_silent`` only when True.
@@ -555,11 +571,11 @@ def test_probe_evidence_reaches_the_uplink_reading_end_to_end(
         ]
 
     endpoint = ["16.52.146.32:4097"]
-    monkeypatch.setattr(relay.socket, "create_connection", local_error)
+    monkeypatch.setattr(relay, "_new_dial_socket", lambda _f: DialSocket(local_error))
     probe = relay.probe_candidates(endpoint, deadline=None, connect_cap=1.0, wait_all=True)
     assert uplink.uplink_checks(DUAL, rows_for(probe.attempts), route_reader=ROUTED) == []
 
-    monkeypatch.setattr(relay.socket, "create_connection", time_out)
+    monkeypatch.setattr(relay, "_new_dial_socket", lambda _f: DialSocket(time_out))
     with monkeypatch.context() as patch:
         patch.setattr(relay.threading.Thread, "start", lambda self: None)
         probe = relay.probe_candidates(

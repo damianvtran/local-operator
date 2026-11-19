@@ -200,14 +200,62 @@ def test_a_candidate_that_never_reported_is_named_rather_than_dropped() -> None:
     assert probe.reason == probe.attempts[0].detail
 
 
+class _FakeDialSocket:
+    """The literal-address dial socket (``relay._new_dial_socket``) with a scripted
+    ``connect``: no packet leaves the host, and each test picks the outcome."""
+
+    def __init__(self, connect: Any) -> None:
+        self._connect = connect
+        self.timeout: float | None = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def connect(self, _address: Any) -> None:
+        self._connect(self)
+
+    def close(self) -> None:
+        pass
+
+
+def _dial_with(monkeypatch: pytest.MonkeyPatch, connect: Any) -> None:
+    monkeypatch.setattr(relay, "_new_dial_socket", lambda _family: _FakeDialSocket(connect))
+
+
+def _time_out_after(seconds: float | None) -> Any:
+    """A blackholed SYN: nothing answers for ``seconds`` (None: the whole budget)."""
+
+    def connect(sock: _FakeDialSocket) -> None:
+        time.sleep((sock.timeout or 0.0) if seconds is None else seconds)
+        raise TimeoutError("timed out")
+
+    return connect
+
+
 def test_a_local_connect_error_is_never_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """U3 (PR #4260): an OSError the local stack raises before any SYN is no silence."""
+    """U3 (PR #4260): an OSError the local stack raises is no silence."""
     import errno
 
-    def refuse_locally(*_args: Any, **_kwargs: Any) -> socket.socket:
+    def refuse_locally(_sock: Any) -> None:
         raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
 
-    monkeypatch.setattr(relay.socket, "create_connection", refuse_locally)
+    _dial_with(monkeypatch, refuse_locally)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9"], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:OSError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_a_socket_creation_error_is_never_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U3b: a socket that could not even be built was never an issued dial."""
+    import errno
+
+    def no_socket(_family: int) -> Any:
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(relay, "_new_dial_socket", no_socket)
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.0)
     probe = relay.probe_candidates(
         ["203.0.113.9:9"], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
     )
@@ -216,7 +264,12 @@ def test_a_local_connect_error_is_never_dial_silence(monkeypatch: pytest.MonkeyP
 
 
 def test_the_connects_own_timeout_is_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A patched floor keeps the run fast; the connect waits past it (R3-1).
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.05)
+    _dial_with(monkeypatch, _time_out_after(0.06))
+
     def time_out(*_args: Any, **_kwargs: Any) -> socket.socket:
+        time.sleep(0.06)
         raise TimeoutError("timed out")
 
     monkeypatch.setattr(relay.socket, "create_connection", time_out)
@@ -232,26 +285,91 @@ def test_the_connects_own_timeout_is_dial_silence(monkeypatch: pytest.MonkeyPatc
     assert by_endpoint["peer.example:9"].dial_silent is False
 
 
-def test_a_connect_in_flight_at_the_deadline_is_dial_silence(
+def test_a_timeout_on_a_sliver_of_the_deadline_is_not_dial_silence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The connect was issued and nothing answered before the report stopped waiting."""
+    """R3-1 (PR #4260): 2 ms left of a shared deadline is not attempted long enough.
+
+    The budget is ``min(connect_cap, deadline - now)``, so a late peer under one
+    shared deadline times out at once; that keeps the base diagnostic, no evidence.
+    """
+    _dial_with(monkeypatch, _time_out_after(None))
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9"], deadline=time.monotonic() + 0.002, connect_cap=3.0, wait_all=True
+    )
+    assert probe.attempts[0].detail in {"connect_failed:TimeoutError", "no_answer"}
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_a_timeout_after_the_full_floor_is_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3-1: a connect that waited the whole floor unanswered is silence.
+
+    The cap is below the real floor, so the effective floor is the cap, and the
+    connect that spends all of it counts — no real 1 s sleep needed.
+    """
+    assert relay.SILENT_MIN_WAIT_S > 0.05
+    _dial_with(monkeypatch, _time_out_after(None))
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9"], deadline=time.monotonic() + 5.0, connect_cap=0.05, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+    assert probe.attempts[0].dial_silent is True
+
+
+def test_an_issued_connect_pending_at_the_cutoff_is_not_dial_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3b: an issued connect still pending at the cutoff is ambiguous.
+
+    It supports only "no answer during this check", so it keeps the base
+    ``no_answer`` — even when it has been pending longer than the floor.
+    """
     import threading
 
     release = threading.Event()
+    issued = threading.Event()
 
-    def black_hole(*_args: Any, **_kwargs: Any) -> socket.socket:
+    def black_hole(_sock: Any) -> None:
+        issued.set()
         release.wait(5.0)
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(relay.socket, "create_connection", black_hole)
+    _dial_with(monkeypatch, black_hole)
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.05)
     try:
         probe = relay.probe_candidates(
-            ["203.0.113.9:9"], deadline=time.monotonic() + 0.2, connect_cap=30.0, wait_all=True
+            ["192.0.2.1:9"], deadline=time.monotonic() + 0.2, connect_cap=30.0, wait_all=True
         )
     finally:
         release.set()
+    assert issued.is_set(), "rig: the connect was never issued"
     assert [row.detail for row in probe.attempts] == ["no_answer"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_a_timeout_completed_before_the_cutoff_is_never_lost_to_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3b: a terminal outcome written before the cutoff is that endpoint's answer.
+
+    The collector is made to lose the race deterministically — its queue read
+    waits out the deadline and reports empty — so only the state the worker
+    wrote under the lock can carry the completed timeout to the report.
+    """
+    import queue as queue_mod
+
+    class LosingQueue(queue_mod.Queue):  # type: ignore[type-arg]
+        def get(self, block: bool = True, timeout: float | None = None) -> Any:
+            time.sleep(timeout or 0.0)
+            raise queue_mod.Empty
+
+    monkeypatch.setattr(relay.queue, "Queue", LosingQueue)
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.05)
+    _dial_with(monkeypatch, _time_out_after(0.06))
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9"], deadline=time.monotonic() + 0.3, connect_cap=3.0, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
     assert probe.attempts[0].dial_silent is True
 
 

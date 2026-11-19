@@ -791,6 +791,23 @@ MEMBERSHIP_READ_CLIENT_TIMEOUT_S = 5.0
 #: a CAP, not a share: see :func:`probe_candidates`.
 PROBE_CONNECT_TIMEOUT_S = 3.0
 
+#: How long a literal-address connect must have WAITED, unanswered, before the
+#: probe calls it dial silence (``CandidateAttempt.dial_silent``; code review
+#: R3-1, PR #4260). The connect budget is ``min(connect_cap, deadline - now)``
+#: and one deadline is shared by peers probed in turn (``ready``'s 12 s,
+#: ``doctor``'s), so a late peer can be handed milliseconds: a connect that
+#: times out after 2 ms, or is still pending 20 ms into its life when the report
+#: stops waiting, has NOT BEEN ATTEMPTED LONG ENOUGH to say anything about the
+#: peer (reproduced: 192.0.2.1 with 2 ms or 20 ms left read as silent). 1.0 s is
+#: over 6x the slowest healthy connect measured above (~0.15 s transatlantic;
+#: loopback 0.03 s) and equals TCP's initial retransmission timeout (RFC 6298
+#: section 2.1), so a SYN unanswered that long has had its full first chance.
+#: The effective floor is ``min(connect_cap, SILENT_MIN_WAIT_S)``: a caller
+#: whose cap is shorter still gets silence when the connect used its whole cap.
+#: A shorter wait keeps its base diagnostic (``no_answer`` /
+#: ``connect_failed:TimeoutError``) with no silence evidence.
+SILENT_MIN_WAIT_S = 1.0
+
 #: The one reason a member row carries when nothing was even attempted. Its own
 #: spelling because "we could not try" and "we tried and nothing answered" are
 #: different operator actions, and a budget that ran out must never be reported as
@@ -980,50 +997,80 @@ def probe_candidates(
     opened_lock = threading.Lock()
     stop = threading.Event()
     started_at = time.monotonic()
-    #: Endpoints whose connect is issued and still blocked, guarded by
-    #: ``opened_lock``: a member at the closing pass is a dial that drew neither
-    #: an answer nor an error before the deadline — silence, with evidence that
-    #: the dial began (U3). Literal addresses only: for a hostname the blocked
-    #: call may still be the resolver, which is not a dial.
-    dialing: set[str] = set()
+    #: ONE state per endpoint, guarded by ``opened_lock`` (U3b / R3-1, PR #4260):
+    #: absent = not started; ``("issued", t0)`` = the connect syscall is about to
+    #: run on a socket already built; ``("done", outcome)`` = the worker's
+    #: terminal answer, written under the same lock that queues it. The collector
+    #: reads this once under the lock at the cutoff, so an outcome that completed
+    #: just before the cutoff is never lost to it, and an issued-but-pending
+    #: connect stays ambiguous: it keeps ``no_answer`` and carries no evidence.
+    states: dict[str, tuple[str, Any]] = {}
+    #: R3-1: the wait a timed-out literal dial needs before its silence counts.
+    silent_floor = min(connect_cap, SILENT_MIN_WAIT_S)
+
+    def finish(outcome: _AttemptOutcome) -> None:
+        with opened_lock:
+            states[outcome.endpoint] = ("done", outcome)
+            results.put(outcome)
 
     def attempt(endpoint: str) -> None:
         budget = connect_cap
         if deadline is not None:
             budget = min(connect_cap, max(0.0, deadline - time.monotonic()))
         if budget <= 0:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
             return
         address, _, port_text = endpoint.rpartition(":")
         try:
             port = int(port_text)
         except ValueError:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
             return
         literal = _is_ip_literal(address)
         started = time.monotonic()
-        if literal:
-            with opened_lock:
-                dialing.add(endpoint)
         try:
-            sock = socket.create_connection((address or endpoint, port), timeout=budget)
+            if literal:
+                # Build the socket ourselves for a literal so a creation error
+                # (EMFILE, EAFNOSUPPORT) is a local error raised BEFORE the dial
+                # is marked issued, and ``t0`` is stamped right before the one
+                # syscall that sends a SYN (U3b). A hostname keeps
+                # create_connection: its blocked call may be the resolver.
+                host = address.strip("[]")
+                sock = _new_dial_socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+                try:
+                    sock.settimeout(budget)
+                    with opened_lock:
+                        started = time.monotonic()
+                        states[endpoint] = ("issued", started)
+                    sock.connect((host, port))
+                except BaseException:
+                    _close_quietly(sock)
+                    raise
+            else:
+                sock = socket.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
+            waited = time.monotonic() - started
             with opened_lock:
-                dialing.discard(endpoint)
-            results.put(
+                issued = states.get(endpoint, ("",))[0] == "issued"
+            finish(
                 _AttemptOutcome(
                     endpoint,
                     None,
                     f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}",
                     0.0,
-                    # Only the connect's OWN timeout is silence; every other
-                    # OSError is a local or remote answer, not a quiet peer (U3).
-                    dial_silent=literal and isinstance(exc, TimeoutError),
+                    # Silence only for an ISSUED literal connect that hit its OWN
+                    # timeout (every other OSError is a local or remote answer,
+                    # U3) after waiting at least the floor: a timeout on a sliver
+                    # of a shared deadline is "not attempted long enough" (R3-1).
+                    dial_silent=(
+                        literal
+                        and issued
+                        and isinstance(exc, TimeoutError)
+                        and waited >= silent_floor
+                    ),
                 )
             )
             return
-        with opened_lock:
-            dialing.discard(endpoint)
         latency = round((time.monotonic() - started) * 1000, 1)
         with opened_lock:
             if stop.is_set():
@@ -1032,7 +1079,9 @@ def probe_candidates(
                 _close_quietly(sock)
                 return
             opened.append(sock)
-        results.put(_AttemptOutcome(endpoint, sock, DETAIL_OK, latency))
+            outcome = _AttemptOutcome(endpoint, sock, DETAIL_OK, latency)
+            states[endpoint] = ("done", outcome)
+            results.put(outcome)
 
     threads = [
         threading.Thread(target=attempt, args=(endpoint,), name="mesh-probe", daemon=True)
@@ -1040,6 +1089,17 @@ def probe_candidates(
     ]
     for thread in threads:
         thread.start()
+
+    def record(outcome: _AttemptOutcome) -> None:
+        attempts.append(
+            CandidateAttempt(
+                endpoint=outcome.endpoint,
+                connected=outcome.sock is not None,
+                detail=outcome.detail,
+                latency_ms=outcome.latency_ms or None,
+                dial_silent=outcome.dial_silent,
+            )
+        )
 
     attempts: list[CandidateAttempt] = []
     winner_sock: socket.socket | None = None
@@ -1054,51 +1114,61 @@ def probe_candidates(
         except queue.Empty:
             break
         settled += 1
-        attempts.append(
-            CandidateAttempt(
-                endpoint=outcome.endpoint,
-                connected=outcome.sock is not None,
-                detail=outcome.detail,
-                latency_ms=outcome.latency_ms or None,
-                dial_silent=outcome.dial_silent,
-            )
-        )
+        record(outcome)
         if outcome.sock is not None and winner_sock is None:
             winner_sock, winner = outcome.sock, outcome.endpoint
             if not wait_all:
                 break
 
-    stop.set()
+    # The cutoff: one read of every endpoint's state, under the lock the workers
+    # write it under. After ``stop`` is set no worker can append a socket, so the
+    # snapshot is the probe's final knowledge (U3b).
+    reported = {row.endpoint for row in attempts}
+    with opened_lock:
+        stop.set()
+        final = dict(states)
+    late: list[_AttemptOutcome] = []
+    if wait_all or winner_sock is None:
+        # A terminal outcome written before the cutoff but not yet dequeued is
+        # still that endpoint's answer (a completed timeout must not turn into
+        # ``no_answer``). The early-return path (winner, not wait_all) asked for
+        # one answer only and stays as it was.
+        for endpoint in endpoints:
+            state = final.get(endpoint)
+            if endpoint not in reported and state is not None and state[0] == "done":
+                late.append(state[1])
+                reported.add(endpoint)
+    for outcome in late:
+        # Not counted in ``settled``: ``complete`` keeps its meaning — every
+        # answer arrived before the collector stopped waiting — and a late
+        # read only stops a terminal outcome from being renamed ``no_answer``.
+        record(outcome)
+        if outcome.sock is not None and winner_sock is None:
+            winner_sock, winner = outcome.sock, outcome.endpoint
     with opened_lock:
         for sock in opened:
             if sock is not winner_sock:
                 _close_quietly(sock)
         opened.clear()
-        # Read under the lock the workers write it under: a worker whose connect
-        # returned an error after the deadline has already left the set, so only
-        # a connect still blocked right now counts as silence (U3).
-        still_dialing = set(dialing)
 
     # An attempt still in flight when the budget ran out never reported. Name it:
     # every declared endpoint appears in the result, so a caller reading the rows
     # cannot mistake "we stopped waiting" for "this address is fine". WHICH name
     # depends on whether anything was tried at all — a probe handed a deadline that
     # had already passed has not dialled anything and must say so, rather than
-    # report a reachability result it never established.
+    # report a reachability result it never established. An issued connect still
+    # pending here is AMBIGUOUS (U3b): it supports only "no answer during this
+    # check", so it keeps the base ``no_answer`` and never carries ``dial_silent``.
     starved = deadline is not None and deadline <= started_at
-    reported = {row.endpoint for row in attempts}
     for endpoint in endpoints:
         if endpoint not in reported:
+            reported.add(endpoint)
             attempts.append(
                 CandidateAttempt(
                     endpoint,
                     False,
                     DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER,
                     None,
-                    # The report deadline alone proves no dial: a worker still
-                    # queued or not yet at its connect is ``no_answer`` here too
-                    # (U3), so silence needs the connect to be in flight.
-                    dial_silent=endpoint in still_dialing,
                 )
             )
 
@@ -1109,6 +1179,15 @@ def probe_candidates(
         complete=settled == len(threads),
         reason="" if winner_sock is not None else probe_reason(attempts),
     )
+
+
+def _new_dial_socket(family: int) -> socket.socket:
+    """The bare TCP socket a literal-address probe dials on (U3b, PR #4260).
+
+    Its own function so a creation failure is testable as what it is — a local
+    error raised before any dial was issued — without patching the socket type.
+    """
+    return socket.socket(family, socket.SOCK_STREAM)
 
 
 def _is_ip_literal(address: str) -> bool:
