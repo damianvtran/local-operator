@@ -1405,6 +1405,7 @@ def _relay_call(
     allow_no_answer: bool = False,
     allow_no_relay: bool = False,
     no_answer_message: str | None = None,
+    report_unsent: bool = False,
     **fields: Any,
 ) -> dict[str, Any] | None:
     """Run one op on the running relay, or REFUSE when no relay answers it.
@@ -1442,11 +1443,29 @@ def _relay_call(
     destructive operation offline. Keep that distinction at this single lookup.
     ``no_answer_message`` lets the caller name its already-resolved context;
     it is display-only and never sent in the control frame or read back from disk.
+
+    ``report_unsent`` is for a caller whose sentence depends on WHETHER the op could
+    have run (security review round 3, S-R3-1: ``confirm`` reports a terminal
+    pairing answer). With it, "the op never left this device" — no relay record, or
+    ``relay.control_request`` saw the connection fail before the op line was
+    written — raises :class:`~local_operator.network.types.ControlRequestUnsent`,
+    and a ``None`` (under ``allow_no_answer``) then means only "sent, no reply":
+    the relay may have acted. It is forwarded only when set, so the existing test
+    doubles of ``control_request`` keep their exact call shape.
     """
     from local_operator.network import relay, store
 
     record = store.find_own_relay()
-    reply = relay.control_request(record, op, timeout=timeout, **fields) if record else None
+    if record is None and report_unsent:
+        from local_operator.network.types import ControlRequestUnsent
+
+        raise ControlRequestUnsent()
+    unsent_flag: dict[str, Any] = {"report_unsent": True} if report_unsent else {}
+    reply = (
+        relay.control_request(record, op, timeout=timeout, **unsent_flag, **fields)
+        if record
+        else None
+    )
     if reply is None:
         if allow_no_answer or (allow_no_relay and record is None):
             return None
@@ -10494,7 +10513,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
     property the joiner's prompt enforces from the other side. ``--sas-stdin`` is
     the harness's seam and is refused outside ``LOP_NETWORK_TEST_MODE=1``.
     """
-    from local_operator.network import store, types
+    from local_operator.network import types
 
     rows = _pending_pairings()
     if args.list_pending:
@@ -10529,47 +10548,47 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         answer, shares = _read_confirmation(args, chosen)
         admit = answer == "yes"
     chosen_shares = sorted(shares) if admit else []
-    live = _relay_call(
-        "net_pair_confirm",
-        invite_id=invite_id,
-        decision="admit" if admit else "decline",
-        matched=admit,
-        reason="" if admit else "declined",
-        answered_by=_answered_by(args),
-        # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
-        # have sent an offer understands them; one that does not answers without
-        # the echo below, and this CLI says so by name instead of quietly
-        # admitting more than the operator chose.
-        shares=chosen_shares,
-        allow_no_answer=True,
-    )
-    if live is None:
-        # No relay running: the pairing loop cannot be waiting either, so this
-        # records the answer for a relay that starts later — and says so, rather
-        # than reporting a success that nobody is watching for.
-        decision = types.PairDecision(
+    # ONLY A LIVE ACKNOWLEDGMENT IS AN ANSWER (security review round 3, S-R3-1).
+    # This used to write a decision file and a success audit itself whenever the
+    # relay did not answer, "for a relay that starts later". That fallback was
+    # wrong twice: the file is unstamped, so no ceremony's poll would ever honour
+    # it (it only blocked the next live answer), and a missing reply AFTER the
+    # frame left may mean the relay already recorded an answer — so reporting
+    # either "recorded" or "nothing recorded" would be a guess. Each outcome is
+    # now said only as far as it is known, nothing is written here, and the exit
+    # is non-zero. An explicit relay rejection still raises from ``_relay_call``
+    # with the relay's own code and sentence.
+    try:
+        live = _relay_call(
+            "net_pair_confirm",
             invite_id=invite_id,
             decision="admit" if admit else "decline",
             matched=admit,
             reason="" if admit else "declined",
+            answered_by=_answered_by(args),
+            # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
+            # have sent an offer understands them; one that does not answers without
+            # the echo below, and this CLI says so by name instead of quietly
+            # admitting more than the operator chose.
             shares=chosen_shares,
+            allow_no_answer=True,
+            report_unsent=True,
         )
-        store.save_pair_decision(decision, None)
-        _audit(
-            "pairing_confirmed" if admit else "pairing_refused",
-            actor=str(chosen.get("joiner_device_id") or ""),
-            subject=str(chosen.get("network_id") or ""),
-            cause="" if admit else "declined",
+    except types.ControlRequestUnsent as exc:
+        # Known: the frame never left this device, so nothing can have recorded it.
+        raise types.MeshRefusal(
+            CODE_RELAY_UNAVAILABLE,
+            "No relay is running on this device, so nothing was recorded. "
+            "Start it and answer again.",
+        ) from exc
+    if live is None:
+        # Sent, but no reply: the relay may or may not have recorded it, so this
+        # claims neither.
+        raise types.MeshRefusal(
+            "pairing_answer_unconfirmed",
+            "Could not confirm whether the relay recorded this answer.",
         )
-        live = {
-            "invite_id": invite_id,
-            "decision": decision.decision,
-            "matched": admit,
-            "joiner_device_id": chosen.get("joiner_device_id"),
-            "shares": list(chosen_shares),
-            "relay": "not running: the answer is recorded for when it is",
-        }
-    elif chosen_shares and "shares" not in live:
+    if chosen_shares and "shares" not in live:
         # §4.5, the one silent-loss case: the relay that answered did not report
         # the share choices, so it is older than this CLI and the shares were not
         # applied by it. The admission still lands — warn, never refuse; the

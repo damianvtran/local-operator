@@ -1415,6 +1415,22 @@ class ControlRequestTimeout(TimeoutError):
         super().__init__("the local control reply did not arrive within its existing deadline")
 
 
+class ControlRequestUnsent(ConnectionError):
+    """The op frame never left this device, so the relay cannot have acted on it.
+
+    WHY A SEPARATE SIGNAL (security review round 3, S-R3-1). ``control_request``
+    answers ``None`` both when no relay took the connection and when the reply was
+    lost AFTER the op was written — and those two mean opposite things to a caller
+    reporting a terminal answer: the first is "nothing was recorded", the second is
+    "the relay may well have recorded it". Only a caller that opts in
+    (``report_unsent=True``) gets this raised, so every existing ``None`` reader is
+    unchanged. Local-only: never a wire refusal, never carries a payload.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("no relay accepted the control request, so it was never sent")
+
+
 class MeshRefusal(Exception):
     """A refusal that carries a machine ``code`` and a sentence for the operator.
 

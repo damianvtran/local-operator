@@ -1184,7 +1184,10 @@ class OnboardRun:
             + (
                 "; the approval pre-answered the pairing confirm"
                 if pre_answered
-                else "; the approval is bound to the node's mesh identity at the join step"
+                # Q-R3-2: a fresh host has no identity, so nothing gets bound at
+                # the join step either; the summary must not promise a binding.
+                else "; the approval will be bound at the join step if the node already "
+                "has a mesh identity"
             ),
             {
                 "invite_id": self.invite_id,
@@ -1793,10 +1796,14 @@ class OnboardRun:
                 else:
                     detail = f"the join did not complete ({embedded})"
                 if awaiting_card:
-                    # The join waited on a pairing card nobody answered in time: the
-                    # failure names where the approval was waiting.
-                    detail = f"{detail}; {awaiting_card}"
                     data["awaiting_card"] = True
+                    # The join waited on a pairing card: the failure names where the
+                    # approval was waiting — unless a person already answered it with
+                    # a decline (Q-R3-2), where "waiting … confirm it" would tell the
+                    # operator to act on a card that is closed. ``declined_remote`` is
+                    # the joiner's own code for that answer (``handshake``).
+                    if refusal != "declined_remote":
+                        detail = f"{detail}; {awaiting_card}"
                 # The token file is removed by the ``finally`` below — one place.
                 return _StepOutcome(False, detail, data)
             after = self._node_json("lop network identity show", timeout=60.0)

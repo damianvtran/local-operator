@@ -1589,6 +1589,62 @@ def test_a_fresh_host_writes_no_pre_approval_and_says_where_the_pairing_waits(
         assert "Mesh approvals" not in said
 
 
+def test_a_declined_fresh_host_join_does_not_say_the_card_is_still_waiting(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Q-R3-2 (copy): the invite summary for a fresh host promises no binding it
+    cannot make, and once the person DECLINED the card the join failure no longer
+    appends "waiting for approval … confirm it" — the card is closed."""
+    from local_operator.network import pairing_attest
+
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    record = _record()
+    record["device"]["device_id"] = ""
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    monkeypatch.setattr(pairing_attest, "cards_answerable_here", lambda root=None: False)
+    declined = {
+        "rc": 1,
+        "stdout": json.dumps(
+            {
+                "ok": False,
+                "code": "declined_remote",
+                "message": "the other device declined. ask its operator",
+            }
+        ),
+    }
+    outputs: list[tuple[str, dict[str, Any]]] = []
+    for command, result in HAPPY_OUTPUTS:
+        if command == "identity show":
+            outputs.append(
+                (command, {"stdout": json.dumps({"ok": False, "code": "identity_missing"})})
+            )
+        elif command == "network join":
+            outputs.append((command, declined))
+        else:
+            outputs.append((command, result))
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=outputs),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+    steps = {row["step"]: row for row in payload["steps"]}
+    invite_detail = str(steps["invite"]["detail"])
+    assert "bound to the node's mesh identity at the join step" not in invite_detail
+    assert "if the node already has a mesh identity" in invite_detail
+    join = steps["join"]
+    assert join["data"]["awaiting_card"] is True
+    assert join["data"]["code"] == "declined_remote"
+    assert "the other device declined" in str(join["detail"])
+    assert "waiting for approval" not in str(join["detail"]), join["detail"]
+    assert "lop network confirm" not in str(join["detail"])
+
+
 def test_a_node_with_an_identity_is_pre_approved_at_the_join_step(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

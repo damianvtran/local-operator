@@ -134,6 +134,7 @@ from local_operator.network.types import (
     PAIR_STAGE_AWAITING_CONFIRMATION,
     PAIR_STAGE_AWAITING_JOINER,
     ControlRequestTimeout,
+    ControlRequestUnsent,
     Granted,
     LinkContext,
     LinkPhase,
@@ -13066,7 +13067,7 @@ class RelayServer:
             # every relay ingress stamps ``live.ceremony`` under the record lock, and
             # onboarding's pre-approval is stamped when the flip consumes it. An
             # unstamped file (an out-of-band write) is never an answer.
-            if decision is not None and decision.ceremony and decision.ceremony == pending.ceremony:
+            if decision is not None and _answers_ceremony(decision, pending.ceremony):
                 return decision
             time.sleep(0.2)
         return PairDecision(
@@ -14600,7 +14601,9 @@ class RelayServer:
         does; it says only that this answer was not recorded.
         """
         decided = store.pair_decision(live.invite_id, self.root)
-        if decided is not None and decided.ceremony in ("", live.ceremony):
+        # The poll's own rule (``_answers_ceremony``): a decision the poll would
+        # never act on must not shut the ceremony to a live answer either.
+        if _answers_ceremony(decided, live.ceremony):
             raise MeshRefusal(
                 "pairing_answered",
                 "that pairing is no longer open, and this answer was not recorded",
@@ -16997,6 +17000,22 @@ def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
         "sequence": record.sequence,
         "trust": record.trust,
     }
+
+
+def _answers_ceremony(decision: PairDecision | None, ceremony: str) -> bool:
+    """Whether ``decision`` is THE answer to the live ``ceremony`` — the one rule.
+
+    ONE HELPER, TWO READERS (security review round 3, S-R3-1 / QA Q-R3-1). The
+    pairing poll and the terminal-answer latch must agree on what counts as an
+    answer: when the latch also honoured an UNSTAMPED decision file (an
+    out-of-band write, or a stale CLI fallback) while the poll ignored it, a stray
+    file blocked every live answer with ``pairing_answered`` and then let the
+    ceremony time out — refused on one side, never seen on the other. Every relay
+    ingress stamps ``live.ceremony`` under the record lock, so only a stamp that
+    matches the current ceremony is an answer; an empty stamp never matches, even
+    against an (unstamped) empty live ceremony.
+    """
+    return decision is not None and bool(decision.ceremony) and decision.ceremony == ceremony
 
 
 @contextmanager
@@ -19879,6 +19898,7 @@ def control_request(
     *,
     timeout: float = 5.0,
     report_timeout: bool = False,
+    report_unsent: bool = False,
     **fields: Any,
 ) -> dict[str, Any] | None:
     """Dial the relay's loopback control socket and run one op.
@@ -19913,15 +19933,30 @@ def control_request(
     lower-bound byte count; a reply that is not a JSON object raises
     ``frame_unreadable``. Both reach the operator with the relay named as the
     component that answered, not as a component that stayed silent.
+
+    ``report_unsent`` SPLITS THAT ``None`` IN TWO for a caller that must not
+    over-claim (security review round 3, S-R3-1): when the op frame provably never
+    left this device — no connection, or the connection failed before the op line
+    was written — it raises :class:`ControlRequestUnsent`, and ``None`` then means
+    only "sent, but no reply came back", where the relay may have acted. The flag
+    defaults off so every existing caller (and every test double of this function)
+    sees exactly the old contract.
     """
     try:
         sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
     except TimeoutError as exc:
+        if report_unsent:
+            raise ControlRequestUnsent() from exc
         if report_timeout:
             raise ControlRequestTimeout(timeout) from exc
         return None
-    except OSError:
+    except OSError as exc:
+        if report_unsent:
+            raise ControlRequestUnsent() from exc
         return None
+    # Flipped just before the op line is written: a failure after that point may
+    # have delivered the op, so it is never reported as "unsent".
+    sent = False
     try:
         # The bound is read here rather than left to the reader's default: this call
         # CHOOSES the control socket's bound, and ``dial.MAX_SESSION_FRAME_BYTES`` is
@@ -19930,6 +19965,7 @@ def control_request(
             sock, session_dial.MAX_SESSION_FRAME_BYTES, report_bad_frames=True
         )
         sock.sendall(wire.encode_line({"key": record.control_key, "client": "cli"}))
+        sent = True
         sock.sendall(wire.encode_line({"op": op, "req": 1, **fields}))
         started = time.monotonic()
         reply = reader.read_frame(timeout)
@@ -19956,10 +19992,14 @@ def control_request(
             "not a relay that stayed silent.",
         ) from exc
     except TimeoutError as exc:
+        if report_unsent and not sent:
+            raise ControlRequestUnsent() from exc
         if report_timeout:
             raise ControlRequestTimeout(timeout) from exc
         return None
-    except (OSError, ConnectionError):
+    except (OSError, ConnectionError) as exc:
+        if report_unsent and not sent:
+            raise ControlRequestUnsent() from exc
         # Non-timeout no-answer cases retain their existing result.
         return None
     finally:
