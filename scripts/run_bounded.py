@@ -1280,6 +1280,11 @@ def run(
             outcome = bounded_contract.Outcome(
                 wrapper_exit_code=bounded_contract.EXIT_LATE_START,
                 termination_cause="late-start",
+                # The budget is already resolved; record it as the other
+                # pre-spawn refusals do, so a late-start record says which
+                # grant the run would have had (not a null ceiling).
+                memory_ceiling_mb=getattr(budget, "ceiling_mb", 0) or 0,
+                memory_budget_source=budget_source,
                 cleanup_reason=(
                     f"start-by {bounded_contract.utc_stamp(start_by)} passed at "
                     f"{bounded_contract.utc_stamp(now)}; command never spawned"

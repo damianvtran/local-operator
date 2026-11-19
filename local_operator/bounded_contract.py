@@ -65,7 +65,7 @@ def parse_start_by(text: str) -> float:
     unreadable value is a usage error. Raises ValueError for argparse to turn
     into exit 2.
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     value = text.strip()
     try:
@@ -75,6 +75,14 @@ def parse_start_by(text: str) -> float:
     if epoch is not None:
         if not math.isfinite(epoch):
             raise ValueError(f"not a finite epoch time: {text!r}")
+        # A finite float can still lie outside what datetime represents (e.g.
+        # -1e300). utc_stamp formats the deadline only at the breach, AFTER
+        # the queue wait, so an unrepresentable value must fail HERE as a usage
+        # error (2) rather than crash the late-start report at spawn time.
+        try:
+            datetime.fromtimestamp(epoch, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            raise ValueError(f"epoch time out of range: {text!r}") from None
         return epoch
     if value[-1:] in ("Z", "z"):
         # Spelled out rather than relying on 3.11+ fromisoformat accepting Z:

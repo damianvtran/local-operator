@@ -101,12 +101,19 @@ def test_without_the_flag_behaviour_is_unchanged(tmp_path: Path) -> None:
     assert "late start" not in done.stderr
 
 
-@pytest.mark.parametrize("bad", ["soon", "2026-11-19T08:05:00", "nan", "2026-13-40T00:00Z"])
+@pytest.mark.parametrize(
+    # -1e300/1e300 are finite floats datetime cannot represent: refused at
+    # parse time (2), not left to crash utc_stamp at the post-wait breach.
+    "bad", ["soon", "2026-11-19T08:05:00", "nan", "2026-13-40T00:00Z", "-1e300", "1e300"]
+)
 def test_unparseable_start_by_is_a_usage_error_before_anything(tmp_path: Path, bad: str) -> None:
     marker = tmp_path / "must-not-exist"
-    done = _invoke(tmp_path, ["--start-by", bad, *_touch(marker)])
+    # "=" form: a bare "-1e300" would be read by argparse as an option and
+    # refused for the wrong reason, which would not exercise parse_start_by.
+    done = _invoke(tmp_path, [f"--start-by={bad}", *_touch(marker)])
     assert done.returncode == 2, done.stderr
-    assert "--start-by" in done.stderr
+    assert "argument --start-by: " in done.stderr
+    assert "expected one argument" not in done.stderr
     assert not marker.exists()
     # argparse refused before run(): no completion record either.
     assert _records(tmp_path) == []
@@ -155,3 +162,29 @@ def test_deadline_that_passes_during_pre_spawn_work_refuses(
     assert "0.5s late" in stream.getvalue()
     (row,) = _records(tmp_path)
     assert row["termination_cause"] == "late-start"
+
+
+def test_late_start_record_carries_the_resolved_memory_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The budget is resolved before the gate, so the late-start record names
+    # the grant the run would have had, as the spawn-failure record does.
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
+    monkeypatch.delenv(memory_guard.RESOLVED_MEMORY_MB_ENV, raising=False)
+    runner = _load_runner()
+    monkeypatch.setattr(runner.bounded_contract, "execute", lambda *a, **k: 0)
+    rc = runner.run(
+        ["true"],
+        timeout=None,
+        grace=1.0,
+        memory_mb=512,
+        stream=io.StringIO(),
+        contract="command-status",
+        start_by=1000.0,
+        _clock=lambda: 1001.0,
+    )
+    assert rc == 79
+    (row,) = _records(tmp_path)
+    assert row["termination_cause"] == "late-start"
+    assert row["memory_ceiling_mb"] == 512
+    assert row["memory_budget_source"] == "explicit"
