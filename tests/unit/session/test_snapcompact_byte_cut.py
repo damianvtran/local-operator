@@ -121,7 +121,7 @@ def _stamped_images(messages) -> int:
     )
 
 
-def _dump(messages) -> list[dict]:
+def _dump(messages) -> list[dict[str, object]]:
     return [message.model_dump(mode="json") for message in messages]
 
 
@@ -324,6 +324,7 @@ async def test_a_byte_fired_pass_leaves_room_for_at_least_eight_more_screenshots
     kept_frames = sum(
         1
         for message in session._context.messages
+        if isinstance(message, Message)
         for block in message.content
         if isinstance(block, ImageContent) and len(block.data) == FRAME_B64
     )
@@ -344,6 +345,7 @@ async def test_the_newest_frame_survives_a_byte_fired_pass_byte_for_byte(tmp_pat
     session = _make_session(tmp_path, compaction_settings=CompactionSettings())
     await _grow(session, 20)
     newest = session._context.messages[-1]
+    assert isinstance(newest, Message)
     # A payload no other frame has, so equality cannot be met by a neighbour.
     distinct = "B" * FRAME_B64
     newest.content[1] = ImageContent(data=distinct)
@@ -378,7 +380,7 @@ async def test_the_rendered_prefix_is_not_rewritten_between_passes(tmp_path):
     def passes() -> int:
         return sum(isinstance(event, CompactionEndEvent) for event in events)
 
-    previous: list[dict] | None = None
+    previous: list[dict[str, object]] | None = None
     quiet_turns_after_first_pass = 0
     for index in range(30):
         assistant, tool = _group(index)
