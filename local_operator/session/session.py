@@ -5960,6 +5960,10 @@ class Session:
         # session's own context exists. This pass cannot cover a capability that
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
+        # Observe authority before the initial merge so a grant arriving before
+        # the first prompt remains a transition. Inventory replacement is not an
+        # authority change: unchanged authority must preserve refresh_tools exactly.
+        self._notify_authority_available = self._notify_tool_callable() is not None
         self._merge_capability_tools()
         # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
         # below must see the whole inventory it narrows.
@@ -19210,13 +19214,18 @@ class Session:
     def _reconcile_notify_tool(self) -> None:
         """Apply external authority changes at the next turn's inventory boundary.
 
-        The CLI writes a sidecar, not this owner's in-memory tool list. Rescue
-        only notify: a blanket capability merge could restore tools a delegated
-        role deliberately pruned. Existing declaration filtering still bounds
-        the rescue, and cached invocations independently recheck revocation.
+        The CLI writes a sidecar, not this owner's in-memory tool list. Only an
+        observed authority transition may change inventory: unchanged authority
+        must not undo a caller's exact refresh_tools replacement. Rescue only
+        notify through declaration filtering; cached invocations independently
+        recheck revocation, so this observation is never a permission cache.
         """
+        available = self._notify_tool_callable() is not None
+        if available == self._notify_authority_available:
+            return
+        self._notify_authority_available = available
         present = any(tool.name == "notify" for tool in self._tools)
-        if self._notify_tool_callable() is not None:
+        if available:
             if not present:
                 self._merge_capability_tools(("notify",))
         elif present:

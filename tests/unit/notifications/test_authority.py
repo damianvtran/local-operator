@@ -11,6 +11,7 @@ import pytest
 
 from local_operator.cli import sessions_notifications_command
 from local_operator.harness.types import (
+    AgentTool,
     StreamEndEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -206,6 +207,87 @@ async def test_cli_grant_reaches_next_live_provider_request_and_executes(
         assert len(NotificationStore(tmp_path).list_items()[0]) == 1
         await session.prompt("After revocation")
         assert not any(tool.name == "notify" for tool in stream.requests[3].tools)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace_before_first_prompt", [False, True])
+@pytest.mark.parametrize("granted_workstream", [False, True])
+async def test_unchanged_authority_preserves_exact_replacement_across_prompts(
+    tmp_path: Path, replace_before_first_prompt: bool, granted_workstream: bool
+) -> None:
+    if granted_workstream:
+        directory = tmp_path / "sess"
+        _workstream(directory)
+        set_grant(directory, allow=True, reason="operator request")
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]] * 3
+    )
+    session = make_session(tmp_path, stream)
+    try:
+        assert session._notify_tool_callable() is not None
+        if not replace_before_first_prompt:
+            await session.prompt("Before replacement")
+
+        async def execute(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("Inventory-only tools must not execute")
+
+        replacement = [
+            AgentTool(name="mcp__late_one", execute=execute),
+            AgentTool(name="mcp__late_two", execute=execute),
+        ]
+        session.refresh_tools(replacement)
+        # A caller replacement is not a declaration or an authority transition.
+        # It must remain exact on both the first and subsequent provider calls.
+        for _ in range(2):
+            await session.prompt("Use the replacement")
+            assert [tool.name for tool in stream.requests[-1].tools] == [
+                "mcp__late_one",
+                "mcp__late_two",
+            ]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_after_grant", [False, True])
+async def test_grant_before_first_prompt_survives_inventory_refresh_and_executes(
+    tmp_path: Path, refresh_after_grant: bool
+) -> None:
+    directory = tmp_path / "sess"
+    _workstream(directory)
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(
+                    index=0,
+                    id="notify-memo",
+                    name="notify",
+                    argument_delta=json.dumps(
+                        {"title": "Memo ready", "body": "Synthetic memo", "key": "memo"}
+                    ),
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="published"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    session._config_dir = tmp_path / "config"
+    try:
+        assert session._notify_tool_callable() is None
+        assert not any(tool.name == "notify" for tool in session._tools)
+        set_grant(directory, allow=True, reason="operator request")
+        if refresh_after_grant:
+            # Refresh changes inventory, not the last observed authority. It
+            # cannot consume a grant before the turn boundary observes it.
+            session.refresh_tools([])
+        await session.prompt("Publish the memo")
+        assert any(tool.name == "notify" for tool in stream.requests[0].tools)
+        items, _ = NotificationStore(session._config_dir).list_items()
+        assert len(items) == 1 and items[0]["key"] == "memo"
+        assert session._run_notified is True
     finally:
         await session.dispose()
 
