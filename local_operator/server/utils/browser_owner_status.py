@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from local_operator.browser_bridge.resources import RESOURCE_NAME
+from local_operator.browser_bridge.resource_layout import RESOURCE_NAME
 from local_operator.session.retention import SESSIONS_DIRNAME
 from local_operator.session_lease import (
     LEASE_NAME,

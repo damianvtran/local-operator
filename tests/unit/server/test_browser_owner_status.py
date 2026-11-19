@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -30,6 +32,29 @@ AUTH = {"Authorization": f"Bearer {BEARER}"}
 PARENT = "bb0a00000001"
 CHILD = "bb0a00000002"
 MISSING = "bb0a00000003"
+
+
+def test_owner_status_router_stays_off_the_browser_transport_boot_path(tmp_path: Path) -> None:
+    # The in-process HTTP fixture already uses httpx; only a cold interpreter can
+    # distinguish the router's own imports from the test client's dependencies.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; "
+            "from local_operator.server.routes import desktop_sessions as m; "
+            f"assert {ROUTE!r} in {{r.path for r in m.router.routes}}; "
+            "assert 'local_operator.browser_bridge.backend' not in sys.modules; "
+            "assert 'httpx' not in sys.modules",
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        env={"HOME": str(tmp_path), "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / ".lop")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.fixture
