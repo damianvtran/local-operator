@@ -174,9 +174,11 @@ def test_a_group_or_a_hub_that_names_no_kind_never_routes(tmp_path, monkeypatch,
     owner, config_dir, store, calls = _setup(tmp_path, monkeypatch, kind=kind)
     _asked(config_dir, ASKER, ago_s=30, owner=owner, message_id="bcmsg_ask00001")
 
-    _run(owner, config_dir)
+    out = _run(owner, config_dir)
 
-    assert [c["session"] for c in calls] == [DESIGNATED]
+    # The failure message names what the run did when no wake was made (claimed
+    # elsewhere, badge-only, a hold): an empty ``calls`` alone says nothing.
+    assert [c["session"] for c in calls] == [DESIGNATED], out
     assert _reservation(store, owner)["routed_session"] is None
 
 
