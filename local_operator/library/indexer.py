@@ -692,27 +692,37 @@ class LibraryIndexer:
         watch has already released every descriptor, and one warning names the
         limit and the remedy; repeating it per session would only flood the log
         of a host that is already short on watches.
+
+        ``observer_failed`` is set LAST, in ``finally``: readers (status
+        surfaces, and the tests that wait on it before inspecting the log)
+        treat the flag as "the failure is fully reported". Setting it first
+        let a reader on another thread see the flag while the warning was
+        still being built (``budget_limit`` runs inside its arguments), and
+        read a log with no warning in it. ``finally`` keeps the flag set on
+        the already-warned early return and if logging itself raises.
         """
-        self.observer_failed = True
-        if self._watch_warned:
-            return
-        self._watch_warned = True
-        code = getattr(error, "errno", None)
-        if code in session_watch.BUDGET_ERRNOS:
-            logger.warning(
-                "library: inotify limit reached (%s); journal watch off, using the timed "
-                "reconcile. Raise %s, or find the holder with `lop mobile doctor`.",
-                error,
-                session_watch.budget_limit(code),
-            )
-        else:
-            # A non-OSError is a bug or a broken libc, not a budget: keep its
-            # traceback (an OSError's message already says everything).
-            logger.warning(
-                "library: journal watch stopped (%s); using the timed reconcile",
-                error,
-                exc_info=None if isinstance(error, OSError) else error,
-            )
+        try:
+            if self._watch_warned:
+                return
+            self._watch_warned = True
+            code = getattr(error, "errno", None)
+            if code in session_watch.BUDGET_ERRNOS:
+                logger.warning(
+                    "library: inotify limit reached (%s); journal watch off, using the timed "
+                    "reconcile. Raise %s, or find the holder with `lop mobile doctor`.",
+                    error,
+                    session_watch.budget_limit(code),
+                )
+            else:
+                # A non-OSError is a bug or a broken libc, not a budget: keep its
+                # traceback (an OSError's message already says everything).
+                logger.warning(
+                    "library: journal watch stopped (%s); using the timed reconcile",
+                    error,
+                    exc_info=None if isinstance(error, OSError) else error,
+                )
+        finally:
+            self.observer_failed = True
 
     def _mark_dirty(self, session_id: str) -> None:
         if session_id:
