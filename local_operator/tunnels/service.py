@@ -722,8 +722,7 @@ def _requires_client_update(failure: BaseException) -> bool:
     # Read typed status across wrappers, never prose/provider data. An older API
     # wrapper may retain 426 without the dedicated new exception type.
     return any(
-        isinstance(link, RequestFailed) and link.status == 426
-        for link in _failure_chain(failure)
+        isinstance(link, RequestFailed) and link.status == 426 for link in _failure_chain(failure)
     )
 
 

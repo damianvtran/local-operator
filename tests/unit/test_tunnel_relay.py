@@ -724,7 +724,9 @@ async def _stop(task: asyncio.Task[int]) -> int:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token_present", [False, True])
-async def test_relay_offered_without_cloudflared_runs_relay_only(tmp_path, monkeypatch, token_present):
+async def test_relay_offered_without_cloudflared_runs_relay_only(
+    tmp_path, monkeypatch, token_present
+):
     async with FakeRelay({}) as relay:
         service, served, _, children = _relay_service(tmp_path, monkeypatch, relay, binary=False)
         if not token_present:

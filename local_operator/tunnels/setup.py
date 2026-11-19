@@ -629,9 +629,7 @@ def _disabled_copy(plan: dict[str, Any]) -> Msg:
     return ms.disabled_resume() if plan.get("resuming") else ms.disabled()
 
 
-def _client_update_plan(
-    connector: dict[str, Any], fields: dict[str, Any]
-) -> dict[str, Any] | None:
+def _client_update_plan(connector: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any] | None:
     from local_operator.tunnels import gateway
 
     # GET polling does not negotiate bootstrap. Preserve a known 426 while the

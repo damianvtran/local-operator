@@ -13,7 +13,16 @@ import httpx
 import pytest
 
 from local_operator.providers.auth_store import AuthStore
-from local_operator.tunnels import cli, gateway, install, report, service, setup, state, upgrade
+from local_operator.tunnels import (
+    cli,
+    gateway,
+    install,
+    report,
+    service,
+    setup,
+    state,
+    upgrade,
+)
 from local_operator.tunnels.api import RadientTunnels
 from local_operator.tunnels.errors import ClientUpgradeRequired, RequestFailed
 
@@ -28,7 +37,7 @@ def refusing_server():
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, *_args):
+        def log_message(self, format: str, *_args: object) -> None:
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -86,10 +95,16 @@ async def test_http_426_is_actionable_permanent_and_body_safe(tmp_path, monkeypa
     monkeypatch.setattr(cli, "dispatch", rejected)
     assert await asyncio.to_thread(cli.main, argparse.Namespace(tunnel_command="connect")) == 1
     assert str(failure) in capsys.readouterr().err
-    applied = await setup._apply(initial_plan={
-        "step": "apply", "ready": True, "verified": False,
-        "configured": False, "credential_id": row.id, "activation_required": False,
-    })
+    applied = await setup._apply(
+        initial_plan={
+            "step": "apply",
+            "ready": True,
+            "verified": False,
+            "configured": False,
+            "credential_id": row.id,
+            "activation_required": False,
+        }
+    )
     assert applied["step"] == "client_update" and applied["failure_stage"] == "reservation"
     assert not applied["ready"] and applied["receipts"] == []
     assert "untrusted-body-canary" not in json.dumps(applied)
@@ -125,7 +140,9 @@ async def test_http_426_is_actionable_permanent_and_body_safe(tmp_path, monkeypa
     assert "untrusted-body-canary" not in json.dumps(parked)
     monkeypatch.setattr(install.supervisors, "supervisor", lambda: "launchd")
     assert install.rearm_if_parked(provider="radient", credential_id=row.id) == ""
-    assert state.parked()["reason"] == upgrade.REASON
+    still_parked = state.parked()
+    assert still_parked is not None
+    assert still_parked["reason"] == upgrade.REASON
     monkeypatch.setattr(
         setup.config, "transport_override", lambda: setup.config.TRANSPORT_CLOUDFLARE
     )
