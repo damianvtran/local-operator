@@ -1,0 +1,35 @@
+{
+  "kind": "context_only_compatibility_ack",
+  "date": "2026-11-19T16:26:21.896542+00:00",
+  "auditor": {
+    "agent": "i18n-auditor (vertex-i18n-audit-secondary)",
+    "session": "03178f8c9cba",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "Current resumed session host model declaration; original audit provenance retained unchanged in secondary-report.json."
+  },
+  "original_report": {
+    "path": "/Users/damian/.local-operator/sessions/03178f8c9cba/scratchpad/vertex-i18n-secondary/secondary-report.json",
+    "sha256": "523ad23652a88c9d6f382e335ed93e3a4f69914188106bf6da7f1da5849061e0"
+  },
+  "old_context_sha256": "3cd3aea2a7d54c979bfd3bdbbaa46da061c4a5a99ad02c3075ce8ca23cfdf916",
+  "new_context_sha256": "fa524f9163a535252a9f9eac8d391b46f86fcd2435c3723a8d0be12b6198faef",
+  "exact_delta": {
+    "key": "providers.vertex_prompts.prompt.field",
+    "field": "note",
+    "old": "CLI and Desktop required-field question. {field} is an already-localized field label (Google Cloud project ID), not a secret or user input. Empty submission cancels login. Trailing space separates terminal input from prompt; preserve it. Desktop strips trailing space.",
+    "new": "CLI required-field question. {field} is an already-localized field label (Google Cloud project ID), not a secret or user input. Empty submission cancels login. Trailing space separates terminal input from prompt; preserve it. Desktop uses only the localized field label because its input endpoint rejects empty submissions and exposes a separate cancel action."
+  },
+  "verification": "Reconstructed original context by replacing only this note; SHA-256 exactly matches original audited context. English plus all seven target file hashes exactly match original audit. No semantic rerun or string edits.",
+  "verdict": "Original semantic PASS retained for all seven locales; zero unresolved BLOCKER/MAJOR. CLI-only template applicability matches empty-to-cancel wording. Desktop uses project-ID field label without promising unsupported empty-submit cancellation.",
+  "limits": "Desktop endpoint behavior supplied by coder/manager; not independently re-executed in this acknowledgement. No rendered or runtime QA sign-off added.",
+  "unchanged_catalogue_hashes": {
+    "en": "27eea2d21975bd655a616bb412364c855c753c8256eed8a1fa42cc83869d10ae",
+    "fr": "295f4a38e6695174d34855f869539b98ed73d276584af0f80988f0b3734bc614",
+    "es": "52529ec33127aa2ffba7adf14635b482db25aa73424c3784bea94cb83213d6b0",
+    "zh-CN": "8986c34d6ef9b2631ef796df4a1fbf9072f13916fdc567983a7fa14f983ad5cf",
+    "ru": "cfcb52a7f46ff674ed6ee702d1652ba3a2f3124ac7db7842717269cae822ffbf",
+    "vi": "ba29f8fb06364e521ec81eaca247a69a240f5c6d5c53597301acee0eaf758d5c",
+    "ur": "e394387c8dfa4afcdc77ac12d8b66f7701332de7bacca2b1336f7bdcccb1e856",
+    "hi": "af86a9e5b7ecdf54906ab8f1668abf32995b3d7411cae478e9b1d6b719c59f59"
+  }
+}

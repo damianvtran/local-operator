@@ -107,12 +107,13 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     else:
         prompt = "Paste the code here (empty to cancel): "
     # A prompt opened AFTER the browser/paste race is decided is a follow-up
-    # question (Vertex asks for a project ID); its text arrived via
-    # ``on_progress`` just before, so it gets a neutral input line rather than
-    # "Paste the code here". Reset by ``on_input_rejected``: a rejected paste is
+    # question (Vertex asks for a project ID); ``on_setup_input`` supplies its
+    # explicit field label, rather than reusing "Paste the code here".
+    # Reset by ``on_input_rejected``: a rejected paste is
     # re-offered as the same fallback.
     race: dict[str, Any] = {"over": False}
     follow_up_prompt = "Enter value (empty to cancel): "
+    follow_up_secret = False
 
     def read_credential() -> str:
         """Read a possibly multi-line credential (JSON object) or a file path.
@@ -177,6 +178,10 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         protect a value that is not worth protecting.
         """
         if race["over"]:
+            if follow_up_secret and sys.stdin.isatty():
+                import getpass
+
+                return getpass.getpass(follow_up_prompt)
             return input(follow_up_prompt)
         if wants_credential:
             return read_credential()
@@ -297,6 +302,20 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
             race["over"] = True
         return value.strip() or None
 
+    async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+        nonlocal follow_up_prompt, follow_up_secret
+        # Adopt the existing daemon reader if the optional OAuth paste lost
+        # the browser race. A second stdin reader could swallow this answer.
+        # Vertex requests only a nonsecret project, so adopting the unmasked
+        # OAuth-code reader does not weaken the field's secrecy contract.
+        from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+        from local_operator.i18n.messages import render_resolved
+
+        follow_up_prompt = render_resolved(prompt_keys.prompt_field(field=field))
+        follow_up_secret = secret
+        race["over"] = True
+        return await on_manual_code_input()
+
     def on_input_rejected() -> None:
         race["over"] = False
 
@@ -307,6 +326,9 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         on_progress=on_progress,
         on_input_rejected=on_input_rejected,
         on_manual_code_input=manual_input,
+        # Keep local-server setup's existing host support unchanged. This hook
+        # is for required post-auth fields, not a new endpoint setup wizard.
+        on_setup_input=on_setup_input if not definition.local_setup else None,
         displays_warnings=True,
     )
 

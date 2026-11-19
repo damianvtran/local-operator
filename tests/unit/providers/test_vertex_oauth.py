@@ -244,7 +244,7 @@ async def test_login_vertex_oauth_probes_service_usage_when_no_vertex_name(
 async def test_login_vertex_oauth_falls_back_to_manual_project_prompt_when_none_discovered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If Cloud Resource Manager returns zero projects, prompt once via on_manual_code_input."""
+    """No discovered project uses a required field, never the optional OAuth code prompt."""
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("VERTEX_PROJECT", raising=False)
 
@@ -272,25 +272,30 @@ async def test_login_vertex_oauth_falls_back_to_manual_project_prompt_when_none_
             )
 
     async def on_manual() -> str | None:
+        import asyncio
+
+        # The browser wins the optional code race; this callback must never
+        # be reused to ask for required post-auth configuration.
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    def on_setup(field: str, default: str, secret: bool) -> str:
         nonlocal prompt_calls
         prompt_calls += 1
-        # First call may race the loopback callback; delay it so the callback wins,
-        # then the second call (post-exchange) supplies the project id.
-        if prompt_calls == 1:
-            import asyncio
-
-            await asyncio.sleep(5)
-            return None
+        assert (field, default, secret) == ("Google Cloud project ID", "", False)
         return "manual-gcp-project"
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         creds = await vertex.login_vertex_oauth(
-            LoginCallbacks(on_auth_url=on_auth_url, on_manual_code_input=on_manual),
+            LoginCallbacks(
+                on_auth_url=on_auth_url, on_manual_code_input=on_manual, on_setup_input=on_setup
+            ),
             open_browser=lambda _url: None,
             http_client=http,
         )
 
     assert creds["project_id"] == "manual-gcp-project"
+    assert prompt_calls == 1
 
 
 @pytest.mark.asyncio
@@ -720,11 +725,10 @@ async def test_service_account_refresh_only_updates_token_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_vertex_oauth_no_project_and_no_answer_raises_actionable_error(
+async def test_login_vertex_oauth_no_project_and_no_field_reader_raises_actionable_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MAJOR 4: zero projects and an empty project answer ends with guidance, not a
-    credential that fails on the first request."""
+    """A host without field input gets configuration guidance, not partial credentials."""
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("VERTEX_PROJECT", raising=False)
 
@@ -737,7 +741,7 @@ async def test_login_vertex_oauth_no_project_and_no_answer_raises_actionable_err
         return httpx.Response(200, json={"projects": []})
 
     flow = vertex.VertexOAuthFlow(
-        LoginCallbacks(on_manual_code_input=lambda: ""),
+        LoginCallbacks(),
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(LoginError, match="GOOGLE_CLOUD_PROJECT"):
@@ -829,14 +833,16 @@ def test_cli_follow_up_prompt_adopts_the_parked_reader(
         await asyncio.sleep(0.05)
         first.cancel()  # the browser callback won the race
         await asyncio.gather(first, return_exceptions=True)
-        second = asyncio.ensure_future(callbacks.on_manual_code_input())
+        second = asyncio.ensure_future(
+            callbacks.on_setup_input("Google Cloud project ID", "", False)
+        )
         await asyncio.sleep(0.05)
         typed.set()
         return await asyncio.wait_for(second, 5)
 
     assert asyncio.run(scenario()) == "my-manual-proj"
     assert reads == ["Paste the code here (empty to cancel): "]
-    assert "Enter value (empty to cancel): " in capsys.readouterr().out
+    assert "Enter Google Cloud project ID (empty to cancel): " in capsys.readouterr().out
 
 
 @pytest.mark.usefixtures("_no_token_uri_override")
@@ -873,3 +879,31 @@ def test_cli_login_google_vertex_sa_end_to_end_with_piped_json(
     assert creds["auth_mode"] == "service_account" and creds["access"] == "ya29.ok"
     assert seen == [vertex.TOKEN_URL]
     assert "API key" not in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [None, "", "   "])
+async def test_vertex_project_field_cancel_does_not_return_partial_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str | None,
+) -> None:
+    from local_operator.providers.oauth.callback_server import LoginCancelledError
+
+    for name in ("GOOGLE_CLOUD_PROJECT", "VERTEX_PROJECT"):
+        monkeypatch.delenv(name, raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == vertex.TOKEN_URL:
+            return httpx.Response(200, json={"access_token": "synthetic", "expires_in": 3600})
+        return httpx.Response(200, json={"projects": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        callbacks = LoginCallbacks(on_setup_input=lambda _field, _default, _secret: answer)
+        flow = vertex.VertexOAuthFlow(callbacks, http_client=http)
+        with pytest.raises(LoginCancelledError, match="cancelled"):
+            await flow.exchange_token("synthetic-code", "state", "http://127.0.0.1:8085/")
+
+
+def test_cli_required_field_hook_does_not_enable_local_server_setup() -> None:
+    """Adding post-OAuth fields must not change endpoint setup's host support."""
+    assert _cli_prompt("openai-compatible").on_setup_input is None

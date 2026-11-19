@@ -534,8 +534,10 @@ class LoginCallbacks:
     on_warning: Callable[[str], Awaitable[None] | None] | None = None
     on_input_rejected: Callable[[], Awaitable[None] | None] | None = None
     on_manual_code_input: Callable[[], Awaitable[str | None] | str | None] | None = None
-    # Endpoint setup is a sequence of explicit fields, not an OAuth code. The
-    # host decides how to capture them; the controller never touches stdin.
+    # Explicit configuration fields, not an OAuth code: endpoint setup or a
+    # required post-auth project. The host decides how to capture them; flows
+    # never touch stdin. None cancels; an empty value is interpreted by the
+    # caller (optional endpoint fields can keep defaults; required login fields cancel).
     on_setup_input: Callable[[str, str, bool], Awaitable[str | None] | str | None] | None = None
     #: Structured facts about the flow a host renders as CONTROLS rather than
     #: prose: ``user_code`` (a device flow's code), ``launch_url`` (the short

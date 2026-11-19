@@ -469,19 +469,25 @@ class VertexOAuthFlow(OAuthCallbackFlow):
             if owns_client:
                 await http.aclose()
 
-        if not project_id and self.callbacks.on_manual_code_input is not None:
-            # A REQUIRED post-callback prompt: the progress text is the prompt
-            # (CLI prints it, Desktop surfaces it as the operation message), and
-            # the browser callback has already completed by now — the base flow
-            # awaits the cancelled paste-code reader before calling us.
-            await report_safely(
-                self.callbacks.on_progress,
-                "No active Google Cloud project was found automatically. "
-                "Enter your Google Cloud project ID:",
+        if not project_id and self.callbacks.on_setup_input is not None:
+            # OAuth has finished: this is required, nonsecret configuration,
+            # not the optional authorization-code reader raced by the browser.
+            # Reuse the explicit field contract so each host can label and
+            # cancel this prompt without inferring its kind from progress text.
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.messages import render_resolved
+
+            pasted_project = await maybe_await(
+                self.callbacks.on_setup_input(
+                    render_resolved(prompt_keys.field_project_id()), "", False
+                )
             )
-            pasted_project = await maybe_await(self.callbacks.on_manual_code_input())
-            if pasted_project and pasted_project.strip():
-                project_id = pasted_project.strip()
+            if not pasted_project or not pasted_project.strip():
+                # The required field has no alternate completion path: empty
+                # Enter, Escape and Ctrl+C must cancel, never store a partial
+                # OAuth credential or claim we are still awaiting the browser.
+                raise LoginCancelledError()
+            project_id = pasted_project.strip()
         if project_id:
             project_id = validate_project_id(project_id)
         else:

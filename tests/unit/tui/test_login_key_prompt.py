@@ -970,3 +970,69 @@ async def test_the_pending_browser_block_does_not_dump_the_oauth_url(
     # Non-zero control: the same call DOES print it when the browser is remote,
     # so the absence above cannot be a block that prints nothing.
     assert long_url in headless, headless
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keys, answer",
+    [
+        ([*"synthetic-project", "enter"], "synthetic-project"),
+        (["enter"], None),
+        (["escape"], None),
+        (["ctrl+c"], None),
+    ],
+)
+async def test_vertex_required_project_field_has_no_oauth_code_semantics(
+    keys: list[str],
+    answer: str | None,
+) -> None:
+    """D1/U1: after OAuth, the project is nonsecret and cancelling ends login.
+
+    Drive real OperatorApp callbacks and keys, not a bare prompt host: the bug
+    was the callback choosing the optional browser-code contract.
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        callbacks = app._login_callbacks(get_provider_definition("google-vertex"))
+        assert callbacks.on_setup_input is not None
+        task = asyncio.create_task(callbacks.on_setup_input("Google Cloud project ID", "", False))
+        await pilot.pause()
+        block = app._key_prompt
+        assert block is not None
+        pending = _rendered(block)
+        assert "Google Cloud project ID" in pending
+        assert "authorization code" not in pending
+        assert "skip paste" not in pending
+        assert block.secret is False and block.sole_path is True
+        await pilot.press(*keys)
+        assert await asyncio.wait_for(task, 5) == answer
+        receipt = _rendered(block)
+        if answer:
+            assert "Google Cloud project ID received" in receipt
+            assert "code received" not in receipt
+        else:
+            assert "login cancelled" in receipt
+
+
+@pytest.mark.asyncio
+async def test_vertex_service_account_prompt_labels_json_and_stays_secret() -> None:
+    """D2: a service-account credential is JSON/path, not an API key."""
+    from local_operator.providers.registry import get_provider_definition
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        callbacks = app._login_callbacks(get_provider_definition("google-vertex-sa"))
+        assert callbacks.on_manual_code_input is not None
+        task = asyncio.create_task(callbacks.on_manual_code_input())
+        await pilot.pause()
+        block = app._key_prompt
+        assert block is not None
+        assert "service account JSON or JSON file path" in _rendered(block)
+        assert "API key" not in _rendered(block)
+        assert block.secret is True
+        await pilot.press(*"synthetic-json-path")
+        assert "synthetic-json-path" not in _rendered(block)
+        await pilot.press("escape")
+        assert await asyncio.wait_for(task, 5) is None

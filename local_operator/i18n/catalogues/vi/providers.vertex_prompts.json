@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "ID dự án Google Cloud",
+  "providers.vertex_prompts.field.service_account": "JSON của tài khoản dịch vụ hoặc đường dẫn tệp JSON",
+  "providers.vertex_prompts.hint.required": "Enter để gửi; để trống rồi nhấn Enter hoặc nhấn Esc để hủy đăng nhập.",
+  "providers.vertex_prompts.prompt.field": "Nhập {field} (để trống để hủy): "
+}

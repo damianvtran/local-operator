@@ -459,6 +459,16 @@ class DesktopAuth:
             if not op.abandoned:
                 op.message = "Sign-in could not use that response. Check it and try again."
 
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # This is a required configuration step after OAuth, not another
+            # optional code paste. Publish the explicit field label instead of
+            # inferring a question from provider progress narration.
+            op.paste_race_over = True
+            # Desktop rejects empty /input submissions; its cancel endpoint is
+            # the way out. Do not reuse CLI's empty-to-cancel instruction here.
+            op.last_progress = field
+            return await on_input()
+
         async def on_input() -> str | None:
             if op.abandoned:
                 # No prompt for a flow nobody is watching; None is the paste
@@ -516,6 +526,7 @@ class DesktopAuth:
             on_warning=on_warning,
             on_input_rejected=on_input_rejected,
             on_manual_code_input=on_input if definition.accepts_paste_prompt else None,
+            on_setup_input=on_setup_input if not definition.local_setup else None,
             on_flow_details=on_flow_details,
         )
         from local_operator.providers.controller import ProviderController

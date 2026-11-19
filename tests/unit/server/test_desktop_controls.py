@@ -1740,7 +1740,10 @@ async def test_an_optional_paste_keeps_the_browser_primary(desktop, monkeypatch)
     assert "Paste the key" not in waiting["message"]
 
 
-async def test_vertex_post_callback_project_prompt_is_required_and_answerable(desktop, monkeypatch):
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_vertex_post_callback_project_prompt_is_required_and_answerable(
+    desktop, monkeypatch, cancel
+):
     """MAJOR 4 / QA Q2: the REAL Vertex flow, Cloud Resource Manager returning
     zero projects. After the browser callback wins, the follow-up project-ID
     prompt must be live (required, not optional, with its own prompt_id and
@@ -1802,7 +1805,21 @@ async def test_vertex_post_callback_project_prompt_is_required_and_answerable(de
     assert snapshot["input_required"] is True
     assert snapshot["input_optional"] is False
     assert snapshot["prompt_id"] and snapshot["prompt_id"] != first_prompt
-    assert "project ID" in snapshot["message"]
+    assert snapshot["message"] == "Google Cloud project ID"
+    if cancel:
+        # Desktop has an explicit cancel control, not CLI's empty-line cancel.
+        # Keep the HTTP contract honest while proving no partial OAuth row is
+        # stored after declining this required post-auth field.
+        empty = await client.post(
+            f"/v1/auth/operations/{started['id']}/input",
+            json={"value": "", "prompt_id": snapshot["prompt_id"]},
+        )
+        assert empty.status_code == 422
+        cancelled = await client.delete(f"/v1/auth/operations/{started['id']}")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["result"]["state"] == "cancelled"
+        assert not desktop[1].state.desktop_auth.store.list_credentials("google-vertex")
+        return
 
     reply = await client.post(
         f"/v1/auth/operations/{started['id']}/input",
