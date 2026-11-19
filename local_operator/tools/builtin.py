@@ -27653,10 +27653,32 @@ async def _node_site_access(
         )
     if not receipt.get("ok"):
         error = str(receipt.get("error") or "the ask was refused")
+        if receipt.get("code") == site_approval.SITE_REQUESTER_CLOSED:
+            # THE TEARDOWN OWNS THIS ENTRY (60334 R4 / R2-2 residual). The fence
+            # closed while this dispatch was in flight, so the teardown holds
+            # its cancel and runs it after this call finishes, behind the guard
+            # that skips an origin whose card of this requester is ``deciding``
+            # or ``unknown``. Cancelling here would bypass that guard; the
+            # extension's TTL is the floor if the teardown's wait runs out.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"Refused request_access for {url}: this subagent has finished, so no "
+                "card was raised and nothing will notify the operator.",
+                details={
+                    "origin": origin,
+                    "code": site_approval.SITE_REQUESTER_CLOSED,
+                    "state": "none",
+                },
+            )
         if "already carries that question" in error:
-            # This origin is already on the operator's card, bound to THIS
-            # entry: any card for another entry was withdrawn above, so the
-            # identical text the queue refuses is the live card's.
+            # This origin is already on an operator card with this exact text.
+            # Through the child door that card is bound to THIS entry and
+            # requester (``_queue_site_card``). On the top-level path the
+            # queue's identical-text refusal may instead name ANOTHER
+            # requester's card in this family (a child's, which the scoped
+            # withdraw above leaves alone). Either way the operator has been
+            # asked, so the copy holds and nothing is withdrawn.
             return _text(
                 tool_call_id,
                 "browser",

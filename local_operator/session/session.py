@@ -15349,12 +15349,19 @@ class Session:
         teardown can withdraw its entry (never anyone else's: ``cancel_access``
         is keyed by origin and THIS requester).
         """
-        from local_operator.browser_bridge.site_approval import SiteAccessFacts
+        from local_operator.browser_bridge.site_approval import (
+            SITE_REQUESTER_CLOSED,
+            SiteAccessFacts,
+        )
 
         if not isinstance(facts, SiteAccessFacts) or not facts.entry_id:
             return {"ok": False, "error": "only typed site-access facts can raise a site card"}
         if self._site_requests_closed:
-            return {"ok": False, "error": "site card refused: this session has finished"}
+            return {
+                "ok": False,
+                "code": SITE_REQUESTER_CLOSED,
+                "error": "site card refused: this session has finished",
+            }
         host = self._site_card_host()
         if host is None:
             return {
@@ -15453,7 +15460,10 @@ class Session:
         self, facts: Any, *, requester: Session, timeout: Any, tool_call_id: str
     ) -> dict[str, Any]:
         """The 60334 checks every requester's facts pass before a card exists."""
-        from local_operator.browser_bridge.site_approval import SiteAccessFacts
+        from local_operator.browser_bridge.site_approval import (
+            SITE_REQUESTER_CLOSED,
+            SiteAccessFacts,
+        )
 
         refuse = self._refuse_site_card
         if not isinstance(facts, SiteAccessFacts):
@@ -15461,7 +15471,9 @@ class Session:
         if self.ask_queue() is None:
             return refuse("this session has no ask queue")
         if requester._site_requests_closed:
-            return refuse("the requester has finished")
+            # Typed, so the tool leaves the entry to the guarded teardown
+            # (``site_approval.SITE_REQUESTER_CLOSED``).
+            return {**refuse("the requester has finished"), "code": SITE_REQUESTER_CLOSED}
         if requester._pending_site_requests.get(facts.entry_id) != facts:
             return refuse("that request is not pending in the requester's browser")
         if facts.expires_at_ms is not None and facts.expires_at_ms <= int(time.time() * 1000):

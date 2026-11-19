@@ -903,6 +903,97 @@ async def test_f2_a_dispatch_in_flight_at_teardown_is_cancelled(tmp_path: Path) 
     assert root.ask_queue().records() == [], "no card for a finished requester"
     assert ext.state == "none", "the entry that crossed the fence is cancelled"
     assert _cancelled_by(ext, child)
+    assert result.details["code"] == "requester_closed"
+
+
+async def _re_request_across_the_fence(child: Any, ext: _Extension) -> Any:
+    """The child re-requests the origin, its teardown starts while that
+    ``request_access`` is in flight, and the reply lands after the fence
+    closed — so the tool's path meets the door's ``requester_closed``."""
+    import asyncio
+
+    gate, entered = asyncio.Event(), asyncio.Event()
+    real_call = ext.call
+
+    async def _slow_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "request_access":
+            entered.set()
+            await gate.wait()
+        return await real_call(method, params)
+
+    ext.call = _slow_call  # type: ignore[method-assign]
+    request = asyncio.ensure_future(_browser("request_access", child._build_tool_context(), ext))
+    await entered.wait()
+    teardown = asyncio.ensure_future(child.dispose())
+    await _until(lambda: child._site_requests_closed)
+    gate.set()
+    result = await request
+    await teardown
+    return result
+
+
+@pytest.mark.asyncio
+async def test_f3_a_closed_requesters_tool_path_leaves_an_unknown_cards_entry_alone(
+    tmp_path: Path,
+) -> None:
+    """60334 R4 (R2-2 residual). The requester's card is ``unknown`` (the
+    decision may have applied); it re-requests the same origin, so the
+    extension hands back the SAME pending entry, and its teardown starts
+    mid-dispatch. The door refuses ``requester_closed`` and the tool must
+    send NO ``cancel_access``: the teardown's guard skips that origin. Fails
+    on c6c398792, where the tool cancelled the entry under decision itself."""
+    from local_operator.browser_bridge.backend import BridgeUnreachable
+
+    root, child, ext, ask_id = await _child_card(tmp_path)
+    await _decide(root, ext, "approve", submit=_Counting(ext, BridgeUnreachable("lost")))
+    assert root._site_cards[ask_id].state == "unknown"
+    result = await _re_request_across_the_fence(child, ext)
+    assert _cancels_by(ext, child) == 0, "no cancel for the unknown card's entry"
+    assert result.is_error and result.details["code"] == "requester_closed", _text_of(result)
+    assert ext.state == "pending", "the entry is left to the decision / the extension's TTL"
+    assert _status(root, ask_id) == "open"
+
+
+@pytest.mark.asyncio
+async def test_f3b_control_an_open_cards_entry_is_cancelled_by_the_teardown(
+    tmp_path: Path,
+) -> None:
+    """The control for F3: with the card still ``open`` the guard passes, so
+    the teardown — not the tool — withdraws the card and cancels the entry."""
+    root, child, ext, ask_id = await _child_card(tmp_path)
+    assert root._site_cards[ask_id].state == "open"
+    result = await _re_request_across_the_fence(child, ext)
+    assert result.is_error and result.details["code"] == "requester_closed", _text_of(result)
+    assert _status(root, ask_id) == "withdrawn"
+    assert ext.state == "none" and _cancelled_by(ext, child)
+
+
+@pytest.mark.asyncio
+async def test_t3b_a_missing_bridge_state_file_is_pre_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60334 R4 MINOR-1. With no bridge state file the production
+    ``BridgeClient().call`` sends nothing, so the decision is provably
+    undelivered: ``site_unreachable`` and the card reopens. Fails on
+    c6c398792, where ``no_state`` was a plain ``BridgeUnreachable`` and the
+    card went ``unknown`` ("may or may not have been applied")."""
+    from local_operator.browser_bridge.backend import BridgeClient
+
+    root, _child, ext, ask_id = await _child_card(tmp_path)
+    monkeypatch.setattr(BridgeClient, "_read", lambda self: None)
+    [record] = _open(root)
+    [question] = record["questions"]
+    mint_bridge_decide_grant(
+        session_id=root.session_id,
+        ask_id=ask_id,
+        question_id=question["question_id"],
+        word="approve",
+        proof={"operator_sig": "3044ab", "operator_key_id": "kid", "challenge": "ch"},
+    )
+    # ``submit=None``: site_decide's own production submit over BridgeClient.
+    outcome = await root.site_decide(ask_id, question["question_id"], "approve")
+    assert outcome["code"] == "site_unreachable", outcome
+    assert root._site_cards[ask_id].state == "open"
 
 
 # --- lapse (design §3, 60334 design correction (1)) ------------------------------------

@@ -124,6 +124,13 @@ APPROVAL_SIGNED = "signed"
 #: The node has no usable anchor in policy: nobody can decide, so say so
 #: instead of queueing a prompt that expires unseen.
 APPROVAL_NO_APPROVER = "no_approver"
+#: The site-card door's typed refusal for a requester whose teardown has begun
+#: (60334 R4 / R2-2 residual). The browser tool must NOT cancel the entry on
+#: this code: the teardown already snapshotted the dispatch and owns its
+#: cancel, behind the guard that skips an origin with a ``deciding`` or
+#: ``unknown`` card of this requester. A direct cancel here would bypass that
+#: guard and could race a decision that already reached the extension.
+SITE_REQUESTER_CLOSED = "requester_closed"
 
 
 def _lp(value: str) -> bytes:
