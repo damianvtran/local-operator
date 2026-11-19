@@ -227,4 +227,68 @@ def test_owned_github_lend_row_names_its_serving_arm(
     assert row["kind"] == "github-app"
     assert (row["source"], row["label"]) == (source, label)
     out = _listing_text(capsys)
-    assert f"  github         {label:<15} owner: this device" in out, out
+    # The type column widens to the longest label, so ``owner:`` stays aligned
+    # (review n1 / QA Q3) and the gh lend carries the same caution as ``shareable``.
+    assert f"  github         {label:<{max(15, len(label))}} owner: this device" in out, out
+    assert (
+        f"  github         {label:<{max(15, len(label))}} owner: this device\n      {WARNING}"
+        in out
+    ) == (source == github_mod.SOURCE_GH), out
+
+
+def test_listing_type_column_aligns_owner_across_rows(capsys: pytest.CaptureFixture[str]) -> None:
+    """A wide label sizes the column for every row of that network (review n1)."""
+    from local_operator.network.credentials import placement as placement_mod
+
+    _arm(github_mod.SOURCE_GH)
+    self_device = _declare_github_lend()
+    document = placement_mod.PlacementDocument.load(
+        "n_0123456789abcdef01234567", _root(), self_device=self_device
+    )
+    document.declare(
+        "OPENAI_API_KEY",
+        owner_device=self_device,
+        owner_device_name="node2",
+        kind="api_key",
+        by=self_device,
+    )
+    document.save()
+    out = _listing_text(capsys)
+    rows = [line for line in out.splitlines() if "owner: this device" in line]
+    assert len(rows) == 2, out
+    assert len({line.index("owner:") for line in rows}) == 1, out
+
+
+def test_agent_tool_digest_names_the_serving_arm() -> None:
+    """The agent's ``credentials`` digest reads ``label``, not ``kind`` (review M1/S1)."""
+    from local_operator.network import tool as net_tool
+
+    def payload(source: str) -> dict[str, object]:
+        return {
+            "ok": True,
+            "networks": [
+                {
+                    "network": "n1",
+                    "credentials": [
+                        {
+                            "credential_name": "github",
+                            "kind": github_mod.GITHUB_KIND,
+                            "source": source,
+                            "label": github_mod.source_label(source),
+                            "owned_here": True,
+                        }
+                    ],
+                }
+            ],
+            "shareable": [],
+        }
+
+    # Through ``_scrub`` like the production path, so a field it drops would show.
+    gh = net_tool._render(
+        "credentials", net_tool._scrub(payload(github_mod.SOURCE_GH))
+    )  # noqa: SLF001
+    assert gh == ["n1:", f"  github  {GH_LABEL}  owner: this device", f"      {WARNING}"]
+    app = net_tool._render(
+        "credentials", net_tool._scrub(payload(github_mod.SOURCE_APP))
+    )  # noqa: SLF001
+    assert app == ["n1:", "  github  github-app  owner: this device"]

@@ -2875,8 +2875,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
                 # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
                 # 7, last acked 14:02)``. Read from the sync document only: a
-                # listing never dials and never reads a store, and a copy
-                # relationship with no generation yet shows NO segment (absent,
+                # listing never dials, and the one store touch is the github
+                # arm's metadata ``describe`` above (``resolve_source``; no value
+                # is read, as ``source_present`` already does for ``shareable``).
+                # A copy relationship with no generation yet shows NO segment (absent,
                 # never "failed" — the rollout segment's own rule). The §4.2
                 # selection mark rides the same read (S4): one document, so the
                 # mark cannot disagree with the holders it governs.
@@ -2897,6 +2899,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
             lines.append(f"{network_name}: nothing is shared in this network yet")
         else:
             lines.append(f"{network_name}:")
+            # The type column is sized to the widest entry (min 15, the historic
+            # width) so the 27-character gh label keeps ``owner:`` aligned across
+            # rows instead of pushing that one row right (agent review n1 / QA Q3).
+            kind_width = max([15] + [len(r.get("label") or r["kind"]) for r in keys])
             for row in keys:
                 owner = (
                     "this device"
@@ -2906,7 +2912,15 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 label = _peer_label(row["identity_label"] or "")
                 who = f" ({label})" if label else ""
                 shown_kind = row.get("label") or row["kind"]
-                lines.append(f"  {row['credential_name']:<14} {shown_kind:<15} owner: {owner}{who}")
+                lines.append(
+                    f"  {row['credential_name']:<14} {shown_kind:<{kind_width}} owner: {owner}{who}"
+                )
+                if row.get("source") == github_mod.SOURCE_GH:
+                    # The same caution the ``shareable`` row and ``ready`` give, on
+                    # the lend itself: borrowers of this row get the full account.
+                    from local_operator.network.readiness import GITHUB_BROAD_TOKEN_NOTE
+
+                    lines.append(f"      {GITHUB_BROAD_TOKEN_NOTE}")
                 if row.get("mark"):
                     mark_tail = " — never crosses" if row["mark"] == "local-only" else ""
                     lines.append(f"      marked {row['mark']}{mark_tail}")

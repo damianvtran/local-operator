@@ -1367,7 +1367,14 @@ def _render(action: str, payload: dict[str, Any], *, show_removed: bool = False)
                 # round 1, code findings 4 and 5). The markers and the scrub boundary stay
                 # exactly where they are; the CLI's field is named so the heuristic cannot
                 # eat the one fact this listing exists to convey.
-                lines.append(f"  {row.get('credential_name')}  {row.get('kind')}  owner: {owner}")
+                # ``label`` before ``kind`` (lend honesty, agent review round 1 M1):
+                # ``kind`` stays the wire type, ``label`` names the serving arm, so an
+                # agent relaying this view says "gh CLI login (full account)" rather
+                # than ``github-app`` — the same choice the CLI listing makes.
+                shown_kind = row.get("label") or row.get("kind")
+                lines.append(f"  {row.get('credential_name')}  {shown_kind}  owner: {owner}")
+                if row.get("source") == readiness_mod.GITHUB_SOURCE_GH:
+                    lines.append(f"      {readiness_mod.GITHUB_BROAD_TOKEN_NOTE}")
         # THE SAME BLOCK THE CLI PRINTS, through the one renderer
         # (``readiness.shareable_lines``): the device-level ledger of what this device
         # could offer — the shareability preflight design §2 added, so an agent asked
