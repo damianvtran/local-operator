@@ -20,7 +20,12 @@ from local_operator.providers.bedrock import check as bcheck
 from local_operator.providers.bedrock import connection as bconn
 from local_operator.providers.bedrock import login as blogin
 from local_operator.providers.key_check import KeyCheck
-from local_operator.providers.oauth.callback_server import LoginCallbacks, LoginError
+from local_operator.providers.oauth.callback_server import (
+    LoginCallbacks,
+    LoginCancelledError,
+    LoginDeferredError,
+    LoginError,
+)
 from tests.unit.providers.bedrock.awsfixtures import isolate_aws, write_sso_token
 
 pytestmark = pytest.mark.asyncio
@@ -149,32 +154,46 @@ async def test_rejected_connection_raises_and_returns_no_row(
 
 async def test_sign_in_now_without_aws_cli_ends_with_install_remedy(aws: Path) -> None:
     # The fixture hides the CLI: "Sign in now" must refuse, never spawn.
-    host = Host(choices=["profile", "console", "run"], typed=[])
+    host = Host(choices=["sso", "console", "run"], typed=[])
     with pytest.raises(LoginError, match="AWS CLI"):
         await blogin.login_bedrock(host.callbacks())
 
 
 async def test_expired_sso_profile_offers_sign_in_and_self_run_ends_with_command(aws: Path) -> None:
+    # "I'll run it myself" is a CHOICE, not a failure (#4270 D4/Q7): a
+    # LoginDeferredError carrying the command apart from the sentence, raised
+    # before any row exists (nothing stored), and never a probe.
     write_sso_token(aws, "corp", expires_in=timedelta(hours=-1), refresh=False)
-    host = Host(choices=["profile", "corp-sso", "self"], typed=[])
-    with pytest.raises(LoginError, match="aws sso login --profile corp-sso"):
+    host = Host(choices=["sso", "corp-sso", "self"], typed=[])
+    with pytest.raises(LoginDeferredError) as caught:
         await blogin.login_bedrock(host.callbacks())
     assert host.asked[2][1] == ["run", "self"]
+    assert caught.value.command == "aws sso login --profile corp-sso"
+    assert "Nothing was stored" in str(caught.value)
+    assert not isinstance(caught.value, LoginCancelledError)
+    assert PROBES == []
+
+
+async def test_escape_on_the_sign_in_question_is_a_cancel_not_a_deferral(aws: Path) -> None:
+    write_sso_token(aws, "corp", expires_in=timedelta(hours=-1), refresh=False)
+    host = Host(choices=["sso", "corp-sso", None], typed=[])
+    with pytest.raises(LoginCancelledError):
+        await blogin.login_bedrock(host.callbacks())
 
 
 async def test_refreshable_sso_profile_needs_no_sign_in(aws: Path) -> None:
     write_sso_token(aws, "corp", expires_in=timedelta(hours=-1), refresh=True)
-    host = Host(choices=["profile", "corp-sso", "eu-west-1"], typed=[])
+    host = Host(choices=["sso", "corp-sso", "eu-west-1"], typed=[])
     row = await blogin.login_bedrock(host.callbacks())
     assert row["bedrock"]["profile"] == "corp-sso"
 
 
 async def test_numbered_fallback_without_a_picker(aws: Path) -> None:
     # Host has no on_choice: method list is a numbered on_setup_input prompt.
-    # 1 = AWS profile; profiles are listed sorted (admin, console, corp-sso,
-    # default, dev, ...) so 5 = dev; Enter takes the default Region (option 1,
-    # the profile's own ca-central-1).
-    host = Host(choices=[], typed=["1", "5", ""])
+    # 1 = AWS profile; its list holds only the non-SSO profiles, sorted
+    # (admin, default, dev, helper), so 3 = dev; Enter takes the default
+    # Region (option 1, the profile's own ca-central-1).
+    host = Host(choices=[], typed=["1", "3", ""])
     row = await blogin.login_bedrock(host.callbacks(picker=False))
     assert row["key"] == "bedrock://profile?name=dev&region=ca-central-1"
     assert "1. " in host.fields[0][0]  # the numbered list rides the label
@@ -225,3 +244,94 @@ def test_label_identity_for_status_listing() -> None:
         credential_identity({"account_id": "profile:dev@x", "bedrock": {"label": "dev · x"}})
         == "dev · x"
     )
+
+
+# --- #4270 round 1: canonical vocabulary (D1) and the Region "Other…" path (D2) ---
+
+
+async def test_method_chooser_uses_the_canonical_order_and_labels(aws: Path) -> None:
+    # One list shared with the desktop connect dialog; reordering it here
+    # alone is the parity break design D1 flagged.
+    captured: list[list[tuple[str, str, str]]] = []
+
+    async def on_choice(title, options, default):  # noqa: ANN001
+        captured.append(list(options))
+        return None
+
+    with pytest.raises(LoginCancelledError):
+        await blogin.login_bedrock(
+            LoginCallbacks(on_choice=on_choice, on_setup_input=lambda *a: None)
+        )
+    values = [value for value, _label, _desc in captured[0]]
+    labels = [label for _value, label, _desc in captured[0]]
+    assert values == ["profile", "sso", "access_key", "api_key", blogin.DEFAULT_CHAIN]
+    assert labels == [
+        "AWS profile",
+        "AWS SSO",
+        "Access key",
+        "Bedrock API key",
+        "Default credentials",
+    ]
+
+
+async def test_aws_profile_lists_non_sso_kinds_and_aws_sso_lists_the_rest(aws: Path) -> None:
+    host = Host(choices=["profile", None], typed=[])
+    with pytest.raises(LoginCancelledError):
+        await blogin.login_bedrock(host.callbacks())
+    plain = host.asked[1][1]
+    assert "dev" in plain and "admin" in plain and "helper" in plain
+    assert not {"corp-sso", "legacy-sso", "console"} & set(plain)
+
+    host = Host(choices=["sso", None], typed=[])
+    with pytest.raises(LoginCancelledError):
+        await blogin.login_bedrock(host.callbacks())
+    assert sorted(host.asked[1][1]) == ["console", "corp-sso", "legacy-sso"]
+    assert host.asked[1][0] == "Which AWS SSO profile?"
+
+
+async def test_kind_labels_are_the_canonical_short_ones() -> None:
+    assert [
+        blogin.kind_text(kind)
+        for kind in ("static", "sso", "login", "assume_role", "process", "web_identity")
+    ] == ["Access keys", "SSO", "AWS login", "Assume role", "Credential process", "Web identity"]
+
+
+async def test_empty_sso_list_says_so_and_returns_to_the_chooser(
+    aws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.providers.bedrock import profiles as bprofiles
+
+    plain_only = [p for p in bprofiles.list_profiles() if not blogin.is_sso_profile(p)]
+    monkeypatch.setattr(bprofiles, "list_profiles", lambda: plain_only)
+    host = Host(choices=["sso", None], typed=[])
+    with pytest.raises(LoginCancelledError):
+        await blogin.login_bedrock(host.callbacks())
+    assert any("aws configure sso" in m for m in host.messages)
+    # Back on the method chooser, not cancelled.
+    assert len(host.asked) == 2 and host.asked[1][1][0] == "profile"
+
+
+async def test_other_region_reasks_and_never_discards_a_typed_secret(aws: Path) -> None:
+    # Invalid ids re-ask; an empty entry goes back to the Region picker; the
+    # API key typed first survives all of it (#4270 D2).
+    host = Host(
+        choices=["api_key", "__other__", "__other__"],
+        typed=["bedrock-api-key-fixture", "nope", "", "ap-southeast-7"],
+    )
+    row = await blogin.login_bedrock(host.callbacks())
+    assert row["secret"] == "bedrock-api-key-fixture"
+    assert bconn.parse(row["key"]).region == "ap-southeast-7"
+    assert [title for title, _v, _d in host.asked].count(
+        "Which AWS Region should Bedrock use?"
+    ) == 2
+    assert any("nope" in m for m in host.messages)
+
+
+async def test_other_region_after_max_invalid_returns_to_the_picker(aws: Path) -> None:
+    host = Host(
+        choices=["api_key", "__other__", "us-east-1"],
+        typed=["bedrock-api-key-fixture", "x1", "x2", "x3"],
+    )
+    row = await blogin.login_bedrock(host.callbacks())
+    assert bconn.parse(row["key"]).region == "us-east-1"
+    assert row["secret"] == "bedrock-api-key-fixture"

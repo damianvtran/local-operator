@@ -117,6 +117,18 @@ def method_profile_none() -> Msg:
     return Msg("wire.login.bedrock.method_profile_none", {})
 
 
+def method_sso() -> Msg:
+    return Msg("wire.login.bedrock.method_sso", {})
+
+
+def method_sso_desc(*, count: int | float) -> Msg:
+    return Msg("wire.login.bedrock.method_sso_desc", {"count": count})
+
+
+def method_sso_none() -> Msg:
+    return Msg("wire.login.bedrock.method_sso_none", {})
+
+
 def method_title() -> Msg:
     return Msg("wire.login.bedrock.method_title", {})
 
@@ -125,8 +137,16 @@ def no_profiles() -> Msg:
     return Msg("wire.login.bedrock.no_profiles", {})
 
 
+def no_sso_profiles() -> Msg:
+    return Msg("wire.login.bedrock.no_sso_profiles", {})
+
+
 def no_tty(*, bearer_env: str, auth_env: str) -> Msg:
     return Msg("wire.login.bedrock.no_tty", {"bearer_env": bearer_env, "auth_env": auth_env})
+
+
+def picker_title() -> Msg:
+    return Msg("wire.login.bedrock.picker_title", {})
 
 
 def profile_desc(*, kind: str, region: str, session: str) -> Msg:
@@ -220,6 +240,10 @@ def sso_cli_missing() -> Msg:
     return Msg("wire.login.bedrock.sso_cli_missing", {})
 
 
+def sso_deferred() -> Msg:
+    return Msg("wire.login.bedrock.sso_deferred", {})
+
+
 def sso_done(*, profile: str) -> Msg:
     return Msg("wire.login.bedrock.sso_done", {"profile": profile})
 
@@ -238,6 +262,10 @@ def sso_headless(*, command: str) -> Msg:
 
 def sso_not_applicable(*, profile: str) -> Msg:
     return Msg("wire.login.bedrock.sso_not_applicable", {"profile": profile})
+
+
+def sso_profile_title() -> Msg:
+    return Msg("wire.login.bedrock.sso_profile_title", {})
 
 
 def sso_run() -> Msg:

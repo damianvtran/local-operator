@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginCancelledError,
+    LoginDeferredError,
     LoginError,
 )
 from local_operator.providers.registry import (
@@ -869,6 +870,14 @@ def run_login(
     try:
         with _terminal_state_restored():
             result = asyncio.run(_run())
+    except LoginDeferredError as exc:
+        # A deliberate "I'll finish this myself" (Bedrock's expired AWS SSO
+        # session): exit 0, no "Login failed:" lead-in, and the command on its
+        # own indented line so it can be copied (#4270 D4/Q7). Nothing stored.
+        print(str(exc))
+        if exc.command:
+            print(f"\n    {exc.command}\n")
+        return 0
     except LoginError as exc:
         # A cancel is an OUTCOME, not a failure, so it must not be reported as
         # "Login failed:" — LoginCancelledError is a LoginError subclass and
@@ -1317,7 +1326,15 @@ def format_logins(
         # only. The plaintext ``credentials.env`` loop this used to print is GONE
         # (PR2a): the file is no longer a credential source, and
         # ``stored_login_key_names`` is the one callable that reads those names.
+        from local_operator.providers.bedrock.connection import REF_PATTERN
+
         for key in stored_login_key_names(config_dir):
+            # A Bedrock sealed ref (BEDROCK_SECRET_<hex>) is an internal handle
+            # behind a connection row already listed above, not a key the user
+            # set; printing it only invites someone to export or delete it
+            # (#4270 QA Q6).
+            if REF_PATTERN.fullmatch(key):
+                continue
             lines.append(f"  secret store  {key}=<set>")
             found = True
     if not found:

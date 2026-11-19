@@ -205,6 +205,22 @@ class LoginCancelledError(LoginError):
         super().__init__(message)
 
 
+class LoginDeferredError(LoginError):
+    """The user chose to finish a step outside this login, so nothing was stored.
+
+    Not a failure and not a cancel: Amazon Bedrock's "I'll run it myself"
+    answer to an expired AWS SSO session is a deliberate choice that ends the
+    login with a command to run elsewhere (#4270 design D4 / QA Q7). Hosts
+    render it as a neutral note, exit 0 from the CLI, and set ``command``
+    apart so it can be copied. A ``LoginError`` subclass so any host that does
+    not know it still ends the login rather than storing anything.
+    """
+
+    def __init__(self, message: str, *, command: str = "") -> None:
+        super().__init__(message)
+        self.command = command
+
+
 class LoginTimeoutError(LoginError):
     """No callback/manual code arrived within the timeout window."""
 

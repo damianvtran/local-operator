@@ -346,7 +346,7 @@ def ambient_sources(
     """Whether the env tier enables Bedrock, and which ambient signals exist.
 
     ``sources`` lists what the default chain WOULD find (names only), so the
-    "Use this environment" choice can say what it is about to use;
+    "Default credentials" choice can say what it is about to use;
     ``enabled`` is the env tier's own verdict (design D6: ``AWS_PROFILE`` /
     ``AWS_ACCESS_KEY_ID`` alone never enable it).
     """

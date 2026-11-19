@@ -677,8 +677,13 @@ def _bedrock_input(body: BedrockConnectionBody) -> Any:
 
 def _invalid_input(error: Any) -> HTTPException:
     keys = _bedrock_keys()
+    if error.code == "bedrock_region_invalid" and error.value:
+        return _bedrock_refusal(422, error.code, keys.region_invalid(region=error.value))
     if error.code == "bedrock_region_invalid":
-        return _bedrock_refusal(422, error.code, keys.region_invalid(region=error.value or ""))
+        # A MISSING Region keeps its code (the desktop contract keys on it) but
+        # not the "{region} is not a valid…" sentence, which read
+        # " is not a valid AWS Region id." with no subject (#4270 QA Q4).
+        return _bedrock_refusal(422, error.code, keys.input_invalid(field="region"))
     return _bedrock_refusal(422, "bedrock_input_invalid", keys.input_invalid(field=error.field))
 
 

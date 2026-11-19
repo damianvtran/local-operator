@@ -145,6 +145,22 @@ async def test_connect_bounds_answer_422_with_codes(
     assert _detail(response)["code"] == code
 
 
+async def test_connect_without_a_region_names_the_missing_field(
+    desktop, aws
+) -> None:  # noqa: ANN001
+    # #4270 QA Q4: a missing Region kept the code but read
+    # " is not a valid AWS Region id." with no subject.
+    client, _app = desktop
+    response = await client.put(
+        "/v1/auth/providers/bedrock/connection", json={"method": "profile", "profile": "dev"}
+    )
+    assert response.status_code == 422
+    detail = _detail(response)
+    assert detail["code"] == "bedrock_region_invalid"
+    assert not detail["text"].startswith(" ")
+    assert "region" in detail["text"]
+
+
 async def test_connect_access_key_stores_sealed_row_and_lists_it(
     desktop, aws, tmp_path
 ) -> None:  # noqa: ANN001

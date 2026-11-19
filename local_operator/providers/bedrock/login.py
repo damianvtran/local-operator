@@ -75,6 +75,12 @@ _MAX_ATTEMPTS = 3
 #: Picker value for "type a Region"; not a shape-valid Region, so it can never
 #: collide with a real one.
 _OTHER = "__other__"
+#: Chooser value for the "AWS SSO" entry. Not a wire method: it collects a
+#: ``profile`` connection, filtered to the sign-in-capable kinds below.
+_SSO_METHOD = "sso"
+#: Profile kinds listed under "AWS SSO" (IAM Identity Center and ``aws login``);
+#: every other kind is listed under "AWS profile".
+_SSO_KINDS: Final[frozenset[str]] = frozenset({"sso", "login"})
 
 
 def _k():  # noqa: ANN202 - generated module
@@ -376,7 +382,14 @@ def needs_sign_in(profile: bprofiles.AwsProfile) -> bool:
 
 
 async def choose_region(callbacks: "LoginCallbacks", profile_region: str | None) -> str | None:
-    """Region picker: the default first (profile's Region beats the rest), then Other…."""
+    """Region picker: the default first (profile's Region beats the rest), then Other….
+
+    ``None`` only when the user cancels the PICKER itself. "Other…" types a
+    Region: an invalid id re-asks, and an empty or cancelled entry (or too many
+    invalid ones) goes back to the picker rather than ending the login — by
+    this step the user may already have typed a key or secret, and losing it
+    to a typo is what #4270 design D2 flagged.
+    """
     k = _k()
     region, source = bprofiles.default_region(profile_region_value=profile_region)
     source_text = {
@@ -394,20 +407,21 @@ async def choose_region(callbacks: "LoginCallbacks", profile_region: str | None)
         if candidate != region
     ]
     options.append((_OTHER, _t(k.region_other()), _t(k.region_other_desc())))
-    picked = await choose(callbacks, _t(k.region_title()), options, region)
-    if picked != _OTHER:
-        return picked
-    for _attempt in range(_MAX_ATTEMPTS):
-        typed = await _ask(callbacks, _t(k.region_prompt()), secret=False)
-        if typed is None or not typed.strip():
-            return None
-        typed = typed.strip().lower()
-        if bprofiles.valid_region_input(typed):
-            return typed
-        await _report(
-            callbacks.on_warning or callbacks.on_progress, _t(k.region_invalid(region=typed[:40]))
-        )
-    return None
+    while True:
+        picked = await choose(callbacks, _t(k.region_title()), options, region)
+        if picked != _OTHER:
+            return picked
+        for _attempt in range(_MAX_ATTEMPTS):
+            typed = await _ask(callbacks, _t(k.region_prompt()), secret=False)
+            if typed is None or not typed.strip():
+                break
+            typed = typed.strip().lower()
+            if bprofiles.valid_region_input(typed):
+                return typed
+            await _report(
+                callbacks.on_warning or callbacks.on_progress,
+                _t(k.region_invalid(region=typed[:40])),
+            )
 
 
 async def _sign_in_if_needed(
@@ -420,7 +434,10 @@ async def _sign_in_if_needed(
     login with the command to run — never a silent retry.
     """
     from local_operator.providers.bedrock import sso_login
-    from local_operator.providers.oauth.callback_server import LoginError
+    from local_operator.providers.oauth.callback_server import (
+        LoginDeferredError,
+        LoginError,
+    )
 
     k = _k()
     command = bprofiles.login_command(profile.name, profile.kind) or ""
@@ -434,8 +451,13 @@ async def _sign_in_if_needed(
         ("self", _t(k.sso_self()), _t(k.sso_self_desc(command=command))),
     ]
     picked = await choose(callbacks, _t(title), options, "run")
+    if picked is None:
+        raise _cancelled()
     if picked != "run":
-        raise LoginError(_t(k.sso_run_yourself(command=command)))
+        # A choice, not a failure (#4270 D4/Q7): hosts render this neutrally,
+        # the CLI exits 0, and the command is carried separately so it can be
+        # set apart for copying. Raised before any row exists: nothing stored.
+        raise LoginDeferredError(_t(k.sso_deferred()), command=command)
     await _report(callbacks.on_progress, _t(k.sso_started(profile=profile.name)))
     try:
         result = await sso_login.run_sso_login(
@@ -458,14 +480,28 @@ async def _sign_in_if_needed(
         raise LoginError(_t(k.sso_run_yourself(command=command)))
 
 
+def is_sso_profile(profile: bprofiles.AwsProfile) -> bool:
+    """Listed under "AWS SSO" rather than "AWS profile": the sign-in-capable kinds."""
+    return profile.kind in _SSO_KINDS
+
+
 async def _choose_method(
     callbacks: "LoginCallbacks", found: Sequence[bprofiles.AwsProfile]
 ) -> str | None:
+    """The method chooser, in the canonical order the desktop shares (#4270 D1).
+
+    AWS profile · AWS SSO · Access key · Bedrock API key · Default credentials.
+    The order and labels are one list across the TUI, the CLI and the desktop
+    connect dialog; change them in all three or in none.
+    """
     k = _k()
     ambient_on, sources = bprofiles.ambient_sources()
+    plain = [p for p in found if not is_sso_profile(p)]
+    sso = [p for p in found if is_sso_profile(p)]
     profile_desc = (
-        _t(k.method_profile_desc(count=len(found))) if found else _t(k.method_profile_none())
+        _t(k.method_profile_desc(count=len(plain))) if plain else _t(k.method_profile_none())
     )
+    sso_desc = _t(k.method_sso_desc(count=len(sso))) if sso else _t(k.method_sso_none())
     ambient_desc = (
         _t(k.method_ambient_desc(sources=", ".join(sources)))
         if sources
@@ -473,11 +509,17 @@ async def _choose_method(
     )
     options: list[Choice] = [
         ("profile", _t(k.method_profile()), profile_desc),
-        ("api_key", _t(k.method_api_key()), _t(k.method_api_key_desc())),
+        (_SSO_METHOD, _t(k.method_sso()), sso_desc),
         ("access_key", _t(k.method_access_key()), _t(k.method_access_key_desc())),
+        ("api_key", _t(k.method_api_key()), _t(k.method_api_key_desc())),
         (DEFAULT_CHAIN, _t(k.method_ambient()), ambient_desc),
     ]
-    default = "profile" if found else ("api_key" if not ambient_on else DEFAULT_CHAIN)
+    if plain:
+        default = "profile"
+    elif sso:
+        default = _SSO_METHOD
+    else:
+        default = "api_key" if not ambient_on else DEFAULT_CHAIN
     return await choose(callbacks, _t(k.method_title()), options, default)
 
 
@@ -489,17 +531,26 @@ async def _collect(
 ) -> ConnectionInput | None:
     """The inputs for one method; ``None`` sends the user back to the chooser."""
     k = _k()
-    if method == "profile":
-        if not found:
-            await _report(callbacks.on_warning or callbacks.on_progress, _t(k.no_profiles()))
+    if method in ("profile", _SSO_METHOD):
+        # Both entries store a ``profile`` connection; they differ only in
+        # which profiles they list, so SSO users are not hunting through
+        # static-key profiles for theirs (#4270 D1).
+        want_sso = method == _SSO_METHOD
+        listed = [p for p in found if is_sso_profile(p) == want_sso]
+        if not listed:
+            empty = k.no_sso_profiles() if want_sso else k.no_profiles()
+            await _report(callbacks.on_warning or callbacks.on_progress, _t(empty))
             return None
-        default = next((p.name for p in found if p.name == "default"), found[0].name)
+        default = next((p.name for p in listed if p.name == "default"), listed[0].name)
         name = await choose(
-            callbacks, _t(k.profile_title()), [profile_choice(p) for p in found], default
+            callbacks,
+            _t(k.sso_profile_title() if want_sso else k.profile_title()),
+            [profile_choice(p) for p in listed],
+            default,
         )
         if name is None:
             raise _cancelled()
-        profile = next(p for p in found if p.name == name)
+        profile = next(p for p in listed if p.name == name)
         if needs_sign_in(profile):
             await _sign_in_if_needed(callbacks, profile, signal)
         region = await choose_region(callbacks, profile.region)

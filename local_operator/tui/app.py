@@ -28739,7 +28739,11 @@ class OperatorApp(App[None]):
 
     # -- the agent's own questions --------------------------------------------
     async def request_user_choice(
-        self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
+        self,
+        questions: list[AskQuestion],
+        *,
+        source: SessionInteraction | None = None,
+        card_options: dict[str, Any] | None = None,
     ) -> dict[str, list[str]] | None:
         """The ``ask`` tool's surface while this app owns the terminal.
 
@@ -28752,6 +28756,13 @@ class OperatorApp(App[None]):
         answered nothing. Both are ANSWERS, not failures: the tool reports the
         empty case as "the user did not answer" so the model falls back to its
         own recommendation.
+
+        ``card_options``: host keywords for :class:`AskPickerScreen`
+        (``allow_free_text``, ``title``, ``exit_hint``, ``initial_rows``) for a
+        caller that is NOT the agent's ``ask`` — the Bedrock login reuses this
+        card and must not be headed "the agent needs your decision" or offer a
+        free-text row its answer cannot use (#4270 D2/D3/D5). The ``ask`` tool
+        passes none, so its card is unchanged.
 
         A future rather than ``push_screen_wait``, which requires a worker: this
         coroutine is the tool call, and moving it into a worker would put the
@@ -28796,7 +28807,7 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        card = AskPickerScreen(questions, answered)
+        card = AskPickerScreen(questions, answered, **(card_options or {}))
         # Same hint as the approval card, for the same reason — the copy
         # differs by kind because an ask is answerable from here (see
         # `AskPickerScreen.set_remote_device`).
@@ -57923,6 +57934,7 @@ class OperatorApp(App[None]):
         itself lives in `providers/bedrock/login.py`; this only renders it.
         """
         from local_operator.i18n.keys import wire_login_bedrock as bk
+        from local_operator.i18n.messages import render_resolved
 
         # Lazily, like `_login_callbacks` itself: `callback_server` drags in a
         # loopback listener's imports that only a login needs.
@@ -57940,10 +57952,7 @@ class OperatorApp(App[None]):
                 on_progress(f"{title} {options[0][1]}")
                 return options[0][0]
             by_label = {label: value for value, label, _description in options}
-            # The picker always offers a free-text row; a typed answer that IS
-            # one of the values (a Region id typed instead of picked) counts.
-            by_label.update({value: value for value, _label, _description in options})
-            recommended = next(
+            initial = next(
                 (index for index, option in enumerate(options) if option[0] == default), None
             )
             question = AskQuestion(
@@ -57953,14 +57962,32 @@ class OperatorApp(App[None]):
                     AskOption(label=label, description=description)
                     for _value, label, description in options
                 ],
-                recommended=recommended,
             )
-            answer = await self.request_user_choice([question])
+            answer = await self.request_user_choice(
+                [question],
+                card_options={
+                    # No free-text row (#4270 D2): a typed answer that is not a
+                    # listed row has nowhere to go, and used to cancel the whole
+                    # login. The Region list carries its own "Other…" row,
+                    # which prompts, validates and re-asks.
+                    "allow_free_text": False,
+                    # The user ran /login; no agent is asking (D3).
+                    "title": render_resolved(bk.picker_title()),
+                    "exit_hint": ("esc", "cancel"),
+                    # The default starts under the cursor WITHOUT a
+                    # RECOMMENDED badge: LO has no basis to recommend one AWS
+                    # profile or Region over another (D5).
+                    "initial_rows": [initial],
+                },
+            )
             picked = (answer or {}).get("bedrock_login") or []
             return by_label.get(picked[0]) if picked else None
 
         async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
-            hint = _t(bk.field_hint())
+            # `render_resolved`, not this module's `_t`: `_t` only looks keys
+            # up in the tui.app catalogue, so a wire.login.bedrock key came
+            # back as its raw id on every Bedrock field (#4270 QA Q1).
+            hint = render_resolved(bk.field_hint())
             return await self._request_login_key(
                 name,
                 secret=secret,
@@ -58419,7 +58446,10 @@ class OperatorApp(App[None]):
         # email (~138 ms) for a loopback listener only a login needs, and this
         # module is what every interactive session imports.
         from local_operator.harness.types import AbortSignal
-        from local_operator.providers.oauth.callback_server import LoginCancelledError
+        from local_operator.providers.oauth.callback_server import (
+            LoginCancelledError,
+            LoginDeferredError,
+        )
         from local_operator.providers.oauth.radient import RadientLoginDisabled
 
         assert self._providers is not None
@@ -58535,6 +58565,16 @@ class OperatorApp(App[None]):
                 if self._on_config_changed is not None:
                     self._on_config_changed()
                 self._cmd_model_saved(self._notice)
+        except LoginDeferredError as deferred:
+            # The user chose to finish elsewhere (Bedrock's "I'll run it
+            # myself"): a `note`, not a red "login failed" (#4270 D4/Q7), with
+            # the command drawn in the inline-code ink so it can be found and
+            # copied. On its OWN indented row: inline, the fold split the
+            # command across two rows and a split token is drawn plain.
+            # Nothing was stored; the flow raised before any row.
+            command = deferred.command
+            body = f"{deferred}\n  {command}" if command else str(deferred)
+            self._append_block(NoticeBlock(body, "note", accent=command))
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken

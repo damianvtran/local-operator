@@ -1023,9 +1023,14 @@ export type MessageParams = {
   "wire.login.bedrock.method_profile": undefined;
   "wire.login.bedrock.method_profile_desc": { "count": number };
   "wire.login.bedrock.method_profile_none": undefined;
+  "wire.login.bedrock.method_sso": undefined;
+  "wire.login.bedrock.method_sso_desc": { "count": number };
+  "wire.login.bedrock.method_sso_none": undefined;
   "wire.login.bedrock.method_title": undefined;
   "wire.login.bedrock.no_profiles": undefined;
+  "wire.login.bedrock.no_sso_profiles": undefined;
   "wire.login.bedrock.no_tty": { "bearer_env": string; "auth_env": string };
+  "wire.login.bedrock.picker_title": undefined;
   "wire.login.bedrock.profile_desc": { "kind": string; "region": string; "session": string };
   "wire.login.bedrock.profile_desc_short": { "kind": string; "region": string };
   "wire.login.bedrock.profile_title": undefined;
@@ -1048,11 +1053,13 @@ export type MessageParams = {
   "wire.login.bedrock.sso_browser_opened": { "url": string };
   "wire.login.bedrock.sso_cancelled": undefined;
   "wire.login.bedrock.sso_cli_missing": undefined;
+  "wire.login.bedrock.sso_deferred": undefined;
   "wire.login.bedrock.sso_done": { "profile": string };
   "wire.login.bedrock.sso_enter_code": { "url": string; "code": string };
   "wire.login.bedrock.sso_failed": { "profile": string; "command": string };
   "wire.login.bedrock.sso_headless": { "command": string };
   "wire.login.bedrock.sso_not_applicable": { "profile": string };
+  "wire.login.bedrock.sso_profile_title": undefined;
   "wire.login.bedrock.sso_run": undefined;
   "wire.login.bedrock.sso_run_desc": { "command": string };
   "wire.login.bedrock.sso_run_yourself": { "command": string };
