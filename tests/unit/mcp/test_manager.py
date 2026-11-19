@@ -692,6 +692,104 @@ class TestToolCallHygieneAndRetry:
         await manager.disconnect_all()
 
 
+class TestDroppedArgumentNote:
+    """A strict schema makes the bridge withhold an undeclared argument; the
+    SAME call's result must say so (``clean_outbound_args``). Driven through
+    ``tool.execute`` -- the path a model's call takes -- because a note that
+    the bridge computes and the manager never attaches helps nobody.
+    """
+
+    STRICT_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {"command": {"type": "string"}, "timeout_s": {"type": "integer"}},
+        "required": ["command"],
+        "additionalProperties": False,
+    }
+
+    async def _manager(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, session: FakeSession
+    ) -> McpManager:
+        manager = McpManager(str(project))
+        schema = self.STRICT_SCHEMA
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            if name == "fast":
+                return ServerConnection(
+                    name=name, config=cfg, session=session, tools=[_tool("search", schema)]
+                )
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        await manager.discover_and_connect()
+        session.calls.clear()
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_misnamed_argument_is_named_in_the_result_and_the_call_still_runs(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = FakeSession()
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1", {"command": "sleep 90", "timeout": 120, "i": "Waiting"}, None, None, ToolContext()
+        )
+
+        # Still dropped and still sent: a call that succeeded before succeeds now.
+        assert session.calls == [("search", {"command": "sleep 90"})]
+        assert result.is_error is False
+        # The server's own text is untouched; the note is a block after it.
+        assert len(result.content) == 2 and result.text.startswith("ok\n[Note: ")
+        note = result.text
+        # Exactly one name: the harness's own intent field is not reported as
+        # the model's mistake.
+        assert "NOT sent: timeout. " in note and "Waiting" not in note
+        assert "Declared arguments: command, timeout_s." in note
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_failed_call_carries_the_note_too(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The recorded loss was a TIMEOUT: the error result is exactly where
+        the model needs to learn its ``timeout`` never arrived."""
+        session = FakeSession(raise_on_call=ValueError("Timed out while waiting for response"))
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1", {"command": "sleep 90", "timeout": 120}, None, None, ToolContext()
+        )
+
+        assert result.is_error is True
+        assert "Timed out while waiting for response" in result.text
+        assert len(result.content) == 2 and "NOT sent: timeout. " in result.text
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_clean_call_and_silent_drops_add_nothing(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Control: declared arguments, the intent field and an empty
+        placeholder leave the result exactly as the server returned it."""
+        session = FakeSession()
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1",
+            {"command": "ls", "timeout_s": 5, "i": "Listing", "cwd": ""},
+            None,
+            None,
+            ToolContext(),
+        )
+
+        assert session.calls == [("search", {"command": "ls", "timeout_s": 5})]
+        assert result.text == "ok" and len(result.content) == 1
+        await manager.disconnect_all()
+
+
 class TestOwnTurnOnlyGate:
     @pytest.mark.asyncio
     async def test_delegated_calls_are_refused_before_any_connection(

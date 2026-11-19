@@ -14,7 +14,8 @@ from __future__ import annotations
 import base64
 import copy
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -123,12 +124,39 @@ def _is_unused_optional_placeholder(value: object) -> bool:
     return value is None or value == "" or (isinstance(value, dict) and not value)
 
 
-def prepare_outbound_args(
+#: Bounds on the dropped-argument note (:func:`outbound_args_note`). The note
+#: rides in a tool result on every affected call, so it must stay a line or
+#: two however large the schema is: a server may declare dozens of properties
+#: and a model may invent any number of keys. Names past the bound are counted,
+#: not listed; a name longer than the cap is cut (it is a model- or
+#: server-chosen string, and nothing requires it to be short).
+MAX_NOTE_REJECTED_NAMES = 8
+MAX_NOTE_DECLARED_NAMES = 24
+MAX_NOTE_NAME_CHARS = 48
+
+
+@dataclass(frozen=True)
+class OutboundArgs:
+    """What :func:`clean_outbound_args` forwards, and what it withheld.
+
+    ``rejected`` names ONLY the keys the model can do something about: a key
+    it supplied with a real value that a strict schema
+    (``additionalProperties: false``) does not declare. The other two drops
+    are not model mistakes and stay out of it -- the harness-injected intent
+    field (the harness added it, the model did nothing wrong) and an empty
+    placeholder (dropping it changes nothing the model meant).
+    """
+
+    cleaned: dict[str, Any]
+    rejected: tuple[str, ...] = ()
+
+
+def clean_outbound_args(
     args: dict[str, Any] | None,
     declared_properties: dict[str, Any] | None,
     required: list[str] | None = None,
     additional_properties: bool | dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> OutboundArgs:
     """Clean harness-side arguments before forwarding to ``tools/call``.
 
     1. Drop the harness-injected ``i`` intent field when the schema does not
@@ -146,25 +174,97 @@ def prepare_outbound_args(
        (``None``, ``""``, ``{}``). Falsy values that are not placeholders
        (``0``, ``False``, ``[]``) are always kept.
 
-    Returns a new dict; the input is never mutated.
+    WHY RULE 2 REPORTS WHAT IT DROPPED. The drop itself is the long-standing
+    contract (a strict server would reject the whole call, so the harness
+    forwards the part it can), but done silently it hides a real mistake: a
+    model that passed ``timeout`` to a tool declaring ``timeout_s`` had the
+    key vanish, the tool's default applied, the call timed out, and nothing
+    in the result said its argument was never sent -- so it repeated the same
+    call. ``rejected`` carries those keys to the call site, which says so in
+    the SAME call's result (:func:`outbound_args_note`). The call still runs:
+    turning the drop into a refusal would fail calls that succeed today.
+
+    Returns new objects; the input is never mutated.
     """
     if not isinstance(args, dict):
-        return {}
+        return OutboundArgs({})
     properties = declared_properties if isinstance(declared_properties, dict) else {}
     required_set = set(required or [])
     strict = additional_properties is False
 
     cleaned: dict[str, Any] = {}
+    rejected: list[str] = []
     for key, value in args.items():
         declared = key in properties
         if key == INTENT_FIELD and not declared:
             continue  # harness intent never reaches a server that didn't ask for it
         if strict and not declared:
-            continue  # schema explicitly forbids unknown fields
+            # Schema explicitly forbids unknown fields. A placeholder value is
+            # the model filling a slot it did not mean to use, so only a key
+            # carrying a real value is worth telling it about.
+            if not _is_unused_optional_placeholder(value):
+                rejected.append(str(key))
+            continue
         if key not in required_set and _is_unused_optional_placeholder(value):
             continue
         cleaned[key] = value
-    return cleaned
+    return OutboundArgs(cleaned, tuple(rejected))
+
+
+def prepare_outbound_args(
+    args: dict[str, Any] | None,
+    declared_properties: dict[str, Any] | None,
+    required: list[str] | None = None,
+    additional_properties: bool | dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The forwarded arguments alone: :func:`clean_outbound_args` ``.cleaned``.
+
+    Kept as the dict-returning entry point because callers and tests depend on
+    that shape; a caller that also has a result to annotate uses
+    :func:`clean_outbound_args` and reads ``rejected`` from the same pass, so
+    the two can never disagree about what was dropped.
+    """
+    return clean_outbound_args(args, declared_properties, required, additional_properties).cleaned
+
+
+def _bounded_names(names: Iterable[str], limit: int) -> str:
+    """``a, b, c (+N more)``: at most ``limit`` names, each cut to the cap."""
+    listed = list(names)
+    shown = [
+        name if len(name) <= MAX_NOTE_NAME_CHARS else name[:MAX_NOTE_NAME_CHARS] + "..."
+        for name in listed[:limit]
+    ]
+    text = ", ".join(shown)
+    if len(listed) > limit:
+        text += f" (+{len(listed) - limit} more)"
+    return text
+
+
+def outbound_args_note(
+    rejected: Sequence[str], declared_properties: dict[str, Any] | None
+) -> str | None:
+    """The line a tool result carries when arguments were withheld, or ``None``.
+
+    Says three things the model otherwise cannot know: which of its arguments
+    did not reach the tool, that the call ran WITHOUT them (so a default
+    applied wherever it meant to set a value), and which names the tool does
+    declare -- the correction is usually one of them (``timeout`` ->
+    ``timeout_s``). The intent field is left out of the declared list unless
+    the server itself declares it: it is the harness's field, not an argument
+    the model should reach for. Both lists are bounded (see the ``MAX_NOTE_*``
+    constants).
+    """
+    if not rejected:
+        return None
+    properties = declared_properties if isinstance(declared_properties, dict) else {}
+    declared = _bounded_names((str(name) for name in properties), MAX_NOTE_DECLARED_NAMES)
+    plural = len(rejected) != 1
+    return (
+        f"[Note: {'arguments' if plural else 'argument'} not declared by this tool "
+        f"{'were' if plural else 'was'} NOT sent: "
+        f"{_bounded_names(rejected, MAX_NOTE_REJECTED_NAMES)}. The call ran without "
+        f"{'them' if plural else 'it'}. Declared arguments: {declared or '(none)'}.]"
+    )
 
 
 def _dict_block_text(block: dict[str, Any]) -> str | None:

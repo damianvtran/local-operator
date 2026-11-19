@@ -189,7 +189,11 @@ stored through the Settings screen but cannot be referenced — rename it to
   unless the server's schema declares it; other undeclared keys are dropped
   only when the schema sets `additionalProperties: false` explicitly (an
   absent or `{}` `additionalProperties` is open per JSON Schema and keeps all
-  args); empty optional placeholders (`None`, `""`, `{}`) are dropped.
+  args); empty optional placeholders (`None`, `""`, `{}`) are dropped. The
+  call still runs, and when a key the model supplied with a real value was
+  dropped by a strict schema, that call's result ends with a note naming the
+  key(s) and the argument names the tool declares (the `i` field and empty
+  placeholders are dropped silently).
 - **Tool cache:** `~/.local-operator/mcp_cache.db` — deliberately separate
   from `auth.db` because the cache is disposable while `auth.db` is
   credential-grade.
