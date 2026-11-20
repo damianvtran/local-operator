@@ -27,7 +27,43 @@ def carriage():
 
 
 def owner():
-    return SimpleNamespace(account_id="account", tenant_id="tenant", endpoint_id="endpoint")
+    # A REAL OwnerSnapshot, not a SimpleNamespace stand-in: since PR #4348,
+    # ``_deliver_card`` asks the bridge Store for the card's hand-off binding
+    # BEFORE dispatch (``Store.card_handoff_bindings``), and the store keys
+    # that lookup on the full owner identity (``canonical_base_url`` +
+    # account/tenant/endpoint, live ``enrollment_generation``). A partial
+    # owner would no longer reach the display path at all. The ids still
+    # match ``bridge_receipt_source`` so the source-binding checks are real.
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    return OwnerSnapshot(
+        credential_id=1,
+        account_id="account",
+        tenant_id="tenant",
+        endpoint_id="endpoint",
+        canonical_base_url="https://api.radienthq.com/v1",
+        enrollment_generation=1,
+    )
+
+
+def enrolled_store(config_dir):
+    """A disposable Store under ``config_dir`` with ``owner()`` committed.
+
+    The card hand-off gate reads the binding only for the LIVE owner (a fenced
+    owner reads every id as unreserved without looking). Enrolling makes the
+    tests drive that real lookup: these cards have no body reservation row, so
+    the store answers UNRESERVED and the card takes its historical minted-id
+    path — the precondition the display assertions rely on, not a bypass.
+    """
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store
+
+    store = Store(config_dir)
+    store.commit_enrollment(
+        owner(), OwnerReceipt("bridge_consent_v1", "ref-display"), cos_session_id=None
+    )
+    assert store.active_owner() == owner()
+    return store
 
 
 def test_display_receipt_is_metadata_only_and_source_bound():
@@ -135,6 +171,7 @@ async def test_real_metadata_handoff_live_and_replay_keep_the_same_display_witho
 
     monkeypatch.setattr(peer_send, "session_has_durable_history", lambda session_id: True)
     monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", primitive)
+    enrolled_store(tmp_path)
     metadata = ConversationCardMetadata(
         conversation_id="conversation",
         tenant_id="tenant",
@@ -225,6 +262,15 @@ async def test_unadmitted_coalesced_card_has_counts_and_ordered_sources_but_no_i
         return "delivered"
 
     monkeypatch.setattr(conversation, "deliver_wake", deliver)
+    from local_operator.team_bridge.store import CARD_HANDOFF_UNRESERVED
+
+    store = enrolled_store(tmp_path)
+    # The unadmitted recovery card never had a reservation row: the live
+    # owner's real binding lookup must say so, or this is not that card.
+    assert store.card_handoff_bindings(owner(), "conversation", ["older", "newer"]) == {
+        "older": CARD_HANDOFF_UNRESERVED,
+        "newer": CARD_HANDOFF_UNRESERVED,
+    }
     metadata = ConversationCardMetadata(
         conversation_id="conversation",
         tenant_id="tenant",
