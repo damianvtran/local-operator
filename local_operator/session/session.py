@@ -4761,10 +4761,14 @@ class Session:
         #: runtime rather than a trusted one — an unattended compliance worker
         #: that must reach its screening tools and nothing else.
         self._declared_tools: frozenset[str] | None = None
-        #: Whether the first turn's bounded wait for declared/preloaded MCP
-        #: servers has run (``session/declared_mcp_ready.py``). Once per session:
-        #: the wait exists for the cold-start race, and a server that drops
-        #: later is the reconnect path's job, not a per-turn stall.
+        #: Whether the bounded wait for declared/preloaded MCP servers has
+        #: SUCCEEDED (``session/declared_mcp_ready.py``). Once per session: the
+        #: wait exists for the cold-start race, and a server that drops later is
+        #: the reconnect path's job, not a per-turn stall. Set only after the gate
+        #: settles, never before it runs: an SDK caller retrying ``prompt()``
+        #: after the gate raised (or after an abort cut it short) must meet the
+        #: gate again, not a silent send without its declared tools (agent
+        #: review round 1, R3).
         self._named_mcp_ready_checked = False
         #: The OPS a declared tool may reach, for the few tools whose reach is not
         #: its name. ``None`` means "every op this build's tool accepts", which is
@@ -21398,16 +21402,27 @@ class Session:
         # the request is built, and one that never arrives raises here, where
         # nothing durable has happened yet (the same shape as ``TurnInFlight``).
         if not self._named_mcp_ready_checked:
-            self._named_mcp_ready_checked = True
             from local_operator.session.declared_mcp_ready import (
                 await_named_mcp_servers,
             )
 
-            await await_named_mcp_servers(
+            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
+            # the TUI/desktop subscribed to this runtime) merges a late
+            # ``preload_tools`` server mid-session, the contract documented on
+            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
+            # a headless host (exec, SDK, scheduler) holds the turn for one.
+            # The same "no UI, no attach subscriber" test the turn-end
+            # checkpoint uses to tell a headless store apart (review R4).
+            store = getattr(self, "_frontend_state_store", None)
+            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
+            self._named_mcp_ready_checked = await await_named_mcp_servers(
                 self.mcp_manager,
                 declared=self._declared_tools,
                 reachable=lambda: self.tool_inventory,
                 materialize=self.materialize_declared_tools,
+                wait_for_preload=not front_end,
+                # Esc lands here as the sticky flag (no turn signal exists yet).
+                cancelled=lambda: self._abort_requested,
             )
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:

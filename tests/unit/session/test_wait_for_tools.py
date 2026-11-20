@@ -29,6 +29,7 @@ than duck-typed stand-ins the static gate would flag.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from typing import Any
 
 import pytest
@@ -69,7 +70,9 @@ class _ExplodingManager(McpManager):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def wait_settled(self, timeout_s: float) -> bool:
+    async def wait_settled(
+        self, timeout_s: float, *, servers: Collection[str] | None = None, first: bool = False
+    ) -> bool:
         self.calls += 1
         raise AssertionError("wait_settled must not be called on the fast path")
 
@@ -83,7 +86,9 @@ class _SettledManager(McpManager):
         self.settle_result = settle_result
         self.error = error
 
-    async def wait_settled(self, timeout_s: float) -> bool:
+    async def wait_settled(
+        self, timeout_s: float, *, servers: Collection[str] | None = None, first: bool = False
+    ) -> bool:
         self.calls += 1
         self.timeouts.append(timeout_s)
         if self.error is not None:
@@ -118,7 +123,9 @@ class _DelayedManager(McpManager):
 
         self._task = asyncio.get_running_loop().create_task(_arrive())
 
-    async def wait_settled(self, timeout_s: float) -> bool:
+    async def wait_settled(
+        self, timeout_s: float, *, servers: Collection[str] | None = None, first: bool = False
+    ) -> bool:
         self.calls += 1
         self._schedule()
         try:

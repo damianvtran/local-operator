@@ -489,7 +489,12 @@ class TestFormatMcpResult:
         assert len(formatted.text) <= UNREADABLE_SPILL_INLINE_LIMIT_CHARS
         assert BASH_TRUNCATION_MARKER in formatted.text
         assert "spill://" not in formatted.text and "read(" not in formatted.text
-        assert "spill" not in (formatted.details or {})
+        # The full result is still STORED, for the harness rather than the
+        # model (passage ranking, monitors, renderers: review round 1, R2), and
+        # the de-duplicated ``server_result`` rides along as it does with read.
+        details = formatted.details or {}
+        assert details["spill"]["complete"] is True
+        assert "server_result" in details
 
     def test_with_read_the_same_result_keeps_todays_cap_and_footer(
         self, tmp_path, monkeypatch

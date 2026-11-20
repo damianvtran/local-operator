@@ -1428,25 +1428,41 @@ def spill_truncate(
     letting renderers, transcripts and compaction see what happened.
 
     A session that cannot read spills (``spills_readable``) gets the same
-    store-free shape as the degraded path below, and no handle: a footer naming
+    store-free DISPLAY shape as the degraded path below: a footer naming
     ``read``/``spill://`` would teach a call the run cannot make, and the model
     spends a tool call on it (see :data:`UNREADABLE_SPILL_INLINE_LIMIT_CHARS`).
-    The plain truncation marker names no route at all.
+    The plain truncation marker names no route at all. The full text is STILL
+    stored and its handle still returned in ``spill_details``, because the
+    harness itself reads it back: ``web_fetch``'s ``query`` ranks passages from
+    the stored lines (without the store a no-read session got 24k unfocused
+    chars instead of a ~1.4k focused answer: agent review round 1, R2), a
+    monitor compares the stored body rather than the projection, and renderers
+    and ``format_mcp_result``'s de-duplication key on ``details['spill']``.
+    Only the model-facing route is withheld.
     """
     if len(text) <= limit:
         return text, None
-    meta = _spill(text, tool_name, context) if spills_readable(context) else None
-    if meta is None:
-        # Degraded path: there is no handle to expand, so the shape here is all
-        # the model gets. A JSON payload still comes back as JSON — otherwise a
-        # store failure would silently reintroduce the unparseable result this
-        # function's structured branch exists to remove.
-        structured = _elide_json(text, limit - len(BASH_TRUNCATION_MARKER))
-        if structured is not None:
-            return structured + BASH_TRUNCATION_MARKER, None
-        return truncate_output(text, limit), None
+    meta = _spill(text, tool_name, context)
+    if meta is None or not spills_readable(context):
+        details = None if meta is None else {"spill": _spill_detail(meta)}
+        return unrouted_truncate(text, limit), details
     body, span = _elide_inline(text, limit)
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
+
+
+def unrouted_truncate(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` with the plain marker and NO recovery route.
+
+    The shape for a result the model cannot expand: a failed store write (no
+    handle exists) or a session without ``read`` (the handle is unreachable).
+    A JSON payload still comes back as JSON — otherwise a store failure would
+    silently reintroduce the unparseable result :func:`spill_truncate`'s
+    structured branch exists to remove.
+    """
+    structured = _elide_json(text, limit - len(BASH_TRUNCATION_MARKER))
+    if structured is not None:
+        return structured + BASH_TRUNCATION_MARKER
+    return truncate_output(text, limit)
 
 
 def _spill_detail(meta: SpillMeta) -> dict[str, Any]:

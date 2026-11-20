@@ -219,3 +219,65 @@ def test_a_large_mcp_result_is_shaped_by_what_the_run_can_read(cold_exec, with_r
         assert "spill://" not in text and "read(" not in text
         assert "BEGIN" in text and text.endswith("END-OF-PAGE")
         assert len(text) == 12_000
+
+
+def _write_servers(root: Path, servers: dict[str, dict[str, Any]]) -> None:
+    (root / "mcp.json").write_text(json.dumps({"mcpServers": servers}))
+
+
+def _slow(delay_s: float) -> dict[str, Any]:
+    return {
+        "command": sys.executable,
+        "args": [str(FIXTURE)],
+        "env": {"SLOW_MCP_DELAY_S": str(delay_s)},
+    }
+
+
+def test_a_wedged_prefix_sibling_does_not_hold_or_fail_the_declared_tool(cold_exec):
+    """Review R1 / QA Q4r, on the real path: ``slowfix`` (wedged) is an
+    ambiguous owner of ``mcp__slowfix_x_search``, which ``slowfix_x`` serves
+    after ~1 s. The status-keyed gate waited the whole 30 s on ``slowfix`` and
+    then failed the run (``declared tools unreachable:`` with an EMPTY list)."""
+    import time
+
+    run, requests, root = cold_exec
+    _write_servers(root, {"slowfix": _slow(120), "slowfix_x": _slow(1)})
+    started = time.monotonic()
+    result = run("exec", "--tools", "mcp__slowfix_x_search", "--yolo", f"{MARKER}: q4r")
+    elapsed = time.monotonic() - started
+    turns = _turn_requests(requests)
+    print("EVIDENCE", f"elapsed={elapsed:.1f}s", f"exit={result.returncode}")
+    print("EVIDENCE", f"turn_requests={len(turns)}", f"first_tools={_tool_names(turns[0])}")
+    assert result.returncode == 0, result.stderr
+    assert _tool_names(turns[0]) == ["mcp__slowfix_x_search"]
+    assert elapsed < 25, "the wedged sibling held the turn toward the 30 s bound"
+
+
+@pytest.mark.parametrize("shape", ["bad-command", "instant-crash"])
+def test_a_declared_server_that_cannot_start_fails_loudly_before_any_turn(cold_exec, shape):
+    """QA Q-F2 / Q2a, on the real path: a declared server whose command does
+    not exist had ALREADY failed when the first turn checked, so the gate
+    neither waited nor raised and exec sent a turn with NO tools, exit 0. It
+    must fail non-zero at once, name the tool and the reason, send no turn,
+    and print no ERROR traceback ahead of ``exec failed:`` (review N1, QA O3)."""
+    run, requests, root = cold_exec
+    server: dict[str, Any] = (
+        {"command": str(root / "no-such-mcp-server")}  # QA Q2a
+        if shape == "bad-command"
+        else {"command": sys.executable, "args": ["-I", "-S", "-c", "raise SystemExit(3)"]}  # Q2c
+    )
+    _write_servers(root, {"ghost": server})
+    result = run("exec", "--tools", "mcp__ghost_search", "--yolo", f"{MARKER}: {shape}")
+    failure = [line for line in result.stderr.splitlines() if line.startswith("exec failed:")]
+    print(
+        "EVIDENCE",
+        shape,
+        f"exit={result.returncode}",
+        f"turn_requests={len(_turn_requests(requests))}",
+    )
+    print("EVIDENCE", failure)
+    assert result.returncode != 0
+    assert _turn_requests(requests) == [], "nothing may be sent without the declared reach"
+    assert len(failure) == 1 and "mcp__ghost_search" in failure[0]
+    assert "ghost failed: disconnected" in failure[0]
+    assert "Traceback" not in result.stderr

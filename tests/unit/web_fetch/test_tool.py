@@ -119,6 +119,83 @@ async def test_without_read_a_large_page_is_inlined_and_names_no_spill_route(
     assert "Line number 42 " in preview
 
 
+def _needle_markdown_page() -> tuple[str, str]:
+    """A ~102k-char markdown page whose one answer sits in the MIDDLE.
+
+    The shape review round 1 (R2) measured: past the 24,000-char no-read inline
+    bound, so a head+tail cut drops the answer and only passage ranking finds it.
+    """
+    lines = ["# Service manual", ""]
+    filler = "Routine maintenance prose that says nothing about the question at all."
+    for i in range(1300):
+        lines.append(f"Paragraph {i}: {filler}")
+        if i == 650:
+            lines.append("The NEEDLE_TOKEN service listens on port 47213 by default.")
+    page = "\n".join(lines)
+    return page, "port 47213"
+
+
+async def _fetch_md(page: str, context: ToolContext, query: str | None):
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, text=page, headers={"content-type": "text/markdown"})
+    )
+    return await run_fetch(
+        "https://example.com/manual",
+        tool_name="web_fetch",
+        context=context,
+        transport=transport,
+        query=query,
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_read_a_query_still_returns_the_focused_passage(tmp_path) -> None:
+    """REGRESSION (agent review round 1, R2): a no-read session stopped
+    storing oversized output, so passage ranking (which pages the stored lines)
+    never ran and ``web_fetch(query=…)`` returned ~24k unfocused head+tail chars
+    WITHOUT the answer, ~17x a read-holding session's ~1.4k focused result. It
+    must return the same passages, minus the footer and the ``read`` hint."""
+    from local_operator.tools.builtin import TOOL_OUTPUT_LIMIT_CHARS
+
+    page, answer = _needle_markdown_page()
+    assert len(page) > 100_000 and answer in page[40_000:60_000], "precondition"
+    readable = ToolContext(cwd=str(tmp_path), session_id="q-read", spill_readable=True)
+    no_read = ToolContext(cwd=str(tmp_path), session_id="q-no-read", spill_readable=False)
+
+    with_read, read_details, _ = await _fetch_md(page, readable, "NEEDLE_TOKEN port")
+    without, details, is_error = await _fetch_md(page, no_read, "NEEDLE_TOKEN port")
+
+    assert answer in with_read, "control: the read-holding session finds it"
+    assert is_error is False
+    assert answer in without
+    assert details.get("query_passages") == read_details.get("query_passages")
+    assert "spill://" not in without and "read(" not in without
+    assert len(without) <= TOOL_OUTPUT_LIMIT_CHARS
+    # Roughly the read-holding size: the same passages, minus its footer.
+    assert len(without) <= len(with_read) + 200, (len(without), len(with_read))
+    # Stored for the harness's own use (ranking, monitors, renderers).
+    assert details["spill"]["handle"].startswith("spill://")
+
+
+@pytest.mark.asyncio
+async def test_without_read_an_unmatched_query_says_so_and_keeps_the_wide_inline_shape(
+    tmp_path,
+) -> None:
+    from local_operator.tools.builtin import UNREADABLE_SPILL_INLINE_LIMIT_CHARS
+
+    page, _answer = _needle_markdown_page()
+    no_read = ToolContext(cwd=str(tmp_path), session_id="q-miss", spill_readable=False)
+    plain, _d, _ = await _fetch_md(page, no_read, None)
+    missed, details, _ = await _fetch_md(page, no_read, "zebra xylophone quokka")
+
+    assert "[No passage matched the query; showing the start and end.]" in missed
+    assert "spill://" not in missed and "read(" not in missed
+    assert len(missed) <= UNREADABLE_SPILL_INLINE_LIMIT_CHARS
+    # The no-query shape it would have had, less only the room the notice takes.
+    assert len(plain) - len(missed) < 200
+    assert details["query_passages"] == []
+
+
 @pytest.mark.asyncio
 async def test_cache_hit_makes_no_network_call(context: ToolContext) -> None:
     page = _html_page(50)
