@@ -241,9 +241,9 @@ def test_resolvers_tolerate_a_config_without_config_dir(clean_env, census) -> No
         "bedrock",
         "ca.anthropic.claude-haiku-5-5",
     )
-    assert bootstrap.resolve_hosting_model(
-        _DirlessConfig({"model_name": model}), None, None, None
-    ) == (
+    # Typed ``Any`` like ``config`` above: the duck-typed stand-in is the point.
+    with_model: Any = _DirlessConfig({"model_name": model})
+    assert bootstrap.resolve_hosting_model(with_model, None, None, None) == (
         "bedrock",
         "ca.anthropic.claude-haiku-5-5",
     )
