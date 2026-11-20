@@ -633,6 +633,11 @@ class SessionSpec:
             # The exact technical sentence ``Session.wait_for_tools`` and
             # ``Session.set_first_turn_mcp_wait`` raise for the same parameter,
             # prefixed with the field so the caller knows which spec value.
+            # Deliberately NOT keyed like ``output_retries_range`` (PR #4349
+            # review N2): it is an SDK developer's parameter check (identifier
+            # plus bound, the same unkeyed text the two methods raise), and a new
+            # ``wire.errors.sdk_spec`` key would need a translator and an
+            # independent audit in every locale for a string no end user reads.
             raise SessionSpecError(
                 # i18n: ignore technical parameter validation (identifier + bound)
                 "mcp_ready_timeout_s: timeout_s must be a finite number >= 0"

@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import threading
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,15 @@ pytestmark = pytest.mark.e2e
 
 FIXTURE = Path(__file__).with_name("slow_mcp_fixture.py")
 TOOL = "mcp__slowfix_search"
+DEFAULT_STEPS: list[tuple[str, dict[str, Any]]] = [
+    ("read", {"path": "mcp://slowfix/search"}),
+    (TOOL, {"query": "judges"}),
+]
+BIG_TOOL = "mcp__slowfix_bigsearch"
+BIG_STEPS: list[tuple[str, dict[str, Any]]] = [
+    ("read", {"path": "mcp://slowfix/bigsearch"}),
+    (BIG_TOOL, {"query": "judges"}),
+]
 
 
 @pytest.fixture
@@ -67,6 +77,10 @@ def sdk_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv(agent_shell.MAY_DELEGATE_ENV, raising=False)
     monkeypatch.delenv(agent_shell.ALLOW_NESTED_SESSION_ENV, raising=False)
     requests: list[dict[str, Any]] = []
+    #: The scripted model's tool calls, in order; ``open_with(steps=...)`` swaps
+    #: it per test. Counted against the conversation's tool results, so a later
+    #: prompt (every step answered) just ends with "done".
+    script: list[tuple[str, dict[str, Any]]] = list(DEFAULT_STEPS)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):  # noqa: A002 — the stdlib signature
@@ -84,7 +98,7 @@ def sdk_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(body)
             answered = sum(1 for m in body.get("messages", []) if m.get("role") == "tool")
-            steps = [("read", {"path": "mcp://slowfix/search"}), (TOOL, {"query": "judges"})]
+            steps = script
             delta: dict[str, Any] = {"role": "assistant", "content": "done"}
             finish = "stop"
             if answered < len(steps):
@@ -127,7 +141,17 @@ def sdk_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     roots = SessionRoots(config_dir=root, agent_home=agent_home, cwd=work, allow_volatile=True)
 
-    def open_with(delay_s: float, **spec: Any):
+    def open_with(
+        delay_s: float,
+        *,
+        steps: list[tuple[str, dict[str, Any]]] | None = None,
+        big_schema_chars: int = 0,
+        **spec: Any,
+    ):
+        script[:] = DEFAULT_STEPS if steps is None else steps
+        env = {"SLOW_MCP_DELAY_S": str(delay_s)}
+        if big_schema_chars:
+            env["SLOW_MCP_BIG_SCHEMA_CHARS"] = str(big_schema_chars)
         (root / "mcp.json").write_text(
             json.dumps(
                 {
@@ -135,7 +159,7 @@ def sdk_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                         "slowfix": {
                             "command": sys.executable,
                             "args": [str(FIXTURE)],
-                            "env": {"SLOW_MCP_DELAY_S": str(delay_s)},
+                            "env": env,
                         }
                     }
                 }
@@ -211,3 +235,63 @@ async def test_a_server_still_connecting_at_the_bound_refuses_and_a_retry_meets_
 
     results = _tool_results(requests)
     assert results[-1] == "fixture result for judges", results
+
+
+def _duplicate_tool_names(requests: list[dict[str, Any]]) -> list[dict[str, int]]:
+    """Per request, every tool name its ``tools`` array carries more than once.
+
+    Anthropic refuses such a request outright (400 "Tool names must be
+    unique"); the loopback provider here accepts it, so the test has to look.
+    """
+    out: list[dict[str, int]] = []
+    for body in requests:
+        counts = Counter(tool["function"]["name"] for tool in body.get("tools") or ())
+        out.append({name: count for name, count in counts.items() if count > 1})
+    return out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["undeclared_wait_for_tools", "declared_with_read"])
+async def test_an_over_cap_tool_granted_and_then_read_is_published_once(sdk_root, shape) -> None:
+    """PR #4349 agent review round 1, R1: a GRANT of a lazy MCP tool followed by
+    the model's ``mcp://`` read of the same over-cap tool put two copies of the
+    name in the inventory, and every later request in the session carried both.
+
+    - ``undeclared_wait_for_tools``: the SDK's default shape through the gate
+      SDK.md recommends. The grant used to bypass the factory's activation
+      bookkeeping, so the read's ``activate`` added a second copy (reviewer's
+      repro: inventory count 1 → 2, prompt 2's ``tools`` listing it twice).
+    - ``declared_with_read``: the pre-existing route. A declaration grants the
+      tool directly; the model's read then publishes it again. Fixed by
+      ``refresh_selected`` keeping one copy per name.
+    """
+    open_with, requests = sdk_root
+    spec: dict[str, Any] = {}
+    if shape == "declared_with_read":
+        spec["tools"] = ("read", BIG_TOOL)
+    # 20,000 chars of parameter description: past the 16,000-char inline cap, so
+    # the read takes the publication path (``activate``), not the deferred one.
+    async with open_with(0.0, steps=BIG_STEPS, big_schema_chars=20_000, **spec) as opened:
+        session = cast(Any, opened)
+        if shape == "undeclared_wait_for_tools":
+            readiness = await session.wait_for_tools([BIG_TOOL], timeout_s=30.0)
+            assert readiness.status == "ready", readiness
+        await session.prompt("search for judges")
+        assert session.tool_inventory.count(BIG_TOOL) == 1, session.tool_inventory
+        await session.prompt("search again")
+        assert session.tool_inventory.count(BIG_TOOL) == 1, session.tool_inventory
+
+    results = _tool_results(requests)
+    assert results[0].startswith(f"# Enabled MCP tool: {BIG_TOOL}"), (
+        "precondition: the read took the over-cap publication path",
+        results[0][:300],
+    )
+    assert "too large to show inline" in results[0], results[0][:300]
+    assert results[1] == "big fixture result for judges", results
+    # Prompt 1 published the grant; prompt 2 is the request the duplicate reached.
+    assert len(requests) >= 3, len(requests)
+    assert all(
+        BIG_TOOL in [tool["function"]["name"] for tool in body.get("tools") or ()]
+        for body in requests
+    ), "the granted tool stays published on every request"
+    assert _duplicate_tool_names(requests) == [{}] * len(requests)

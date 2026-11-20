@@ -15974,11 +15974,33 @@ class Session:
             for tool in available
             if getattr(tool, "name", None) in wanted and tool.name not in present
         ]
-        if granted:
-            # Through ``refresh_tools``, so the grant is subject to the very
-            # declaration that asked for it rather than beside it.
-            self.refresh_tools([*self._tools, *granted])
-        return tuple(tool.name for tool in granted)
+        if not granted:
+            return ()
+        names_granted = tuple(tool.name for tool in granted)
+        # AN UNDECLARED SESSION'S GRANT IS AN ACTIVATION, so it goes through the
+        # factory's activation bookkeeping (``_mcp_activate_named``, installed by
+        # ``session_factory.wire_mcp_into_session`` beside
+        # ``_mcp_cold_boundary_prune``). Installed directly, the tool sat outside
+        # that bookkeeping: a later ``mcp://`` read of the same over-cap tool
+        # selected it again and the provider array carried the name twice — an
+        # Anthropic 400 on every later request (PR #4349 agent review round 1,
+        # R1). A DECLARATION keeps the direct path on purpose: its tools are the
+        # caller's fixed contract (a bounded runtime may hold no ``read`` to
+        # re-find a schema), so they must not enter the idle demotion a
+        # model's activation is subject to.
+        activate = getattr(self, "_mcp_activate_named", None)
+        if self._declared_tools is None and callable(activate):
+            try:
+                activate(names_granted)
+            except Exception:  # noqa: BLE001 — a grant must not break the wait
+                logger.debug("mcp activation unavailable for a named-tool grant", exc_info=True)
+            else:
+                reached = set(self.tool_inventory)
+                return tuple(name for name in names_granted if name in reached)
+        # Through ``refresh_tools``, so the grant is subject to the very
+        # declaration that asked for it rather than beside it.
+        self.refresh_tools([*self._tools, *granted])
+        return names_granted
 
     def unresolved_declared_tools(self) -> tuple[str, ...]:
         """Declared names this session reaches NOTHING for, for a host to report.

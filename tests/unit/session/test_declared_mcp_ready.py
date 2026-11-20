@@ -16,7 +16,7 @@ import asyncio
 import logging
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -716,6 +716,21 @@ async def test_wait_for_all_warns_and_proceeds_for_a_server_that_dies_mid_wait(c
         )
     assert settled is True and elapsed < 1.5
     assert "'dies' settled disconnected" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_settled_warning_reports_each_servers_own_settle_time(caplog):
+    """PR #4349 QA round 1, Q3: a server refused early must not read as having
+    taken the whole wait because a slower healthy server held it open."""
+    manager = TimedManager({"dies": ("dies", 0.1), "slow": ("up", 1.0, ["mcp__slow_x"])})
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.declared_mcp_ready"):
+        settled, elapsed, _ = await _gate(manager, None, wait_for_all=True, timeout_s=10.0)
+    assert settled is True and elapsed >= 1.0, elapsed
+    (record,) = [r for r in caplog.records if r.args and r.args[0] == "dies"]
+    assert record.args is not None and record.args[1] == "disconnected"
+    own = cast(float, record.args[2])
+    # Its own ~0.1 s (one wake later at most), not the ~1.0 s the wait lasted.
+    assert own < 0.6, (own, elapsed)
 
 
 @pytest.mark.asyncio

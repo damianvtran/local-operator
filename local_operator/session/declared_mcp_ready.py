@@ -329,6 +329,14 @@ async def await_named_mcp_servers(
     # configured (neither a declared candidate nor preload), and whether the
     # loop ended on the bound rather than on everything settling.
     others_seen: set[str] = set()
+    #: Seconds from ``started`` to the pass that first saw each awaited
+    #: ``others`` server stop ``connecting``: ITS settle time, for the warning
+    #: below. That warning printed the whole wait's length instead, so a server
+    #: refused 0.1 s in read "settled auth-required after 2.8 s" whenever a
+    #: slower server held the wait (PR #4349 QA round 1, Q3). ``first=True``
+    #: wakes the wait on the first server to settle, so the pass that notices
+    #: it runs right after the fact, not a poll slice later.
+    settled_after: dict[str, float] = {}
     bound_reached = False
 
     def pending() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
@@ -344,8 +352,11 @@ async def await_named_mcp_servers(
             owners, preload, others = pending()
             preload_seen |= preload
             others_seen |= others
+            now = time.monotonic()
+            for server in others_seen - others:
+                settled_after.setdefault(server, now - started)
             awaited = owners | preload | others
-            remaining = deadline - time.monotonic()
+            remaining = deadline - now
             if not awaited:
                 break
             if remaining <= 0:
@@ -395,7 +406,7 @@ async def await_named_mcp_servers(
                 "MCP server %r settled %s after %.1f s; first turn proceeds without its tools",
                 server,
                 status,
-                time.monotonic() - started,
+                settled_after.get(server, time.monotonic() - started),
             )
     for server in sorted(preload_seen):
         status = statuses[server]

@@ -15,7 +15,7 @@ Stdio server:
 ```bash
 local-operator mcp add filesystem \
   --command npx \
-  --arg -y \
+  --arg=-y \
   --arg @modelcontextprotocol/server-filesystem \
   --arg /allowed/path
 ```
@@ -43,14 +43,14 @@ Add `--scope project` to write `<cwd>/.local-operator/mcp.json`; the default glo
 
 ## Environment variables and API keys
 
-A stdio server does NOT inherit Local Operator's environment. Its child environment is an allowlist — `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER` (the MCP SDK's `get_default_environment()`) — plus the server's own config `env`, merged last. This is intended: a project `.mcp.json` must not be able to copy arbitrary variables out of the running app. So `TAVILY_API_KEY` exported in your shell never reaches a Tavily server by itself.
+A stdio server does NOT inherit Local Operator's environment. Its child environment is an allowlist — on macOS and Linux `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER` (the MCP SDK's `get_default_environment()`; Windows inherits `APPDATA`, `HOMEDRIVE`, `HOMEPATH`, `LOCALAPPDATA`, `PATH`, `PATHEXT`, `PROCESSOR_ARCHITECTURE`, `SYSTEMDRIVE`, `SYSTEMROOT`, `TEMP`, `USERNAME`, `USERPROFILE` instead) — then Local Operator's quiet-output defaults `NO_COLOR=1`, `TERM=dumb`, `CLICOLOR=0`, `PY_COLORS=0` (`CHILD_QUIET_ENV` in `local_operator/mcp/manager.py`, so `TERM` arrives as `dumb`, not inherited), and finally the server's own config `env`, merged last and winning. This is intended: a project `.mcp.json` must not be able to copy arbitrary variables out of the running app. So `TAVILY_API_KEY` exported in your shell never reaches a Tavily server by itself.
 
 Pass a key by reference, resolved from the encrypted secret store at connect time:
 
 ```bash
 lop secret set TAVILY_API_KEY          # reads the value from stdin; never put it in argv
 local-operator mcp add tavily \
-  --command npx --arg -y --arg tavily-mcp@latest \
+  --command npx --arg=-y --arg tavily-mcp@latest \
   --env 'TAVILY_API_KEY=${TAVILY_API_KEY}'
 ```
 
