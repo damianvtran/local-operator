@@ -356,3 +356,87 @@ async def test_the_rows_route_refuses_what_history_refuses_and_foreign_refs(
         assert past.status_code == 416
         assert (await harness.client.get(route, params={"offset": -1})).status_code == 422
         assert (await harness.client.get(route, params={"limit": 0})).status_code == 422
+
+
+def _text_row(id_: str, ts: float, char: str, count: int) -> TranscriptEntry:
+    return _message(id_, ts, "tool", char * count)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("char", ["ж", "😀"])
+async def test_a_non_latin_snapshot_fits_the_cap_on_the_sse_wire(tmp_path: Path, char: str) -> None:
+    """R1-1: the snapshot record the event stream emits, measured through ``_sse_data``.
+
+    On 2a397de74 these rows fit the 4 MiB page bound in UTF-8 bytes, and the
+    SSE record (``json.dumps`` escapes non-ASCII: 6 B per 2-byte character,
+    12 B per emoji) was ~3x that — over the UI's 8 MiB per-record cap.
+    """
+    from local_operator.server.routes.desktop_sessions import _sse_data
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    directory = tmp_path / "sessions" / sid
+    directory.mkdir(parents=True, exist_ok=True)
+    count = 200_000 if len(char.encode()) == 2 else 100_000
+    rows = [*_opening(1), *(_text_row(f"t{n}", 200.0 + n, char, count) for n in range(12))]
+    (directory / TRANSCRIPT_FILENAME).write_text(
+        "\n".join(row.to_json() for row in rows) + "\n", encoding="utf-8"
+    )
+    async with pool.session(sid) as bridge:
+        sub = bridge.subscribe()
+        stream = bridge.events(sub, epoch=bridge.epoch, after_seq=bridge.sequence)
+        assert (await anext(stream))["type"] == "open"
+        snapshot = await anext(stream)
+        assert snapshot["type"] == "snapshot"
+        record = _sse_data(snapshot).encode("utf-8")
+        assert len(record) <= UI_RECORD_CAP, len(record)
+        history = snapshot["payload"]["history"]
+        assert history["entries"][-1]["id"] == "t11"
+        assert history["has_more"] is True
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_bare_anchored_page_keeps_its_anchor(tmp_path: Path) -> None:
+    """R1-5: ``around_id`` with ``after>0`` spent the budget on newer rows and lost the anchor."""
+    async with _Harness(tmp_path) as harness:
+        rows = [_sized_tool_row(f"t{n}", 200.0 + n, 1_400_000) for n in range(8)]
+        harness.seed([*_opening(1), *rows])
+        page = (
+            await harness.client.get(
+                f"{harness.base}/history", params={"around_id": "t1", "before": 1, "after": 6}
+            )
+        ).json()["result"]
+        ids = [row["id"] for row in page["entries"]]
+        assert "t1" in ids, ids
+        assert ids == sorted(ids, key=lambda i: int(i[1:])), "contiguous, oldest first"
+        assert page["has_newer"] is True, "newer rows were left out"
+        assert sum(len(json.dumps(row)) for row in page["entries"]) <= 4 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_the_documented_stale_ref_recovery_read_mints_a_working_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-3: after a serve restart (new ref secret) the old ref 404s; the documented
+    ``around_id=<row id>&before=0&after=0`` read mints a fresh ref that resolves."""
+    from local_operator.session import row_clip
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed([*_opening(), _sized_tool_row("huge", 200.0, C4_ROW_BYTES)])
+        page = (await harness.client.get(f"{harness.base}/history")).json()["result"]
+        stale = _newest(page)["truncated"]
+        monkeypatch.setattr(row_clip, "_REF_KEY", b"\x01" * 32)  # a restarted process
+        gone = await harness.client.get(f"{harness.base}/history/rows/{stale['ref']}")
+        assert gone.status_code == 404
+        again = (
+            await harness.client.get(
+                f"{harness.base}/history", params={"around_id": "huge", "before": 0, "after": 0}
+            )
+        ).json()["result"]
+        [row] = again["entries"]
+        fresh = row["truncated"]
+        assert row["id"] == "huge" and fresh["ref"] != stale["ref"]
+        assert fresh["bytes_total"] == stale["bytes_total"]
+        data, _ = await _fetch_all(harness, fresh["ref"], step=1_048_576)
+        assert len(data) == fresh["bytes_total"]

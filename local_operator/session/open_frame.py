@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
 
 from local_operator.harness.rows import is_harness_chrome, is_harness_injection
-from local_operator.session.row_clip import clip_row
+from local_operator.session.row_clip import clip_row, wire_size
 from local_operator.session.transcript_index import RunRecord, TranscriptIndex
 
 if TYPE_CHECKING:
@@ -918,7 +918,7 @@ def build_frame(
     # that row too.
     pairs = [(raw, stripped) for raw in ordered if (stripped := strip(raw)) is not None]
     painted = [stripped for _, stripped in pairs]
-    sizes = [len(json.dumps(entry, separators=(",", ":"))) for entry in painted]
+    sizes = [wire_size(entry) for entry in painted]
     # A ROW OVER THE WHOLE PAGE BUDGET IS PROJECTED, NOT DROPPED. Such a row can
     # only ever be admitted alone (the newest-row and anchor exceptions above),
     # and admitted whole it made the opening snapshot larger than the
@@ -937,7 +937,7 @@ def build_frame(
                     budget=OPEN_FRAME_MAX_BYTES,
                 )
             )
-            sizes[pos] = len(json.dumps(painted[pos], separators=(",", ":")))
+            sizes[pos] = wire_size(painted[pos])
     anchor_index = None
     if anchor_id is not None:
         anchor_index = next(

@@ -158,7 +158,11 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.index_prewarm import start_session_warm
 from local_operator.session.remote_open import PeerSessionUnresolved
-from local_operator.session.row_clip import ROW_RANGE_MAX_BYTES, RowRangeUnsatisfiable
+from local_operator.session.row_clip import (
+    ROW_RANGE_MAX_BYTES,
+    RowRangeUnsatisfiable,
+    wire_json,
+)
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -6706,8 +6710,13 @@ async def move(session_id: str, body: MoveSession, request: Request):
 
 
 def _sse_data(frame: Any) -> str:
-    """One SSE ``data:`` record for ``frame``; synchronous so it can run in a thread."""
-    return "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+    """One SSE ``data:`` record for ``frame``; synchronous so it can run in a thread.
+
+    ``wire_json`` is shared with ``session.row_clip`` on purpose: the row and
+    page budgets are counted in exactly this encoding, so the bound and the
+    record it bounds cannot drift apart.
+    """
+    return "data: " + wire_json(frame) + "\n\n"
 
 
 @router.get("/v1/desktop/sessions/{session_id}/events")
@@ -6979,7 +6988,7 @@ async def desktop_events(request: Request):
     async def stream():
         try:
             async for frame in engine.events(subscription):
-                yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                yield _sse_data(frame)
         finally:
             await release_once()
 

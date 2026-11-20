@@ -668,13 +668,15 @@ def _wire_entries(entries: Sequence[Any]) -> list[dict[str, Any]]:
     )
 
 
-def _bounded_page(entries: Sequence[Any], session_id: str) -> tuple[list[Mapping[str, Any]], bool]:
+def _bounded_page(
+    entries: Sequence[Any], session_id: str, anchor_id: str | None = None
+) -> tuple[list[Mapping[str, Any]], bool, bool]:
     """A bare page's rows clipped and bounded, for the event loop's thread.
 
     ``_wire_entries`` is the expensive half (a JSON round trip per row, tens of
     ms on a fat page), so both it and the clip stay off the loop.
     """
-    return bound_history_entries(_wire_entries(entries), session_id=session_id)
+    return bound_history_entries(_wire_entries(entries), session_id=session_id, anchor_id=anchor_id)
 
 
 def _own_wire_state(shared: dict[str, Any]) -> dict[str, Any]:
@@ -4724,8 +4726,11 @@ class DesktopSessionBridge:
         # one 10.59 MB ``frontend_state_checkpoint_v1`` row made a 12.13 MB
         # snapshot the renderer's 8 MiB per-record cap refused. Each row is
         # clipped to 1.5 MiB (a checkpoint is withheld, not cut) and the page
-        # to 4 MiB, newest rows first; the full rows stay one ref away.
-        entries, capped = await asyncio.to_thread(_bounded_page, page.entries, self.session_id)
+        # to 4 MiB (wire bytes), newest rows first — or outward from
+        # ``around_id``, which is always kept; the full rows stay one ref away.
+        entries, capped_older, capped_newer = await asyncio.to_thread(
+            _bounded_page, page.entries, self.session_id, around_id
+        )
         answer = {
             # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
             # construction — the ``entry`` value of the closed vocabulary, and the
@@ -4736,11 +4741,11 @@ class DesktopSessionBridge:
             # tens of ms of JSON round trip, and the snapshot asks for one on
             # every open (serve stall, 2026-11-15 real-path sampler).
             "entries": entries,
-            # ``capped`` left OLDER rows for the next page, so there is more
-            # even when the journal page itself reached the head.
-            "has_more": page.has_more or capped,
+            # A cap that left rows out on a side means there is more on that
+            # side even when the journal page itself reached its end.
+            "has_more": page.has_more or capped_older,
             "cursor_missing": page.reconciled,
-            "has_newer": page.has_newer,
+            "has_newer": True if capped_newer else page.has_newer,
         }
         answer = await self._with_peer_cycle_records(answer, [page])
         return (

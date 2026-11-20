@@ -16,11 +16,11 @@ reader can say so and fetch the rest on demand.
 THE WIRE FIELD (``docs/DESKTOP_API.md`` §"Clipped rows"): a clipped row
 carries ``truncated: {bytes_total, shown_bytes, ref, reason}`` —
 
-- ``bytes_total``: the byte length of the row's FULL content, i.e. exactly
-  what ``GET .../history/rows/{ref}`` reassembles to (``canonical_row_bytes``
-  of the unclipped desktop wire row);
-- ``shown_bytes``: the canonical byte length of the row as served, WITHOUT the
-  ``truncated`` key itself;
+- ``bytes_total``: the UTF-8 byte length of the row's FULL content, i.e.
+  exactly what ``GET .../history/rows/{ref}`` reassembles to
+  (``canonical_row_bytes`` of the unclipped desktop wire row);
+- ``shown_bytes``: the WIRE byte length (``wire_size``, the SSE spelling every
+  budget counts) of the row as served, WITHOUT the ``truncated`` key itself;
 - ``ref``: opaque, session-bound (see ``row_ref``); ``None`` only when the
   producer had no session to bind it to (pure helpers in tests);
 - ``reason``: ``"open_frame_cap"`` or ``"history_cap"`` — which bound clipped
@@ -33,9 +33,11 @@ keeps its shape and the reader still paints the start of every part. A
 checkpoint is not a checkpoint, and a reader that parsed one would restore a
 corrupt state. Such a row keeps its envelope (id, ts, type, and its
 ``custom_type`` when it has one) with every other payload key removed and
-``truncated.omitted: true``; no surface paints these rows (``open_frame``'s
-reader survey), and the full row is one ref fetch away for anything that does
-need it.
+``truncated.omitted: true``, and the full row is one ref fetch away. Most of
+these rows are never painted, but the desktop UI DOES paint ``supplement_v1``
+custom rows, so a withheld one would otherwise render as an empty block: a
+reader that paints a row carrying ``truncated.omitted`` should render its own
+placeholder (or fetch the row by ref) instead (``docs/DESKTOP_API.md``).
 """
 
 from __future__ import annotations
@@ -48,8 +50,8 @@ import json
 import secrets
 from typing import Any, Final, Literal, Mapping, Sequence
 
-#: The per-row budget: a clipped row is at most this many canonical bytes
-#: (plus its few-dozen-byte marker). The same figure as
+#: The per-row budget: a clipped row, its ``truncated`` marker included, is at
+#: most this many WIRE bytes (``wire_size``). The same figure as
 #: ``open_frame.OPEN_FRAME_MAX_BYTES`` — the measured p90 of an unstripped open
 #: page — so one clipped row is never larger than a whole ordinary page, and
 #: five of them still fit under the UI's 8 MiB record cap.
@@ -90,8 +92,38 @@ _REF_PREFIX: Final = "r1"
 _MAC_BYTES: Final = 16
 
 
+def wire_json(value: Any) -> str:
+    """The SSE wire spelling of ``value``: the ONE encoding every budget counts.
+
+    WHY THIS IS THE MEASURE (review round 1, R1-1). The snapshot reaches the
+    renderer as an SSE ``data:`` record built by exactly this call
+    (``routes.desktop_sessions._sse_data`` and the event stream use it, so
+    there is no second spelling to drift), and ``json.dumps`` escapes every
+    non-ASCII character: a 2-byte UTF-8 character costs 6 bytes on the wire, a
+    4-byte one (an emoji, a surrogate pair) 12. Budgets measured in UTF-8 let a
+    page of Cyrillic text "bounded" at 4,000,401 B reach 12,000,401 B on the
+    wire — over the 8 MiB UI cap the bound exists to respect. The result is
+    pure ASCII, so its ``len`` IS its byte count; and since an escape is never
+    shorter than its UTF-8 form, a row within a wire budget is within it over
+    the plain-JSON HTTP routes too.
+    """
+    return json.dumps(value, separators=(",", ":"))
+
+
+def wire_size(row: Any) -> int:
+    """Bytes ``row`` occupies inside an SSE record (see :func:`wire_json`)."""
+    return len(wire_json(row))
+
+
 def canonical_row_bytes(row: Mapping[str, Any]) -> bytes:
-    """The one byte form a row is measured, clipped against and served in."""
+    """The byte form the rows route serves a FULL row in: compact JSON, UTF-8.
+
+    Deliberately NOT the wire spelling: the ref route ships these bytes as
+    base64 ranges (never inside an SSE record), and unescaped UTF-8 is up to 3x
+    smaller for non-Latin text, so a long row reassembles in fewer requests.
+    ``truncated.bytes_total`` counts THESE bytes — the exact length the joined
+    ranges reach — while every budget and ``shown_bytes`` count wire bytes.
+    """
     return json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
@@ -184,7 +216,7 @@ def _clip_message(row: Mapping[str, Any], budget: int, size: int) -> dict[str, A
     # The structure's own bytes, measured with every string emptied, and the
     # strings' average encoded bytes per character (escapes, multi-byte text),
     # so the character ceiling below is sized in the budget's unit: bytes.
-    fixed = len(canonical_row_bytes(_cut_strings(row, 0)))
+    fixed = wire_size(_cut_strings(row, 0))
     if fixed >= budget:
         return None
     per_char = max((size - fixed) / max(total_chars, 1), 1.0)
@@ -204,7 +236,7 @@ def _clip_message(row: Mapping[str, Any], budget: int, size: int) -> dict[str, A
     limit = max(limit, 0)
     while True:
         clipped = _cut_strings(row, limit)
-        if len(canonical_row_bytes(clipped)) <= budget:
+        if wire_size(clipped) <= budget:
             return clipped
         if limit == 0:
             return None
@@ -233,22 +265,32 @@ def clip_row(
     already a projection of it (the open frame's strip): ``bytes_total`` always
     measures what the ref reassembles to, never an intermediate form.
     """
-    served = canonical_row_bytes(row)
-    if len(served) <= budget:
+    size = wire_size(row)
+    if size <= budget:
         return row
-    total = len(canonical_row_bytes(full)) if full is not None else len(served)
-    clipped = _clip_message(row, budget, len(served)) if row.get("type") == "message" else None
+    total = len(canonical_row_bytes(full if full is not None else row))
+    row_id = row.get("id")
+    ref = (
+        row_ref(session_id, row_id)
+        if session_id is not None and isinstance(row_id, str) and row_id
+        else None
+    )
+    # THE MARKER IS INSIDE THE BUDGET (QA round 1, Q1): a projection cut to the
+    # whole budget plus its marker came to 1,572,990 B, 126 B over the
+    # 1,572,864 B it was bounded by. The reserve is the marker's own wire cost
+    # at its widest — ``shown_bytes`` at the budget's digit count, ``omitted``
+    # present — less the ``{`` the merge into the row does not add, so the
+    # served row, marker included, is <= ``budget``.
+    widest = {"bytes_total": total, "shown_bytes": budget, "ref": ref, "reason": reason}
+    reserve = wire_size({"truncated": {**widest, "omitted": True}}) - 1
+    room = max(budget - reserve, 0)
+    clipped = _clip_message(row, room, size) if row.get("type") == "message" else None
     omitted = clipped is None
     projection = _withhold(row) if clipped is None else clipped
-    row_id = row.get("id")
     marker: dict[str, Any] = {
         "bytes_total": total,
-        "shown_bytes": len(canonical_row_bytes(projection)),
-        "ref": (
-            row_ref(session_id, row_id)
-            if session_id is not None and isinstance(row_id, str) and row_id
-            else None
-        ),
+        "shown_bytes": wire_size(projection),
+        "ref": ref,
         "reason": reason,
     }
     if omitted:
@@ -261,29 +303,59 @@ def bound_history_entries(
     *,
     session_id: str | None,
     max_bytes: int = HISTORY_MAX_BYTES,
-) -> tuple[list[Mapping[str, Any]], bool]:
-    """A bare ``/history`` page clipped per row and bounded in total.
+    anchor_id: str | None = None,
+) -> tuple[list[Mapping[str, Any]], bool, bool]:
+    """A bare ``/history`` page clipped per row and bounded in total (wire bytes).
 
     Walks NEWEST-FIRST for the same reason the open frame does: the rows a
     reader cannot lose are the recent ones, so a page over budget loses its
     OLDEST rows to the next page and never its tail. The newest row is always
     kept (clipped), so the page is never empty when the journal is not.
-    Returns ``(entries oldest-first, capped)``; ``capped`` means older rows were
-    left out and the caller must answer ``has_more: true``.
+
+    AN ANCHORED PAGE KEEPS ITS ANCHOR (review round 1, R1-5). ``around_id``
+    with ``after > 0`` reads rows NEWER than the anchor, and a newest-first walk
+    spent the budget on those and could drop the anchor itself — the one row
+    the reader asked for. With ``anchor_id`` on the page the window instead
+    grows outward from the anchor, older side then newer, one row at a time
+    (``open_frame._window_around``'s rule), so the anchor is always present and
+    the page stays contiguous around it.
+
+    Returns ``(entries oldest-first, capped_older, capped_newer)``: rows were
+    left out on that side, so the caller must answer ``has_more: true`` /
+    ``has_newer: true`` respectively.
     """
-    kept: list[Mapping[str, Any]] = []
-    total = 0
-    capped = False
-    for raw in reversed(entries):
-        row = clip_row(raw, session_id=session_id, reason="history_cap")
-        size = len(canonical_row_bytes(row))
-        if kept and total + size > max_bytes:
-            capped = True
+    rows = [clip_row(raw, session_id=session_id, reason="history_cap") for raw in entries]
+    if not rows:
+        return [], False, False
+    sizes = [wire_size(row) for row in rows]
+    anchor = next(
+        (pos for pos, row in enumerate(rows) if anchor_id and row.get("id") == anchor_id), None
+    )
+    if anchor is None:
+        # A tail read: grow from the newest row, older only.
+        anchor = len(rows) - 1
+    lo = hi = anchor
+    total = sizes[anchor]
+    capped_older = capped_newer = False
+    while True:
+        grew = False
+        if lo > 0 and not capped_older:
+            if total + sizes[lo - 1] <= max_bytes:
+                lo -= 1
+                total += sizes[lo]
+                grew = True
+            else:
+                capped_older = True
+        if hi + 1 < len(rows) and not capped_newer:
+            if total + sizes[hi + 1] <= max_bytes:
+                hi += 1
+                total += sizes[hi]
+                grew = True
+            else:
+                capped_newer = True
+        if not grew:
             break
-        kept.append(row)
-        total += size
-    kept.reverse()
-    return kept, capped
+    return rows[lo : hi + 1], capped_older, capped_newer
 
 
 def row_range(content: bytes, *, offset: int, limit: int) -> dict[str, Any]:

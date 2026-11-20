@@ -1689,7 +1689,15 @@ could not open. Rows are now bounded per row, and the bare page in total
 | read | per-row budget | page budget | `reason` |
 | --- | --- | --- | --- |
 | open frame (`open_frame=1`) | 1.5 MiB (`OPEN_FRAME_MAX_BYTES`) | 1.5 MiB (unchanged; the newest row is always admitted) | `"open_frame_cap"` |
-| bare `/history` | 1.5 MiB | 4 MiB, newest rows first; older rows go to the next page and `has_more` is `true` | `"history_cap"` |
+| bare `/history` | 1.5 MiB | 4 MiB, newest rows first; older rows go to the next page and `has_more` is `true`. With `around_id` the page grows outward from the anchor, which is always kept; rows left out on the newer side set `has_newer: true` | `"history_cap"` |
+
+**Every budget counts WIRE bytes**: the row's compact JSON with non-ASCII
+escaped (`\uXXXX`), i.e. exactly its bytes inside the SSE `data:` record the
+snapshot travels in (`row_clip.wire_json`, which the event stream itself
+uses). A 2-byte character costs 6 wire bytes and an emoji 12, so a budget in
+UTF-8 bytes would let a non-Latin page reach ~3x its bound on the wire. The
+per-row budget INCLUDES the `truncated` marker. Plain-JSON HTTP answers are
+never larger than the wire form, so they are bounded too.
 
 A row over its budget stays on the page, at its position, with its id, and
 carries an ADDITIVE field (absent on every row that fits, so unclipped pages
@@ -1697,8 +1705,8 @@ keep today's bytes):
 
 ```
 truncated: {
-  bytes_total: int,   // bytes of the FULL row: what the rows route reassembles to
-  shown_bytes: int,   // compact-JSON bytes of the row as served, without `truncated`
+  bytes_total: int,   // UTF-8 bytes of the FULL row: exactly what the rows route reassembles to
+  shown_bytes: int,   // WIRE bytes (see above) of the row as served, without `truncated`
   ref: str | null,    // opaque, bound to this session; null = not fetchable here
   reason: "open_frame_cap" | "history_cap",
   omitted?: true      // payload WITHHELD rather than cut (see below)
@@ -1709,7 +1717,11 @@ truncated: {
 shape; every string leaf longer than one shared ceiling is cut to it, so every
 part keeps its start. A non-message row (a `frontend_state_checkpoint_v1`, a
 spend receipt) cannot be meaningfully half-present: it keeps its envelope and
-`payload.custom_type` only, with `omitted: true`. No surface paints those rows.
+`payload.custom_type` only, with `omitted: true`. Most such rows are never
+painted, but the desktop UI does paint `supplement_v1` custom rows, so a
+withheld one would render as an empty block: a reader that paints a row
+carrying `truncated.omitted` should render its own placeholder for it (or fetch
+the full row by `ref`) rather than paint the empty payload.
 A peer's row clipped by its owner carries `ref: null` — this device has no mesh
 lane that fetches one.
 
@@ -1728,8 +1740,27 @@ draft handling), so a full row is never reachable where its page is not. The
 `ref` is `r1.<base64url row id>.<base64url HMAC-SHA256(session_id NUL row_id)
 truncated to 128 bits>` under a per-process secret: a ref from another session,
 a forged or guessed one, and one minted by an earlier serve process all answer
-404 — the same answer as a row that no longer exists. After a serve restart a
-reader re-reads `/history` for fresh refs.
+404 — the same answer as a row that no longer exists.
+
+**Reading a clipped row back (client procedure).**
+
+1. `ref: null` means the row is not fetchable from this serve (a peer's row
+   clipped by its owner, or a producer with no session): show the clipped
+   preview as final; do not call the rows route.
+2. Page `offset=0, 1 MiB, 2 MiB, …` and on EVERY answer compare its
+   `bytes_total` with the marker's `bytes_total`. If they differ the row
+   changed under you: discard the bytes collected so far and restart from
+   `offset=0` with the new total.
+3. Concatenate the base64-decoded `data` of each range until `eof`. Decode
+   UTF-8 only AFTER joining all ranges — a range boundary may fall inside a
+   multi-byte character, so decoding range by range corrupts text. The joined
+   length equals `bytes_total` exactly.
+4. A 404 on a `ref` (most often a serve restart: the ref secret is per
+   process, by design) is recovered ONCE: re-read
+   `GET .../history?around_id=<row id>&before=0&after=0` to mint a fresh ref
+   for that row, and retry the procedure from step 2 with it. If that read
+   does not return the row clipped with a ref, or the retry fails again, show
+   the clipped preview as final.
 
 ### The open frame: a turn-aligned, paint-only page (`open_frame: 1`)
 
