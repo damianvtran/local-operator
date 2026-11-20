@@ -5973,6 +5973,7 @@ class TestTheStreamCompletedStopBoundary:
         progress_guards: Any = None,
         frozen: bool = False,
         commands: bool = False,
+        enforce_recorded_spend: bool = False,
     ) -> tuple[list[dict[str, Any]], Any, str]:
         """One real episode; returns (wire calls, outcome, record text).
 
@@ -6093,12 +6094,39 @@ class TestTheStreamCompletedStopBoundary:
             launch=launch,
             rescue=rescue,
             progress_guards=progress_guards,
+            enforce_recorded_spend=enforce_recorded_spend,
         )
         record = outcome.record_root / "events.jsonl" if outcome.record_root else None
         text = ""
         if record is not None and record.exists():
             text = record.read_text(encoding="utf-8")
         return calls, outcome, text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enforce", [False, True])
+    async def test_episode_spend_refusal_names_the_stop_and_joins_owned_work(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch, enforce: bool
+    ) -> None:
+        # The mock SSE transport deliberately sends no usage frame. The same
+        # capped EpisodeSpec must still complete two requests with no opt-in.
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[("read", {"path": str(real_arm_scratch / "world" / "note.txt")})]],
+            max_steps=2,
+            enforce_recorded_spend=enforce,
+        )
+        assert len(calls) == (1 if enforce else 2)
+        rows = [json.loads(line) for line in text.splitlines()]
+        assert any(row["kind"] == "shutdown" and row["complete"] for row in rows)
+        stops = [row for row in rows if row.get("cap_semantics") == "admission_on_recorded_spend"]
+        if enforce:
+            assert outcome.status == "truncated"
+            assert outcome.terminal_reason == "cost-unreported"
+            assert len(stops) == 1 and stops[0]["in_flight"] == 0
+        else:
+            assert not stops
+            assert outcome.terminal_reason == "max-steps"
 
     @pytest.mark.asyncio
     async def test_a_local_only_nth_group_spends_no_second_request(

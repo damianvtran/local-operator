@@ -63,6 +63,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # stubs it should never have needed). Both signatures name these types, and
     # importing them at runtime here would pull the session package into the
     # protocol module for no reader's gain.
+    from local_operator.harness.request_admission import RequestAdmission
     from local_operator.session.request_observation import (
         OwnedShutdownResult,
         RequestObserver,
@@ -642,6 +643,17 @@ class OwningSessionProtocol(SessionProtocol, Protocol):
     owning capability cheaply (``owns_runtime`` plus the callable methods)
     rather than via whole-protocol traversal.
     """
+
+    def install_request_admission(self, policy: RequestAdmission) -> Callable[[], None]:
+        """Install one synchronous policy for future requests in the owning tree.
+
+        Descendants (including already-created forks) and isolated helpers
+        share it. Refusal occurs before account selection and transport; it is
+        not a provider failure. Requests admitted before install/uninstall are
+        not affected, and admitted lifecycle callbacks still run on close.
+        A second install raises until the idempotent uninstaller is called.
+        """
+        ...
 
     def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
         """Observe the ORIGINAL OWNING ROOT TREE's request-final records.

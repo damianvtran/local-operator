@@ -153,6 +153,7 @@ from local_operator.harness.render import (
     _is_todo_reminder,
 )
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.request_admission import RequestAdmission
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
     is_inherit_tier_sentinel,
@@ -37381,6 +37382,12 @@ class Session:
                     comms.abandon_stop(stamp)
         except Exception:  # noqa: BLE001 — teardown must not fail over evidence
             logger.warning("could not roll back teardown attribution", exc_info=True)
+
+    def install_request_admission(self, policy: RequestAdmission) -> Callable[[], None]:
+        install = getattr(self._stream_fn, "install_request_admission", None)
+        if not callable(install):
+            raise RuntimeError("this session's stream does not support request admission")
+        return cast("Callable[[], None]", install(policy))
 
     def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
         """Observe this session tree's request-final records.

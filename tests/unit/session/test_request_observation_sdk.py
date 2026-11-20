@@ -318,6 +318,97 @@ async def test_ordinary_unset_is_allocation_free_and_turn_output_unchanged(
         assert calls == [], "an unsubscribed request must not build a record"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cap", "receipt", "admitted", "reason"),
+    [
+        (None, 0.000001, 3, None),  # no-hook control with the same wire script
+        (2, 0.000001, 2, "budget-cap"),
+        (0, 0.000001, 0, "budget-cap"),
+        (2, None, 1, "cost-unreported"),
+    ],
+)
+async def test_episode_recorded_spend_admission_uses_the_sdk_wire(
+    scratch: Any,
+    wire: Wire,
+    cap: int | None,
+    receipt: float | None,
+    admitted: int,
+    reason: str | None,
+) -> None:
+    from local_operator.evaluation.session_arm import open_episode_session
+    from local_operator.harness.types import AgentEndEvent
+
+    def turn(_request: ChatRequest) -> list[Any]:
+        if receipt is None:
+            return [StreamTextDelta(delta="no usage"), StreamEndEvent(stop_reason="stop")]
+        usage = Usage(input_tokens=1, usd_cost=receipt)
+        return [StreamUsageEvent(usage=usage), *text_turn("recorded spend", usage=usage)]
+
+    wire.script("parent", turn, turn, turn)
+    ends: list[AgentEndEvent] = []
+
+    def observe(event: Any) -> None:
+        if isinstance(event, AgentEndEvent):
+            ends.append(event)
+
+    handle = await open_episode_session(
+        spec=_spec(), roots=scratch, on_event=observe, max_recorded_spend_micros=cap
+    )
+    try:
+        for _ in range(min(admitted + 1, 3)):
+            await handle.session.prompt(f"{_PARENT_MARKER}: reply")
+        assert len(wire.scoped("parent")) == admitted
+        assert len(handle.request_rows) == admitted, "refusals are not billable requests"
+        assert handle.admission_refusal == reason
+        assert ends and ends[-1].error is None
+        assert ends[-1].aborted is (reason is not None)
+        shutdown = await handle.session.shutdown_owned_work("recorded-spend test")
+        assert shutdown.complete and shutdown.observer_callback_errors == 0
+        if handle._admission is not None:
+            assert not handle._admission.pending
+    finally:
+        await handle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_typed_admission_follows_preforked_isolated_requests(
+    scratch: Any, wire: Wire
+) -> None:
+    from local_operator.sdk import RequestAdmissionRefused
+
+    wire.script("helper", text_turn("no-hook control"))
+    async with _opened(scratch) as session:
+        child = session._stream_fn.fork("capped-child")
+        grandchild = child.fork("capped-grandchild")
+        request = session._errand_request(session._lowest_effort(session._model), "sys", "name")
+        assert request.isolated
+
+        def refuse(_request_id: str) -> None:
+            raise RequestAdmissionRefused("synthetic-denial")
+
+        try:
+            uninstall = session.install_request_admission(refuse)
+            for stream in (session._stream_fn, child, grandchild):
+                with pytest.raises(RequestAdmissionRefused, match="synthetic-denial"):
+                    async for _ in stream(request, None):
+                        pytest.fail("a declined request yielded a provider event")
+            assert not wire.requests
+
+            uninstall()
+            uninstall_again = session.install_request_admission(refuse)
+            uninstall()  # A stale uninstaller cannot disarm its replacement.
+            with pytest.raises(RequestAdmissionRefused, match="synthetic-denial"):
+                await session._drain_errand(request)
+            uninstall_again()
+
+            assert await session._drain_errand(request) == "no-hook control"
+            assert len(wire.requests) == 1 and wire.requests[0].isolated
+        finally:
+            await grandchild.close()
+            await child.close()
+
+
 # ---------------------------------------------------------------------------
 # Single native tool loop -- one row per request, duplicate frames once
 # ---------------------------------------------------------------------------
