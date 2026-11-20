@@ -69,6 +69,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import os
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -78,6 +79,7 @@ from local_operator.model.catalogue import (
     DEFAULT_TTL_S,
     MISS_REFETCH_MIN_AGE_S,
     SOFT_TTL_S,
+    _cache_path,
     _schedule_revalidate,
     invalidate,
     note_unavailable,
@@ -88,6 +90,7 @@ from local_operator.model.discovery import (
     DEFAULT_TIMEOUT_S,
     DiscoveredModel,
     _bills_in_tokens,
+    _effort_ladder,
     _positive_float,
     _positive_int,
 )
@@ -131,7 +134,37 @@ PRICE_CATALOGUE_KEY = "models-dev.listing"
 #: existing install for up to a day — the same one-refetch repair as version 2,
 #: on whichever surface reads the document first (single-id resolution repairs
 #: in-call, the picker's bulk read repairs off-loop).
-PRICE_CATALOGUE_CAPTURE = 3
+#: Version 4 adds the ``google-vertex`` provider key to the projection AND
+#: reads nested ``cost.context_over_200k`` long-context tier pricing into
+#: ``DiscoveredModel.long_context_*``. Existing installs cached a version-3
+#: projection that omitted ``google-vertex`` entirely, so without bumping the
+#: capture stamp Vertex AI models would miss their models.dev prices and >200k
+#: tier rates until the 24h TTL expired. Same one-time refetch repair as v2/v3.
+#:
+#: Version 5 adds ``effort_levels``: the values of every ``reasoning_options``
+#: entry of ``type: "effort"``, which :func:`_row` reads into
+#: ``DiscoveredModel.reasoning_efforts`` and :func:`catalogue_effort_ladder`
+#: serves to the providers in :data:`CATALOGUE_EFFORT_PROVIDERS`. It is what
+#: lets a Gemini model released after this build show its real thinking ladder
+#: (measured 2026-11-19: ``gemini-4-neon`` low/medium/high/xhigh,
+#: ``gemini-3.8-flash`` low/medium/high, both matching live Vertex probes). A
+#: version-4 document carries no ladder, so without the bump the dial would fall
+#: back to the offline table for up to a day. Same one-time refetch repair.
+PRICE_CATALOGUE_CAPTURE = 5
+
+#: The LOCAL providers whose effort ladder may come from models.dev.
+#:
+#: Deliberately narrow, although the projection itself is provider-neutral. A
+#: ladder is only worth advertising where (a) the provider's own listing states
+#: none, so the catalogue answers a real silence, and (b) the client for that
+#: provider maps the level onto its wire — otherwise the dial offers a rung that
+#: never reaches the request. Both hold for Google: AI Studio and Vertex list no
+#: thinking metadata (Vertex's publisher-model GET returns only
+#: name/versionId/launchStage), and ``GoogleClient`` sends the level as
+#: ``thinkingConfig.thinkingLevel``. Other direct providers either state their
+#: own ladder or are covered by hand-transcribed ``model.effort`` rows whose
+#: wire key was verified; widening this set is a per-provider decision.
+CATALOGUE_EFFORT_PROVIDERS: frozenset[str] = frozenset({"google", "google-vertex"})
 
 #: A local (canonical) provider id, mapped to the models.dev provider keys that
 #: describe the same models — FIRST MATCH WINS, per model id. The local id is the
@@ -157,6 +190,7 @@ _PRICE_CATALOGUE_KEYS: dict[str, tuple[str, ...]] = {
     "anthropic": ("anthropic",),
     "openai": ("openai",),
     "google": ("google",),
+    "google-vertex": ("google-vertex", "google"),
     "xai": ("xai",),
     "deepseek": ("deepseek",),
     "mistral": ("mistral",),
@@ -221,6 +255,7 @@ OPENROUTER_NAMESPACE: dict[str, str] = {
     "anthropic": "anthropic",
     "openai": "openai",
     "google": "google",
+    "google-vertex": "google",
     "deepseek": "deepseek",
     "mistral": "mistralai",
     "xai": "x-ai",
@@ -277,6 +312,28 @@ def _input_modalities(modalities: Any) -> list[str]:
     return [item for item in inputs if isinstance(item, str)]
 
 
+def _effort_levels(options: Any) -> list[str]:
+    """The words of models.dev's ``type: "effort"`` reasoning options, else ``[]``.
+
+    ``reasoning_options`` is a list of typed knobs (``effort`` with ``values``,
+    ``budget_tokens`` with ``min``/``max``, a bare ``toggle``). Only ``effort``
+    names tiers; a budget is a different wire parameter that no client here
+    maps a word onto, so it must not become a ladder. Kept raw (unranked) on
+    disk; :func:`_row` applies ``discovery._effort_ladder``'s ingest rules so
+    there is ONE parser of effort words.
+    """
+    if not isinstance(options, (list, tuple)):
+        return []
+    levels: list[str] = []
+    for option in options:
+        if not isinstance(option, Mapping) or option.get("type") != "effort":
+            continue
+        values = option.get("values")
+        if isinstance(values, (list, tuple)):
+            levels.extend(value for value in values if isinstance(value, str))
+    return levels
+
+
 def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
     """The on-disk document for a models.dev body: mapped providers, seven fields.
 
@@ -320,6 +377,9 @@ def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
                 # standing second source for it, and for a provider whose own
                 # listing carries no modality it is the only machine source.
                 "input_modalities": _input_modalities(model.get("modalities")),
+                # The named thinking tiers, for the providers whose listing
+                # states none (see :data:`CATALOGUE_EFFORT_PROVIDERS`).
+                "effort_levels": _effort_levels(model.get("reasoning_options")),
             }
         providers[provider_key] = projected
     return {"capture": PRICE_CATALOGUE_CAPTURE, "etag": etag, "providers": providers}
@@ -443,6 +503,19 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
     limit = entry.get("limit")
     limit = limit if isinstance(limit, Mapping) else {}
     cache_read = _positive_float(cost.get("cache_read"))
+    over_200k = cost.get("context_over_200k")
+    lc_input = 0.0
+    lc_output = 0.0
+    lc_cache_read = 0.0
+    lc_cache_write = 0.0
+    lc_threshold = 0
+    if isinstance(over_200k, Mapping):
+        lc_input = _positive_float(over_200k.get("input"))
+        lc_output = _positive_float(over_200k.get("output"))
+        lc_cache_read = _positive_float(over_200k.get("cache_read"))
+        lc_cache_write = _positive_float(over_200k.get("cache_write"))
+        if lc_input > 0 or lc_output > 0:
+            lc_threshold = 200_000
     name = entry.get("name")
     stated_input = _stated_price(cost.get("input"))
     stated_output = _stated_price(cost.get("output"))
@@ -487,6 +560,11 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
         ),
         cache_read_price=cache_read,
         cache_write_price=_positive_float(cost.get("cache_write")),
+        long_context_threshold=lc_threshold,
+        long_context_input_price=lc_input,
+        long_context_output_price=lc_output,
+        long_context_cache_read_price=lc_cache_read,
+        long_context_cache_write_price=lc_cache_write,
         # Never from here: a second-hand catalogue cannot issue the provider's
         # denial that a stated ``False`` means. See the module docstring.
         supports_images=None,
@@ -499,6 +577,10 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
         # rung, which the STT chain still covers.
         supports_audio_input=supports_audio,
         supports_prompt_cache=cache_read > 0,
+        # Through discovery's one ingest rule (ascending, deduped, unknown words
+        # dropped, an all-unknown or empty list read as silence -> ``None``), so
+        # a catalogue ladder and a listing ladder can never disagree in shape.
+        reasoning_efforts=_effort_ladder(entry.get("effort_levels")),
     )
 
 
@@ -810,6 +892,35 @@ def openrouter_rows(
     return rows
 
 
+#: ``(document identity, providers map)`` of the last USABLE projection
+#: :func:`models_dev_providers` parsed. Keyed on the file's identity (see
+#: :func:`models_dev_document_identity`) rather than on a clock, so a document
+#: that is rewritten -- the off-loop capture repair, a refetch, a 304 restamp --
+#: is re-read on the very next call, while a paint path that calls this every
+#: frame (``cached_available_models`` -> ``with_catalogue_efforts``) stops
+#: re-parsing ~140 KB of JSON per call. Only a usable document is remembered:
+#: an absent, unreadable or wrong-capture one is never cached, which is what
+#: lets the first read after the repair lands see the live ladder.
+_providers_memo: tuple[tuple[str, int, int, int], Mapping[str, Any]] | None = None
+
+
+def models_dev_document_identity(
+    cache_dir: Path | None = None,
+) -> tuple[str, int, int, int] | None:
+    """``(path, mtime_ns, size, inode)`` of the models.dev document, or ``None``.
+
+    A ``stat`` only -- cheap enough for a paint path. Callers key memos on it so
+    a memo can never outlive the document it was derived from. ``None`` when the
+    document is absent or the cache directory is unreadable.
+    """
+    try:
+        path = _cache_path(PRICE_CATALOGUE_KEY, cache_dir)
+        st = os.stat(path)
+        return (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return None
+
+
 def models_dev_providers(
     *, ttl_s: float = DEFAULT_TTL_S, cache_dir: Path | None = None
 ) -> Mapping[str, Any] | None:
@@ -821,16 +932,85 @@ def models_dev_providers(
     this reader cannot use reads as absent, and is dropped so the next read
     finds a repairable state — see :func:`_repair_unusable_capture`.
     """
+    global _providers_memo
     try:
+        identity = models_dev_document_identity(cache_dir)
+        memo = _providers_memo
+        if identity is not None and memo is not None and memo[0] == identity:
+            return memo[1]
         payload = peek_listing(PRICE_CATALOGUE_KEY, cache_dir=cache_dir).payload
         providers = _usable(payload)
         if providers is None and payload is not None:
             _repair_unusable_capture(cache_dir)
+        if providers is not None and identity is not None:
+            _providers_memo = (identity, providers)
         return providers
     except Exception as exc:  # noqa: BLE001 — a price is never worth a failed paint
         logger.debug("models.dev catalogue unreadable: %s", exc)
         note_unavailable("models.dev catalogue")
         return None
+
+
+def catalogue_effort_ladder(
+    provider: str,
+    model_id: str,
+    *,
+    models_dev: Mapping[str, Any] | None = None,
+    cache_dir: Path | None = None,
+) -> tuple[str, ...] | None:
+    """models.dev's thinking ladder for ``provider/model_id``, or ``None``.
+
+    ``None`` means "the catalogue says nothing usable" — the provider is not in
+    :data:`CATALOGUE_EFFORT_PROVIDERS`, the document is absent, the id is not
+    listed, or its options are a budget rather than named tiers — and the
+    caller then falls back to ``model.effort``'s table. DISK ONLY (it never
+    fetches) and never raises, because ``build_model_spec`` reaches it from a
+    TUI repaint; the picker and the resolver keep the document fresh.
+    ``models_dev`` lets a caller that already read the projection skip the read.
+    """
+    if provider not in CATALOGUE_EFFORT_PROVIDERS:
+        return None
+    try:
+        providers = (
+            models_dev if models_dev is not None else models_dev_providers(cache_dir=cache_dir)
+        )
+        if providers is None:
+            return None
+        row = _lookup(providers, provider, model_id)
+        return row.reasoning_efforts if row is not None else None
+    except Exception as exc:  # noqa: BLE001 — a display dial is never worth a failed paint
+        logger.debug("models.dev effort ladder unreadable for %s/%s: %s", provider, model_id, exc)
+        return None
+
+
+def with_catalogue_efforts(
+    provider: str, rows: list[DiscoveredModel], *, cache_dir: Path | None = None
+) -> list[DiscoveredModel]:
+    """``rows`` with each SILENT effort ladder filled from models.dev.
+
+    The catalogue twin of ``discovery._borrow_relayed_efforts``, with the same
+    rules: only a row whose own listing stated no ladder
+    (``reasoning_efforts is None``) is touched, only the ladder is borrowed
+    (``reasoning_default_effort`` stays unset, so nothing is seeded on the
+    wire), and it is applied at read time, never written back into the
+    provider's cached listing. One disk read for the whole list.
+    """
+    if provider not in CATALOGUE_EFFORT_PROVIDERS or not any(
+        row.reasoning_efforts is None for row in rows
+    ):
+        return rows
+    providers = models_dev_providers(cache_dir=cache_dir)
+    if providers is None:
+        return rows
+    result: list[DiscoveredModel] = []
+    for row in rows:
+        ladder = (
+            catalogue_effort_ladder(provider, row.id, models_dev=providers)
+            if row.reasoning_efforts is None
+            else None
+        )
+        result.append(dataclasses.replace(row, reasoning_efforts=ladder) if ladder else row)
+    return result
 
 
 def _repair_unusable_capture(cache_dir: Path | None) -> None:

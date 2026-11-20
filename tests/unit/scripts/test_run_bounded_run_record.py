@@ -255,6 +255,9 @@ def test_the_flag_reaches_the_run_contract(wrapper, monkeypatch):
                 "memory_mb": None,
                 "run_id": "qa-cli",
                 "contract": "cleanup-required",
+                # start_by is always passed (None means no deadline); added by
+                # #4279, which keeps main()'s call shape unconditional.
+                "start_by": None,
             },
         )
     ]

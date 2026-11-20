@@ -1022,6 +1022,12 @@ class SettingsView(Vertical):
         #: path that could disagree with the config.
         self._rows: list[_Row] = []
         self._selected = 0
+        #: Where the LATEST programmatic body scroll is headed while it waits
+        #: for the refresh it was deferred to, and the generation that owns
+        #: it. See :meth:`_scroll_body_to` for why the movers must decide
+        #: against this rather than the applied offset.
+        self._scroll_pending_y: int | None = None
+        self._scroll_generation = 0
         #: Whether the detail band is currently rendering a WRAPPED two-line
         #: explanation (agent-messages rows on narrow terminals, D4). Tracked
         #: so the band's padding is touched only when the MODE flips — the
@@ -1745,7 +1751,7 @@ class SettingsView(Vertical):
         height = self._body_rows()
         if height <= 0:
             return
-        offset = self._body.scroll_offset.y
+        offset = self._body_offset_y()
         # The cursor's claim is on its whole VISUAL UNIT, not on its one line.
         # Some settings carry an ATTACHED trailing row that only makes sense
         # beside the row it belongs to — today the cascade's `empty` line, which
@@ -1786,7 +1792,7 @@ class SettingsView(Vertical):
             while top > 0 and self._rows[top - 1].kind == "header":
                 top -= 1
         if top < offset:
-            self._body.scroll_to(y=top, animate=False, immediate=immediate)
+            self._scroll_body_to(top, immediate=immediate)
         elif bottom >= offset + height:
             # The SELECTED row still wins when the unit is taller than the
             # viewport: an explanation painted without the row it explains is
@@ -1795,7 +1801,53 @@ class SettingsView(Vertical):
             # attached row already fits, so a page that was fine does not move.
             target = max(bottom - height + 1, 0)
             target = min(target, self._selected)
-            self._body.scroll_to(y=target, animate=False, immediate=immediate)
+            self._scroll_body_to(target, immediate=immediate)
+
+    def _body_offset_y(self) -> int:
+        """The body offset the NEXT frame will show: a pending move, else the applied one."""
+        if self._scroll_pending_y is not None:
+            return self._scroll_pending_y
+        return self._body.scroll_offset.y
+
+    def _scroll_body_to(self, y: int, *, immediate: bool = False) -> None:
+        """Move the body to ``y``, now or after the next refresh, newest move wins.
+
+        WHY NOT ``scroll_to(immediate=False)`` DIRECTLY. Textual defers that to
+        ``call_after_refresh`` and only then updates ``scroll_offset`` (and
+        ``scroll_target_y``), so a second mover arriving before the refresh
+        decided against the OLD offset. `end` then `home` in one batch was the
+        visible case: `home` read 0, judged the top row already in view and
+        scheduled nothing, then the queued `end` landed and left the cursor on
+        the first row with the viewport on the last page (`305 == 0`, main
+        run 44674031880). One `pilot.pause()` does not promise a refresh on a
+        loaded runner, and a fast typist or a remote terminal batches keys the
+        same way, so this was a product race the test merely exposed.
+
+        The fix keeps the deferral (the next frame still carries cursor and
+        offset together, and the body's virtual size after a repaint is only
+        settled by that refresh) but records the destination so
+        :meth:`_body_offset_y` answers from it, and tags each move with a
+        generation so a superseded deferred move is dropped rather than applied
+        over a newer one. An immediate move bumps the generation too, so a
+        stale deferred move can never land after it either.
+        """
+        self._scroll_generation += 1
+        generation = self._scroll_generation
+        if immediate:
+            self._scroll_pending_y = None
+            self._body.scroll_to(y=y, animate=False, immediate=True)
+            return
+        self._scroll_pending_y = y
+
+        def apply() -> None:
+            if generation != self._scroll_generation:
+                return
+            self._scroll_pending_y = None
+            self._body.scroll_to(y=y, animate=False, immediate=True)
+
+        # On the BODY, as Textual's own deferred path does, so the move lands
+        # after the same refresh it always did.
+        self._body.call_after_refresh(apply)
 
     def _attached_bottom(self, index: int) -> int:
         """Last row index of the visual unit that starts at ``index``.
@@ -2158,13 +2210,13 @@ class SettingsView(Vertical):
             if self._rows[index].kind not in ("choice", "hop", "hop_add", "note"):
                 break
             last = index
-        offset = self._body.scroll_offset.y
+        offset = self._body_offset_y()
         if last >= offset + height:
             # Prefer keeping the OWNING row on screen when the group is taller
             # than the viewport: the choices are meaningless without the label
             # that says what is being chosen.
             target = min(self._selected, last - height + 1)
-            self._body.scroll_to(y=max(target, 0), animate=False)
+            self._scroll_body_to(max(target, 0))
 
     def action_reset(self) -> None:
         """``r`` — put the highlighted row back to its shipped default.

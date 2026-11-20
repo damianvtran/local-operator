@@ -266,6 +266,45 @@ def test_enospc_on_a_later_session_tears_down_with_one_warning(tmp_path, fake, c
         index._stop_observer()
 
 
+def test_the_failed_flag_is_set_only_after_the_warning_is_logged(
+    tmp_path, fake, caplog, monkeypatch
+) -> None:
+    """CI flake on #4261/#4246 (``assert 0 == 1``): the flag used to be set
+    before the warning, so a reader waiting on ``observer_failed`` could read
+    the log in between. Slowing the warning's own argument (``budget_limit``)
+    widens that window from a race into a certainty on the old order."""
+    real_budget_limit = session_watch.budget_limit
+
+    def slow_budget_limit(code: int) -> str:
+        time.sleep(0.1)
+        return real_budget_limit(code)
+
+    monkeypatch.setattr(session_watch, "budget_limit", slow_budget_limit)
+    sessions = _deep_sessions(tmp_path)
+    index, _dirty = _indexer(tmp_path)
+    index._start_observer()
+    try:
+        fake.fail_after = len(fake.added)
+        with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+            (sessions / "eeeeeeeeeeee").mkdir()
+            fake.feed(_event(1, session_watch.IN_CREATE | session_watch.IN_ISDIR, "eeeeeeeeeeee"))
+            assert _until(lambda: index.observer_failed)
+            # Read at once, as a status reader would: no sleep, no second wait.
+            warnings = [r for r in caplog.records if "inotify limit reached" in r.getMessage()]
+            assert len(warnings) == 1
+    finally:
+        index._stop_observer()
+
+
+def test_an_already_warned_failure_still_sets_the_flag(tmp_path) -> None:
+    """The early return for a second failure sits inside ``try``/``finally``."""
+    index, _dirty = _indexer(tmp_path)
+    index._watch_warned = True
+    index.observer_failed = False
+    index._session_watch_failed(OSError(errno.ENOSPC, os.strerror(errno.ENOSPC)))
+    assert index.observer_failed is True
+
+
 def test_a_kernel_queue_overflow_asks_for_a_reconcile(tmp_path, fake) -> None:
     _deep_sessions(tmp_path)
     index, _dirty = _indexer(tmp_path)

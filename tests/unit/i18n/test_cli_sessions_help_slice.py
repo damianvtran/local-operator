@@ -92,7 +92,14 @@ def test_the_sessions_block_renders_through_the_help_bootstrap() -> None:
     block = source[start:nxt]
     calls = block.count("_sh.")
     assert calls == 51, calls
-    assert block.count('.envelope(locale=help_locale)["text"]') == 51
+    # `sessions move`'s working-set flags (PR #4241: --no-engage-on-arrival,
+    # --dry-run, --confirm-working-set, --without-working-set, --yes) render through
+    # the same bootstrap from their own fully translated namespace
+    # (`cli.sessions_move_workset`, imported as `_wsh`), so they add envelope sites
+    # without adding `_sh.` keys or growing this tranche's recorded coverage gaps.
+    working_set_calls = block.count("_wsh.")
+    assert working_set_calls == 5, working_set_calls
+    assert block.count('.envelope(locale=help_locale)["text"]') == calls + working_set_calls
     assert "# i18n: ignore" not in block
     assert "_sh." in block
 

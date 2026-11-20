@@ -1,0 +1,31 @@
+{
+  "validator_controls": {
+    "normal_admission": [],
+    "negative_placeholder": [
+      "es/wire.session_status: wire.session_status.retired_label: arguments (('wrong', 'simple'),) != en's (('base', 'simple'),): argument 1 is 'wrong', en's is 'base' (renamed or reordered)"
+    ],
+    "negative_missing_many_REPO_VALIDATOR_GAP": [],
+    "negative_dropped_key": [
+      "es/wire.session_status: missing key 'wire.session_status.complete'"
+    ],
+    "negative_broken_icu": [
+      "es/wire.session_status: wire.session_status.signal_stop: expected a word (at offset 90 of 'Interrumpida — detenida con una señal{command, select, none {} other { mediante {command}}')"
+    ],
+    "restored_normal_admission": []
+  },
+  "sample_count": 45,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/b39246e0d986/scratchpad/terminal-status-es/wire.session_status.json",
+      "sha256": "b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128"
+    }
+  }
+}

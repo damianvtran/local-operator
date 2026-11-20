@@ -1,0 +1,166 @@
+{
+  "schema": 1,
+  "kind": "secondary_independent_high_visibility_semantic_audit",
+  "audit_date": "2026-11-19T16:22:51.006747+00:00",
+  "namespace": "providers.vertex_prompts",
+  "key_count_per_locale": 4,
+  "total_target_keys": 28,
+  "auditor": {
+    "agent": "i18n-auditor (vertex-i18n-audit-secondary)",
+    "session": "03178f8c9cba",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 after provider quota failure, before semantic audit execution.",
+    "independent_from_translator_session": "541740ac0ac6"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/providers.vertex_prompts.json",
+      "sha256": "27eea2d21975bd655a616bb412364c855c753c8256eed8a1fa42cc83869d10ae"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/providers.vertex_prompts.json",
+      "sha256": "295f4a38e6695174d34855f869539b98ed73d276584af0f80988f0b3734bc614"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/providers.vertex_prompts.json",
+      "sha256": "52529ec33127aa2ffba7adf14635b482db25aa73424c3784bea94cb83213d6b0"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/providers.vertex_prompts.json",
+      "sha256": "8986c34d6ef9b2631ef796df4a1fbf9072f13916fdc567983a7fa14f983ad5cf"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/providers.vertex_prompts.json",
+      "sha256": "cfcb52a7f46ff674ed6ee702d1652ba3a2f3124ac7db7842717269cae822ffbf"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/providers.vertex_prompts.json",
+      "sha256": "ba29f8fb06364e521ec81eaca247a69a240f5c6d5c53597301acee0eaf758d5c"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/providers.vertex_prompts.json",
+      "sha256": "e394387c8dfa4afcdc77ac12d8b66f7701332de7bacca2b1336f7bdcccb1e856"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/providers.vertex_prompts.json",
+      "sha256": "af86a9e5b7ecdf54906ab8f1668abf32995b3d7411cae478e9b1d6b719c59f59"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/providers.vertex_prompts.context.json",
+      "sha256": "3cd3aea2a7d54c979bfd3bdbbaa46da061c4a5a99ad02c3075ce8ca23cfdf916"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "locales": {
+    "fr": {
+      "status": "passed",
+      "reviewed_keys": [
+        "providers.vertex_prompts.field.project_id",
+        "providers.vertex_prompts.field.service_account",
+        "providers.vertex_prompts.hint.required",
+        "providers.vertex_prompts.prompt.field"
+      ],
+      "semantic_evidence": "Project ID is ID du projet, not authorization code. compte de service JSON/path alternatives preserved. Enter à vide and Esc cancel connexion; narrow no-break spaces before semicolon and colon, final input-separating space preserved.",
+      "findings": []
+    },
+    "es": {
+      "status": "passed",
+      "reviewed_keys": [
+        "providers.vertex_prompts.field.project_id",
+        "providers.vertex_prompts.field.service_account",
+        "providers.vertex_prompts.hint.required",
+        "providers.vertex_prompts.prompt.field"
+      ],
+      "semantic_evidence": "Project ID and authorization code remain distinct. cuenta de servicio and ruta del archivo JSON preserve alternatives. Enter sin texto cancels inicio de sesión, not a skip. Tú-register Introduce/deja is consistent.",
+      "findings": []
+    },
+    "zh-CN": {
+      "status": "passed",
+      "reviewed_keys": [
+        "providers.vertex_prompts.field.project_id",
+        "providers.vertex_prompts.field.service_account",
+        "providers.vertex_prompts.hint.required",
+        "providers.vertex_prompts.prompt.field"
+      ],
+      "semantic_evidence": "项目ID, not authorization code; 服务账号JSON或JSON文件路径 retains both input forms. 留空按Enter或按Esc取消登录 explicitly cancels. 请输入 is correct field-prompt register; no interscript spaces per guide; full-width punctuation.",
+      "findings": []
+    },
+    "ru": {
+      "status": "passed",
+      "reviewed_keys": [
+        "providers.vertex_prompts.field.project_id",
+        "providers.vertex_prompts.field.service_account",
+        "providers.vertex_prompts.hint.required",
+        "providers.vertex_prompts.prompt.field"
+      ],
+      "semantic_evidence": "Идентификатор проекта clearly names project identifier, not auth code. JSON сервисного аккаунта или путь к JSON-файлу retains raw JSON/path alternatives. Enter без ввода или Esc отменить вход clearly cancels. Введите/оставьте is polite plural imperative.",
+      "findings": []
+    },
+    "vi": {
+      "status": "passed",
+      "reviewed_keys": [
+        "providers.vertex_prompts.field.project_id",
+        "providers.vertex_prompts.field.service_account",
+        "providers.vertex_prompts.hint.required",
+        "providers.vertex_prompts.prompt.field"
+      ],
+      "semantic_evidence": "ID dự án is project ID; JSON của tài khoản dịch vụ hoặc đường dẫn tệp JSON preserves alternatives. để trống rồi nhấn Enter hoặc nhấn Esc để hủy đăng nhập cancels whole login. Natural direct pronoun-free copy, NFC and hủy spelling follow guide.",
+      "findings": []
+    },
+    "ur": {
+      "status": "passed",
+      "reviewed_keys": [
+        "providers.vertex_prompts.field.project_id",
+        "providers.vertex_prompts.field.service_account",
+        "providers.vertex_prompts.hint.required",
+        "providers.vertex_prompts.prompt.field"
+      ],
+      "semantic_evidence": "Google Cloud پروجیکٹ ID identifies project, not auth code. سروس اکاؤنٹ کا JSON یا JSON فائل کا پاتھ preserves raw JSON/path distinction. hint means Enter sends and empty Enter or Esc cancels login, not optional skip. درج کریں/چھوڑیں/دبائیں are respectful; text stored in logical order; Latin tokens intact, no embedded bidi controls or arrows. In the standard coordinated imperative construction, خالی چھوڑ کر modifies the Enter alternative; Esc remains a cancellation key. Visual terminal bidi/shaping not inferred from storage.",
+      "findings": []
+    },
+    "hi": {
+      "status": "passed",
+      "reviewed_keys": [
+        "providers.vertex_prompts.field.project_id",
+        "providers.vertex_prompts.field.service_account",
+        "providers.vertex_prompts.hint.required",
+        "providers.vertex_prompts.prompt.field"
+      ],
+      "semantic_evidence": "Google Cloud प्रोजेक्ट ID identifies project, not auth code. सेवा खाते का JSON या JSON फ़ाइल का पाथ preserves raw JSON/path alternatives. Empty Enter or Esc cancels लॉगिन, not skip. दर्ज करें/छोड़ें/दबाएँ are polite; फ़ाइल nukta and danda preserved.",
+      "findings": []
+    }
+  },
+  "execution": {
+    "catalogue_validator": {
+      "command": ".venv/bin/python scripts/i18n/check.py --catalogues-only",
+      "exit": 0,
+      "actual_output": "check.py: catalogue checks: 0 problem(s)"
+    },
+    "scoped_mechanical_and_message_render_probe": {
+      "exit": 0,
+      "scope": "28 target keys; exact keys/placeholders, NFC, no bidi controls, trailing space, Google Cloud/JSON/Enter/Esc tokens; actual messages.render composition for every locale"
+    }
+  },
+  "applicability": {
+    "icu": "Only one simple string placeholder {field}; no plural/select branches, counts, markup, commands or flags in source. No CLDR category expansion required.",
+    "fit": "No maxCells/maxChars hints. Actual raw hint cells fr67 es75 zh-CN41 ru59 vi69 ur87 hi60. Context explicitly says hint truncates to current width; no fixed cap. Longest Urdu hint merits narrow rendering coverage by QA but is not a proven copy overflow defect.",
+    "rtl": "Storage/token review passed. No real terminal bidi/shaping, screenshots, TUI narrow-state or desktop rendering claimed.",
+    "pseudo": "Not run; no advertised one-command pseudo workflow. This is second independent semantic audit, not replacement for designer/QA rendered evidence."
+  },
+  "retention": "Temporary handoff report only. Per read-only delegation no catalogue, ledger, generated file or tracked evidence was edited; manager/primary must retain this report and companion logs under canonical tracked evidence root before claiming durable completion.",
+  "audit_notes_not_execution_log": false,
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/03178f8c9cba/scratchpad/vertex-i18n-secondary/validator.log",
+      "sha256": "d038b615673118da78a1cd54f7bc26de6b8339a34b2ca28968fd668ae28ae0ab"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/03178f8c9cba/scratchpad/vertex-i18n-secondary/mechanical-and-render.log",
+      "sha256": "8fb0ab8ed8565da1ccb6a1e56cd2a13f5f72b3072f6f42fd76e170b9c2e33a88"
+    }
+  ]
+}

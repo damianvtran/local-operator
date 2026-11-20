@@ -465,12 +465,15 @@ def test_the_shipped_default_is_on() -> None:
     assert DEFAULT_HOLD_RELEASE is True
     assert TeamBridgeSettings.from_values({}).hold_release is True
     assert TeamBridgeSettings.from_values({"team_bridge": {}}).hold_release is True
-    # Only a real ``false`` is the off switch (same rule as ``review_held``).
-    for garbled in (None, "false", 0, "off"):
+    # The off switch is whatever ``settings_io.strict_bool`` parses as false
+    # (S-1, PR #4317: the ``/settings`` row reads it the same way). Only an
+    # unparseable value falls back to the shipped default, ON.
+    for garbled in (None, "", "maybe", [], {}, 2):
         values = {"team_bridge": {"hold_release": garbled}}
         assert TeamBridgeSettings.from_values(values).hold_release is True, garbled
-    explicit_off = {"team_bridge": {"hold_release": False}}
-    assert TeamBridgeSettings.from_values(explicit_off).hold_release is False
+    for off in (False, "false", "off", "no", "0", 0, " OFF "):
+        values = {"team_bridge": {"hold_release": off}}
+        assert TeamBridgeSettings.from_values(values).hold_release is False, off
 
 
 def test_enabled_reads_on_with_no_key_and_with_no_config_file(tmp_path) -> None:
@@ -499,20 +502,31 @@ def test_enabled_reads_on_when_the_config_is_torn(tmp_path, monkeypatch) -> None
     assert hr.enabled(tmp_path) is True
 
 
-def test_a_non_boolean_value_reads_on_and_is_logged_once(tmp_path, monkeypatch, caplog) -> None:
-    """S-3: a quoted ``"false"`` is not the off switch; the operator is told once."""
+def test_an_unparseable_value_reads_on_and_is_logged_once(tmp_path, monkeypatch, caplog) -> None:
+    """S-3: a value nobody can parse reads ON; the operator is told once.
+
+    A quoted ``"false"`` is NOT in this class since S-1 (PR #4317): it parses
+    as off on both the row and the receiver, so it is neither ON nor logged.
+    """
 
     import logging
 
     monkeypatch.setattr(hr, "_non_boolean_logged", False)
-    values = {"team_bridge": {"enabled": True, "hold_release": "false"}}
+    values = {"team_bridge": {"enabled": True, "hold_release": "maybe"}}
     (tmp_path / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
     with caplog.at_level(logging.INFO, logger=hr.logger.name):
         assert hr.enabled(tmp_path) is True
         assert hr.enabled(tmp_path) is True
     lines = [r.getMessage() for r in caplog.records if "hold_release" in r.getMessage()]
-    assert len(lines) == 1 and "unquoted false" in lines[0]
-    assert '"false"' not in lines[0]  # the value itself is not echoed
+    assert len(lines) == 1 and "write false" in lines[0]
+    assert "maybe" not in lines[0]  # the value itself is not echoed
+    monkeypatch.setattr(hr, "_non_boolean_logged", False)
+    values = {"team_bridge": {"enabled": True, "hold_release": "false"}}
+    (tmp_path / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=hr.logger.name):
+        assert hr.enabled(tmp_path) is False
+    assert not [r for r in caplog.records if "hold_release" in r.getMessage()]
     monkeypatch.setattr(hr, "_non_boolean_logged", False)
     _setting(tmp_path, False)
     caplog.clear()
