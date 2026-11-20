@@ -194,6 +194,28 @@ def test_httpx_errors_keep_status_code_and_scrub_the_key() -> None:
     assert REDACTION_MARKER in str(exc)
 
 
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "-1", "1e999"])
+@pytest.mark.parametrize("header", ["retry-after", "x-ratelimit-remaining-requests"])
+def test_a_non_finite_or_negative_limit_header_is_omitted(header: str, value: str) -> None:
+    """``int(float("inf"))`` raises ``OverflowError`` and ``nan`` would be stored as
+    seconds: every client's error mapping must survive a hostile header."""
+    response = httpx.Response(429, json={"error": "slow down"}, headers={header: value})
+    exc = errors.api_error_from_httpx_response(response, fallback_message="refused")
+    assert exc.status_code == 429
+    assert "retry_after_s" not in (exc.details or {})
+    assert "remaining_requests" not in (exc.details or {})
+
+
+def test_a_sane_limit_header_is_kept() -> None:
+    response = httpx.Response(
+        429,
+        json={"error": "slow down"},
+        headers={"retry-after": "7", "x-ratelimit-remaining-requests": "0"},
+    )
+    exc = errors.api_error_from_httpx_response(response, fallback_message="refused")
+    assert exc.details == {"retry_after_s": 7.0, "remaining_requests": 0}
+
+
 def test_httpx_error_without_a_designed_message_uses_the_fallback() -> None:
     response = httpx.Response(500, text="<html>oops</html>")
     exc = errors.api_error_from_httpx_response(

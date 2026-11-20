@@ -54,6 +54,11 @@ _AMBIENT_VARS = (
     # the relay door and ``features.community`` in every cell, so the dark-by-
     # default assertions would pass the lit path; tests that need it on set it.
     "LOCAL_OPERATOR_COMMUNITY",
+    # The loopback peer-uid check switch (``server/peer_check.py``). ``off``
+    # waives the same-user rule, so a developer exporting it would make every
+    # serve test admit what it should refuse and the enforcement assertions
+    # pass the waived path; tests that need a mode pass it explicitly.
+    "LOCAL_OPERATOR_PEER_UID_CHECK",
     # The remote-compute API override names the host that receives the
     # operator's Radient bearer. Inheriting a developer's staging value would
     # point the suite's remote-compute client at a real host; tests that cover

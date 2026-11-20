@@ -49,7 +49,6 @@ _CLASS_GATED_MARKERS = (
     "Deliverables surface themselves.",
     "Edit, don't rewrite.",
     "Treat unknown files as the user's work",
-    "(bang-mode)",
     "(`guide://credentials`)",
     "Never delete or move a path you did not create",
     "Guardrail rules: `<config_dir>/rules/*.md`",
@@ -78,6 +77,7 @@ _ALWAYS_ON_MARKERS = (
     "Respect denials of a prompted write or command",
     "Deciding is your job",
     "Authorization never extends to a destructive or irreversible step",
+    "(bang-mode)",
 )
 
 
@@ -161,10 +161,40 @@ def test_a_shell_only_session_keeps_the_filesystem_safety_rules() -> None:
         "When the `console` tool is NOT in your tool list",
     ):
         assert kept in head, kept
-    for dropped in ("Edit, don't rewrite.", "`scratchpad://`", "### Resources", "guide://"):
+    assert "Guardrail rules: `<config_dir>/rules/*.md`; Rules only add restriction." in head
+    for dropped in ("Edit, don't rewrite.", "### Resources", "guide://", "`read scratchpad://`"):
         assert dropped not in head, dropped
     assert "This session was not given the browser tool." in inventory
     assert "<guides>" not in tail
+
+
+@pytest.mark.parametrize("names", [["write"], ["grep"], _MCP_ONLY])
+def test_no_shell_omits_browser_setup_and_keeps_bang_rule(names: list[str]) -> None:
+    head, _inventory, _env, _tail = _blocks(names, host_has_browser=False)
+    assert "(bang-mode)" in head
+    for pointer in ("pages with curl", '"Headless nodes"', "follow `guide://browser`"):
+        assert pointer not in head
+
+
+@pytest.mark.parametrize("names", [["write"], ["grep"], ["bash"]])
+def test_workspace_without_read_keeps_rules_but_not_resource_pointers(names: list[str]) -> None:
+    head, _inventory, _env, _tail = _blocks(names)
+    assert "Guardrail rules: `<config_dir>/rules/*.md`; Rules only add restriction." in head
+    assert "`read scratchpad://`" not in head
+    assert "guide://guardrails" not in head
+
+
+def test_read_resource_sentence_does_not_require_file_class() -> None:
+    text = render_template("system.md", {**_HOST, "has_files": False, "has_resources": True})
+    assert "`read scratchpad://` lists it; details: `guide://scratchpad`." in text
+    assert "Text scratch of your own" not in text
+
+
+@pytest.mark.parametrize("files,shell", list(itertools.product([False, True], repeat=2)))
+def test_direct_render_derives_workspace_from_files_or_shell(files: bool, shell: bool) -> None:
+    text = render_template("system.md", {**_HOST, "has_files": files, "has_shell": shell})
+    assert ("Guardrail rules:" in text) == (files or shell)
+    assert ("Treat unknown files as the user's work" in text) == (files or shell)
 
 
 def test_a_deferred_class_tool_counts_as_held() -> None:

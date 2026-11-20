@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.session_status",
-  "history_sha256": "f25e208774ae87a44b8556215656c2a1f4288025aaab88cedc8831cf2b85897e",
+  "history_sha256": "ef8c3f4ba29636f32d16f00253fdd305930b52258c26592862ca7929681b1221",
   "entries": [
     {
       "locale": "ru",
@@ -147,6 +147,42 @@
       "record_sha256": "197a634f5a113d10d6b1106eaa3e76b4f4b3e6dbd98bca2dc6d01cf7f51dafe3",
       "round": "second",
       "keys_audited": 17
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.session_status",
+      "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+      "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+      "target_sha256": "b79bf8a9eedd572e7e7ee2add5400072fe1aa47820e37bcc0b77bbd947e595ea",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "d07b98d676f1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Round 1 independent audit of the live session-status labels (wire.session_status). Auditor d07b98d676f1 (openai/gpt-6.1-sol, no fallback) verdict CLEAN: 0 blocker, 0 major, 0 minor, 0 nit. Scope: full namespace (31 keys incl. 14 new live-status keys) at worktree head 514d51243ce3.  Record: i18n/audits/evidence/ru/wire.session_status/ls1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ru/wire.session_status/ls1/record.json",
+      "round": "ls1"
     }
   ]
 }
