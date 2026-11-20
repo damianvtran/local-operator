@@ -159,8 +159,7 @@ def test_declared_wrapper_gets_only_validated_path(
         "assert 'TESSDATA_PREFIX' not in os.environ, 'ambient setting leaked'\n"
         f"assert os.environ['PATH'] == {expected_path!r}\n"
         "assert os.getcwd() == '/', os.getcwd()\n"
-        "assert subprocess.check_output(['ocr-probe-helper']) == b'helper ready\\n'\n"
-        + _HEALTHY,
+        "assert subprocess.check_output(['ocr-probe-helper']) == b'helper ready\\n'\n" + _HEALTHY,
     )
     _check(pinned, (str(tools),))
 
