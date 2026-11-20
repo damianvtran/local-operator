@@ -316,11 +316,16 @@ def _dead_grant_bearer(*_args: Any, **_kwargs: Any) -> Any:
 
 
 def _run(run_id: str = RUN_ID, **overrides: Any) -> dict[str, Any]:
-    """A run as the server reports it, with the fields the panel paints."""
+    """A run as the server reports it, with the fields the panel paints.
+
+    ``tier`` is the SERVER's literal (``fargate``), because that is what a real run
+    row carries; the routes publish this build's tier id, and the test that pins
+    that translation is ``test_a_run_row_is_published_with_this_builds_tier_id``.
+    """
     payload: dict[str, Any] = {
         "id": run_id,
         "status": "running",
-        "tier": "cloud_run",
+        "tier": "fargate",
         "network_id": NET_ID,
         "deadline_at": "2026-11-18T00:00:00Z",
         "metered_seconds": 252,
@@ -336,8 +341,26 @@ def _run(run_id: str = RUN_ID, **overrides: Any) -> dict[str, Any]:
     return payload
 
 
-def _capacity(tier: str = "cloud_run", ready: bool = True) -> dict[str, Any]:
-    return {"msg": "ok", "result": {"tiers": [{"tier": tier, "ready": ready, "detail": {}}]}}
+#: The server's ``detail`` is a free string map naming its own infrastructure; the
+#: values here are SYNTHETIC, because this repository is public.
+DETAIL = {
+    "cluster": "example-cluster",
+    "region": "example-region",
+    "task_definition": "example-task",
+}
+
+
+def _capacity(tier: str = "fargate", ready: bool = True) -> dict[str, Any]:
+    """The capacity read as the REAL server answers it: ``result["providers"]``.
+
+    The tier literal is the server's (``fargate``/``kubernetes``), not this
+    build's id: a stand-in that spelled ``cloud_run`` here is what let the real
+    envelope and the real vocabulary drift out of this suite's sight.
+    """
+    return {
+        "msg": "ok",
+        "result": {"providers": [{"tier": tier, "ready": ready, "detail": DETAIL}]},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +541,7 @@ async def test_the_read_answers_the_contract_shape(
     assert body["enabled"] is True
     assert body["account"]["state"] == "signed-in"
     assert body["networks"] == [{"network_id": NET_ID, "name": "devmesh", "role": "admin"}]
-    assert body["capacity"] == [{"tier": "cloud_run", "ready": True, "detail": {}}]
+    assert body["capacity"] == [{"tier": "cloud_run", "ready": True, "detail": DETAIL}]
     # Pricing is null until the capacity read publishes a rate: the honest state,
     # not a client-side constant that drifts from the deployment's config.
     assert body["pricing"] is None
@@ -537,9 +560,9 @@ async def test_capacity_rows_publish_only_the_three_contract_fields(api: Api) ->
         payload={
             "msg": "ok",
             "result": {
-                "tiers": [
+                "providers": [
                     {
-                        "tier": "cloud_run",
+                        "tier": "fargate",
                         "ready": True,
                         "detail": {},
                         "hourly_usd": 9.5,
@@ -557,6 +580,84 @@ async def test_capacity_rows_publish_only_the_three_contract_fields(api: Api) ->
 
     assert body["capacity"] == [{"tier": "cloud_run", "ready": True, "detail": {}}]
     assert body["offered"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_dedicated_provider_publishes_the_dedicated_tier(api: Api) -> None:
+    """The server's second provider word is the GUI's second tier, not a new one."""
+    api.configure()
+    _network(api.root)
+    api.radient.add("GET", "/v1/remote-compute/capacity", payload=_capacity(tier="kubernetes"))
+    api.radient.add("GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": []}})
+
+    body = (await api.client.get("/v1/desktop/remote-compute")).json()
+
+    assert body["capacity"] == [{"tier": "dedicated", "ready": True, "detail": DETAIL}]
+    assert body["offered"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_provider_tier_this_build_cannot_name_is_not_published(api: Api) -> None:
+    """A third provider word is dropped, never relabelled as a tier we know.
+
+    The panel matches a tier id it has copy for, so publishing the server's literal
+    would paint a row nothing can label — and calling it ``cloud_run`` would offer
+    capacity the server would not admit under that word.
+    """
+    api.configure()
+    _network(api.root)
+    api.radient.add(
+        "GET", "/v1/remote-compute/capacity", payload=_capacity(tier="example-provider")
+    )
+    api.radient.add("GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": []}})
+
+    body = (await api.client.get("/v1/desktop/remote-compute")).json()
+
+    assert body["capacity"] == []
+    # No row this build can name means no tier it can start, which is the same
+    # answer as a page with no ready row.
+    assert body["offered"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_empty_providers_list_answers_offered_false(api: Api) -> None:
+    """A deployment that offers no provider at all is not "ready"."""
+    api.configure()
+    _network(api.root)
+    api.radient.add(
+        "GET", "/v1/remote-compute/capacity", payload={"msg": "ok", "result": {"providers": []}}
+    )
+    api.radient.add("GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": []}})
+
+    body = (await api.client.get("/v1/desktop/remote-compute")).json()
+
+    assert body["capacity"] == []
+    assert body["offered"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_run_row_is_published_with_this_builds_tier_id(api: Api) -> None:
+    """A run row carries the server's tier word too, and it is translated once.
+
+    Both surfaces that publish a run — the merged listing here and the detail read
+    - are asserted, because a renderer that received two vocabularies would have
+    to try both on every row.
+    """
+    api.configure()
+    api.radient.add(
+        "GET",
+        "/v1/remote-compute/runs",
+        payload={"msg": "ok", "result": {"runs": [_run()], "limit": 50, "offset": 0}},
+    )
+    api.radient.add(
+        "GET", f"/v1/remote-compute/runs/{RUN_ID}", payload={"msg": "ok", "result": _run()}
+    )
+
+    listing = (await api.client.get("/v1/desktop/remote-compute/runs")).json()
+    detail = (await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}")).json()
+
+    assert listing["runs"][0]["tier"] == "cloud_run"
+    assert detail["run"]["tier"] == "cloud_run"
 
 
 @pytest.mark.asyncio
