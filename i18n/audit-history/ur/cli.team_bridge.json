@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "cli.team_bridge",
-  "history_sha256": "7ca7ce294653a19c05305505e7fe51afb4f8ae487c4b9abffd45238836c81a3f",
+  "history_sha256": "2cf59d7d4adbd9dae07b425ad39be0483f511e04be4cf36b17630a85bc32de9c",
   "entries": [
     {
       "locale": "ur",
@@ -226,6 +226,52 @@
       "note": "PR #4317 copy r2 delta audit at feac0a8c484c: keys audited cli.team_bridge.notify.owner_action_hold_title, cli.team_bridge.notify.owner_action_hold_body against the remediated en source; prior r1 C1-C3 MAJORs verified fixed (eligibility covers org+machine, sign-in covers expired+wrong account, consent 'given', help hedged 'Some', label <=29 cells, title arms <=40 cells, measured with rich.cells.cell_len). Every other key in this namespace is byte-identical to the base 736fd54f06f0, whose last receipt was passed; no other key re-audited. Open non-gating findings: C9. Native/rendered certification not claimed.",
       "round": "pr4317-copy-r2",
       "keys_audited": 2
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "61fc4ba8c3e34fcd80a7f3c5072800ae12179d72e1cb63a7e4d27a44a5d69722",
+      "context_sha256": "770b966e7e989538e2a083dee5682abff83bbc1617a7ce507e424a470ffe8818",
+      "target_sha256": "ece24b0463e7b6c1751d586e2790639acde580c53a59ee8de6febef8bbc9060b",
+      "translator": {
+        "agent": "coder (radientdev team task subagent, PR #4317 remediation implementer; translated all 28 changed strings)",
+        "session": "4d8fffdeba64",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "fallback": "none: auditor read the session record (origin.json agent=coder, subagent; every transcript response model claude-opus-5-5)"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (radientdev team task subagent) acting as independent i18n auditor; convergence rebind, not a new linguistic audit; did not author or edit any value",
+        "session": "aa991fa2d698",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed (harness system prompt: Model: anthropic/claude-opus-5-5)",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4317 convergence rebind at 698918f3e960 (merge of origin/main ad03a820c2b1). Mechanical union verified: the 2 PR keys (notify.owner_action_hold_title/_body) are byte-identical to feac0a8c484c, audited passed in pr4317-copy-r2 (source 4f9a366e9d5d); main's only delta since 736fd54f06f0 is the added key setup.mesh_node_relay, byte-identical to ad03a820c2b1 whose last receipt is passed (PR #4246 i18n-auditor round 3, session 05713429fa2d, anthropic/claude-opus-5-5; translator model unrecorded there, carried as-is); every other key is byte-identical to main. Key sets disjoint, en context likewise unioned. No value re-audited and no new audited status claimed beyond those two receipts. Open non-gating r2 finding C9 carried.",
+      "round": "pr4317-i18n-convergence",
+      "keys_audited": 0,
+      "carried_audits": {
+        "pr4317_keys": {
+          "round": "pr4317-copy-r2",
+          "source_sha256": "4f9a366e9d5d5543639911efef91ac838512f73d422d2d659df1fccc2258064c",
+          "target_sha256": "9dc37d1c5684af578942b57b93e877df59f6d7520a9f0f47c74d9a0f603401e5"
+        },
+        "main_key_setup.mesh_node_relay": {
+          "pr": 4246,
+          "auditor_session": "05713429fa2d",
+          "base": "ad03a820c2b1"
+        }
+      }
     }
   ]
 }
