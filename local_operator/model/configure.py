@@ -4164,6 +4164,9 @@ class SessionStreamFn:
         # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
         # transcript FORK ignores the rows it copied and starts at ``None``.
         self._cache_diagnostics_previous_id: str | None = None
+        # A wire client is rebuilt per attempt; a local stream identity keeps
+        # Google comparisons per conversation (not per inherited routing key).
+        self._cache_diagnostics_chain = uuid.uuid4().hex
         # The credential that served the response ``_cache_diagnostics_previous_id``
         # names. Anthropic keeps diagnostics fingerprints per account, so after
         # a mid-session switch to another credential the old id cannot be found
@@ -7616,6 +7619,7 @@ class SessionStreamFn:
                 update={
                     "cache_diagnostics": True,
                     "cache_diagnostics_previous_id": self._cache_diagnostics_previous_id,
+                    "cache_diagnostics_chain": self._cache_diagnostics_chain,
                 }
             )
         if request.purpose == "turn" and not request.same_route_retry:
@@ -7912,6 +7916,11 @@ class SessionStreamFn:
                 if event_type == "start":
                     cache_miss_type = getattr(event, "cache_miss_type", None) or ""
                     cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
+                elif event_type == "end" and not cache_miss_type:
+                    # Gemini reports its cache read only at stream end. Keep a
+                    # start-frame diagnosis (Anthropic's contract) authoritative.
+                    cache_miss_type = getattr(event, "cache_miss_type", None) or ""
+                    cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
                 stop_reason = getattr(event, "stop_reason", None)
                 if stop_reason is not None:
                     outcome = str(stop_reason)
@@ -8166,7 +8175,9 @@ class SessionStreamFn:
         as ``estimated`` and ``usage_reported`` stays False, so no reader can
         mistake it for a provider receipt.
         """
-        self._log_cache_break(usage, cache_miss_type, cache_missed_tokens)
+        self._log_cache_break(
+            usage, cache_miss_type, cache_missed_tokens, provider=request.model.provider
+        )
         try:
             import time as _time
 
@@ -8318,7 +8329,9 @@ class SessionStreamFn:
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
 
-    def _log_cache_break(self, usage: Usage, miss_type: str, missed_tokens: int) -> None:
+    def _log_cache_break(
+        self, usage: Usage, miss_type: str, missed_tokens: int, *, provider: str = ""
+    ) -> None:
         """One ``[prompt cache break]`` INFO line for a costly diagnosed break.
 
         Called once per call from ``_record_usage``, so the line is emitted at
@@ -8329,6 +8342,8 @@ class SessionStreamFn:
         is the API's documented "rare, low impact" case and would be noise.
         The thresholds mirror the benchmark's break classifier (>= 20k written
         and >= half the context), so log counts and ledger analysis agree.
+        Google has no write counter: its local prefix comparison supplies the
+        loss, bounded by this call's uncached input (which includes cache reads).
         """
         try:
             from local_operator.providers.clients import (
@@ -8341,6 +8356,28 @@ class SessionStreamFn:
                 or miss_type in ("previous_message_not_found", "unavailable")
             ):
                 return
+            if provider in ("google", "google-vertex"):
+                # Google includes cache reads in input and reports no writes.
+                # A large NEW suffix is not a lost cache prefix: require both
+                # locally diagnosed loss and actual uncached input to qualify.
+                if not (miss_type.endswith("_changed") or miss_type == "evicted_or_rerouted"):
+                    return
+                context = int(usage.input_tokens)
+                uncached = max(0, context - int(usage.cache_read_tokens))
+                lost = min(uncached, max(0, missed_tokens))
+                if lost < 20_000 or lost * 2 < context:
+                    return
+                logger.info(
+                    "[prompt cache break] session=%s type=%s missed_tokens=%d "
+                    "uncached=%d context=%d",
+                    self._session_id or "-",
+                    miss_type,
+                    int(missed_tokens),
+                    uncached,
+                    context,
+                )
+                return
+            # Retain Anthropic's write-based threshold and log format verbatim.
             written = int(usage.cache_write_tokens)
             context = int(usage.input_tokens) + int(usage.cache_read_tokens) + written
             if written < 20_000 or written * 2 < context:
