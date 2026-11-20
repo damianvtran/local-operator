@@ -1262,6 +1262,10 @@ export type MessageParams = {
   "wire.session_status.delegating_queued_addend": { "count": number };
   "wire.session_status.delegating_running": { "count": number };
   "wire.session_status.dormant": { "count": number };
+  "wire.session_status.duration_days_hours": { "days": string; "hours": number };
+  "wire.session_status.duration_hours_minutes": { "hours": number; "minutes": number };
+  "wire.session_status.duration_minutes": { "count": number };
+  "wire.session_status.duration_seconds": { "count": number };
   "wire.session_status.error": undefined;
   "wire.session_status.error_cause": { "cause": string };
   "wire.session_status.exec_headless": undefined;
