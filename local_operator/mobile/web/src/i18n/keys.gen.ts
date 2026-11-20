@@ -2046,6 +2046,8 @@ export type MessageParams = {
   "wire.settings.team_bridge.title": undefined;
   "wire.settings.team_bridge_enabled.help": undefined;
   "wire.settings.team_bridge_enabled.label": undefined;
+  "wire.settings.team_bridge_hold_release.help": undefined;
+  "wire.settings.team_bridge_hold_release.label": undefined;
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": undefined;
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": undefined;
   "wire.settings.team_bridge_screening_budget_per_hour.help": undefined;

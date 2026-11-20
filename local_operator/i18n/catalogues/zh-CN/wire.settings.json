@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "每小时非定向上限",
   "wire.settings.team_bridge_session.help": "可因新消息而被唤醒的会话；留空则仅显示角标。",
   "wire.settings.team_bridge_session.label": "CoS会话",
+  "wire.settings.team_bridge_hold_release.label": "暂扣工作请求待审",
+  "wire.settings.team_bridge_hold_release.help": "部分新工作请求会暂扣，由你决定送达或丢弃。除非你送达，否则任何内容都不会到达你的智能体。关闭后，这类请求会被拒绝。",
   "wire.settings.tool_approval_mode.choice.ask.description": "写入/执行工具前先询问",
   "wire.settings.tool_approval_mode.choice.ask.label": "ask",
   "wire.settings.tool_approval_mode.choice.auto.description": "不经询问直接运行",
