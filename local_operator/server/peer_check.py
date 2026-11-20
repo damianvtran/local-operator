@@ -92,16 +92,23 @@ logger = logging.getLogger("local_operator.server.peer_check")
 
 ENV_VAR = "LOCAL_OPERATOR_PEER_UID_CHECK"
 
-# Per-attempt wait for one lookup, INCLUDING queueing on the 2-worker executor.
-# Measured (design §2, macOS 27.2, ~590-850 same-uid pids): hit 1-30 ms, full
-# miss ~50 ms; estimated ~150 ms on a ~2k-process dev machine. A burst of
-# parallel desktop connections queues behind 2 workers, so the budget covers a
-# few full scans back to back rather than the single-scan 250 ms the design
-# sketched; exceeding it is an ERROR (refused), so it must sit well above any
-# legitimate wait.
+# Per-attempt wait for one lookup, INCLUDING waiting for a scan slot and
+# queueing on the 2-worker executor. Measured on macOS 27.2 with ~530 same-uid
+# pids: a hit is 1-30 ms (fresh processes are listed first), a full NOT-FOUND
+# scan -- what every foreign connection costs -- 10-25 ms on a quiet host and
+# ~263 ms under load average ~49 (agent review round 1, PR #4329; the design's
+# ~50 ms was a quiet-host figure). The budget covers a few loaded full scans back
+# to back; exceeding it is an ERROR (503), so it must sit well above any
+# legitimate wait. Hinted same-user connections do not depend on it: they are
+# answered by the hint lane, which a flood of not-found scans cannot fill.
 LOOKUP_TIMEOUT_S = 1.0
-# Pending lookups allowed before new connections are refused as ERROR. Bounds
-# the memory and thread-pool pressure a connection flood can create.
+# Full scans allowed in flight (queued on, or running in, the full-scan
+# executor). Past it a connection WAITS for a slot within its attempt budget
+# rather than being refused outright, so a same-user burst wider than the cap
+# (QA Q1: 100 parallel fresh connections) is admitted, while a flood still
+# cannot grow memory or the queue without bound. A slot is held only while its
+# job is live: an abandoned (timed-out) job is cancelled if still queued and told
+# to stop between pids if running, so abandoned work cannot keep the cap full.
 MAX_PENDING_LOOKUPS = 64
 # A not-found peer is rescanned once after this pause before refusing: covers
 # an fd being passed between processes or an exec in flight (design §4).
@@ -164,6 +171,19 @@ class PeerLookup(Protocol):
 
     def owner_uid(self, client: Endpoint, server: Endpoint) -> int | None: ...
 
+    # Optional, discovered with ``getattr`` so a minimal lookup (Linux, tests)
+    # need not provide them:
+    #
+    # * ``hinted_owner_uid(client, server) -> int | None`` -- a cheap, bounded
+    #   check of recently matched owners only; ``None`` means "ask the full
+    #   scan". Run on the gate's hint lane, outside the full-scan cap.
+    # * ``stoppable = True`` -- ``owner_uid`` accepts ``should_stop=`` and raises
+    #   ``LookupAbandoned`` once it returns True, so a timed-out scan stops.
+
+
+class LookupAbandoned(Exception):
+    """A stoppable scan was told to stop because its caller stopped waiting."""
+
 
 # --------------------------------------------------------------------------
 # Linux: /proc/net/tcp{,6}
@@ -173,6 +193,15 @@ class PeerLookup(Protocol):
 # socket owns them any more, and LISTEN rows are never a client end, so both are
 # skipped: a TIME_WAIT row must never let the root rule admit a stale tuple.
 _PROC_SKIP_STATES = frozenset({"06", "0A"})
+# The state column alone is not enough: the kernel prints EVERY timewait
+# socket with uid 0 and inode 0, and its state is the timewait SUBSTATE, which is
+# 05 (FIN_WAIT2) for an orphaned client that already closed (``get_timewait4_sock``
+# in net/ipv4/tcp_ipv4.c; ``tcp_time_wait(sk, TCP_FIN_WAIT2, ...)`` in
+# tcp_input.c). A foreign user's connect-send-close would otherwise read as
+# root and be admitted (agent review round 1, R1). Inode 0 means no live process
+# holds the socket, so such a row is never an owner; with no live row the
+# lookup is "not found" and the connection is refused.
+_PROC_ORPHAN_INODE = "0"
 
 
 def parse_proc_net_address(field: str) -> Endpoint:
@@ -201,9 +230,9 @@ def find_uid_in_proc_net(text: str, client: Endpoint, server: Endpoint) -> int |
     port_suffix = f":{client[1]:04X}"
     for line in text.splitlines()[1:]:
         parts = line.split()
-        if len(parts) < 8 or not parts[1].endswith(port_suffix):
+        if len(parts) < 10 or not parts[1].endswith(port_suffix):
             continue  # cheap pre-filter on the client port before decoding
-        if parts[3] in _PROC_SKIP_STATES:
+        if parts[3] in _PROC_SKIP_STATES or parts[9] == _PROC_ORPHAN_INODE:
             continue
         if (
             parse_proc_net_address(parts[1]) == client
@@ -273,7 +302,6 @@ _PROX_FDTYPE_SOCKET = 2
 # real child connection through them, so a drift skips (with a warning) rather
 # than refusing everyone.
 _SOCKET_FDINFO_SIZE = 792
-_OFF_FAMILY = 184
 _OFF_KIND = 256
 _OFF_FPORT = 264
 _OFF_LPORT = 268
@@ -297,6 +325,7 @@ class MacLibprocLookup:
 
     mechanism = "macos-libproc"
     admits_root = False
+    stoppable = True
 
     def __init__(self) -> None:
         lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -381,15 +410,39 @@ class MacLibprocLookup:
                 return True
         return False
 
-    def owner_uid(self, client: Endpoint, server: Endpoint) -> int | None:
+    def _scan_hints(self, client: Endpoint, server: Endpoint) -> tuple[int | None, set[int]]:
         with self._hints_lock:
             hints = list(reversed(self._hints))
         for pid in hints:
             if self._pid_owns(pid, client, server):
                 self._remember(pid)
-                return self._uid
-        tried = set(hints)
+                return self._uid, set(hints)
+        return None, set(hints)
+
+    def hinted_owner_uid(self, client: Endpoint, server: Endpoint) -> int | None:
+        """Check only the recently matched pids: ``None`` means "not a hint", not "foreign".
+
+        At most ``_HINT_LRU_SIZE`` pids, so it is cheap and bounded whatever the
+        caller; ``PeerGate`` runs it on its own lane, ahead of the full scan, so
+        the desktop's and TUI's repeat connections never queue behind a flood of
+        not-found scans (agent review round 1, R2).
+        """
+        return self._scan_hints(client, server)[0]
+
+    def owner_uid(
+        self,
+        client: Endpoint,
+        server: Endpoint,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int | None:
+        uid, tried = self._scan_hints(client, server)
+        if uid is not None:
+            return uid
         for pid in self._list_pids():
+            # A caller that gave up (timeout) stops us between pids, so an
+            # abandoned not-found scan frees its worker within one pid's cost.
+            if should_stop is not None and should_stop():
+                raise LookupAbandoned("peer lookup abandoned by its caller")
             if pid in tried:
                 continue
             if self._pid_owns(pid, client, server):
@@ -547,9 +600,19 @@ class PeerGate:
         self.status = status
         self.lookup = lookup
         self._uid = os.getuid() if hasattr(os, "getuid") else -1
+        # Two lanes (agent review round 1, R2): every foreign connection costs a
+        # full NOT-FOUND scan, so if hinted same-user connections queued behind
+        # those scans, a modest foreign connection rate would 503 the desktop.
+        # The hint lane answers repeat same-user owners from a bounded pid list
+        # on its own worker, ahead of and outside the full-scan cap and queue.
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
-        self._pending = 0
-        self._pending_lock = threading.Lock()
+        self._hint_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._executor_lock = threading.Lock()
+        # Full-scan slots, bound to the loop that created them (one in
+        # production; tests drive the same gate from several asyncio.run loops).
+        self._slots: asyncio.Semaphore | None = None
+        self._slots_loop: asyncio.AbstractEventLoop | None = None
+        self._live_full_scans = 0  # queued or running, not abandoned-and-finished
         self._last_logged: dict[str, float] = {}
         self._last_error = ""
 
@@ -557,37 +620,114 @@ class PeerGate:
     def enforcing(self) -> bool:
         return self.status.mode == "enforcing" and self.lookup is not None
 
-    def _submit(self, client: Endpoint, server: Endpoint) -> concurrent.futures.Future[int | None]:
-        assert self.lookup is not None
-        with self._pending_lock:
-            if self._pending >= MAX_PENDING_LOOKUPS:
-                raise RuntimeError("too many pending peer lookups")
-            self._pending += 1
-            if self._executor is None:
+    def _executors(
+        self,
+    ) -> tuple[concurrent.futures.ThreadPoolExecutor, concurrent.futures.ThreadPoolExecutor]:
+        with self._executor_lock:
+            if self._executor is None or self._hint_executor is None:
                 # Dedicated, so a connection flood cannot starve the app's own
                 # default executor (design "Thread pool pressure").
                 self._executor = concurrent.futures.ThreadPoolExecutor(
                     max_workers=2, thread_name_prefix="peer-uid-check"
                 )
-        fut = self._executor.submit(self.lookup.owner_uid, client, server)
+                self._hint_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="peer-uid-hint"
+                )
+            return self._executor, self._hint_executor
 
-        def _done(_f: object) -> None:
-            with self._pending_lock:
-                self._pending -= 1
+    def _slots_for(self, loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
+        if self._slots is None or self._slots_loop is not loop:
+            self._slots = asyncio.Semaphore(MAX_PENDING_LOOKUPS)
+            self._slots_loop = loop
+        return self._slots
 
-        fut.add_done_callback(_done)
-        return fut
+    async def _hinted(self, client: Endpoint, server: Endpoint) -> int | None:
+        """The hint lane: a same-user uid, or ``None`` to fall through to a full scan.
+
+        Never an error: any fault or timeout here just means "ask the full scan",
+        which re-checks the hints anyway, so the lane can only make admission
+        faster, never refuse.
+        """
+        hinted = getattr(self.lookup, "hinted_owner_uid", None)
+        if hinted is None:
+            return None
+        _, hint_executor = self._executors()
+        fut = hint_executor.submit(hinted, client, server)
+        try:
+            uid = await asyncio.wait_for(asyncio.wrap_future(fut), LOOKUP_TIMEOUT_S)
+        except asyncio.CancelledError:
+            fut.cancel()
+            raise
+        except Exception:  # noqa: BLE001 -- fall through to the full scan
+            fut.cancel()
+            return None
+        return uid if uid == self._uid else None
 
     async def _attempt(self, client: Endpoint, server: Endpoint) -> tuple[bool, int | None]:
-        """One lookup; ``(ok, uid)`` where ``ok`` is False on ERROR/timeout."""
+        """One full lookup; ``(ok, uid)`` where ``ok`` is False on ERROR/timeout.
+
+        The ``LOOKUP_TIMEOUT_S`` budget covers waiting for a slot, queueing and
+        the scan. On timeout the job is cancelled if still queued, or told to
+        stop if running, and its slot returns only when it has really ended.
+        """
+        assert self.lookup is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + LOOKUP_TIMEOUT_S
+        slots = self._slots_for(loop)
         try:
-            fut = self._submit(client, server)
-            uid = await asyncio.wait_for(asyncio.wrap_future(fut), LOOKUP_TIMEOUT_S)
+            await asyncio.wait_for(slots.acquire(), LOOKUP_TIMEOUT_S)
+        except TimeoutError:
+            self._last_error = "timed out waiting for a peer lookup slot"
+            return False, None
+        stop = threading.Event()
+        executor, _ = self._executors()
+        lookup = self.lookup
+        if getattr(lookup, "stoppable", False):
+
+            def job() -> int | None:
+                owner_uid: Callable[..., int | None] = lookup.owner_uid
+                return owner_uid(client, server, should_stop=stop.is_set)
+
+        else:
+
+            def job() -> int | None:
+                return lookup.owner_uid(client, server)
+
+        try:
+            fut = executor.submit(job)
+        except BaseException:
+            slots.release()
+            raise
+        self._live_full_scans += 1
+
+        def _ended(_f: object) -> None:
+            # Runs on a worker thread (or here, if cancelled while queued).
+            def _release() -> None:
+                self._live_full_scans -= 1
+                slots.release()
+
+            try:
+                loop.call_soon_threadsafe(_release)
+            except RuntimeError:
+                pass  # loop closed (shutdown): nothing left to admit
+
+        fut.add_done_callback(_ended)
+        try:
+            uid = await asyncio.wait_for(asyncio.wrap_future(fut), max(0.0, deadline - loop.time()))
             return True, uid
         except asyncio.CancelledError:
+            stop.set()
+            fut.cancel()
             raise
         except Exception as exc:  # noqa: BLE001 -- a fault is ERROR, decided by the caller
-            self._last_error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            stop.set()
+            fut.cancel()
+            if isinstance(exc, TimeoutError):
+                self._last_error = "peer lookup timed out"
+            else:
+                self._last_error = (
+                    f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+                )
             return False, None
 
     def _refuse_on_error(self) -> Decision:
@@ -603,6 +743,8 @@ class PeerGate:
 
     async def check(self, client: Endpoint, server: Endpoint) -> Decision:
         if not self.enforcing:
+            return Decision(True)
+        if await self._hinted(client, server) is not None:
             return Decision(True)
         ok, uid = await self._attempt(client, server)
         if not ok:

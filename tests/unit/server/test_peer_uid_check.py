@@ -4,9 +4,11 @@ What these pin, and why each matters:
 
 * the per-connection decision (same user admitted, foreign refused, root only
   where the kernel can attribute it, error -> one retry -> refuse) with injected
-  lookups, so every branch runs on every OS;
+  lookups, so every branch runs on every OS, plus the flood/burst properties
+  (hint lane ahead of slow scans, slot waiting, abandoned scans stopped);
 * the ``/proc/net/tcp`` parser on fixture text (v4, v6, ``::ffff:``, uid 0,
-  overflow 65534, TIME_WAIT, full 4-tuple strictness);
+  overflow 65534, TIME_WAIT, orphaned FIN_WAIT2 / inode 0, full 4-tuple
+  strictness);
 * the skip modes and their ONE notice -- the operator's "zero friction"
   constraint lives there;
 * the uvicorn coupling: real servers booted through the gated protocol, so an
@@ -154,9 +156,129 @@ def test_timeout_counts_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert decision.response.startswith(b"HTTP/1.1 503 ")
 
 
-def test_flood_beyond_pending_cap_is_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_free_slot_within_the_budget_is_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap still bounds work: a slot that never frees ends in 503, not a hang."""
     monkeypatch.setattr(pc, "MAX_PENDING_LOOKUPS", 0)
-    assert _check(_enforcing(FakeLookup(MY_UID))).response.startswith(b"HTTP/1.1 503 ")
+    monkeypatch.setattr(pc, "LOOKUP_TIMEOUT_S", 0.05)
+    lookup = FakeLookup(MY_UID)
+    assert _check(_enforcing(lookup)).response.startswith(b"HTTP/1.1 503 ")
+    assert lookup.calls == []
+
+
+class HintedFakeLookup(FakeLookup):
+    """A lookup with a hint lane: ``hinted`` clients answer at once, the rest scan slowly."""
+
+    def __init__(self, *answers: Any, hinted: set[pc.Endpoint], **kw: Any) -> None:
+        super().__init__(*answers, **kw)
+        self.hinted = hinted
+        self.hint_calls: list[pc.Endpoint] = []
+
+    def hinted_owner_uid(self, client: pc.Endpoint, server: pc.Endpoint) -> int | None:
+        self.hint_calls.append(client)
+        return MY_UID if client in self.hinted else None
+
+
+async def _gather_checks(gate: pc.PeerGate, ports: range) -> list[pc.Decision]:
+    server = _ep("127.0.0.1", 1111)
+    return await asyncio.gather(*(gate.check(_ep("127.0.0.1", p), server) for p in ports))
+
+
+def test_hinted_same_user_is_admitted_while_slow_scans_saturate_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2 regression: a flood of slow not-found scans must not delay a hinted owner.
+
+    Before the hint lane, the hinted connection queued FIFO behind every
+    foreign scan on the 2 workers (and hit the pending cap at ~64), so a
+    modest foreign rate turned the desktop's new connections into 503s.
+    """
+    monkeypatch.setattr(pc, "LOOKUP_TIMEOUT_S", 5.0)
+    me = _ep("127.0.0.1", 40000)
+    lookup = HintedFakeLookup(lambda: time.sleep(0.3), hinted={me})
+    gate = _enforcing(lookup)
+
+    async def scenario() -> tuple[pc.Decision, float, list[pc.Decision]]:
+        flood = asyncio.ensure_future(_gather_checks(gate, range(50000, 50040)))
+        await asyncio.sleep(0.05)  # the flood's scans occupy both workers
+        started = time.monotonic()
+        decision = await gate.check(me, _ep("127.0.0.1", 1111))
+        elapsed = time.monotonic() - started
+        flood.cancel()
+        try:
+            refused = await flood
+        except asyncio.CancelledError:
+            refused = []
+        return decision, elapsed, refused
+
+    decision, elapsed, _ = asyncio.run(scenario())
+    assert decision.admit
+    # Behind 40 x 2 queued 300 ms scans the old FIFO path waited seconds.
+    assert elapsed < 0.25, elapsed
+    assert me not in [c for c, _ in lookup.calls]  # never needed a full scan
+
+
+def test_same_user_burst_wider_than_the_cap_gets_no_503() -> None:
+    """R2/Q1 regression: 100 parallel fresh same-user connections are all admitted.
+
+    The old cap refused the overflow instantly (QA: 100 -> 9 x 503); a burst now
+    waits for a slot inside its attempt budget instead.
+    """
+    lookup = FakeLookup(lambda: time.sleep(0.002) or MY_UID)
+    decisions = asyncio.run(_gather_checks(_enforcing(lookup), range(50000, 50100)))
+    assert [d.admit for d in decisions] == [True] * 100
+
+
+class StoppableSlowLookup:
+    """Scans "forever" in small steps, honouring ``should_stop`` like libproc's scan."""
+
+    mechanism = "fake"
+    admits_root = False
+    stoppable = True
+
+    def __init__(self) -> None:
+        self.abandoned = 0
+        self.lock = threading.Lock()
+
+    def owner_uid(
+        self,
+        client: pc.Endpoint,
+        server: pc.Endpoint,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int | None:
+        for _ in range(1000):
+            if should_stop is not None and should_stop():
+                with self.lock:
+                    self.abandoned += 1
+                raise pc.LookupAbandoned("stop")
+            time.sleep(0.005)
+        return None
+
+
+def test_timed_out_scans_are_stopped_and_release_their_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2: abandoned work is bounded -- a timed-out scan stops and frees its slot.
+
+    Before, ``wait_for`` gave up on the future but the scan kept a worker for
+    its full (not-found) length and its slot stayed counted until it ended.
+    """
+    monkeypatch.setattr(pc, "LOOKUP_TIMEOUT_S", 0.05)
+    lookup = StoppableSlowLookup()
+    gate = pc.PeerGate(pc.GateStatus("enforcing", mechanism="fake"), lookup)
+
+    async def scenario() -> int:
+        decisions = await _gather_checks(gate, range(50000, 50010))
+        assert all(d.response.startswith(b"HTTP/1.1 503 ") for d in decisions)
+        for _ in range(100):  # the running scans stop within one step
+            if gate._live_full_scans == 0:
+                break
+            await asyncio.sleep(0.01)
+        return gate._live_full_scans
+
+    assert asyncio.run(scenario()) == 0
+    # Scans that were running when their callers gave up were told to stop
+    # (the queued rest were cancelled before they ever ran).
+    assert lookup.abandoned >= 1
 
 
 # --------------------------------------------------------------------------
@@ -177,10 +299,16 @@ def _proc_hex(host: str, port: int) -> str:
     return "".join(f"{w:08X}" for w in words) + f":{port:04X}"
 
 
-def _proc_row(local: tuple[str, int], remote: tuple[str, int], uid: int, state: str = "01") -> str:
+def _proc_row(
+    local: tuple[str, int],
+    remote: tuple[str, int],
+    uid: int,
+    state: str = "01",
+    inode: int = 12345,
+) -> str:
     return (
         f"   0: {_proc_hex(*local)} {_proc_hex(*remote)} {state} 00000000:00000000 "
-        f"00:00000000 00000000 {uid:>5}        0 12345 1 0000000000000000 20 4 30 10 -1"
+        f"00:00000000 00000000 {uid:>5}        0 {inode} 1 0000000000000000 20 4 30 10 -1"
     )
 
 
@@ -245,6 +373,34 @@ def test_proc_finder_ignores_time_wait_rows() -> None:
     """TIME_WAIT rows report uid 0; the root rule must never admit them."""
     text = "\n".join([_HEADER, _proc_row(("127.0.0.1", 50000), ("127.0.0.1", 1111), 0, state="06")])
     assert pc.find_uid_in_proc_net(text, _ep("127.0.0.1", 50000), _ep("127.0.0.1", 1111)) is None
+    # As the kernel really prints it: timewait sockets carry inode 0 too.
+    text = "\n".join(
+        [_HEADER, _proc_row(("127.0.0.1", 50000), ("127.0.0.1", 1111), 0, state="06", inode=0)]
+    )
+    assert pc.find_uid_in_proc_net(text, _ep("127.0.0.1", 50000), _ep("127.0.0.1", 1111)) is None
+
+
+def test_proc_finder_ignores_orphaned_fin_wait2_rows() -> None:
+    """R1 regression: a closed client's FIN_WAIT2 timewait row must not read as root.
+
+    The kernel prints timewait sockets with uid 0 and inode 0 and state = the
+    timewait substate, 05 for an orphan that sent its FIN; a foreign user's
+    connect-send-close would otherwise be admitted under the Linux root rule.
+    """
+    client, server = _ep("127.0.0.1", 50000), _ep("127.0.0.1", 1111)
+    orphan = _proc_row(("127.0.0.1", 50000), ("127.0.0.1", 1111), 0, state="05", inode=0)
+    assert pc.find_uid_in_proc_net("\n".join([_HEADER, orphan]), client, server) is None
+    # ...and end to end: with only that row, the Linux gate refuses (not found).
+    lookup = FakeLookup(pc.find_uid_in_proc_net("\n".join([_HEADER, orphan]), client, server))
+    lookup.admits_root = True
+    assert not _check(_enforcing(lookup)).admit
+    # A live socket on the same tuple (inode != 0) is still attributed, even
+    # when it comes after the orphan row.
+    live = _proc_row(("127.0.0.1", 50000), ("127.0.0.1", 1111), 1001, state="01")
+    assert pc.find_uid_in_proc_net("\n".join([_HEADER, orphan, live]), client, server) == 1001
+    # A live FIN_WAIT2 socket a process still holds (not orphaned) keeps its uid.
+    held = _proc_row(("127.0.0.1", 50000), ("127.0.0.1", 1111), 1001, state="05")
+    assert pc.find_uid_in_proc_net("\n".join([_HEADER, held]), client, server) == 1001
 
 
 def test_linux_lookup_rereads_its_preopened_tables(tmp_path: Path) -> None:
@@ -617,6 +773,22 @@ def test_native_lookup_resolves_a_child_connection_to_our_uid(
     # match (a foreign process on 127.0.0.2:X while ours uses 127.0.0.1:X).
     other = ipaddress.ip_address("127.0.0.2")
     assert lookup.owner_uid((other, client[1]), server) is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS libproc hint lane")
+def test_macos_hint_lane_answers_only_recent_owners(
+    child_connection: tuple[pc.Endpoint, pc.Endpoint],
+) -> None:
+    """The hint lane is bounded: it knows a pid only after a full scan matched it."""
+    lookup = pc.MacLibprocLookup()
+    client, server = child_connection
+    assert lookup.hinted_owner_uid(client, server) is None
+    assert lookup.owner_uid(client, server) == MY_UID
+    assert lookup.hinted_owner_uid(client, server) == MY_UID
+    assert lookup.hinted_owner_uid((client[0], 0), server) is None
+    # A caller that already gave up stops the full scan before any pid.
+    with pytest.raises(pc.LookupAbandoned):
+        lookup.owner_uid((client[0], 0), server, should_stop=lambda: True)
 
 
 @pytest.mark.skipif(not NATIVE, reason="native mechanism is macOS/Linux only")

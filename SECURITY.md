@@ -72,8 +72,10 @@ macOS agents 4.6+ `Interoperability` is not supported.)
   desktop-managed daemons alike, and covers `/v1/static/*` file previews. On
   Linux, connections from root (uid 0) are admitted, since root can already
   read the operator's files; macOS cannot attribute root's sockets, so there
-  they are refused (for example `sudo curl`). It needs no setup. The daemon
-  logs one line at start-up saying whether it is enforcing.
+  they are refused (for example `sudo curl`); a Linux socket no live process
+  holds (a client that already closed) is never attributed to root. It needs
+  no setup. The daemon decides once, and logs one line saying whether it is
+  enforcing, at start-up (at the first connection under `--reload`).
 - **Where that check does not run.** It is skipped, with one start-up warning,
   inside containers and WSL (relayed connections make the owning user
   meaningless there), on Windows and other unsupported platforms, and when
