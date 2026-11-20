@@ -391,7 +391,7 @@
         }
       ],
       "references": {
-        "session/catalog.py": 28
+        "session/catalog.py": 33
       }
     },
     "wire.sessions": {

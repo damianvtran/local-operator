@@ -3774,6 +3774,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "destination anything, so a refusal leaves the conversation where it was",
     ),
     (
+        "local_operator/session/cleanup.py::_rename_noreplace",
+        "os.rename",
+        "The fallback half of the quarantine's no-replace rename (the kernel half, "
+        "renameat2 RENAME_NOREPLACE / renamex_np RENAME_EXCL via ctypes, is in the "
+        "same function and invisible to this scan, so it is named here). Reached only "
+        "from quarantine_claimed_session_dir after it proved the source is this call's "
+        "sessions/<new_id> (st_dev/st_ino recorded at creation, .session.pid naming "
+        "os.getpid(), no lease) and the destination is a not-yet-existing name under "
+        "the real <config>/network/quarantine/; refuses an existing destination; a "
+        "rename, never a delete",
+    ),
+    (
+        "local_operator/session/cleanup.py::quarantine_claimed_session_dir",
+        "<path>.unlink",
+        "Drops the .session.pid claim FILE that travelled with the tree, at its "
+        "landing under network/quarantine/ (release_session only acts under "
+        "sessions/); unlink rejects directories",
+    ),
+    (
         "local_operator/network/carry.py::_write_marker",
         "os.replace",
         "Atomic write of a session's own desktop.json cwd marker at the promote, "
@@ -3862,6 +3881,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "this pull itself introduced, restoring the pre-pull state after a refused "
         "plan; iterdir is one level and dest_dir is a replica or staging directory, "
         "never a session directory",
+    ),
+    # The import door's stamp downgrade (``origin.downgrade_stamps``) rewrites FILES
+    # only: it walks with ``followlinks=False``, skips symlinks and keeps only
+    # ``path.is_file()`` ``*.jsonl`` entries, and ``_downgrade_file`` reads the whole
+    # file (``read_bytes`` raises on a directory) before either call below runs.
+    # The directory moves out of ``sessions/`` go through cleanup.py
+    # (``quarantine_claimed_session_dir``), never through here.
+    (
+        "local_operator/network/origin.py::_downgrade_file",
+        "os.replace",
+        "Publishes this call's own mkstemp temp FILE, created in the same directory, "
+        "over the file it read. It asserts in code that the target is that same "
+        "regular file: lstat S_ISREG, O_NOFOLLOW open, fstat dev/ino, re-lstat dev/ino "
+        "just before the replace. A symlink, directory or swapped target raises "
+        "ImportStampsRefused (tests in test_mesh_origin.py), so no directory is ever "
+        "replaced or renamed",
+    ),
+    (
+        "local_operator/network/origin.py::_downgrade_file",
+        "<path>.unlink",
+        "Removes only this call's own mkstemp temp FILE after a failed write; unlink "
+        "rejects directories",
     ),
     (
         "local_operator/network/sync.py::write_replica_cursor",
@@ -5129,13 +5170,17 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/inbox.py::commit_inbox_batch",
         # tmp -> .session-holds.json (the holds map, beside the log)
         "local_operator/session/cleanup.py::_write_holds",
-        # THE ONE PATH DISPLACER THAT MAY NAME A SESSION DIRECTORY, and it is this
-        # module's own function: the mesh commit renames sessions/<id> out to
+        # THE PATH DISPLACERS THAT MAY NAME A SESSION DIRECTORY are this module's
+        # own two functions. The first: the mesh commit renames sessions/<id> out to
         # network/handed-away/ once the destination holds a verified copy. Every
-        # other rename in this neighbourhood is a temp-file swap; this one is
+        # other rename in this neighbourhood is a temp-file swap; the first is
         # argued for in the allow-list above ("the rename is what makes 'exactly
         # one copy' atomic").
         "local_operator/session/cleanup.py::hand_off_session_dir",
+        # The second, and the only other: a refused mesh recovery's partial copy,
+        # renamed out to network/quarantine/ (never deleted) once its claim proves
+        # this call created it (inode) and still claims it (see its allow-list row).
+        "local_operator/session/cleanup.py::_rename_noreplace",
         # tmp -> .session-census.json (the census baseline, beside the log)
         "local_operator/session/census.py::_write_census",
         # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,

@@ -723,6 +723,7 @@ _CLONE_GUARD_FIELDS = frozenset(
         # never changes the prompt bytes the model reads.
         "cache_diagnostics",
         "cache_diagnostics_previous_id",
+        "cache_diagnostics_chain",
         # Request role for the Anthropic cache-TTL policy, stamped by
         # ``SessionStreamFn`` on every request (``anthropic_cache_ttl``). It
         # selects a marker TTL, never message bytes, so an armed one-turn secret
@@ -1793,12 +1794,16 @@ class BrowserSurface:
         "handed",
         "handed_to",
         "late_handoff_to_parent",
+        "terminal_cleanup_generation",
     )
 
     def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
+        # The child runner alone consumes this exact failed-close marker after
+        # disposal, while it still owns the live job's resume fence.
+        self.terminal_cleanup_generation: str = ""
         # Whether the tool has already spent its ONE line telling the agent that
         # a newer browser extension exists. It lives HERE, on the host-owned
         # holder, because the ToolContext is rebuilt at the start of every turn
@@ -5061,6 +5066,9 @@ class ChatRequest(BaseModel):
     #: metadata: it is request policy for one wire, not conversation state.
     cache_diagnostics: bool = Field(default=False, exclude=True, repr=False)
     cache_diagnostics_previous_id: str | None = Field(default=None, exclude=True, repr=False)
+    #: Per-stream local Google comparison identity; forks never share this even
+    #: when they inherit prompt_cache_key. Never sent to any provider or saved.
+    cache_diagnostics_chain: str | None = Field(default=None, exclude=True, repr=False)
     # Native reasoning is opaque: use provider-reported token counts rather
     # than treating encrypted bytes as text. Populated only after replay checks.
     native_context_tokens: int = Field(default=0, exclude=True, repr=False)
@@ -5570,6 +5578,10 @@ class StreamUsageEvent(BaseModel):
 
 class StreamEndEvent(BaseModel):
     type: Literal["end"] = "end"
+    #: Local Google prefix diagnosis, available only after usageMetadata.
+    #: Debug metadata for analytics/logging, never user-facing usage content.
+    cache_miss_type: str | None = Field(default=None, exclude=True, repr=False)
+    cache_missed_tokens: int = Field(default=0, exclude=True, repr=False)
     stop_reason: str  # stop | length | toolUse | refusal | error | aborted
     usage: Usage | None = None
     provider_payload: dict[str, Any] | None = None

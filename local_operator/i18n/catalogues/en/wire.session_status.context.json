@@ -102,7 +102,7 @@
   "wire.session_status.wedged_heartbeat": {
     "role": "Sidebar/picker live row status label",
     "tone": "terse, cautious, factual",
-    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. Same state as wire.session_status.wedged, plus the measured heartbeat age. {duration} is an already-formatted compact duration such as `4m` or `1h 5m`, inserted verbatim; do not translate or reorder it. Keep the 'process alive' qualifier: it stops readers inferring the process died."
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. Same state as wire.session_status.wedged, plus the measured heartbeat age. {duration} is an already-localized compact duration such as `4m` or `1h 5m`, rendered from the wire.session_status.duration_* keys in the same language and inserted verbatim; translate those keys, not this placeholder. Keep the 'process alive' qualifier: it stops readers inferring the process died."
   },
   "wire.session_status.working": {
     "role": "Sidebar/picker live row status label",
@@ -153,5 +153,25 @@
     "role": "Sidebar/picker live row status label",
     "tone": "terse",
     "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. Short segment that FOLLOWS the running-subagents segment (wire.session_status.delegating_running) after ' · ', e.g. `2 subagents running · 1 queued`; the noun is implied by that preceding segment. {count} >= 1 subagents waiting for capacity; plural forms are provided so the adjective can agree."
+  },
+  "wire.session_status.duration_seconds": {
+    "role": "Compact duration unit inside a live row status label",
+    "tone": "terse, technical",
+    "note": "EN-only context sidecar. One arm of the compact elapsed-time value inserted as {duration} into wire.session_status.wedged_heartbeat (session/catalog.py status_duration); it is never shown on its own. Live sidebar/picker row status rendered verbatim in the desktop sidebar, status feed, mobile relay and TUI sidebar, so keep it as short as the English: a number plus a one- or two-letter unit abbreviation, no plural words, no trailing punctuation. Use the locale's conventional short unit abbreviation (or keep the ASCII letter if that is the norm). {count} is whole seconds, 0-59. English `42s`."
+  },
+  "wire.session_status.duration_minutes": {
+    "role": "Compact duration unit inside a live row status label",
+    "tone": "terse, technical",
+    "note": "EN-only context sidecar. One arm of the compact elapsed-time value inserted as {duration} into wire.session_status.wedged_heartbeat (session/catalog.py status_duration); it is never shown on its own. Live sidebar/picker row status rendered verbatim in the desktop sidebar, status feed, mobile relay and TUI sidebar, so keep it as short as the English: a number plus a one- or two-letter unit abbreviation, no plural words, no trailing punctuation. Use the locale's conventional short unit abbreviation (or keep the ASCII letter if that is the norm). {count} is whole minutes, 1-59. English `4m`."
+  },
+  "wire.session_status.duration_hours_minutes": {
+    "role": "Compact duration unit inside a live row status label",
+    "tone": "terse, technical",
+    "note": "EN-only context sidecar. One arm of the compact elapsed-time value inserted as {duration} into wire.session_status.wedged_heartbeat (session/catalog.py status_duration); it is never shown on its own. Live sidebar/picker row status rendered verbatim in the desktop sidebar, status feed, mobile relay and TUI sidebar, so keep it as short as the English: a number plus a one- or two-letter unit abbreviation, no plural words, no trailing punctuation. Use the locale's conventional short unit abbreviation (or keep the ASCII letter if that is the norm). {hours} is 1-23 and {minutes} is 0-59 (a zero minute part is still shown). English `3h 12m`; keep both parts in one token-like group."
+  },
+  "wire.session_status.duration_days_hours": {
+    "role": "Compact duration unit inside a live row status label",
+    "tone": "terse, technical",
+    "note": "EN-only context sidecar. One arm of the compact elapsed-time value inserted as {duration} into wire.session_status.wedged_heartbeat (session/catalog.py status_duration); it is never shown on its own. Live sidebar/picker row status rendered verbatim in the desktop sidebar, status feed, mobile relay and TUI sidebar, so keep it as short as the English: a number plus a one- or two-letter unit abbreviation, no plural words, no trailing punctuation. Use the locale's conventional short unit abbreviation (or keep the ASCII letter if that is the norm). {days} is a whole number of days (1 or more, unbounded) passed as a pre-rendered ASCII digit string so it never gains a grouping separator (English `1000d`, not `1,000d`); insert it verbatim. {hours} is 0-23. English `2d 4h`."
   }
 }

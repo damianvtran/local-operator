@@ -45,6 +45,22 @@ def dormant(*, count: int | float) -> Msg:
     return Msg("wire.session_status.dormant", {"count": count})
 
 
+def duration_days_hours(*, days: str, hours: int | float) -> Msg:
+    return Msg("wire.session_status.duration_days_hours", {"days": days, "hours": hours})
+
+
+def duration_hours_minutes(*, hours: int | float, minutes: int | float) -> Msg:
+    return Msg("wire.session_status.duration_hours_minutes", {"hours": hours, "minutes": minutes})
+
+
+def duration_minutes(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.duration_minutes", {"count": count})
+
+
+def duration_seconds(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.duration_seconds", {"count": count})
+
+
 def error() -> Msg:
     return Msg("wire.session_status.error", {})
 

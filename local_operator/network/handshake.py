@@ -840,6 +840,9 @@ class Handshake:
             peer_build=self.peer_build,
             peer_capabilities=self.peer_capabilities,
             local_capabilities=list(self.capabilities),
+            # Reported, never re-derived: ``auth_verified`` is set by the one MAC
+            # check (``verify_auth``), so this field cannot disagree with it.
+            peer_verified=self.auth_verified,
         )
 
     @property
