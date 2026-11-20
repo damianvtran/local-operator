@@ -1713,6 +1713,11 @@ async def _run_managed_frontend(
         # something proves otherwise.
         observed = _owner_observation(lease)
         lost = observed.state is JobState.ABSENT
+        if lost:
+            # The owner may have admitted and sealed while liveness was being read.
+            terminal = owner_status()
+            if terminal is not None and terminal.phase in owned_process.TERMINAL_PHASES:
+                return _report_owner_outcome(lease, terminal)
         detail = (
             "the owner exited without admitting: no terminal status and no live holder "
             "were observable. Its retained state is UNVERIFIED (it may have admitted "
@@ -1755,6 +1760,10 @@ async def _run_managed_frontend(
             return _report_owner_outcome(lease, status)
         observed = _owner_observation(lease)
         if observed.state is JobState.ABSENT:
+            # A terminal receipt can land between the status read and owner exit.
+            terminal = owner_status()
+            if terminal is not None and terminal.phase in owned_process.TERMINAL_PHASES:
+                return _report_owner_outcome(lease, terminal)
             print(
                 json.dumps(
                     {

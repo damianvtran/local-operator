@@ -149,7 +149,7 @@ def isolated_session_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     return config_dir
 
 
-def _session_preflight_args(tmp_path: Path, session_route: str) -> Any:
+def _session_preflight_args(tmp_path: Path, session_route: str, *, managed: bool = False) -> Any:
     selector = tmp_path / "selector.json"
     selector.write_text(
         json.dumps(
@@ -169,25 +169,26 @@ def _session_preflight_args(tmp_path: Path, session_route: str) -> Any:
             }
         )
     )
-    return run_episode.build_parser(internal_test_support=True).parse_args(
-        [
-            "--selector",
-            str(selector),
-            "--task-id",
-            "t",
-            "--route",
-            f"{_PROVIDER}/{_MODEL}",
-            "--run-root",
-            str(tmp_path / "run"),
-            "--engagement",
-            "session",
-            "--session-route",
-            session_route,
-            "--reasoning-effort",
-            "max",
-            "--in-process-host",
-        ]
-    )
+    argv = [
+        "--selector",
+        str(selector),
+        "--task-id",
+        "t",
+        "--route",
+        f"{_PROVIDER}/{_MODEL}",
+        "--run-root",
+        str(tmp_path / "run"),
+        "--engagement",
+        "session",
+        "--session-route",
+        session_route,
+        "--reasoning-effort",
+        "max",
+        "--owner-backend=detached" if managed else "--in-process-host",
+    ]
+    args = run_episode.build_parser(internal_test_support=True).parse_args(argv)
+    args._raw_argv = argv
+    return args
 
 
 @pytest.mark.asyncio
@@ -276,7 +277,8 @@ async def test_admitted_session_effort_uses_scoped_route_before_allocation(
     monkeypatch.setattr(source_pin, "verify_core_source", lambda _: calls.append("pin"))
     monkeypatch.setattr(configure, "_catalogue_credential", credentials)
     monkeypatch.setattr(discovery, "available_models", listing)
-    monkeypatch.setattr(run_episode, "_parse_infra_refs", stop_before_prepare)
+    # Ref parsing also runs before admission; this boundary is only after effort validation.
+    monkeypatch.setattr(run_episode, "_ensure_lease_outlasts_wall", stop_before_prepare)
     channel = owned_process.OwnerStatusChannel(
         tmp_path / "status.json",
         owner_id="fixture-owner",
@@ -309,6 +311,84 @@ async def test_admitted_session_effort_uses_scoped_route_before_allocation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("admitted", [True, False], ids=["after-admission", "admission-timeout"])
+@pytest.mark.parametrize("receipt", ["matching", "missing", "wrong-pid", "wrong-owner"])
+async def test_frontend_checks_terminal_receipt_when_owner_disappears(
+    admitted: bool,
+    receipt: str,
+    tmp_path: Path,
+    isolated_session_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from local_operator import owned_process
+    from local_operator.evaluation import source_pin
+
+    args = _session_preflight_args(tmp_path, "deepseek/fixture-dynamic", managed=True)
+    refusal = "session route deepseek/fixture-dynamic does not accept reasoning effort 'max'"
+    monkeypatch.setattr(source_pin, "verify_core_source", lambda _: None)
+    monkeypatch.setattr(run_episode, "resolve_core_pin", lambda: "fixture-source-pin")
+    monkeypatch.setattr(run_episode, "refuse_volatile_root", lambda *a, **kw: None)
+    if not admitted:
+        # The owner has started, but the frontend is descheduled until its
+        # admission deadline. No status has been seen and no real wait is needed.
+        ticks = iter((0.0, args.owner_startup_timeout_s))
+        monkeypatch.setattr(run_episode, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+
+    def publish(lease: owned_process.OwnedProcessLease, phase: str) -> None:
+        terminal = phase == "ended"
+        owned_process.write_owner_status(
+            lease.paths.status_path,
+            owner_id="foreign-owner" if terminal and receipt == "wrong-owner" else lease.owner_id,
+            phase=phase,
+            pid=lease.pid + 1 if terminal and receipt == "wrong-pid" else lease.pid,
+            birth=lease.birth,
+            backend=lease.backend,
+            job_label=lease.job_label,
+            detail=refusal if terminal else None,
+            receipt={"session_effort_preflight_refused": True} if terminal else None,
+        )
+
+    def start(
+        spec: owned_process.OwnedProcessSpec, *, startup_timeout_s: float
+    ) -> owned_process.OwnedProcessLease:
+        lease = owned_process.OwnedProcessLease(
+            owner_id=spec.owner_id,
+            backend=spec.backend,
+            job_label=None,
+            pid=123,
+            birth_scheme=None,
+            birth="fixture-birth",
+            source_pin=spec.source_pin,
+            run_root=spec.run_root,
+        )
+        if admitted:
+            publish(lease, "admitted")
+        return lease
+
+    def observe(lease: owned_process.OwnedProcessLease) -> run_episode.JobObservation:
+        status = owned_process.read_owner_status(lease.paths.status_path)
+        assert (status.phase if status else None) == ("admitted" if admitted else None)
+        # Seal while liveness is being read, not before the frontend's first read.
+        if receipt != "missing":
+            publish(lease, "ended")
+        return run_episode.JobObservation(run_episode.JobState.ABSENT, None, "fixture owner exited")
+
+    monkeypatch.setattr(owned_process, "start_owned_process", start)
+    monkeypatch.setattr(run_episode, "_owner_observation", observe)
+    result = await run_episode.run(args)
+    captured = capsys.readouterr()
+    if receipt == "matching":
+        assert result == run_episode.EXIT_PREFLIGHT
+        assert captured.err == refusal + "\n"
+        assert captured.out == ""
+    else:
+        assert result == run_episode.EXIT_EPISODE
+        assert captured.err == ""
+        assert json.loads(captured.out)["status"] == "owner_lost_unverified"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider", "requested", "auto", "expected"),
     [
@@ -319,7 +399,7 @@ async def test_admitted_session_effort_uses_scoped_route_before_allocation(
         ("deepseek", "max", True, "max"),
         ("deepseek", "none", True, "none"),
         ("deepseek", None, True, "low"),
-        ("deepseek", None, False, "high"),
+        ("deepseek", None, False, "max"),
     ],
 )
 async def test_first_session_turn_serializes_effective_effort(
@@ -341,7 +421,11 @@ async def test_first_session_turn_serializes_effective_effort(
     from local_operator.session.spec import SessionRoots
 
     config = ConfigManager(config_dir=isolated_session_env)
-    config.set_config_value("model_effort", "high" if provider == "deepseek" else "medium")
+    configured = "medium"
+    if provider == "deepseek":
+        # Auto-off must differ from both the built-in high and the auto low.
+        configured = "high" if auto else "max"
+    config.set_config_value("model_effort", configured)
     config.set_config_value("effort", {"auto": auto})
     monkeypatch.setattr(source_pin, "verify_core_source", lambda _: None)
     # Metadata and credential *sources* are offline; the real Session and
