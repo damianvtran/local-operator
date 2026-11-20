@@ -29,7 +29,6 @@ import json
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
