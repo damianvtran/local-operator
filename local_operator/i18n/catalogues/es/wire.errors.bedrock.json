@@ -1,0 +1,17 @@
+{
+  "wire.errors.bedrock.access_denied": "AWS denegó esta solicitud en {region}: la identidad no tiene un permiso de IAM para Amazon Bedrock.",
+  "wire.errors.bedrock.check_list_denied": "Estas credenciales de AWS funcionan en {region}, pero no pueden listar los modelos de Amazon Bedrock; se usará la lista de modelos integrada.",
+  "wire.errors.bedrock.check_unverified": "No se pudo contactar con Amazon Bedrock en {region} para comprobar esta conexión. Se guardó sin verificar.",
+  "wire.errors.bedrock.credential_resolution_failed": "No se pudieron cargar las credenciales de AWS para Amazon Bedrock: {detail}",
+  "wire.errors.bedrock.credential_timeout": "Cargar las credenciales de AWS para Amazon Bedrock tardó más de {seconds, plural, one {# segundo} many {# de segundos} other {# segundos}}.",
+  "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock rechazó estas credenciales de AWS en {region}.",
+  "wire.errors.bedrock.iam_denied": "Tu identidad de AWS no tiene permiso para llamar a {action} en {resource}. Pide a tu administrador de AWS que te lo conceda en IAM; puede que otros modelos sigan funcionando.",
+  "wire.errors.bedrock.invalid_connection": "Esta conexión de Amazon Bedrock no es válida ({detail}). Vuelve a conectar Bedrock.",
+  "wire.errors.bedrock.model_access": "Esta cuenta de AWS no tiene acceso a {model} en {region}. Activa el acceso al modelo en la consola de Amazon Bedrock o elige otro modelo.",
+  "wire.errors.bedrock.model_unavailable": "{model} no está disponible en {region}. Prueba su perfil de inferencia global. o regional (por ejemplo, us.), u otra región.",
+  "wire.errors.bedrock.no_credentials": "No hay credenciales de AWS para Amazon Bedrock. Define {bearer_env}, o en un worker de AWS define {auth_env}, o conecta Bedrock con una conexión guardada.",
+  "wire.errors.bedrock.profile_no_credentials": "El perfil de AWS {profile} no tiene credenciales utilizables para Amazon Bedrock.",
+  "wire.errors.bedrock.profile_not_found": "No se encontró el perfil de AWS {profile} en tu configuración de AWS.",
+  "wire.errors.bedrock.secret_missing": "La credencial guardada de Amazon Bedrock no está en el almacén cifrado. Ejecuta {command} para volver a conectar.",
+  "wire.errors.bedrock.session_expired": "La sesión de AWS del perfil {profile} ha caducado. Ejecuta {command} y vuelve a intentarlo."
+}

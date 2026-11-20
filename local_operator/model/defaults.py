@@ -64,6 +64,12 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # workloads"; also served by the live /v1/models listing under a Claude
     # Pro/Max OAuth grant, so the subscription route can use it too.
     "anthropic": SuggestedModel("claude-opus-5-5", "Claude Opus 5.5"),
+    # Bedrock: the same model through the GLOBAL cross-Region inference
+    # profile — first-party price (regional/geo ids cost 1.10x, AWS Price
+    # List 2026-11-18) and callable from every commercial source Region.
+    # Bedrock prompt-caching docs list ``anthropic.claude-opus-5-5`` (read
+    # 2026-11-18). A worker that needs data residency picks ``us.``/``eu.``.
+    "bedrock": SuggestedModel("global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Bedrock)"),
     # developers.openai.com/api/docs/models/gpt-6-astra: "our most capable
     # model". The ChatGPT-subscription (Codex) route serves the same id, which is
     # what scripts/bench_openai_oauth_cache.py drives over OAuth.

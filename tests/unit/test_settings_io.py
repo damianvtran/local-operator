@@ -135,6 +135,10 @@ def _consumer_defaults() -> dict[str, object]:
     # (``SyncSettings.from_config`` falls back to exactly these).
     from local_operator.network.sync import SYNC_DEBOUNCE_S, SYNC_TICK_S
     from local_operator.notifications import sound as notification_sound
+    from local_operator.providers.bedrock.connection import (
+        DEFAULT_BEDROCK_AUTH_SETTING,
+        DEFAULT_BEDROCK_REGION_SETTING,
+    )
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -382,6 +386,9 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.anthropic.subagent_cache_ttl_1h_min_context_tokens": (
             ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
         ),
+        # Bedrock's two inherit keys: the connection module's own defaults.
+        "providers.bedrock.region": DEFAULT_BEDROCK_REGION_SETTING,
+        "providers.bedrock.auth": DEFAULT_BEDROCK_AUTH_SETTING,
         # The openrouter routing rows are guarded against the shipped config
         # block itself: their consumer is the single-shot resolver
         # ``model.configure._openrouter_provider_preferences`` (no independent

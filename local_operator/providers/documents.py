@@ -149,6 +149,12 @@ class DocumentForm:
 DOCUMENT_FORMS: dict[str, DocumentForm] = {
     "anthropic": DocumentForm("anthropic", 32_000_000, 600, "anthropic"),
     "anthropic-key": DocumentForm("anthropic", 32_000_000, 600, "anthropic"),
+    # Bedrock carries the Anthropic Messages body verbatim (the same document
+    # block, rendered by the same AnthropicClient body builder), so it shares
+    # the Anthropic form per design §6.2. The byte ceiling is the store's upload
+    # ceiling, as for the rows around it; Bedrock's own payload cap is not
+    # separately transcribed here.
+    "bedrock": DocumentForm("anthropic", 32_000_000, 600, "bedrock"),
     # 32 MB here is the STORE'S UPLOAD CEILING, not a documented OpenAI limit:
     # ``MAX_ATTACHMENT_UPLOAD_BYTES`` refuses a larger file before it can ever
     # reach this row, so a bigger number would be unreachable. The file-inputs
@@ -371,7 +377,7 @@ def admission_wire(provider: str, *, supports_responses_api: bool = False) -> st
     OpenAI is the only provider with two wires this harness ships, so it is
     the only one that needs the spec's Responses capability to choose.
     """
-    if provider in {"anthropic", "anthropic-key"}:
+    if provider in {"anthropic", "anthropic-key", "bedrock"}:
         return "anthropic-messages"
     if provider in ("google", "google-vertex"):
         return "google-content"

@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.errors.bedrock",
+  "history_sha256": "f9f315c14aa3811bb2deda869db0924cbeaf55e611f4639bed6c6485992e91dd",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "b004444c47de06d6a54368193cf6e7ef0067ba9589072180eb2ae6571c8f0bb6",
+      "context_sha256": "18c734a976b1403e0ecc43f431141c86513f6e8c2c18ec450209d292ffcc7958",
+      "target_sha256": "134373322810f87a0a4729ea945052f24079baed3b46f37923bb608c9bf99116",
+      "translator": {
+        "agent": "translator not identified to the auditor: lopdev implementation lane, commit 8bfc7b9ed428 'feat(i18n): translate bedrock provider copy' (shared git author identity proves nothing); manager relayed only that other agents translated",
+        "model": null,
+        "date": "2026-11-19",
+        "provenance": "unknown — agent/session/model not available to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 2
+        },
+        "finding_ids": [
+          "zh-B1",
+          "zh-B2"
+        ]
+      },
+      "status": "passed",
+      "note": "PR #4266 (Amazon Bedrock provider) round 1: independent audit of new namespace wire.errors.bedrock, 14/14 keys, against en b004444c47de with context sidecar. Mechanical: key set equals en; placeholder set parity ({region},{model},{profile},{command},{detail},{bearer_env},{auth_env},{seconds}); {seconds} ICU plural carries the locale's CLDR arms; literals IAM, global., us. verbatim; NFC; no manual bidi controls. Semantic: every key faithful to en and context (access_denied=IAM policy refusal, not console model access; check_list_denied is informational; check_unverified says saved unverified); credentials term matches glossary/locale guide and existing catalogue usage; address form and punctuation per style guide. Findings: zh-B1 (nit): profile_not_found: '在你的AWS config文件中' carries a pronoun the style guide prefers dropped; meaning intact; zh-B2 (nit): credential_timeout: '超过了{seconds}' reads slightly clipped; '用时超过' smoother; meaning intact — deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "b004444c47de06d6a54368193cf6e7ef0067ba9589072180eb2ae6571c8f0bb6",
+      "context_sha256": "18c734a976b1403e0ecc43f431141c86513f6e8c2c18ec450209d292ffcc7958",
+      "target_sha256": "134373322810f87a0a4729ea945052f24079baed3b46f37923bb608c9bf99116",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 35241b9c509a",
+        "session": "35241b9c509a",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), job ab68148cabf7, session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 2
+        },
+        "finding_ids": [
+          "zh-B1",
+          "zh-B2"
+        ],
+        "job": "ab68148cabf7"
+      },
+      "status": "passed",
+      "note": "Provenance correction, same audit and verdict as the preceding pr4266-r1 row (identical source/context/target hashes): translator identity relayed by the manager after the first append (was recorded unknown). PR #4266 (Amazon Bedrock provider) round 1: independent audit of new namespace wire.errors.bedrock, 14/14 keys, against en b004444c47de with context sidecar. Mechanical: key set equals en; placeholder set parity ({region},{model},{profile},{command},{detail},{bearer_env},{auth_env},{seconds}); {seconds} ICU plural carries the locale's CLDR arms; literals IAM, global., us. verbatim; NFC; no manual bidi controls. Semantic: every key faithful to en and context (access_denied=IAM policy refusal, not console model access; check_list_denied is informational; check_unverified says saved unverified); credentials term matches glossary/locale guide and existing catalogue usage; address form and punctuation per style guide. Findings: zh-B1 (nit): profile_not_found: '在你的AWS config文件中' carries a pronoun the style guide prefers dropped; meaning intact; zh-B2 (nit): credential_timeout: '超过了{seconds}' reads slightly clipped; '用时超过' smoother; meaning intact — deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1-provenance"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "f3ea9f43f7f88e88f79cf9f7346897bc1496e376b88920a9ab181756c6f21945",
+      "context_sha256": "472b378f897e61cda076c8ff77c02c727b1b9363c715c457504ee8817ff41d8b",
+      "target_sha256": "8632c7491b8cd2deef6bd46381325d995a46a2f2b5d90dfa3bf2a0120166d49d",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 2187788f7981",
+        "session": "2187788f7981",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, task role, independent of coder job ad5bb4b65a2a and translator job 2187788f7981), session 64af8635cd3c; did not author the English or these translations and read no translator scratchpad",
+        "session": "64af8635cd3c",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "zh-B3"
+        ]
+      },
+      "status": "passed",
+      "note": "PR #4266 (Amazon Bedrock provider) round 3: independent audit of the one new key wire.errors.bedrock.iam_denied (commit fb916b136690) against en f3ea9f43f7f8 with context sidecar 472b378f897e. Mechanical: key set equals en (15/15); placeholders {action},{resource} preserved; literals AWS, IAM verbatim; NFC; no manual bidi controls; locale punctuation per style guide. Semantic: faithful to en and context (IAM policy denial of one action on one ARN, remedy = admin grant in IAM, other models may work; not console model access); 'identity' term matches the previously audited access_denied key in this locale; address form per style guide. Carry-forward: the other 14 keys are byte-identical in en and in this locale's target versus the pr4266-r1 audited state (diff f959aa8f7229..fb916b136690 adds only the iam_denied line and its context entry), so that audit carries onto the new en hash. zh-B3 (nit): iam_denied '你的AWS身份' keeps the possessive pronoun the zh-CN guide prefers dropped (same class as deferred zh-B1); '当前AWS身份' would read more native; meaning intact — deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r3"
+    }
+  ]
+}

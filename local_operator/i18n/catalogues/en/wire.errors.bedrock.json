@@ -1,0 +1,17 @@
+{
+  "wire.errors.bedrock.access_denied": "AWS denied this request in {region}: the identity lacks an Amazon Bedrock IAM permission.",
+  "wire.errors.bedrock.check_list_denied": "These AWS credentials work in {region} but cannot list Amazon Bedrock models; the built-in model list will be used.",
+  "wire.errors.bedrock.check_unverified": "Could not reach Amazon Bedrock in {region} to check this connection. It was saved without being verified.",
+  "wire.errors.bedrock.credential_resolution_failed": "Could not load AWS credentials for Amazon Bedrock: {detail}",
+  "wire.errors.bedrock.credential_timeout": "Loading AWS credentials for Amazon Bedrock took longer than {seconds, plural, one {# second} other {# seconds}}.",
+  "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock rejected these AWS credentials in {region}.",
+  "wire.errors.bedrock.iam_denied": "Your AWS identity is not allowed to call {action} on {resource}. Ask your AWS admin to grant it in IAM; other models may still work.",
+  "wire.errors.bedrock.invalid_connection": "This Amazon Bedrock connection is not valid ({detail}). Connect Bedrock again.",
+  "wire.errors.bedrock.model_access": "This AWS account has no access to {model} in {region}. Enable access to the model in the Amazon Bedrock console, or pick another model.",
+  "wire.errors.bedrock.model_unavailable": "{model} is not available in {region}. Try its global. or regional inference profile (for example us.), or another Region.",
+  "wire.errors.bedrock.no_credentials": "No AWS credentials for Amazon Bedrock. Set {bearer_env}, or on an AWS worker set {auth_env}, or connect Bedrock with a stored connection.",
+  "wire.errors.bedrock.profile_no_credentials": "AWS profile {profile} has no usable credentials for Amazon Bedrock.",
+  "wire.errors.bedrock.profile_not_found": "AWS profile {profile} was not found in your AWS config.",
+  "wire.errors.bedrock.secret_missing": "The saved Amazon Bedrock credential is missing from the encrypted store. Run {command} to connect again.",
+  "wire.errors.bedrock.session_expired": "The AWS sign-in session for profile {profile} has expired. Run {command}, then try again."
+}

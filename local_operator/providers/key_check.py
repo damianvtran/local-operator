@@ -237,6 +237,13 @@ async def check_api_key(
     definition = get_provider_definition(credential_provider_id(provider_id))
     if definition is None or definition.allows_missing_api_key:
         return KeyCheck(None, None)
+    if definition.wire == "bedrock":
+        # A connection descriptor or Bedrock API key, validated by a signed
+        # control-plane read in the credential's Region (``_request`` would
+        # aim it at a base_url Bedrock does not have). Lazy: botocore.
+        from local_operator.providers.bedrock.check import check_connection
+
+        return await check_connection(key, timeout, client=client)
     request = _request(definition, key)
     if request is None:
         return KeyCheck(None, None)

@@ -1047,7 +1047,12 @@ def test_no_listing_providers_is_derived_from_the_provider_registry() -> None:
         for definition in PROVIDER_REGISTRY
         if definition.wire == "mock"
         or definition.id in discovery._UNLISTABLE_PROVIDERS
-        or (not definition.base_url and not definition.local_setup)
+        or (
+            not definition.base_url
+            and not definition.local_setup
+            # Bedrock lists with no base_url: its endpoint comes from the credential.
+            and definition.wire != "bedrock"
+        )
     }
 
     # Derived, not hardcoded: with a literal id list, the provider added next is

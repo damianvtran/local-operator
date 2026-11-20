@@ -332,6 +332,36 @@ def test_list_models_with_ollama_inactive(client, mock_credential_manager):
         assert len(ollama_models) == 0
 
 
+def test_bedrock_is_listed_by_the_authoring_catalogue(client, mock_credential_manager, monkeypatch):
+    """UI QA #1987 Q3: Settings' model picker reads ``/v1/models``, which had no
+    Bedrock branch and so returned zero Bedrock rows while the chat picker
+    listed them. The route must ask the same discovery seam (with the stored
+    connection as the listing credential) and project its rows.
+    """
+    from local_operator.model.registry import bedrock_models
+
+    seen = []
+
+    def listing(provider, **kwargs):
+        seen.append((provider, kwargs))
+        if provider == "bedrock":
+            return merge_models(bedrock_models, None), "static"
+        return [], "static"
+
+    monkeypatch.setattr("local_operator.server.routes.models.available_models", listing)
+    response = client.get("/v1/models?provider=bedrock")
+    assert response.status_code == 200
+    rows = response.json()["result"]["models"]
+    assert rows and {row["provider"] for row in rows} == {"bedrock"}
+    assert {row["id"] for row in rows} == set(bedrock_models)
+    assert "global.anthropic.claude-opus-5-5" in {row["id"] for row in rows}
+    assert seen == [("bedrock", {"api_key": seen[0][1]["api_key"]})]
+
+    # And in the unfiltered list Settings actually requests.
+    everything = client.get("/v1/models?sort=recommended&direction=descending")
+    assert any(row["provider"] == "bedrock" for row in everything.json()["result"]["models"])
+
+
 def test_list_models_no_provider(client, mock_credential_manager):
     """Test the list_models endpoint without a provider filter."""
     response = client.get("/v1/models")

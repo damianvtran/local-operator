@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.errors.bedrock",
+  "history_sha256": "2b7e11112c786beb251d810096b70e56ccd6fafa0d709fa120fd0e4359813d62",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "b004444c47de06d6a54368193cf6e7ef0067ba9589072180eb2ae6571c8f0bb6",
+      "context_sha256": "18c734a976b1403e0ecc43f431141c86513f6e8c2c18ec450209d292ffcc7958",
+      "target_sha256": "9fd2c415902661e499456cadc91d22ea5e2cf872dc0c91dc9b4f49662c21cc5b",
+      "translator": {
+        "agent": "translator not identified to the auditor: lopdev implementation lane, commit 8bfc7b9ed428 'feat(i18n): translate bedrock provider copy' (shared git author identity proves nothing); manager relayed only that other agents translated",
+        "model": null,
+        "date": "2026-11-19",
+        "provenance": "unknown — agent/session/model not available to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4266 (Amazon Bedrock provider) round 1: independent audit of new namespace wire.errors.bedrock, 14/14 keys, against en b004444c47de with context sidecar. Mechanical: key set equals en; placeholder set parity ({region},{model},{profile},{command},{detail},{bearer_env},{auth_env},{seconds}); {seconds} ICU plural carries the locale's CLDR arms; literals IAM, global., us. verbatim; NFC; no manual bidi controls. Semantic: every key faithful to en and context (access_denied=IAM policy refusal, not console model access; check_list_denied is informational; check_unverified says saved unverified); credentials term matches glossary/locale guide and existing catalogue usage; address form and punctuation per style guide. Findings: none. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "b004444c47de06d6a54368193cf6e7ef0067ba9589072180eb2ae6571c8f0bb6",
+      "context_sha256": "18c734a976b1403e0ecc43f431141c86513f6e8c2c18ec450209d292ffcc7958",
+      "target_sha256": "9fd2c415902661e499456cadc91d22ea5e2cf872dc0c91dc9b4f49662c21cc5b",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 35241b9c509a",
+        "session": "35241b9c509a",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), job ab68148cabf7, session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "job": "ab68148cabf7"
+      },
+      "status": "passed",
+      "note": "Provenance correction, same audit and verdict as the preceding pr4266-r1 row (identical source/context/target hashes): translator identity relayed by the manager after the first append (was recorded unknown). PR #4266 (Amazon Bedrock provider) round 1: independent audit of new namespace wire.errors.bedrock, 14/14 keys, against en b004444c47de with context sidecar. Mechanical: key set equals en; placeholder set parity ({region},{model},{profile},{command},{detail},{bearer_env},{auth_env},{seconds}); {seconds} ICU plural carries the locale's CLDR arms; literals IAM, global., us. verbatim; NFC; no manual bidi controls. Semantic: every key faithful to en and context (access_denied=IAM policy refusal, not console model access; check_list_denied is informational; check_unverified says saved unverified); credentials term matches glossary/locale guide and existing catalogue usage; address form and punctuation per style guide. Findings: none. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1-provenance"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "f3ea9f43f7f88e88f79cf9f7346897bc1496e376b88920a9ab181756c6f21945",
+      "context_sha256": "472b378f897e61cda076c8ff77c02c727b1b9363c715c457504ee8817ff41d8b",
+      "target_sha256": "93c18d912124203a9ebe62758c59b8adbbcd61ba5c315540828e92b3160753ca",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 2187788f7981",
+        "session": "2187788f7981",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, task role, independent of coder job ad5bb4b65a2a and translator job 2187788f7981), session 64af8635cd3c; did not author the English or these translations and read no translator scratchpad",
+        "session": "64af8635cd3c",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "PR #4266 (Amazon Bedrock provider) round 3: independent audit of the one new key wire.errors.bedrock.iam_denied (commit fb916b136690) against en f3ea9f43f7f8 with context sidecar 472b378f897e. Mechanical: key set equals en (15/15); placeholders {action},{resource} preserved; literals AWS, IAM verbatim; NFC; no manual bidi controls; locale punctuation per style guide. Semantic: faithful to en and context (IAM policy denial of one action on one ARN, remedy = admin grant in IAM, other models may work; not console model access); 'identity' term matches the previously audited access_denied key in this locale; address form per style guide. Carry-forward: the other 14 keys are byte-identical in en and in this locale's target versus the pr4266-r1 audited state (diff f959aa8f7229..fb916b136690 adds only the iam_denied line and its context entry), so that audit carries onto the new en hash. No findings on iam_denied. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r3"
+    }
+  ]
+}

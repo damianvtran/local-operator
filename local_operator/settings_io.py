@@ -2119,6 +2119,37 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
         maximum=10_000_000,
     ),
+    # -- providers.bedrock: Amazon Bedrock Region and ambient-chain switch ---
+    #
+    # Both are free-text "unset means inherit" keys read by
+    # ``providers/bedrock/connection.py`` (defaults
+    # ``DEFAULT_BEDROCK_REGION_SETTING`` / ``DEFAULT_BEDROCK_AUTH_SETTING``).
+    # ``region`` applies only to connections that do not carry their own (env
+    # and ambient tiers; a stored connection keeps the Region chosen at
+    # login). ``auth: ambient`` lets a headless AWS worker use the default
+    # credential chain with no stored row — the deterministic alternative to
+    # compute-marker auto-detection (design D6). LIVE: both are read per
+    # request/census, so no relaunch is needed.
+    Setting(
+        key="providers.bedrock.region",
+        path=("providers", "bedrock", "region"),
+        section="providers",
+        label=_t(_ws.providers_bedrock_region_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.providers_bedrock_region_help()),
+        empty_unsets=True,
+    ),
+    Setting(
+        key="providers.bedrock.auth",
+        path=("providers", "bedrock", "auth"),
+        section="providers",
+        label=_t(_ws.providers_bedrock_auth_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.providers_bedrock_auth_help()),
+        empty_unsets=True,
+    ),
     # -- providers.openrouter: chat-completions `provider` routing object ----
     #
     # These rows build the OpenRouter chat-completions request body's

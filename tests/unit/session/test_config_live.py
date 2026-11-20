@@ -50,6 +50,7 @@ from local_operator.model.configure import (
     _openrouter_retire_below_tps,
 )
 from local_operator.projects import stale_after_s
+from local_operator.providers.bedrock import connection as bedrock_connection
 from local_operator.providers.failover import RetrySettings
 from local_operator.saver.gate import configured_mode
 from local_operator.session.session import Session
@@ -601,6 +602,20 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "providers.openai.api": (
         "chat_completions",
         lambda s, w: _openai_api_mode(s.routing_settings),
+    ),
+    # -- bedrock: re-read from config on every request / credential census ----
+    # Like ``session.scratchpad.max_bytes``, not a session attribute: the two
+    # readers resolve ``providers.bedrock.*`` through ``config_dir()`` at call
+    # time when handed no mapping, which is why the rows are LIVE. Observed
+    # through those exact readers. ``eu-west-1`` and ``ambient`` are the
+    # non-default values (both default to "" = inherit / no ambient chain).
+    "providers.bedrock.region": (
+        "eu-west-1",
+        lambda s, w: bedrock_connection.configured_region(),
+    ),
+    "providers.bedrock.auth": (
+        "ambient",
+        lambda s, w: bedrock_connection.configured_auth(),
     ),
     # -- openrouter: the routing object the NEXT client build will send -------
     # Same discipline as the two probes above: observed through the exact

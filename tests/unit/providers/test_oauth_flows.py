@@ -1996,6 +1996,10 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # key (or path) -- the one REQUIRED paste that is not an API key.
         "google-vertex-key",
         "google-vertex-sa",
+        # Amazon Bedrock's login is the Bedrock API-key paste
+        # (``create_api_key_login``); profiles, SSO and access keys are set up
+        # outside this flow, so reading the key IS the login.
+        "bedrock",
     }, required
 
     # And the union a host actually gates on: required plus the browser

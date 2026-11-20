@@ -1,0 +1,17 @@
+{
+  "wire.errors.bedrock.access_denied": "AWS拒绝了{region}中的此请求：该身份缺少Amazon Bedrock的IAM权限。",
+  "wire.errors.bedrock.check_list_denied": "这些AWS凭据在{region}中可用，但无法列出Amazon Bedrock模型；将使用内置模型列表。",
+  "wire.errors.bedrock.check_unverified": "无法连接{region}中的Amazon Bedrock来检查此连接。连接已保存，但未经验证。",
+  "wire.errors.bedrock.credential_resolution_failed": "无法加载Amazon Bedrock所需的AWS凭据：{detail}",
+  "wire.errors.bedrock.credential_timeout": "加载Amazon Bedrock所需的AWS凭据超过了{seconds, plural, other {#秒}}。",
+  "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock在{region}中拒绝了这些AWS凭据。",
+  "wire.errors.bedrock.iam_denied": "你的AWS身份无权调用{action}（资源：{resource}）。请让AWS管理员在IAM中授予该权限；其他模型可能仍可使用。",
+  "wire.errors.bedrock.invalid_connection": "此Amazon Bedrock连接无效（{detail}）。请重新连接Bedrock。",
+  "wire.errors.bedrock.model_access": "此AWS账户无权访问{model}（区域：{region}）。请在Amazon Bedrock控制台中启用该模型的访问权限，或选择其他模型。",
+  "wire.errors.bedrock.model_unavailable": "{model}在{region}中不可用。请尝试它的global.或区域推理配置文件（例如us.），或换一个区域。",
+  "wire.errors.bedrock.no_credentials": "没有可用于Amazon Bedrock的AWS凭据。请设置{bearer_env}；在AWS工作节点上也可设置{auth_env}；或者用已保存的连接来连接Bedrock。",
+  "wire.errors.bedrock.profile_no_credentials": "AWS配置文件{profile}中没有可用于Amazon Bedrock的凭据。",
+  "wire.errors.bedrock.profile_not_found": "在你的AWS config文件中找不到AWS配置文件{profile}。",
+  "wire.errors.bedrock.secret_missing": "加密存储中缺少已保存的Amazon Bedrock凭据。请运行{command}重新连接。",
+  "wire.errors.bedrock.session_expired": "配置文件{profile}的AWS登录会话已过期。请运行{command}，然后重试。"
+}

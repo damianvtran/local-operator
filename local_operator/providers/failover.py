@@ -852,6 +852,7 @@ class ProviderError(RenderedStreamError):
         transport: bool = False,
         transport_cause: BaseException | None = None,
         fail_closed: bool = False,
+        block_on_rotate: bool = True,
         provider: str = "",
         model: str = "",
         failover_from: str = "",
@@ -878,6 +879,18 @@ class ProviderError(RenderedStreamError):
         # resource refusals must stop the entire attempt chain, even before any
         # delta was forwarded (or when a host buffers the whole response).
         self.fail_closed = fail_closed
+        #: Whether ``AuthStore.rotate_sibling`` may write a credential BLOCK for
+        #: the failing row (default ``True``: every existing provider keeps its
+        #: behaviour). ``False`` means "rotate away, but the row itself is not
+        #: at fault": the store deprioritises instead, exactly as for a
+        #: server-side failure. Only Bedrock's ``_unresolved`` sets it -- a
+        #: botocore credential CHAIN that failed to resolve (expired SSO /
+        #: ``aws login`` cache, missing profile) is re-read on every attempt, so
+        #: a 60 s block would outlive the user's ``aws sso login`` and report
+        #: "rate limit or quota exceeded" (QA Q8), while NOT rotating would
+        #: strand a session sticky to that row away from a healthy sibling
+        #: connection (review R3-1). Deprioritising satisfies both.
+        self.block_on_rotate = block_on_rotate
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
         #: PROVENANCE, not classification: this error was built from a transport
@@ -1768,6 +1781,11 @@ def is_auth_error(error: BaseException) -> bool:
     return False
 
 
+#: Providers whose auth failures are not fixed by replacing a single API key
+#: (multi-method connections whose errors name their own remedy).
+_NO_CREDENTIAL_UPDATE_HINT = frozenset({"bedrock"})
+
+
 def auth_recovery_hint(provider: str | None) -> str:
     """The local remedies for an authentication failure, as one clause.
 
@@ -1778,6 +1796,16 @@ def auth_recovery_hint(provider: str | None) -> str:
     copy-pasteable), generic otherwise. The ``/login`` form is the TUI's; the
     shell forms work anywhere.
     """
+    if provider in _NO_CREDENTIAL_UPDATE_HINT:
+        # Bedrock auth errors already carry the method-specific remedy (`aws
+        # sso login`, IAM permission, ...) and no `<PROVIDER>_API_KEY` exists
+        # for it: offering `credential update <BEDROCK_API_KEY>` names a
+        # variable nothing reads and is wrong advice for SSO/IAM failures.
+        # The login flow is the one remedy that applies to every method.
+        return (
+            f"To fix: `/login {provider}` in the TUI, `local-operator login "
+            f"{provider}` from a shell."
+        )
     if provider:
         return (
             f"To fix: `/login {provider}` in the TUI, `local-operator login "
@@ -2349,6 +2377,15 @@ def is_rotation_eligible(error: BaseException) -> bool:
     other account — so it is not here, and nothing rotates on it.
     """
     if not isinstance(error, ProviderError):
+        return False
+    if error.kind == "request" and not error.auth_error and not error.retryable:
+        # A raiser that EXPLICITLY classified a 403 as a request refusal
+        # (Bedrock's per-model access denial: console model access, or an IAM
+        # policy scoped to one model/inference-profile ARN) is saying the
+        # credential is fine for other models. The bare-403 clause below must
+        # not override that: rotating would block the whole credential for
+        # every model. A 403 constructed without an explicit kind derives
+        # ``kind="auth"`` in ``_classify_fields``, so first-party paths are unchanged.
         return False
     return error.retryable or error.auth_error or error.status in (401, 403)
 
@@ -5429,6 +5466,13 @@ async def _stream_with_failover_events(
                 # frame the reported slot holds. Gate strictly on kind=="request"
                 # (not "unknown": a bare-status gateway failure may be transient
                 # and a fallback can survive it).
+                #
+                # Accepted consequence (PR #4266 review R2-2): Bedrock's per-model
+                # refusals -- ResourceNotFound and an AccessDenied scoped to one
+                # model ARN -- are also kind=="request", so on the primary they
+                # stop the turn here rather than walking the fallback chain,
+                # although another model might serve. The user gets the error
+                # for the model they chose; docs/providers/BEDROCK.md says so.
                 if exc.kind == "request" and is_primary:
                     raise exc
                 break  # non-retryable for this provider

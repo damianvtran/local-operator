@@ -216,7 +216,15 @@ def secret_name_from_key(key: str) -> str:
 #: device's token being used by this one — the case the design itself calls
 #: never. Refused by NAME rather than by a heuristic, because a heuristic that
 #: missed would broker it silently.
-DEVICE_BOUND_PROVIDERS: frozenset[str] = frozenset({"kimi"})
+#:
+#: Bedrock is refused for a different reason with the same consequence: its
+#: stored "key" is a connection DESCRIPTOR (``bedrock://profile?name=dev``,
+#: ``bedrock://access-key?ref=BEDROCK_SECRET_...``) that only means something
+#: on this device — it names a local ~/.aws profile, a local encrypted-store
+#: ref or this host's ambient AWS role. Lending it would hand a borrower a
+#: string that resolves to nothing (or, worse, to the BORROWER's own AWS
+#: identity under the owner's label).
+DEVICE_BOUND_PROVIDERS: frozenset[str] = frozenset({"kimi", "bedrock"})
 
 
 def is_device_bound_provider(provider: str) -> bool:

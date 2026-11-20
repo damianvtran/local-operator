@@ -211,12 +211,68 @@ async def _settle(app: OperatorApp, pilot: Any, rounds: int = 6) -> None:
             await pilot.pause()
 
 
-async def _booted(app: OperatorApp, pilot: Any) -> None:
-    for _ in range(40):
-        await pilot.pause()
-        if app._session is not None:
-            return
-    raise AssertionError("the session worker never attached a session")
+async def _booted(app: OperatorApp, _pilot: Any) -> None:
+    """Wait for boot's worker, not a scheduling-dependent count of idle turns.
+
+    The factory may still be pending after the pilot has drained forty message
+    queues. Only the session worker owns attachment; unrelated long-lived scan
+    and hub workers must not become prerequisites for these notification tests.
+    """
+    if app._session is not None:
+        return
+    workers = [worker for worker in app.workers if worker.group == "session"]
+    try:
+        await asyncio.gather(*(worker.wait() for worker in workers))
+    except Exception as error:
+        raise AssertionError(
+            "session boot worker failed: " f"{[(worker.state, worker.error) for worker in workers]}"
+        ) from error
+    assert app._session is not None, (
+        "session boot finished without attaching a session: "
+        f"{[(worker.state, worker.error) for worker in workers]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_boot_waits_for_attachment_not_a_number_of_pilot_turns() -> None:
+    """A pending factory can outlive the old helper's forty idle-loop turns.
+
+    Hold construction with an event, not a sleep: the notification tests must
+    wait for the session worker's completion regardless of runner scheduling.
+    """
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    session = AttachedSession()
+
+    async def factory() -> AttachedSession:
+        entered.set()
+        await release.wait()
+        return session
+
+    class IdlePilot:
+        async def pause(self) -> None:
+            # An idle message queue need not yield to a pending factory. Model
+            # that legal scheduling outcome without forty real render cycles.
+            pass
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 40)):
+        await entered.wait()
+        waiting = asyncio.create_task(_booted(app, IdlePilot()))
+        try:
+            await asyncio.sleep(0)
+            assert not waiting.done(), (
+                "boot wait exhausted loop turns before attachment; "
+                f"workers={[(w.group, w.state, w.error) for w in app.workers]}; "
+                f"wait_error={waiting.exception() if waiting.done() else None}"
+            )
+            assert app._session is None
+            release.set()
+            await waiting
+            assert app._session is session
+        finally:
+            release.set()
+            await asyncio.gather(waiting, return_exceptions=True)
 
 
 @pytest.mark.asyncio

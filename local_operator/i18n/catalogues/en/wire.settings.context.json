@@ -203,6 +203,28 @@
     "tone": "plain",
     "maxCells": 29
   },
+  "wire.settings.providers_bedrock_auth.help": {
+    "role": "settings help text",
+    "tone": "plain, precise",
+    "note": "'ambient' is the literal value to type; keep it verbatim. Must fit about 76 cells."
+  },
+  "wire.settings.providers_bedrock_auth.label": {
+    "role": "text setting label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "How Bedrock authenticates."
+  },
+  "wire.settings.providers_bedrock_region.help": {
+    "role": "settings help text",
+    "tone": "plain, precise",
+    "note": "Keep AWS_REGION verbatim (environment variable). Must fit about 76 cells."
+  },
+  "wire.settings.providers_bedrock_region.label": {
+    "role": "text setting label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "'Region' is an AWS Region (us-east-1)."
+  },
   "wire.settings.remote_compute.description": {
     "role": "settings section description",
     "tone": "plain, honest about preview status",
