@@ -1347,3 +1347,42 @@ async def test_a_run_with_a_tier_this_build_cannot_name_keeps_its_row(
         read = await client.get_run("run_1")
 
     assert read == {"id": "run_1", "status": "running"}
+
+
+@pytest.mark.asyncio
+async def test_a_run_already_carrying_this_builds_id_keeps_it(credential: int) -> None:
+    """A server build that caught up to ours answers an id, not a word to translate.
+
+    ``cloud_run`` is not in the server's table and never needed to be: it is already
+    the id a surface matches, so passing it through is the absence of a translation.
+    Reading it as "cannot name" stripped the tier off the row silently.
+    """
+    origin = _Origin(
+        httpx.Response(200, json=_read(_run("run_1", "running", tier="cloud_run"))),
+        httpx.Response(
+            200,
+            json={"msg": "Runs", "result": {"runs": [_run("run_1", "running", tier="dedicated")]}},
+        ),
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        read = await client.get_run("run_1")
+        listed = await client.list_runs()
+
+    assert read["tier"] == "cloud_run"
+    assert [row["tier"] for row in listed] == ["dedicated"]
+
+
+@pytest.mark.asyncio
+async def test_a_capacity_row_already_carrying_this_builds_id_is_kept(credential: int) -> None:
+    """The same pass-through on the capacity read: the tier was offered, so it shows."""
+    origin = _Origin(
+        httpx.Response(
+            200, json=_capacity_body({"tier": "cloud_run", "ready": True, "detail": DETAIL})
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    assert rows == [{"tier": "cloud_run", "ready": True, "detail": DETAIL}]

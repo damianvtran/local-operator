@@ -968,6 +968,18 @@ async def _capacity(root: Path, credential_id: int) -> tuple[list[dict[str, Any]
     not get (an unreachable API, a dead sign-in) leaves ``offered`` true: "not
     offered" would paint a remedy that cannot work over a network problem that a
     retry fixes.
+
+    ONE CORNER READS IMPRECISELY, AND IS ACCEPTED RATHER THAN REPAIRED. A provider row
+    whose ``tier`` this build cannot name is dropped by the client's ``capacity()``, so
+    a deployment whose ONLY provider is a tier newer than this build answers ``[]``
+    here and ``offered`` falls to false — the renderer's "not offered by this
+    deployment", where the truth is "this build predates the tier". Telling those
+    apart needs a third state on the wire plus a sentence the catalogue does not carry,
+    for a corner that cannot arise while the server's two literals are the two this
+    build knows; the dropped literal is logged at debug by the client, which is where
+    a deployment that grew a tier is found. If that changes, the fix is a machine
+    field on this response (never new copy here), so no renderer has to parse it out
+    of ``offered``.
     """
     async with _runs(root, credential_id) as runs:
         try:

@@ -25,6 +25,9 @@ between the two vocabularies; no caller compares a row against the server's word
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.messages import Msg
 
@@ -40,10 +43,16 @@ TIERS: tuple[str, ...] = ("cloud_run", "dedicated")
 #: vocabularies meet only here: a surface that compared the server's word would paint
 #: a ready tier as unavailable, and a second table beside this one is how two surfaces
 #: come to label the same row differently.
-SERVER_TIER_TO_TIER: dict[str, str] = {
-    "fargate": "cloud_run",
-    "kubernetes": "dedicated",
-}
+#:
+#: IMMUTABLE, so "the ONE join" holds by construction rather than by convention: a
+#: mutable module-level table is one ``[...] = ...`` away from a second vocabulary,
+#: and nothing would fail until two surfaces labelled the same row differently.
+SERVER_TIER_TO_TIER: Mapping[str, str] = MappingProxyType(
+    {
+        "fargate": "cloud_run",
+        "kubernetes": "dedicated",
+    }
+)
 
 #: The capacity choices offered UNDER :data:`TIERS` as opt-ins.
 #:
@@ -80,12 +89,21 @@ def tier_label(tier: str) -> Msg:
 def tier_from_server(wire: str) -> str | None:
     """This build's id for a server tier literal; ``None`` when it names no tier.
 
-    ``None``, never a guess and never an echo: a tier this build has never heard of
+    AN ID THIS BUILD ALREADY USES IS RETURNED UNCHANGED. The wire carries the
+    server's vocabulary today, but a read is answered by whichever server build the
+    deployment runs, and one that has caught up to ours answers ``cloud_run`` or
+    ``dedicated``. That word is not a translation source — it is already the id —
+    and reading it as "cannot name" silently stripped the tier off every row that
+    carried it.
+
+    ``None``, never a guess for anything else: a tier this build has never heard of
     is a contract change, and calling it ``cloud_run`` would offer the operator
     capacity the server would not admit under that word. The caller drops what
     carried it and logs the literal at debug, so a new server tier stays visible
     without being mislabelled as one this build knows.
     """
+    if wire in TIERS:
+        return wire
     return SERVER_TIER_TO_TIER.get(wire)
 
 

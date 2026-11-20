@@ -568,24 +568,27 @@ class RemoteComputeClient:
         offer capacity under a word the server does not admit. A deployment that
         grew a third tier is then a line in a log rather than a mislabelled row.
 
-        ``ready`` and ``detail`` are PASSED THROUGH: the answer is the deployment's
-        own config, and it carries no rate, so a surface renders readiness and never
-        a price (there is no money in this answer to read).
+        ``ready`` and ``detail`` are PASSED THROUGH WHOLE, AND NOTHING IS FILTERED
+        OUT OF THEM. ``detail`` is the deployment's own string map about its own
+        infrastructure, republished as it arrived: this module neither reads it nor
+        strips a rate or a pool name from it. The guarantee that the answer carries
+        no price is the SERVER's — it documents ``{tier, ready, detail}`` and no
+        money — so a surface must not assume a filter on this side backs it up.
         """
         reply = await self._request("GET", CAPACITY_PATH)
         page = reply.payload
         rows = page.get("providers") if isinstance(page, dict) else None
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise RemoteComputeError("Radient returned an invalid remote-compute capacity list.")
-        tiers: list[dict[str, Any]] = []
+        mapped: list[dict[str, Any]] = []
         for row in rows:
             wire = row.get("tier")
             tier = tier_from_server(wire) if isinstance(wire, str) else None
             if tier is None:
                 logger.debug("remote compute: capacity row carries tier %r, dropped", wire)
                 continue
-            tiers.append({**row, "tier": tier})
-        return tiers
+            mapped.append({**row, "tier": tier})
+        return mapped
 
     async def cancel_run(self, identifier: str) -> dict[str, Any]:
         """Cancel a run. Idempotent: cancelling a finished run is not an error.
@@ -644,6 +647,12 @@ def _tier_mapped_run(payload: dict[str, Any]) -> dict[str, Any]:
     so every run this client hands back (a create's receipt, a per-run read, a
     listing) speaks the one vocabulary a surface matches; a surface comparing the
     server's word would find no tier it can label.
+
+    A ROW THAT ALREADY CARRIES THIS BUILD'S ID IS LEFT ALONE:
+    :func:`~local_operator.remote_compute.tiers.tier_from_server` answers an id in
+    :data:`~local_operator.remote_compute.tiers.TIERS` with itself, which is the
+    absence of a translation rather than a guess. Without that, a server build that
+    had caught up to this one had its tier silently removed from the row.
 
     A TIER THIS BUILD CANNOT NAME LOSES THE FIELD AND THE ROW IS KEPT. A run is
     work in flight: hiding it would make a running task vanish from the panel
