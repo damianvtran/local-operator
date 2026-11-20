@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -131,56 +132,8 @@ def test_omitting_the_flag_leaves_the_spec_default_untouched(
     assert captured["model_spec"].reasoning_effort == expected
 
 
-@pytest.mark.asyncio
-async def test_session_arm_refuses_invalid_effort_before_source_or_resource_preflight(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # The effective Session route can differ from the reply/manifest route.
-    # This route has no such level, even though the manifest route accepts it.
-    async def unexpected(*_args: Any, **_kwargs: Any) -> None:
-        pytest.fail("invalid effort started the managed owner")
-
-    monkeypatch.setattr(run_episode, "_run_managed_frontend", unexpected)
-    args = run_episode.build_parser().parse_args(
-        [
-            "--selector",
-            str(tmp_path / "does-not-exist.json"),
-            "--task-id",
-            "t",
-            "--route",
-            f"{_PROVIDER}/{_MODEL}",
-            "--run-root",
-            "r",
-            "--engagement",
-            "session",
-            "--session-route",
-            "test/mock",
-            "--reasoning-effort",
-            "max",
-        ]
-    )
-    assert await run_episode.run(args) == run_episode.EXIT_PREFLIGHT
-    assert "test/mock does not accept reasoning effort 'max'" in capsys.readouterr().err
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("requested", "auto", "expected"),
-    [("high", True, "high"), ("max", True, "max"), (None, True, "low"), (None, False, "medium")],
-)
-async def test_first_session_turn_serializes_effective_effort(
-    requested: str | None,
-    auto: bool,
-    expected: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from local_operator import sdk
-    from local_operator.config import ConfigManager
-    from local_operator.evaluation import session_arm, source_pin
-    from local_operator.harness.types import ChatRequest
-    from local_operator.providers import failover
-    from local_operator.providers.clients import AnthropicClient
+@pytest.fixture
+def isolated_session_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from local_operator.session.spec import SessionRoots
 
     home = tmp_path / "home"
@@ -192,13 +145,235 @@ async def test_first_session_turn_serializes_effective_effort(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(home / "local-operator-home"))
     monkeypatch.setenv("LOP_RUN_SCRATCH_ROOT", str(tmp_path))
-    config = ConfigManager(config_dir=config_dir)
-    config.set_config_value("model_effort", "medium")
+    monkeypatch.setattr(SessionRoots, "assert_durable", lambda self: None)
+    return config_dir
+
+
+def _session_preflight_args(tmp_path: Path, session_route: str) -> Any:
+    selector = tmp_path / "selector.json"
+    selector.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.7",
+                "adapter_id": "tiny",
+                "distribution": "tiny-adapter",
+                "version": "1.0",
+                "entry_point": "tiny:create",
+                "package_digest": "a" * 64,
+                "release_digest": "b" * 64,
+                "python_executable": str(tmp_path / "python"),
+                "workspace": str(tmp_path),
+                "workspace_digest": "c" * 64,
+                "route_capability": "computer",
+                "core_source": {"commit": "f" * 40, "module_hashes": {}},
+            }
+        )
+    )
+    return run_episode.build_parser(internal_test_support=True).parse_args(
+        [
+            "--selector",
+            str(selector),
+            "--task-id",
+            "t",
+            "--route",
+            f"{_PROVIDER}/{_MODEL}",
+            "--run-root",
+            str(tmp_path / "run"),
+            "--engagement",
+            "session",
+            "--session-route",
+            session_route,
+            "--reasoning-effort",
+            "max",
+            "--in-process-host",
+        ]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["pin", "isolation", "owner"])
+async def test_session_gates_refuse_before_metadata_lookup(
+    refusal: str,
+    tmp_path: Path,
+    isolated_session_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from local_operator.evaluation import source_pin
+    from local_operator.model import configure
+
+    def unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("an unadmitted run reached model metadata or a store")
+
+    def verify_pin(_: Any) -> None:
+        if refusal == "pin":
+            raise source_pin.SourcePinError("fixture bad source pin")
+
+    monkeypatch.setattr(source_pin, "verify_core_source", verify_pin)
+    monkeypatch.setattr(configure, "build_model_spec", unexpected)
+    monkeypatch.setattr(configure, "resolve_model_info", unexpected)
+    monkeypatch.setattr(configure, "_catalogue_credential", unexpected)
+    monkeypatch.setattr(run_episode, "_open_store", unexpected)
+    args = _session_preflight_args(tmp_path, "deepseek/deepseek-flash")
+    if refusal == "isolation":
+        monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR")
+    if refusal == "owner":
+        args.owned_host = True
+    assert await run_episode.run(args) == run_episode.EXIT_PREFLIGHT
+    expected = {
+        "pin": "fixture bad source pin",
+        "isolation": "requires LOCAL_OPERATOR_CONFIG_DIR",
+        "owner": "this environment carries no owner identity",
+    }
+    assert expected[refusal] in capsys.readouterr().err
+    assert not (tmp_path / "world").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid", [False, True])
+async def test_admitted_session_effort_uses_scoped_route_before_allocation(
+    valid: bool,
+    tmp_path: Path,
+    isolated_session_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from local_operator import owned_process
+    from local_operator.evaluation import source_pin
+    from local_operator.model import configure, discovery
+
+    args = _session_preflight_args(tmp_path, "deepseek/fixture-dynamic")
+    args.owned_host = True
+    calls: list[str] = []
+
+    def admit(_: Any) -> None:
+        assert calls == ["pin"]
+        calls.append("owner admitted")
+
+    def credentials(provider: str, *, base: Path | None = None) -> tuple[str, bool, None]:
+        assert calls == ["pin", "owner admitted"]
+        assert provider == "deepseek"
+        assert base == isolated_session_env.resolve()
+        calls.append("scoped metadata")
+        return "fixture-only", False, None
+
+    def listing(provider: str, **kwargs: Any) -> Any:
+        assert provider == "deepseek"
+        assert kwargs["config_dir"] == isolated_session_env.resolve()
+        assert kwargs["api_key"] == "fixture-only"
+        ladder = ("high", "max") if valid else ("high",)
+        row = discovery.DiscoveredModel(
+            id="fixture-dynamic", name="fixture-dynamic", reasoning_efforts=ladder
+        )
+        return [row], "live"
+
+    class ReachedPrepare(Exception):
+        """Stop a valid preflight before any preparation, store, or generation."""
+
+    def stop_before_prepare(*_args: Any, **_kwargs: Any) -> Any:
+        raise ReachedPrepare
+
+    monkeypatch.setattr(source_pin, "verify_core_source", lambda _: calls.append("pin"))
+    monkeypatch.setattr(configure, "_catalogue_credential", credentials)
+    monkeypatch.setattr(discovery, "available_models", listing)
+    monkeypatch.setattr(run_episode, "_parse_infra_refs", stop_before_prepare)
+    channel = owned_process.OwnerStatusChannel(
+        tmp_path / "status.json",
+        owner_id="fixture-owner",
+        backend="detached",
+        job_label=None,
+        pid=123,
+        birth="fixture-birth",
+    )
+    monkeypatch.setattr(run_episode, "_owned_host_status_channel", lambda _: channel)
+
+    if valid:
+        with pytest.raises(ReachedPrepare):
+            await run_episode.run(args, _test_owner_admission=admit)
+        status = owned_process.read_owner_status(channel.path)
+        assert status is not None and status.phase == "admitted"
+    else:
+        assert await run_episode.run(args, _test_owner_admission=admit) == run_episode.EXIT_PREFLIGHT
+        refusal = capsys.readouterr().err
+        assert (
+            "session route deepseek/fixture-dynamic does not accept reasoning effort 'max'"
+            in refusal
+        )
+        assert "its ladder is high" in refusal
+        status = owned_process.read_owner_status(channel.path)
+        assert status is not None and status.phase == "ended"
+        assert run_episode._report_owner_outcome(None, status) == run_episode.EXIT_PREFLIGHT
+        assert capsys.readouterr().err == refusal
+    assert calls == ["pin", "owner admitted", "scoped metadata"]
+    assert not (tmp_path / "world").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "requested", "auto", "expected"),
+    [
+        ("anthropic", "high", True, "high"),
+        ("anthropic", "max", True, "max"),
+        ("anthropic", None, True, "low"),
+        ("anthropic", None, False, "medium"),
+        ("deepseek", "max", True, "max"),
+        ("deepseek", "none", True, "none"),
+        ("deepseek", None, True, "low"),
+        ("deepseek", None, False, "high"),
+    ],
+)
+async def test_first_session_turn_serializes_effective_effort(
+    provider: str,
+    requested: str | None,
+    auto: bool,
+    expected: str,
+    tmp_path: Path,
+    isolated_session_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import sdk
+    from local_operator.config import ConfigManager
+    from local_operator.evaluation import session_arm, source_pin
+    from local_operator.harness.types import ChatRequest
+    from local_operator.model import configure, discovery
+    from local_operator.providers import failover, registry
+    from local_operator.providers.clients import AnthropicClient, OpenAICompatClient
+    from local_operator.session.spec import SessionRoots
+
+    config = ConfigManager(config_dir=isolated_session_env)
+    config.set_config_value("model_effort", "high" if provider == "deepseek" else "medium")
     config.set_config_value("effort", {"auto": auto})
     monkeypatch.setattr(source_pin, "verify_core_source", lambda _: None)
-    monkeypatch.setattr(SessionRoots, "assert_durable", lambda self: None)
+    # Metadata and credential *sources* are offline; the real Session and
+    # model spec still derive the effort and the native client serializes it.
+    monkeypatch.setattr(configure, "_catalogue_credential", lambda *a, **kw: ("", False, None))
+    monkeypatch.setattr(discovery, "available_models", lambda *a, **kw: ([], "static"))
+    monkeypatch.setattr(configure, "_from_price_catalogue", lambda p, m, info, **kw: info)
+    monkeypatch.setattr(registry, "provider_env_key", lambda *a, **kw: None)
 
-    turn_efforts: list[str] = []
+    attempted_egress: list[str] = []
+    connect = socket.socket.connect
+    connect_ex = socket.socket.connect_ex
+
+    def refuse_egress(*_args: Any, **_kwargs: Any) -> Any:
+        attempted_egress.append("unexpected network access")
+        pytest.fail(attempted_egress[-1])
+
+    def guard_connect(sock: socket.socket, address: Any) -> None:
+        if sock.family != socket.AF_UNIX:
+            refuse_egress()
+        connect(sock, address)
+
+    def guard_connect_ex(sock: socket.socket, address: Any) -> int:
+        if sock.family != socket.AF_UNIX:
+            refuse_egress()
+        return connect_ex(sock, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", refuse_egress)
+    monkeypatch.setattr(socket.socket, "connect", guard_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guard_connect_ex)
+
+    turn_fields: list[dict[str, Any]] = []
     events = (
         {"type": "message_start", "message": {"id": "fixture", "usage": {"input_tokens": 1}}},
         {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
@@ -211,7 +386,14 @@ async def test_first_session_turn_serializes_effective_effort(
         },
         {"type": "message_stop"},
     )
-    response = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+    response = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+    if provider == "deepseek":
+        response = "".join(
+            "data: "
+            + json.dumps({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+            + "\n\n"
+            for delta, finish in (({"content": "OK"}, None), ({}, "stop"))
+        ) + "data: [DONE]\n\n"
 
     async def open_and_prompt(*, session_spec: Any, roots: SessionRoots, **_kwargs: Any) -> Any:
         # Replace the adapter/guest, but open and prompt the same typed Session.
@@ -226,9 +408,17 @@ async def test_first_session_turn_serializes_effective_effort(
         def receive(request: httpx.Request) -> httpx.Response:
             if turn:
                 # Never retain prompts, tool schemas, headers or cache keys.
-                turn_efforts.append(json.loads(request.content)["output_config"]["effort"])
+                body = json.loads(request.content)
+                if provider == "deepseek":
+                    assert str(request.url) == "https://api.deepseek.com/v1/chat/completions"
+                    assert body["model"] == "deepseek-flash"
+                    turn_fields.append(
+                        {key: body[key] for key in ("thinking", "reasoning_effort") if key in body}
+                    )
+                else:
+                    turn_fields.append({"effort": body["output_config"]["effort"]})
             return httpx.Response(
-                200, headers={"content-type": "text/event-stream"}, content=response
+                200, headers={"content-type": "text/event-stream"}, content=response.encode()
             )
 
         return httpx.MockTransport(receive)
@@ -236,10 +426,16 @@ async def test_first_session_turn_serializes_effective_effort(
     async def synthetic_failover(
         request: ChatRequest, *_args: Any, **_kwargs: Any
     ) -> AsyncIterator[Any]:
-        # Replace credential selection with a dummy key and an in-process HTTP
-        # transport. The Anthropic request builder and serializer are real.
+        # Substitute only credential/failover and HTTP I/O at the wire edge.
         async with httpx.AsyncClient(transport=bind_wire(request.purpose == "turn")) as http:
-            async for event in AnthropicClient(http_client=http).stream(request, "fixture-key"):
+            if request.purpose == "turn":
+                assert request.model.provider == provider
+            client = (
+                OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+                if provider == "deepseek"
+                else AnthropicClient(http_client=http)
+            )
+            async for event in client.stream(request, "fixture-key"):
                 yield event
 
     monkeypatch.setattr(failover, "stream_with_failover", synthetic_failover)
@@ -255,6 +451,8 @@ async def test_first_session_turn_serializes_effective_effort(
         "--engagement",
         "session",
     ]
+    if provider == "deepseek":
+        argv.extend(["--session-route", "deepseek/deepseek-flash"])
     if requested is not None:
         argv.extend(["--reasoning-effort", requested])
     result = await run_episode._run_session_arm(
@@ -267,7 +465,14 @@ async def test_first_session_turn_serializes_effective_effort(
     )
 
     assert result == run_episode.EXIT_OK
-    assert turn_efforts and turn_efforts[0] == expected
+    assert not attempted_egress
+    if provider == "anthropic":
+        expected_fields: dict[str, Any] = {"effort": expected}
+    elif expected == "none":
+        expected_fields = {"thinking": {"type": "disabled"}}
+    else:
+        expected_fields = {"thinking": {"type": "enabled"}, "reasoning_effort": expected}
+    assert turn_fields and turn_fields[0] == expected_fields
 
 
 def test_the_parser_defaults_the_flag_to_none() -> None:
