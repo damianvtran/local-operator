@@ -26,12 +26,11 @@ from textual.timer import Timer
 from textual.widget import Widget
 
 from local_operator.i18n.keys import tui_notifications as _inbox_keys
+from local_operator.i18n.keys import tui_session_sidebar as _ss
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
 from local_operator.resume import (
-    UNNAMED_DEVICE,
-    UNTITLED_CONVERSATION,
     format_age,
     peer_reason_words,
 )
@@ -63,6 +62,15 @@ _inbox_t = display_tr(
     technical_commands=model.SHELL_COMMAND_TEMPLATES,
 )
 _t_tags = tr("tui.tags")
+# This widget's own residual chrome (headings, body states, footer notes, the
+# hover tooltip's clauses) lives in its OWN namespace rather than in
+# `tui.small`: adding keys to `tui.small` would stale every locale's carried
+# audit of it, whereas a new namespace falls back to English until its own
+# translation/audit wave lands. The older `tui.small.session_sidebar.*` keys
+# (the footer ladder) stay where they are for the same reason. Every lookup
+# below resolves at RENDER time, so a live language change repaints without a
+# refresher.
+_t_ss = tr("tui.session_sidebar")
 
 if TYPE_CHECKING:
     # Type-only: the app's concrete class imports THIS module (it assembles
@@ -148,7 +156,12 @@ SIDEBAR_MAX_WIDTH = 44
 #: ``registry.classify`` is explicit that a stale beat establishes no diagnosis,
 #: and this codebase has already removed one promise of recovery for exactly
 #: that reason.
-WEDGED_REMEDY = "lop stop if it stays silent"
+#:
+#: Only the COMMAND is a constant: it is a literal shell token the user types,
+#: so it never translates. The surrounding clause (and its `·` join to the
+#: state sentence) is the `tui.session_sidebar.tooltip.status_wedged` message,
+#: so a translator can reorder the condition around the command.
+WEDGED_REMEDY_COMMAND = "lop stop"
 
 #: The main lane's COMFORT width, which growth may not eat into.
 #:
@@ -2416,8 +2429,9 @@ class SessionSidebar(Widget, can_focus=True):
 
         The state line is the BACKEND's sentence verbatim — see
         ``session/catalog.py``'s ``status`` for the wording's own argument — plus,
-        for ``wedged`` only, one client-owned remedy clause (``WEDGED_REMEDY``,
-        and its comment for why the two halves have different owners).
+        for ``wedged`` only, one client-owned remedy clause (the
+        ``tooltip.status_wedged`` message around ``WEDGED_REMEDY_COMMAND``, and
+        that constant's comment for why the two halves have different owners).
 
         Keyed on ``status_code == "wedged"`` rather than on the sentence, because
         that is the value the app and the catalogue share; a row that is ALSO
@@ -2429,7 +2443,9 @@ class SessionSidebar(Widget, can_focus=True):
             return None
         status = entry.status
         if entry.status_code == "wedged":
-            status = f"{status} · {WEDGED_REMEDY}"
+            status = _t_ss(
+                _ss.tooltip_status_wedged(status=status, command=WEDGED_REMEDY_COMMAND)
+            )
         # WHERE IT LIVES, and only when there is something to say. This is the
         # one place the device is readable now that remote rows carry no section
         # of their own: the row is width-bound and the tooltip travels with it.
@@ -2442,11 +2458,21 @@ class SessionSidebar(Widget, can_focus=True):
         location = ""
         unreachable = ""
         if entry.row.is_remote or entry.row.owner_device:
-            location = f"on {entry.row.owner_label or UNNAMED_DEVICE}"
-            if entry.row.owner_network_name:
-                location += f" · {entry.row.owner_network_name}"
-            if entry.row.placement_stale:
-                location += " (last known state)"
+            # Four whole messages rather than an `on …` stem plus appended
+            # clauses: a translator must be free to reorder device, network
+            # and the staleness caveat, which concatenation would forbid.
+            device = entry.row.owner_label or _t_ss(_ss.tooltip_unnamed_device())
+            network = entry.row.owner_network_name
+            stale = entry.row.placement_stale
+            if network and stale:
+                msg = _ss.tooltip_location_network_stale(device=device, network=network)
+            elif network:
+                msg = _ss.tooltip_location_network(device=device, network=network)
+            elif stale:
+                msg = _ss.tooltip_location_stale(device=device)
+            else:
+                msg = _ss.tooltip_location(device=device)
+            location = _t_ss(msg)
             if not entry.row.reachable:
                 # THE WORDS, NOT THE TOKEN (design round 1, D3; UX round 3, U23),
                 # and ITS OWN LINE, NOT A SUFFIX (design round 1, D4): the device
@@ -2456,7 +2482,11 @@ class SessionSidebar(Widget, can_focus=True):
                 # (`peer_reason_words` — what the panel and the listing print,
                 # so the sibling surfaces read as one voice). See
                 # `UNREACHABLE_REMOTE_MARK` for the at-rest half of this state.
-                unreachable = f"unreachable · {peer_reason_words(entry.row.unreachable_reason)}"
+                unreachable = _t_ss(
+                    _ss.tooltip_unreachable(
+                        reason=peer_reason_words(entry.row.unreachable_reason)
+                    )
+                )
         lines = [entry.row.name, status]
         if location:
             lines.append(location)
@@ -2728,7 +2758,7 @@ class SessionSidebar(Widget, can_focus=True):
         first = True
         if not self._draws_section_headers(rows):
             result.append(
-                truncate_cells("Sessions", width).ljust(width),
+                truncate_cells(_t_ss(_ss.title()), width).ljust(width),
                 style=theme_mod.semantic_color("muted"),
             )
             first = False
@@ -2789,12 +2819,15 @@ class SessionSidebar(Widget, can_focus=True):
                 # the lookup key. (Peer sections used to smuggle a per-device
                 # label through this branch; remote rows now file under an
                 # ordinary section — see `_unpinned_rank`.)
-                label = {
-                    "header:pinned": "★ Pinned",
-                    "header:active": "Active Sessions",
-                    "header:previous": "Previous Sessions",
-                    "header:subagent": "⌥ Subagent Runs",
+                # The ★ / ⌥ glyphs are the section's mark, shared with the row
+                # chips, so they stay outside the translated words.
+                glyph, heading = {
+                    "header:pinned": ("★ ", _ss.section_pinned),
+                    "header:active": ("", _ss.section_active),
+                    "header:previous": ("", _ss.section_previous),
+                    "header:subagent": ("⌥ ", _ss.section_subagent),
                 }[kind]
+                label = f"{glyph}{_t_ss(heading())}"
                 result.append(
                     truncate_cells(label, width).ljust(width),
                     style=theme_mod.semantic_color("muted"),
@@ -2813,7 +2846,9 @@ class SessionSidebar(Widget, can_focus=True):
                 # widens and crops it further. This form is 24 cells at its
                 # worst (N=99) and never truncates.
                 result.append(
-                    truncate_cells(f"+{missing} more pinned — scroll", width).ljust(width),
+                    truncate_cells(
+                        _t_ss(_ss.pinned_overflow(count=missing, shown=str(missing))), width
+                    ).ljust(width),
                     style=theme_mod.semantic_color("muted"),
                 )
                 continue
@@ -2982,7 +3017,7 @@ class SessionSidebar(Widget, can_focus=True):
                 # Her mark, prefixed before truncation so a narrow row eats the
                 # title and never the mark (design round 1, D1).
                 name = f"{AIDA_MARKER} {name}"
-            title = truncate_cells(name or UNTITLED_CONVERSATION, title_width)
+            title = truncate_cells(name or _t_ss(_ss.row_untitled()), title_width)
             if entry.subagent:
                 # `sub_title` is "label · role", and the role is the half that
                 # truncation eats first. When the cut lands on the separator
@@ -2997,12 +3032,13 @@ class SessionSidebar(Widget, can_focus=True):
             result.append_text(line)
         if not self.entries:
             text = (
-                "Could not load conversations"
+                _t_ss(_ss.state_error())
                 if self.error
                 else (
-                    f"{SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]} Loading conversations…"
+                    f"{SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]} "
+                    f"{_t_ss(_ss.state_loading())}"
                     if self._catalog_loading
-                    else "No conversations yet"
+                    else _t_ss(_ss.state_empty())
                 )
             )
             result.append("\n" + truncate_cells(text, width), style=theme_mod.semantic_color("dim"))
@@ -3290,7 +3326,13 @@ class SessionSidebar(Widget, can_focus=True):
             ),
             base,
         )
-        footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
+        footer = (
+            _t_ss(_ss.footer_refresh_failed())
+            if self.error
+            else _t_ss(_ss.footer_opening())
+            if self.requested_id
+            else hint
+        )
         painted = truncate_cells(footer, width)
         # The chip is the ladder's SUFFIX whenever it is painted — every
         # chip-carrying candidate ends with ` · ⌥N` — so its span is the last
@@ -3312,7 +3354,9 @@ class SessionSidebar(Widget, can_focus=True):
         before the feature and cannot substantiate for a queue it is not
         watching.
         """
-        return f"asks: {self._asks_total}" if self._asks_total > 0 else ""
+        if self._asks_total <= 0:
+            return ""
+        return _t_ss(_ss.footer_asks_note(count=str(self._asks_total)))
 
     def _asks_hit(self, x: int, y: int) -> bool:
         """Whether a point lands on the footer's fleet-ask note.
@@ -3363,7 +3407,9 @@ class SessionSidebar(Widget, can_focus=True):
         Absence is not emptiness, the ask note's rule: a device with no links
         renders NOTHING, so it paints the footer it always did.
         """
-        return f"hub: {self._hub_total}" if self._hub_total > 0 else ""
+        if self._hub_total <= 0:
+            return ""
+        return _t_ss(_ss.footer_hub_note(count=str(self._hub_total)))
 
     def _hub_hit(self, x: int, y: int) -> bool:
         """Whether a point lands on the footer's hub door (the ask note's own rule)."""
