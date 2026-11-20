@@ -831,7 +831,7 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     # The reason is already written to a file whose path we hold, and the
     # launcher is still in the foreground: making the user open a log to read a
     # one-line validation error is a gap we can close for free.
-    receipt = f"Background job {job_id}: {status}"
+    receipt = f"Background job {job_id}: {status}"  # i18n: ignore §1.2.2 machine-contract skeleton
     # The receipt's skeleton (``Background job ``, the id, ``: ``, the status
     # token) is the machine contract §1.2.2 pins — it is composed HERE, never
     # catalogue-side, so no translation can move it. The prose around it
