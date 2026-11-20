@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.session_status",
-  "history_sha256": "edee87c340a9707cb7413d147b5962bb9ef0a1ecd0df1ac5e0cddf0811165af2",
+  "history_sha256": "6035aba015836867d0903127c83162a7e1df147d4b0d9e560d3958d8ef8a579b",
   "entries": [
     {
       "locale": "ur",
@@ -85,6 +85,147 @@
       "evidence": "i18n/audits/evidence/ur/wire.session_status/ns1/record.json",
       "round": "ns1",
       "keys_audited": 1
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.session_status",
+      "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+      "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+      "target_sha256": "4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "7b97856c53df",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "host session-state model declaration",
+        "fallback_used": false,
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; terminal-status-ur-audit; first independent instance)",
+        "session": "9075da90042e",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Host system session-state Model declaration in this audit session",
+        "fallback_used": false,
+        "fallback": "No fallback used in this audit session",
+        "independent_from_translator_session": "7b97856c53df",
+        "independent_from_translator": true,
+        "date": "2026-11-19",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "First independent 17-key Urdu safety audit; 0 blocker/major. Record: i18n/audits/evidence/ur/wire.session_status/tsu1/record.json. Second independent pass and mixed-direction rendered proof remain separate.",
+      "evidence": "i18n/audits/evidence/ur/wire.session_status/tsu1/record.json",
+      "round": "tsu1",
+      "keys_audited": 17
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.session_status",
+      "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+      "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+      "target_sha256": "4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b",
+      "date": "2026-11-19T21:35:40.608331+00:00",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "7b97856c53df",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "host session-state model declaration",
+        "fallback_used": false,
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "task": "terminal-status-vi-hi-ur-second-audit",
+        "session": "5f0a2918d2f2",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Host session-state Model declaration",
+        "fallback_used": false,
+        "independent_from_translator_session": "7b97856c53df",
+        "independent_from_first_auditor_session": "9075da90042e",
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "round": "second-ts2-5f0a",
+      "keys_audited": 17,
+      "note": "Second independent safety-copy audit: 17 keys; 0 major. Record: i18n/audits/evidence/ur/wire.session_status/ts2-5f0a/record.json. No visual/runtime/native clearance.",
+      "evidence": "i18n/audits/evidence/ur/wire.session_status/ts2-5f0a/record.json",
+      "evidence_sha256": "785c606b913d29760fef8ed96f3aa96a0b4a1b6e49e8d1231ff7d8024bddcd48"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.session_status",
+      "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+      "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+      "target_sha256": "9e6d81897de87e8031defe46c6a76fe265a474880fa17cad86e88e46a8787ec6",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "2b5a56c684ba",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Round 1 independent audit of the live session-status labels (wire.session_status). Auditor 2b5a56c684ba (openai/gpt-6.1-sol, no fallback) verdict CLEAN: 0 blocker, 0 major, 0 minor, 0 nit. Scope: full namespace (31 keys incl. 14 new live-status keys) at worktree head 514d51243ce3.  Record: i18n/audits/evidence/ur/wire.session_status/ls1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ur/wire.session_status/ls1/record.json",
+      "round": "ls1"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.session_status",
+      "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+      "context_sha256": "4f9cf2dabc89f7e711c3cf2d74b2a6e75c274954152daa14a1dad31ac9cf12f2",
+      "target_sha256": "b71ced8b6a58c93e8754f199d67bd258b29936ee21e182dfc2884dc95a40730e",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "5a9a0087e06f",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "UR-D1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent audit of the duration-unit slice of wire.session_status (4 new keys duration_seconds/minutes/hours_minutes/days_hours plus the wedged_heartbeat {duration} integration and its edited context note), source commit 74b05c6a2aee; unchanged entries verified against the prior passed rows. Auditor 5a9a0087e06f (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (UR-D1; rendered-fit/wording advisories, no wording change requested, deferred in the PR thread). context_sha256 recorded by the auditor. Record: i18n/audits/evidence/ur/wire.session_status/ld1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ur/wire.session_status/ld1/record.json",
+      "round": "ld1"
     }
   ]
 }

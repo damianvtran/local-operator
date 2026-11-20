@@ -61,6 +61,14 @@ def notify_budget_exhausted_title() -> Msg:
     return Msg("cli.team_bridge.notify.budget_exhausted_title", {})
 
 
+def notify_owner_action_hold_body(*, reason: str) -> Msg:
+    return Msg("cli.team_bridge.notify.owner_action_hold_body", {"reason": reason})
+
+
+def notify_owner_action_hold_title(*, reason: str) -> Msg:
+    return Msg("cli.team_bridge.notify.owner_action_hold_title", {"reason": reason})
+
+
 def notify_probe_suspected_body() -> Msg:
     return Msg("cli.team_bridge.notify.probe_suspected_body", {})
 
@@ -162,6 +170,10 @@ def setup_enable_in_app_required(*, account_id: str) -> Msg:
 
 def setup_failed() -> Msg:
     return Msg("cli.team_bridge.setup.failed", {})
+
+
+def setup_mesh_node_relay() -> Msg:
+    return Msg("cli.team_bridge.setup.mesh_node_relay", {})
 
 
 def setup_not_ready(*, service: str, detail: str) -> Msg:

@@ -1677,6 +1677,9 @@ async def test_every_paste_key_provider_can_actually_be_logged_into() -> None:
         # device flow that would reach the network; it is driven with a mock
         # transport in ``test_qwencloud_token_plan_login_captures_key_and_device_grant``.
         if p.login is not None and p.paste_prompt_required and p.id != "alibaba-token-plan-oauth"
+        # Reads a service-account JSON key and mints a token over the network;
+        # driven end to end in ``test_vertex_oauth`` with a mock transport.
+        and p.id != "google-vertex-sa"
     ]
     # A non-zero control: if the filter ever matches nothing (a renamed field, a
     # registry refactor) the loop below would pass by doing nothing at all.
@@ -1941,7 +1944,9 @@ def test_only_browser_signin_flows_race_a_pasted_code_against_their_callback() -
     from local_operator.providers.registry import PROVIDER_REGISTRY
 
     paste = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.paste_code_flow}
-    assert paste == {"anthropic", "zai-oauth"}, paste
+    # Google Vertex AI's Cloud sign-in is the third: a Google OAuth loopback
+    # redirect with the same paste-the-redirect fallback for remote browsers.
+    assert paste == {"anthropic", "zai-oauth", "google-vertex"}, paste
 
 
 def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
@@ -1987,13 +1992,23 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # changes WHERE the credential is used (the image cascade, never chat)
         # rather than how it is obtained.
         "fal",
+        # Google Vertex AI: an express-mode API key, and a service-account JSON
+        # key (or path) -- the one REQUIRED paste that is not an API key.
+        "google-vertex-key",
+        "google-vertex-sa",
     }, required
 
     # And the union a host actually gates on: required plus the browser
     # sign-ins' optional fallback, and nothing else. A loopback-only provider
     # appearing here would mean a prompt racing its HTTP callback.
     accepts = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.accepts_paste_prompt}
-    assert accepts == required | {"anthropic", "zai-oauth"}, accepts
+    assert accepts == required | {"anthropic", "zai-oauth", "google-vertex"}, accepts
+
+    # Bedrock's structured AWS flow owns its questions; a generic paste card
+    # would race that flow and falsely treat profile/SSO auth as an API key.
+    bedrock = next(p for p in PROVIDER_REGISTRY if p.id == "bedrock")
+    assert bedrock.login_kind == "aws"
+    assert not bedrock.accepts_paste_prompt
 
 
 @pytest.mark.asyncio

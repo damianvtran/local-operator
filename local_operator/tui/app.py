@@ -137,6 +137,7 @@ from local_operator.harness.types import (
     FAULT_KEY,
     INTERRUPTED_FAULTS,
     AgentMessage,
+    AskOption,
     AskQuestion,
     ImageContent,
     Message,
@@ -28738,7 +28739,11 @@ class OperatorApp(App[None]):
 
     # -- the agent's own questions --------------------------------------------
     async def request_user_choice(
-        self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
+        self,
+        questions: list[AskQuestion],
+        *,
+        source: SessionInteraction | None = None,
+        card_options: dict[str, Any] | None = None,
     ) -> dict[str, list[str]] | None:
         """The ``ask`` tool's surface while this app owns the terminal.
 
@@ -28751,6 +28756,13 @@ class OperatorApp(App[None]):
         answered nothing. Both are ANSWERS, not failures: the tool reports the
         empty case as "the user did not answer" so the model falls back to its
         own recommendation.
+
+        ``card_options``: host keywords for :class:`AskPickerScreen`
+        (``allow_free_text``, ``title``, ``exit_hint``, ``initial_rows``) for a
+        caller that is NOT the agent's ``ask`` — the Bedrock login reuses this
+        card and must not be headed "the agent needs your decision" or offer a
+        free-text row its answer cannot use (#4270 D2/D3/D5). The ``ask`` tool
+        passes none, so its card is unchanged.
 
         A future rather than ``push_screen_wait``, which requires a worker: this
         coroutine is the tool call, and moving it into a worker would put the
@@ -28795,7 +28807,7 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        card = AskPickerScreen(questions, answered)
+        card = AskPickerScreen(questions, answered, **(card_options or {}))
         # Same hint as the approval card, for the same reason — the copy
         # differs by kind because an ask is answerable from here (see
         # `AskPickerScreen.set_remote_device`).
@@ -57829,6 +57841,8 @@ class OperatorApp(App[None]):
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
+        if getattr(definition, "login_kind", None) == "aws":
+            return self._aws_login_callbacks(definition, on_auth_url, on_progress, on_warning)
         if getattr(definition, "local_setup", False):
 
             async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
@@ -57850,6 +57864,18 @@ class OperatorApp(App[None]):
                 displays_warnings=True,
             )
 
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # Post-auth configuration is required even though the browser's
+            # authorization-code paste was optional. No default means empty
+            # Enter cancels rather than accepting an unusable blank project.
+            return await self._request_login_key(
+                str(getattr(definition, "name", "Server")),
+                secret=secret,
+                field_label=field,
+                default=default or None,
+                required_field=True,
+            )
+
         label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
         # WHICH value the prompt is reading, which decides both its wording and
         # whether it masks. ``requires_paste_prompt`` means the paste IS the
@@ -57859,13 +57885,28 @@ class OperatorApp(App[None]):
         secret = bool(getattr(definition, "paste_prompt_required", False))
 
         async def on_manual_code_input() -> str | None:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
             # ``sole_path`` tracks ``secret`` here and is a DIFFERENT question
             # that happens to have the same answer for every provider in the
             # registry: "is the paste the only way this login can finish?".
             # Anthropic's is not (the loopback callback is still listening and a
             # declined paste re-parks), so declining must not be reported as a
             # cancelled login.
-            return await self._request_login_key(str(label), secret=secret, sole_path=secret)
+            return await self._request_login_key(
+                str(label),
+                secret=secret,
+                sole_path=secret,
+                field_label=(
+                    prompt_tr(prompt_keys.field_service_account())
+                    if getattr(definition, "id", None) == "google-vertex-sa"
+                    else None
+                ),
+                required_field=getattr(definition, "id", None) == "google-vertex-sa",
+            )
 
         return LoginCallbacks(
             on_auth_url=on_auth_url,
@@ -57873,6 +57914,97 @@ class OperatorApp(App[None]):
             on_progress=on_progress,
             on_input_rejected=on_input_rejected,
             on_manual_code_input=on_manual_code_input,
+            on_setup_input=on_setup_input,
+            displays_warnings=True,
+        )
+
+    def _aws_login_callbacks(
+        self,
+        definition: object,
+        on_auth_url: Callable[..., None],
+        on_progress: Callable[[str], None],
+        on_warning: Callable[[str], None],
+    ) -> LoginCallbacks:
+        """Hooks for Amazon Bedrock's structured AWS login (login_kind "aws").
+
+        Two surfaces this app already has, no new widget: every pick (method,
+        profile, Region, "sign in now?") is ONE single-select question on the
+        ask picker (`request_user_choice`), and every typed field is the
+        login key prompt (`_request_login_key`), masked for secrets. The flow
+        itself lives in `providers/bedrock/login.py`; this only renders it.
+        """
+        from local_operator.i18n.keys import wire_login_bedrock as bk
+        from local_operator.i18n.messages import render_resolved
+
+        # Lazily, like `_login_callbacks` itself: `callback_server` drags in a
+        # loopback listener's imports that only a login needs.
+        from local_operator.providers.oauth.callback_server import LoginCallbacks
+
+        name = str(getattr(definition, "name", None) or "Amazon Bedrock")
+
+        async def on_choice(
+            title: str, options: list[tuple[str, str, str]], default: str | None
+        ) -> str | None:
+            if len(options) == 1:
+                # The picker's floor is two answers (`AskQuestion`), and a
+                # one-row list is an announcement, not a choice: take it and
+                # say so, rather than asking the user to ratify it.
+                on_progress(f"{title} {options[0][1]}")
+                return options[0][0]
+            by_label = {label: value for value, label, _description in options}
+            initial = next(
+                (index for index, option in enumerate(options) if option[0] == default), None
+            )
+            question = AskQuestion(
+                id="bedrock_login",
+                question=title,
+                options=[
+                    AskOption(label=label, description=description)
+                    for _value, label, description in options
+                ],
+            )
+            answer = await self.request_user_choice(
+                [question],
+                card_options={
+                    # No free-text row (#4270 D2): a typed answer that is not a
+                    # listed row has nowhere to go, and used to cancel the whole
+                    # login. The Region list carries its own "Other…" row,
+                    # which prompts, validates and re-asks.
+                    "allow_free_text": False,
+                    # The user ran /login; no agent is asking (D3).
+                    "title": render_resolved(bk.picker_title()),
+                    "exit_hint": ("esc", "cancel"),
+                    # The default starts under the cursor WITHOUT a
+                    # RECOMMENDED badge: LO has no basis to recommend one AWS
+                    # profile or Region over another (D5).
+                    "initial_rows": [initial],
+                },
+            )
+            picked = (answer or {}).get("bedrock_login") or []
+            return by_label.get(picked[0]) if picked else None
+
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # `render_resolved`, not this module's `_t`: `_t` only looks keys
+            # up in the tui.app catalogue, so a wire.login.bedrock key came
+            # back as its raw id on every Bedrock field (#4270 QA Q1).
+            hint = render_resolved(bk.field_hint())
+            return await self._request_login_key(
+                name,
+                secret=secret,
+                field_label=field,
+                # "" (not None): Enter on an empty OPTIONAL field (the
+                # session token) submits "" instead of cancelling setup.
+                default=default,
+                credential=False,
+                instructions=hint,
+            )
+
+        return LoginCallbacks(
+            on_auth_url=on_auth_url,
+            on_progress=on_progress,
+            on_warning=on_warning,
+            on_setup_input=on_setup_input,
+            on_choice=on_choice,
             displays_warnings=True,
         )
 
@@ -57885,17 +58017,22 @@ class OperatorApp(App[None]):
         field_label: str | None = None,
         default: str | None = None,
         credential: bool = False,
+        required_field: bool = False,
+        instructions: str | None = None,
     ) -> str | None:
-        """Put a paste prompt in the transcript and await the key.
+        """Await a credential, optional OAuth code, or explicit setup field.
 
         Awaited by the login flow on this app's own loop (``_login_flow`` runs
         as a Textual worker), so the block is mounted directly here rather than
         marshalled across threads — the same reason
         :meth:`request_tool_approval` mounts its card inline.
 
-        Returns the pasted text, or ``None`` for a cancel, which is exactly the
-        ``on_manual_code_input`` contract. The value is never logged, never
-        echoed, and is not retained by the block once handed over.
+        Returns the value, or ``None`` for a cancel. Secret values are masked;
+        nonsecret fields and optional OAuth codes remain readable. No value is
+        logged or retained by the block once handed over. ``required_field``
+        selects required-login instructions instead of endpoint setup's
+        keep-default instructions; callers pass no default when empty Enter
+        must cancel. It does not repurpose the optional browser-code fallback.
         """
         from local_operator.tui.widgets.key_prompt import KeyPromptBlock
 
@@ -57911,15 +58048,25 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        instructions = None
-        if field_label:
+        # A caller-supplied hint wins: the defaults below describe the
+        # local-server setup fields ("keeps the current token if the URL is
+        # unchanged"), which is wrong for any other structured login's fields
+        # (Amazon Bedrock's access key, Region, session token).
+        if instructions is None and field_label:
             instructions = (
                 f"Enter keeps {default}"
                 if default and not secret
                 else "Enter continues without a new value; Esc cancels setup."
             )
-        if field_label and secret:
-            instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+            if secret:
+                instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+        if required_field:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
+            instructions = prompt_tr(prompt_keys.hint_required())
         block = KeyPromptBlock(
             provider_label,
             secret=secret,
@@ -58299,7 +58446,10 @@ class OperatorApp(App[None]):
         # email (~138 ms) for a loopback listener only a login needs, and this
         # module is what every interactive session imports.
         from local_operator.harness.types import AbortSignal
-        from local_operator.providers.oauth.callback_server import LoginCancelledError
+        from local_operator.providers.oauth.callback_server import (
+            LoginCancelledError,
+            LoginDeferredError,
+        )
         from local_operator.providers.oauth.radient import RadientLoginDisabled
 
         assert self._providers is not None
@@ -58415,6 +58565,16 @@ class OperatorApp(App[None]):
                 if self._on_config_changed is not None:
                     self._on_config_changed()
                 self._cmd_model_saved(self._notice)
+        except LoginDeferredError as deferred:
+            # The user chose to finish elsewhere (Bedrock's "I'll run it
+            # myself"): a `note`, not a red "login failed" (#4270 D4/Q7), with
+            # the command drawn in the inline-code ink so it can be found and
+            # copied. On its OWN indented row: inline, the fold split the
+            # command across two rows and a split token is drawn plain.
+            # Nothing was stored; the flow raised before any row.
+            command = deferred.command
+            body = f"{deferred}\n  {command}" if command else str(deferred)
+            self._append_block(NoticeBlock(body, "note", accent=command))
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken

@@ -1,0 +1,22 @@
+{
+  "providers.vertex_prompts.field.project_id": {
+    "role": "Required Vertex login configuration prompt",
+    "tone": "plain, direct",
+    "note": "Required nonsecret Google Cloud project identifier after OAuth succeeded but no active project was discovered. Field label used in TUI title, empty placeholder and submitted receipt, CLI/Desktop question. Keep Google Cloud product name."
+  },
+  "providers.vertex_prompts.field.service_account": {
+    "role": "Required Vertex login configuration prompt",
+    "tone": "plain, direct",
+    "note": "Masked service-account paste prompt field label; accepts raw JSON or a local JSON file path, NOT an API key. JSON remains technical vocabulary. Used in TUI title, empty placeholder and receipt."
+  },
+  "providers.vertex_prompts.hint.required": {
+    "role": "Required Vertex login configuration prompt",
+    "tone": "plain, direct",
+    "note": "Required login field: Enter submits a nonempty value; empty Enter or Esc cancels the entire login (not optional skip-paste). Enter/Esc name physical keys and must remain recognizable. No browser remains pending. TUI truncates to current content width; no fixed width budget."
+  },
+  "providers.vertex_prompts.prompt.field": {
+    "role": "Required Vertex login configuration prompt",
+    "tone": "plain, direct",
+    "note": "CLI required-field question. {field} is an already-localized field label (Google Cloud project ID), not a secret or user input. Empty submission cancels login. Trailing space separates terminal input from prompt; preserve it. Desktop uses only the localized field label because its input endpoint rejects empty submissions and exposes a separate cancel action."
+  }
+}

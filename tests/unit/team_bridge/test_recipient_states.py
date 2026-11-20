@@ -749,6 +749,7 @@ async def test_unmentioned_member_is_woken_exactly_when_the_setting_emits_a_row(
     assert "expect: reply" not in card
     assert reply_lines == [
         "expect: weigh relevance; no_reply if nothing is needed",
+        "style: in channels/groups reply in the thread; no sign-off line",
         "if you reply: bridge channel_post with channel_id = this conversation_id; "
         "legacy send/reply never appears in a conversation",
     ]

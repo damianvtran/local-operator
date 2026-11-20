@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.voice",
+  "history_sha256": "37bc4f2bcc235a91674b3704d7205b2905ee282ecafbcfe5724df843782a5e11",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.voice",
+      "source_sha256": "1a1142efc72c2d238613baa4a94f3c93cc3a8eab8f158d81eb400a240810bd14",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 663927337bd1",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the new 37-key wire.voice namespace (Simplified Chinese); independent audit NOT completed, so this namespace is not shipped for zh-CN until a passed receipt is appended. Source hash pins the full current en namespace; translated target sha256 94df776710fafa4ebbd30e7df1a43a741dee47e02bbef9f78b692f78453a3b11. Glossary i18n/glossary.md and i18n/style-guides/zh-CN.md. Placeholders ({session_id}, {reason}, {limit_mib}, {detail}) and the identifiers text_origin/qwen_s2s preserved; phrase.* are spoken aloud by TTS so kept short, plain and free of markdown; max_spoken_chars.help quotes the same sentence as phrase.truncated. No rendered, pseudo or native audit claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.voice",
+      "source_sha256": "1a1142efc72c2d238613baa4a94f3c93cc3a8eab8f158d81eb400a240810bd14",
+      "context_sha256": "e2a9e2ac0021ea4d9dfff80bb9863cd28cd260b212fbd62aa5e804c74f9847e7",
+      "target_sha256": "94df776710fafa4ebbd30e7df1a43a741dee47e02bbef9f78b692f78453a3b11",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 663927337bd1",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "lopdev coder acting as independent i18n auditor (audit-only brief; did not author or edit any wire.voice translation)",
+        "session": "df0ed26c058b",
+        "session_kind": "lopdev session id of the auditing coder",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as stated in the session's own system prompt",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19",
+        "fallback": "none known: no provider fallback surfaced in the session; the auditor inspected no harness route log",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor unresolved, 1 nit",
+        "independent_from_translator": true,
+        "translator_session": "663927337bd1",
+        "scope": "full audit of all 37 keys of the namespace"
+      },
+      "status": "passed",
+      "note": "Round 1. Independent audit of all 37 keys against en/wire.voice.json + wire.voice.context.json, i18n/glossary.md, the locale style guide and neighbouring wire.settings.speech / wire.voice_availability. Scripted over all 37 keys: key set equals en; {placeholders} identical to en ({session_id},{reason},{limit_mib},{detail}); no ICU plural/select arms in this namespace; identifiers text_origin/qwen_s2s, WAV/WebM/Ogg/MP4, UUID, MiB, Radient and ElevenLabs preserved; no bidi/zero-width controls, no ASCII quotes, no markdown/digit/symbol in the 6 spoken wire.voice.phrase.* strings; max_spoken_chars.help quotes phrase.truncated exactly. target_sha256 is the file audited (post-fix for fr/ru). Glossary/neighbour consistency: conversation, agent, approvals, provider, key and 'try again in a moment' match the shipped corpus of the locale. Back-translations of the 10 most consequential strings (approval/refusal/limit/provider), all faithful: approval_pending: Please first answer the question or approval on the screen.; phrase.on_screen_first: Please first handle the approval on the screen.; not_enabled: Voice mode is not on for this conversation. Please turn it on for this conversation first.; rate_limited_minute: The voice provider's per-minute cap has been reached. Please retry later.; rate_limited_day: The voice provider's daily quota is used up. Please retry after the reset.; upload_too_large: That recording is too large. Please keep it within {limit_mib} MiB.; provider.help: Who listens to you and speaks for you, for hands-free voice and the read-aloud button. Radient bills against your Radient balance; ElevenLabs uses your own key. Only the one you choose is used; if it cannot handle a request it explains why, rather than switching automatically.; provider.choice.none.description: No provider selected yet. Until one is selected, hands-free voice stays off.; provider.choice.elevenlabs.description: Your own ElevenLabs API key. ElevenLabs bills you directly.; provider_unset: Please first choose a voice provider: Radient or your own ElevenLabs key. Voice mode only uses the one you choose..  nit: description first sentence '免提与对话交谈' is stiff (alt. '免提语音交流，一次只对应一个对话'). Not verified: the English 'Speak button' is a UI label; the locale renders it descriptively as a read-aloud button and the client's real label was not checked here. No rendered, native-speaker, or RTL rendering claim (ur: strings only; bidi handled by the render layer per the style guide). Same model family as the translator, different session and brief."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.voice",
+      "source_sha256": "8512860b98c48da1c4fc5f2b86344c6c84b288b2fcb2b618f596647f2c38ebd1",
+      "context_sha256": "aebbfbbb4b6a37442ad74f1316aff7d0297326eda6b357562c95a0e74f27bc3c",
+      "target_sha256": "5f52c97cebc5159b25bed989409ecf5b1824e89ce79eb58869ca78d5a4b71d5e",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 14434fb37ba2",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the review-round delta of wire.voice (Simplified Chinese): new keys session_syncing, spoken.approval_needed ({title}), spoken.approval_needed_untitled, spoken.code_omitted, spoken.link, and the rewritten invalid_message (the {reason} placeholder is gone from the English source). Independent audit NOT completed, so wire.voice is not shipped for this locale until a passed receipt is appended. Source hash pins the full current en namespace; context and translated target hashes are the files translated against. Glossary i18n/glossary.md and i18n/style-guides/zh-CN.md. Placeholders preserved ({title}, {session_id}, {reason}, {limit_mib}, {detail}); the spoken.* strings are read aloud by TTS so kept short and plain, spoken.link is one word, spoken.code_omitted keeps the English parenthesis pair (optional per the context note). No rendered, pseudo or native audit claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.voice",
+      "source_sha256": "8512860b98c48da1c4fc5f2b86344c6c84b288b2fcb2b618f596647f2c38ebd1",
+      "context_sha256": "aebbfbbb4b6a37442ad74f1316aff7d0297326eda6b357562c95a0e74f27bc3c",
+      "target_sha256": "5f52c97cebc5159b25bed989409ecf5b1824e89ce79eb58869ca78d5a4b71d5e",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 14434fb37ba2",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "lopdev coder acting as independent i18n auditor (audit-only brief; did not author or edit any of the audited translations)",
+        "session": "255bf0f37cac",
+        "session_kind": "lopdev session id of the auditing coder",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as stated in the session's own system prompt",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19",
+        "fallback": "none known: no provider fallback surfaced in the session; the auditor inspected no harness route log",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "translator_session": "14434fb37ba2",
+        "scope": "audit of the 6 review-round keys (session_syncing, spoken.approval_needed, spoken.approval_needed_untitled, spoken.code_omitted, spoken.link, invalid_message); the other 37 keys were already audited and signed passed and were not re-audited, but this receipt pins the whole current namespace hashes"
+      },
+      "status": "passed",
+      "note": "Independent audit of the review-round delta of wire.voice against en/wire.voice.json + wire.voice.context.json, i18n/glossary.md, the locale style guide and the already-audited neighbours (store_busy for 'try again in a moment', approval_pending/phrase.on_screen_first, 'command' as used in cli.sessions_help, 'conversation' as in not_enabled/switched). Source, context and target sha256 recomputed from the files on disk and equal the translator receipt. Scripted over all 43 keys: key set equals en; {placeholders} identical ({title} in spoken.approval_needed, none in invalid_message); NFC; no bidi/zero-width/format controls; no ASCII quotes. fr: U+202F before ':' in spoken.approval_needed and invalid_message, apostrophe U+2019; ru: 'чуть позже' as in store_busy; zh-CN: full-width ：，。（） throughout; ur: ۔ stops, no bidi controls; hi: danda, 'थोड़ी देर बाद फिर कोशिश करें' as in store_busy. spoken.* strings are short plain words, spoken.link is one word, spoken.code_omitted keeps the English parenthesis pair (optional per context), terms match the shipped corpus (approval, link, code block, sync, command). Back-translations: session_syncing: This conversation is still syncing. Please retry a bit later. approval_needed: Approval needed: {title}. approval_needed_untitled: Approval needed. code_omitted: (code block omitted) link: link invalid_message: The message was not sent: the content is too long, or looks like a command. Same model family as the translator (anthropic/claude-sonnet-5-5), different session and brief. Text-level audit only: no rendered, TTS-playback, native-speaker or RTL rendering check performed."
+    }
+  ]
+}

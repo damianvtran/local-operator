@@ -137,6 +137,15 @@ class CorpusItem:
     body: str
     source: str
     organization: str
+    #: Routing facts for a template with ``{{addressed}}``/``{{relation}}`` slots
+    #: (bridge-screen-v5/v6). WHY HERE: production renders those slots from
+    #: hub-stated or connector-derived facts, never from the body, so a bench that
+    #: cannot supply them can only measure the routing-aware templates with every
+    #: render refused. A row value wins; otherwise the plan's ``--addressed``
+    #: default; ``""`` keeps the pre-routing behaviour (a routing template then
+    #: refuses the render and the trial is recorded invalid, never guessed).
+    addressed: str = ""
+    relation: str = ""
 
     @property
     def split(self) -> str:
@@ -147,8 +156,16 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+#: The closed routing vocabularies (the hub's ``bridge.ScreenAddressed*`` /
+#: ``bridge.ScreenRelation*``), duplicated as literals so ``--dry-run`` keeps this
+#: module free of the engine import graph; ``test_screenbench_routing`` pins them
+#: equal to ``screening.ADDRESSED_VALUES`` / ``RELATION_VALUES``.
+ROUTING_ADDRESSED = ("direct", "thread", "everyone", "ambient")
+ROUTING_RELATION = ("owner", "member")
+
+
 def load_corpus(
-    paths: Sequence[Path], *, organization: str
+    paths: Sequence[Path], *, organization: str, addressed: str = ""
 ) -> tuple[list[CorpusItem], dict[str, str]]:
     """Read every corpus file; return the items and ``{path: sha256}``.
 
@@ -184,6 +201,12 @@ def load_corpus(
             if row["id"] in seen:
                 raise PlanError(f"{where}: duplicate id {row['id']!r} (first in {seen[row['id']]})")
             seen[row["id"]] = where
+            row_addressed = row.get("addressed", addressed) or ""
+            row_relation = row.get("relation", "") or ""
+            if row_addressed and row_addressed not in ROUTING_ADDRESSED:
+                raise PlanError(f"{where}: addressed must be one of {ROUTING_ADDRESSED}")
+            if row_relation and row_relation not in ROUTING_RELATION:
+                raise PlanError(f"{where}: relation must be one of {ROUTING_RELATION}")
             items.append(
                 CorpusItem(
                     id=row["id"],
@@ -195,6 +218,8 @@ def load_corpus(
                     body=row["body"],
                     source=path.name,
                     organization=str(row.get("organization") or organization),
+                    addressed=row_addressed,
+                    relation=row_relation,
                 )
             )
     if not items:
@@ -239,6 +264,9 @@ def resolve_template(spec: str) -> TemplateArm:
         "organization": "probe-org",
         "msg_type": "question",
         "nonce": "0" * 32,
+        # A routing value for templates with an ``{{addressed}}`` slot (v5/v6);
+        # templates without the slot ignore it, so the older arms render as before.
+        "addressed": "direct",
     }
     if spec in SCREENING_TEMPLATES:
         sha = screening_template_sha256(spec)
@@ -279,6 +307,7 @@ class ScreenPlan:
     workers: int
     max_calls: int | None
     organization: str
+    addressed: str = ""
 
     @property
     def trial_count(self) -> int:
@@ -317,6 +346,7 @@ def build_plan(
     workers: int,
     max_calls: int | None,
     organization: str,
+    addressed: str = "",
 ) -> ScreenPlan:
     if not corpus:
         raise PlanError("at least one --corpus file is required")
@@ -330,7 +360,9 @@ def build_plan(
         raise PlanError("--workers must be at least 1")
     if split not in (*SPLITS, "all"):
         raise PlanError("--split must be dev, heldout or all")
-    items, digests = load_corpus(corpus, organization=organization)
+    if addressed and addressed not in ROUTING_ADDRESSED:
+        raise PlanError(f"--addressed must be one of {ROUTING_ADDRESSED}")
+    items, digests = load_corpus(corpus, organization=organization, addressed=addressed)
     if split != "all":
         items = [item for item in items if item.split == split]
         if not items:
@@ -352,6 +384,7 @@ def build_plan(
         workers=workers,
         max_calls=max_calls,
         organization=organization,
+        addressed=addressed,
     )
     return plan
 
@@ -386,6 +419,7 @@ def describe_plan(plan: ScreenPlan) -> dict[str, Any]:
         "repeat": plan.repeat,
         "workers": plan.workers,
         "organization": plan.organization,
+        "addressed_default": plan.addressed,
         "trials": plan.trial_count,
         "worst_case_calls": plan.worst_case_calls,
         "max_calls": plan.max_calls,
@@ -518,6 +552,8 @@ async def _run_trial(
                 sender=item.sender,
                 organization=item.organization,
                 msg_type=item.type,
+                addressed=item.addressed,
+                relation=item.relation,
             )
             temperature, supports = leg.last_sampling()
         finally:

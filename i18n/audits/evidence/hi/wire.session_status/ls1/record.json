@@ -1,0 +1,102 @@
+{
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/hi/wire.session_status.json",
+  "target_sha256": "45d0a98ba5c3aa5d770589daa284bd60e75f93dd9773f14aff8ae10e1a6e110d",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance_source": "Delegating task brief; translator instance not independently inspected"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "task": "live-status-audit-hi",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "a6f00e250f6d",
+    "session": "a6f00e250f6d",
+    "date": "2026-11-20",
+    "actual_model_source": "Session host Model field",
+    "fallback_used": false,
+    "independent_from_translator": true,
+    "result": "clean-with-findings",
+    "unresolved_blocker_major": 0,
+    "keys_read": 31,
+    "scope": "All 31 source/target entries and context sidecar; 14 newly translated entries plus 17 unchanged pre-existing entries"
+  },
+  "status": "passed",
+  "result": "clean-with-findings",
+  "findings_count": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "HI-1",
+      "severity": "minor",
+      "key": "wire.session_status.waiting",
+      "current_text": "{jobs, plural, one {# जॉब} other {# जॉब}} की प्रतीक्षा में",
+      "problem": "Plural जॉब is not inflected for the oblique case required by की प्रतीक्षा में.",
+      "evidence": "Runtime renders 2 जॉब की प्रतीक्षा में; Hindi consonant-final masculine nouns need the plural oblique -ों before की. The Hindi style guide explicitly requires natural plural obliques; existing wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help uses उप-एजेंटों की. Counts 2, 5, 21 and 1000000 take other; one covers 0 and 1 per the repository rule.",
+      "suggested_wording": "{jobs, plural, one {# जॉब} other {# जॉबों}} की प्रतीक्षा में"
+    },
+    {
+      "id": "HI-2",
+      "severity": "minor",
+      "key": "wire.session_status.waiting_subagents",
+      "current_text": "{jobs, plural, one {# जॉब} other {# जॉब}} की प्रतीक्षा में · {subagents, plural, one {# उप-एजेंट चल रहा} other {# उप-एजेंट चल रहे}}",
+      "problem": "Plural जॉब is not inflected for the oblique case required by की प्रतीक्षा में.",
+      "evidence": "Runtime renders 2 जॉब की प्रतीक्षा में · 2 उप-एजेंट चल रहे; Hindi consonant-final masculine nouns need the plural oblique -ों before की. The Hindi style guide explicitly requires natural plural obliques; existing wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help uses उप-एजेंटों की. Counts 2, 5, 21 and 1000000 take other; one covers 0 and 1 per the repository rule.",
+      "suggested_wording": "{jobs, plural, one {# जॉब} other {# जॉबों}} की प्रतीक्षा में · {subagents, plural, one {# उप-एजेंट चल रहा} other {# उप-एजेंट चल रहे}}"
+    }
+  ],
+  "evidence": {
+    "head": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+    "key_count": 31,
+    "new_keys": 14,
+    "preexisting_keys": 17,
+    "preexisting_value_changes": [],
+    "preexisting_entry_byte_changes_excluding_required_terminal_comma": [],
+    "runtime_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/runtime.py",
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "plural_categories_call": "runtime.fmt.plural_categories(\"hi\") (function is defined in format.py, not exported directly by runtime.py)",
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "counts_rendered": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000000
+    ],
+    "render_rows": 186,
+    "additional_waiting_subagents_combinations": 36,
+    "all_arguments_match": true,
+    "all_plural_categories_present": true,
+    "all_plural_branches_render_count": true,
+    "no_exact_number_arms": true,
+    "exec_preserved": true,
+    "middle_dot_joiners_preserved": true,
+    "manual_bidi_controls_in_new_entries": false,
+    "evidence_path": "/Users/damian/.local-operator/sessions/a6f00e250f6d/scratchpad/hi-live-status-evidence.json",
+    "evidence_sha256": "c5e607ee8c0fba9fc3601e527545ea6255e273fdff818c36513d96987440b806"
+  },
+  "notes": [
+    "Masculine computational जॉब is accepted: wire.errors.agents.job_cannot_cancel uses रद्द नहीं किया जा सकता / हो चुका है; wire.errors.agents.job_not_found_id uses वाला जॉब नहीं मिला; wire.settings.bash_heavy_jobs_enabled.choice.true.description uses जॉब ... चलते हैं. Delegating_jobs agreement is correct.",
+    "सत्र is masculine: attached खुला, wedged दे रहा and exec_headless चल रहा are compatible. उप-एजेंट is masculine and चल रहा/चल रहे agrees.",
+    "Plural जॉब्स in tui.status.jobs and plural जॉब in wire.settings.bash_heavy_jobs_enabled.choice.true.description already coexist; unchanged inherited variation is not a new gate finding. Direct plural जॉब is natural; the concrete defect here is the missing oblique जॉबों before की.",
+    "स्वीकृति matches tui.chrome.banners.body_approval and mobile.setup.title_quote; प्रतीक्षा matches relay.shell.session.waiting; हेडलेस matches cli.global_help.no_tui; हार्टबीट matches cli.serve_readiness.not_reporting and tui.small.info_panel.last_heartbeat_ago. उत्तर versus जवाब is ordinary contextual synonymy, not a glossary violation.",
+    "Rich cell_len at count 2 and duration 4m: all new Hindi labels are shorter than English except attached (7 vs 4 cells). विंडो में खुला accurately preserves the window-open sense; no fixed cap exists in the context. Recommend downstream rendered check for attached, not an observed overflow defect. No rendered UI validation was performed.",
+    "Hindi is LTR; Urdu-specific RTL proof is outside scope. Literal exec and duration 4m render unchanged.",
+    "Receipt only; catalogue, code, tests, ledger and audit history were not edited."
+  ]
+}

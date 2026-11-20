@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.login.bedrock",
+  "history_sha256": "701fa5b81a9902697c6ba5847551e0518ce0ed4f2cb9398db851f8199614035a",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.login.bedrock",
+      "source_sha256": "9e9bab9f80d4422057d9c41303bb18da6783b0e3c75225c800a93206845d5025",
+      "context_sha256": "5c8a9309e5e4b10e148c1bb5a2f4384627c4b97ee62e71cc0e487ab23f7f0e99",
+      "target_sha256": "6a0944f522da169aed5937731df3c9ae18a362f693eb4dfc1655fbcef89dffc9",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job c1195a706c14, commit fc78a78d8fd6",
+        "session": "c1195a706c14",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session a9c39601124d; did not author these translations and read no translator scratchpad",
+        "session": "a9c39601124d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) round 1: independent audit of new namespace wire.login.bedrock, 67/67 keys, against en 9e9bab9f80d4 with context sidecar. Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: क्षेत्र matches audited bedrock term; सत्र per style guide; क्रेडेंशियल per glossary; feminine प्रोफ़ाइल consistent with audited profile_not_found (मिली); साइन-इन (noun) vs साइन इन (verb/state) used consistently, mirroring en sign-in/sign in; plural one/other. Findings: blocker 0, major 0. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r1"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.login.bedrock",
+      "source_sha256": "e04450e78b6923e9de8cb4565ab248bc44e507c218b7a3b81965bb74b8c588bc",
+      "context_sha256": "ccbb2ba785ae47453dcf31d1416172ff2d51279fc590171b9262da880f774f14",
+      "target_sha256": "1e3dc2ca134925808f01fdcaa3a5f72b1e2c9e0644a51738f3f35c4c035739f2",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 32730d3d6997, commit 6499f4ab40fe",
+        "session": "32730d3d6997",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session 350ecfa493e1; did not author the English (coder jobs 556253a34235 / 4de55f98f6fe) or the translations (jobs 32730d3d6997 / 48f1eebcc45e) and read no translator scratchpad",
+        "session": "350ecfa493e1",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 2,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) remediation round: independent delta audit of wire.login.bedrock after en moved 9e9bab9f80d4 -> e04450e78b69 (7 added, 16 changed, 0 removed). Delta keys read in full against en + context: field_hint, kind_assume_role, kind_login, kind_other, kind_process, kind_sso, kind_static, kind_web_identity, method_access_key, method_access_key_desc, method_ambient, method_ambient_desc, method_ambient_desc_none, method_profile_desc, method_profile_none, method_sso, method_sso_desc, method_sso_none, no_profiles, no_sso_profiles, picker_title, sso_deferred, sso_profile_title. Carry-forward proof vs f89b01d92ea3 (last audited pr4270-r1 rows): the 51 en-unchanged keys are value-identical in en and in the en context sidecar, and in this locale except where this audit edited them (listed below). Mechanical: key set equals en (74); placeholder set and order parity; ICU plural arms per locale CLDR set (glossary plurals row); leading/trailing whitespace parity; verbatim tokens aws login, aws configure, aws configure sso, AWS_PROFILE, AgentCore, IAM, IAM Identity Center, SSO, AWS SSO, Amazon Bedrock; NFC; no manual bidi controls. Corrections (auditor): minor M1 method_access_key_desc 'सेशन टोकन' → 'सत्र टोकन' (hi style guide: session → सत्र, 'सेशन' rejected); minor M2 method_ambient 'डिफ़ॉल्ट क्रेडेंशियल' → 'डिफ़ॉल्ट क्रेडेंशियल्स' (glossary note 6 / hi style guide: plural क्रेडेंशियल्स; matches UI). Semantic: आप address; 'ग्रहण किया गया रोल' kept for Assume role (रोल is the living loan, 23 core / 22 UI hits; UI corrected to match); प्रोफ़ाइल invariant plural consistent with namespace precedent; plural one/other. Cross-surface: the 5 method names (method_profile/sso/access_key/api_key/ambient) and 7 kind badges are byte-identical to local-operator-ui PR #1987 ui.providers.bedrock tab_*/kind_* in this locale after this audit. All findings fixed in this commit; unresolved blocker/major 0. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r2"
+    }
+  ]
+}

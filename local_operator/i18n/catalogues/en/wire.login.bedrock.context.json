@@ -1,0 +1,372 @@
+{
+  "wire.login.bedrock.access_key_id_invalid": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.access_key_id_prompt": {
+    "note": "AWS term.",
+    "role": "input label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.api_key_prompt": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "input label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.cancelled": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "status message",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.checking": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "progress line",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.choice_default_prompt": {
+    "note": "{default} is a number; trailing space significant.",
+    "role": "terminal prompt",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.choice_invalid": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "terminal error",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.choice_prompt": {
+    "note": "Trailing space is significant.",
+    "role": "terminal prompt",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.context_unreadable": {
+    "note": "{detail} is parser output in English; keep verbatim.",
+    "role": "warning",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.field_hint": {
+    "note": "Hint under every typed Bedrock field. Esc cancels the whole setup on most fields but only returns to the Region list on the typed-Region field, so keep it generic: 'cancels' without an object.",
+    "role": "input hint",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.kind_assume_role": {
+    "note": "Profile kind: assumes an IAM role.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.kind_login": {
+    "note": "Profile kind created by the 'aws login' command; keep 'AWS login'.",
+    "role": "inline fragment",
+    "tone": "plain, short"
+  },
+  "wire.login.bedrock.kind_other": {
+    "note": "Profile kind not recognised.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.kind_process": {
+    "note": "Profile kind: credential_process helper.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.kind_sso": {
+    "note": "AWS product name; keep.",
+    "role": "inline fragment",
+    "tone": "plain, short"
+  },
+  "wire.login.bedrock.kind_static": {
+    "note": "Profile kind: long-lived keys in ~/.aws/credentials. Short label.",
+    "role": "inline fragment",
+    "tone": "plain, short"
+  },
+  "wire.login.bedrock.kind_web_identity": {
+    "note": "Profile kind: OIDC web identity token.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_access_key": {
+    "note": "AWS access key ID + secret access key.",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_access_key_desc": {
+    "note": "'IAM' is an AWS product term; keep it.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_ambient": {
+    "note": "Use the AWS default credential chain of the running process.",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_ambient_desc": {
+    "note": "{sources} is a comma-separated list of technical source names such as env:AWS_PROFILE; keep verbatim. AWS_PROFILE is an environment variable and AgentCore an AWS product; keep both.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_ambient_desc_none": {
+    "note": "AWS_PROFILE is an environment variable and AgentCore an AWS product; keep both.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_api_key": {
+    "note": "Amazon Bedrock API key (AWS product term).",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_api_key_desc": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_profile": {
+    "note": "A named profile from the user's AWS CLI configuration.",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_profile_desc": {
+    "note": "Lists the non-SSO AWS profile kinds; keep it short.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_profile_none": {
+    "note": "Shown when no non-SSO AWS profiles exist.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_sso": {
+    "note": "'AWS SSO' is the product name users know for IAM Identity Center; keep 'AWS SSO'.",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_sso_desc": {
+    "note": "'IAM Identity Center' is an AWS product term and 'aws login' a command; keep both verbatim.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_sso_none": {
+    "note": "'aws login' is a command; keep verbatim. Shown when the user's AWS configuration has no SSO profiles.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.method_title": {
+    "note": "Title of the first single-select list in the Bedrock sign-in.",
+    "role": "chooser title",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.no_profiles": {
+    "note": "'aws configure' is a command; keep verbatim.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.no_sso_profiles": {
+    "note": "'aws configure sso' is a command; keep verbatim. 'AWS SSO' is a product name; keep.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.no_tty": {
+    "note": "Placeholders are env var spellings.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.picker_title": {
+    "note": "Header of the picker card during the Amazon Bedrock sign-in (replaces \"the agent needs your decision\"). Imperative title, no punctuation.",
+    "role": "card title",
+    "tone": "plain, short"
+  },
+  "wire.login.bedrock.profile_desc": {
+    "note": "Three facts joined by a middle dot; {kind}, {session} are other keys from this namespace, {region} an AWS Region id.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.profile_desc_short": {
+    "note": "{kind} is a kind label from this namespace, {region} an AWS Region id.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.profile_title": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "chooser title",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_default_desc": {
+    "note": "{source} is where the default came from: an env var name or a word from this namespace.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_invalid": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_other": {
+    "note": "Opens a free-text Region field.",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_other_desc": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_prompt": {
+    "note": "us-east-1 is a Region id; keep.",
+    "role": "input label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_source_config": {
+    "note": "providers.bedrock.region is a config key; keep.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_source_fallback": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_source_profile": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_title": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "chooser title",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.region_unset": {
+    "note": "Shown in place of a Region id when the profile names none.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.secret_access_key_prompt": {
+    "note": "AWS term.",
+    "role": "input label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.session_expired": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.session_missing": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.session_refreshable": {
+    "note": "Access token expired but a refresh token exists.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.session_token_prompt": {
+    "note": "AWS term.",
+    "role": "input label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.session_valid": {
+    "note": "{expires} is an ISO-8601 UTC timestamp; keep verbatim.",
+    "role": "inline fragment",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_browser_opened": {
+    "note": "{url} is a URL.",
+    "role": "notice",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_cancelled": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "status message",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_cli_missing": {
+    "note": "'AWS CLI' and 'aws' are product/command names.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_deferred": {
+    "note": "The user chose to run the AWS sign-in command themselves; the command is shown right after this sentence on its own, so end with a colon. Not an error.",
+    "role": "notice",
+    "tone": "neutral, reassuring, actionable"
+  },
+  "wire.login.bedrock.sso_done": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "progress line / success message",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_enter_code": {
+    "note": "{url} is a URL, {code} a short code such as ABCD-EFGH; keep both verbatim.",
+    "role": "notice",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_failed": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_headless": {
+    "note": "{command} is a shell command.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_not_applicable": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_profile_title": {
+    "note": "Title of the list of AWS SSO / aws login profiles.",
+    "role": "chooser title",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_run": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_run_desc": {
+    "note": "{command} is a shell command; keep verbatim.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_run_yourself": {
+    "note": "{command} is a shell command.",
+    "role": "notice",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_self": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "choice label",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_self_desc": {
+    "note": "{command} is a shell command.",
+    "role": "choice description",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_started": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "status message",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_timeout": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_title": {
+    "note": "{profile} is an AWS profile name; keep verbatim.",
+    "role": "chooser title",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_title_missing": {
+    "note": "{profile} is an AWS profile name.",
+    "role": "chooser title",
+    "tone": "plain, short, actionable"
+  },
+  "wire.login.bedrock.sso_waiting": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "progress line",
+    "tone": "plain, short, actionable"
+  }
+}

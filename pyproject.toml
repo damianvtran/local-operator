@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.107.3"
+version = "0.109.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -67,6 +67,17 @@ dependencies = [
     # bare `pip install local-operator`. Imported lazily so a conversation
     # with no documents never pays the import.
     "pypdf>=5.0",
+    # Amazon Bedrock provider (`providers/bedrock/`): SigV4 signing, the AWS
+    # default credential chain (profiles, SSO / `aws login` refresh, IMDSv2,
+    # ECS/AgentCore container credentials, web identity, credential_process),
+    # the `vnd.amazon.eventstream` decoder and offline Region data. Base, not
+    # an extra, because the installed runtime and the desktop installer take
+    # the bare wheel with no extras — an extra would leave every AWS auth
+    # method but the bearer API key unreachable for them. botocore alone, not
+    # boto3 or `anthropic[bedrock]`: it is the only layer we need (~26 MB on
+    # disk). Imported LAZILY, only on the Bedrock path; a subprocess test pins
+    # that importing the provider registry/clients leaves it unloaded.
+    "botocore>=1.40,<2",
     # Terminal UI. This is the default entry point of the `local-operator`
     # command, so it stays required rather than optional. Pure Python, no
     # compiled wheels — textual pulls rich, which pulls pygments and
@@ -267,12 +278,12 @@ dev = [
     # Direct, not via the lsp extra: CI installs dev and must exercise the
     # optional tool's suite, while `all` stays lean for end users.
     "jedi>=0.19",
-    # The OSWorld adapter's AWS provider (benchmarks/osworld_v2_adapter) is a
-    # SEPARATE distribution that depends on boto3; the harness itself never
-    # imports it. Its unit tests still live under tests/ and drive the
-    # provider against botocore's Stubber, so the dev extra carries boto3 for
-    # the test interpreter only. Keeping it out of `all` is deliberate: an end
-    # user who never runs a benchmark should not install an AWS SDK.
+    # boto3 is here ONLY for the OSWorld adapter's AWS provider
+    # (benchmarks/osworld_v2_adapter, a SEPARATE distribution) whose unit
+    # tests live under tests/ and drive it against botocore's Stubber. The
+    # harness itself never imports boto3: the Bedrock provider needs botocore
+    # alone, which is a base dependency (see `dependencies`). Keeping boto3
+    # out of `all` is deliberate — end users get botocore, not the full SDK.
     "boto3>=1.34",
 ]
 

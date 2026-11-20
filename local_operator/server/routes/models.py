@@ -6,6 +6,7 @@ This module contains the FastAPI route handlers for model-related endpoints.
 
 import asyncio
 import logging
+import os
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,6 +24,7 @@ from local_operator.model.registry import (
     RecommendedRadientModelIds,
     SupportedHostingProviders,
     anthropic_models,
+    bedrock_models,
     deepseek_models,
     glm_models,
     google_models,
@@ -33,13 +35,18 @@ from local_operator.model.registry import (
     xai_models,
 )
 from local_operator.providers.auth_store import AuthStore
-from local_operator.providers.controller import PICKER_TTL_S, ProviderController
+from local_operator.providers.controller import (
+    PICKER_TTL_S,
+    ProviderController,
+    _enrich_prices,
+)
 from local_operator.providers.local import (
     LOCAL_PROVIDER_IDS,
     local_api_key,
     local_model_info,
     resolve_base_url,
 )
+from local_operator.providers.registry import get_provider_definition, resolve_env_key
 from local_operator.server.dependencies import (
     get_config_manager,
     get_env_config,
@@ -57,6 +64,41 @@ from local_operator.server.models.schemas import (
 
 router = APIRouter(tags=["Models"])
 logger = logging.getLogger("local_operator.server.routes.models")
+
+
+async def _vertex_listing_credential(
+    store: AuthStore,
+) -> tuple[str | None, bool, str | None]:
+    """``(token, is_oauth, project_id)`` for Vertex AI's publisher listing.
+
+    Mirrors ``ProviderController.listing_credential`` for ``google-vertex``
+    without constructing a controller per request (which was never closed):
+    the OAuth/service-account bearer plus the GCP project the listing bills
+    via ``x-goog-user-project``, else the express-mode API key.
+    """
+    catalogue_access = getattr(store, "get_catalogue_access", None)
+    access = (
+        await catalogue_access("google-vertex")
+        if catalogue_access is not None
+        else await store.get_oauth_access("google-vertex", read_only=True)
+    )
+    if access is not None and access.kind == "oauth" and access.access_token:
+        raw = access.raw if isinstance(access.raw, dict) else {}
+        project_id = (
+            str(raw.get("project_id") or "").strip()
+            or (access.org_id or "").strip()
+            or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+            or (os.environ.get("VERTEX_PROJECT") or "").strip()
+            or None
+        )
+        return access.access_token, True, project_id
+    if access is not None and access.access_token:
+        return access.access_token, False, None
+    try:
+        stored = await store.get_api_key("google-vertex", read_only=True)
+    except Exception:  # noqa: BLE001 — a refresh failure just means no listing
+        stored = None
+    return stored or resolve_env_key("google-vertex"), False, None
 
 
 @router.get(
@@ -268,6 +310,27 @@ async def list_models(
                     models.append(
                         ModelEntry(id=row.id, name=info.name, provider="deepseek", info=info)
                     )
+            elif provider_detail.id == "bedrock":
+                # Without this branch the provider loop matched nothing and
+                # Bedrock silently contributed zero rows, so Settings' default-
+                # model picker (which reads this route) offered no Bedrock
+                # model while the chat picker listed them (UI QA #1987 Q3).
+                # The SAME discovery the chat picker uses: the stored connection
+                # descriptor (or bearer env var) drives the live listing, and
+                # with nothing configured the registry rows still list, like
+                # every other first-party provider here. ``read_only`` so this
+                # authoring read never moves a running session's stickiness.
+                controller = ProviderController(provider_auth_store, config_manager.config_dir)
+                api_key, _, _ = await controller.listing_credential("bedrock", read_only=True)
+                rows, _ = await asyncio.to_thread(available_models, "bedrock", api_key=api_key)
+                for row in rows:
+                    fallback = bedrock_models.get(row.id) or ModelInfo(
+                        id=row.id, name=row.name or row.id, description="Unknown model"
+                    )
+                    info = info_from_discovered_model("bedrock", row.id, row, fallback)
+                    models.append(
+                        ModelEntry(id=row.id, name=info.name, provider="bedrock", info=info)
+                    )
             elif provider_detail.id == "google":
                 for model_name, model_info in google_models.items():
                     models.append(
@@ -276,6 +339,44 @@ async def list_models(
                             name=model_info.name,
                             provider=provider_detail.id,
                             info=model_info,
+                        )
+                    )
+            elif provider_detail.id == "google-vertex":
+                # Share Vertex AI's live publisher listing + models.dev price
+                # enrichment with the TUI/desktop picker so newly released
+                # Gemini models appear on `/v1/models?provider=google-vertex`
+                # with real limits and pricing rather than a static snapshot.
+                # Read the credential straight from the store, like the
+                # anthropic/deepseek branches above: a ProviderController here
+                # was constructed per request and never closed.
+                api_key, is_oauth, project_id = await _vertex_listing_credential(
+                    provider_auth_store
+                )
+                rows, _ = await asyncio.to_thread(
+                    available_models,
+                    "google-vertex",
+                    api_key=api_key,
+                    is_oauth=is_oauth,
+                    account_id=project_id,
+                    ttl_s=PICKER_TTL_S,
+                )
+                vertex_def = get_provider_definition("google-vertex")
+                if vertex_def is not None:
+                    enriched_map = await asyncio.to_thread(_enrich_prices, [(vertex_def, rows)])
+                    rows = enriched_map.get("google-vertex", rows)
+                for row in rows:
+                    fallback = google_models.get(row.id) or ModelInfo(
+                        id=row.id,
+                        name=row.name or row.id,
+                        description="Model listed by Google Vertex AI",
+                    )
+                    info = info_from_discovered_model("google-vertex", row.id, row, fallback)
+                    models.append(
+                        ModelEntry(
+                            id=row.id,
+                            name=info.name,
+                            provider="google-vertex",
+                            info=info,
                         )
                     )
             elif provider_detail.id == "kimi":
