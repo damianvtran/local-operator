@@ -5159,6 +5159,12 @@ async def _construct_child_session(
     # false one hop down. Read the same way, and ``None`` for a parent that
     # declared no scope means "every op", exactly as it does on the parent.
     declared = getattr(parent_session, "_declared_tools", None)
+    # Stamped UNCONDITIONALLY and BEFORE ``set_tool_inventory`` below: this
+    # child's MCP reach is whatever ``_child_mcp_wiring`` built from the parent,
+    # so neither its declaration's grant step nor the first-turn readiness gate
+    # may add to it (see ``Session._mcp_reach_inherited``). Before the stamp the
+    # gate's grant handed a child its parent's ``ownTurnOnly`` episode tool.
+    child._mcp_reach_inherited = True
     if surface is not None:
         # The harness bound narrows (never widens) whatever the parent declared,
         # and is this child's FIRST declaration, so ``set_tool_inventory``'s

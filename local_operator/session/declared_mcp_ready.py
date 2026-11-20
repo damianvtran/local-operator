@@ -15,11 +15,10 @@ worker hits it, because a cold Python stdio server never makes 250 ms.
 THE RULE: DECIDED BY TOOL REACHABILITY, NOT SERVER STATUS. Before the
 session's first turn (and again on any later turn until it succeeds), wait,
 bounded, only while some declared ``mcp__`` name (``lop exec --tools``, the
-SDK's ``ApprovalPolicy.declared``, a child's inherited declaration) is not
-reachable yet AND a server that could provide it is still ``connecting``. The
-wait re-reads the inventory as each awaited server settles
-(``McpManager.wait_settled(first=True)``) and ends the moment every declared
-name is reachable. A tool name cannot be split back into (server, tool):
+SDK's ``ApprovalPolicy.declared``) is not reachable yet AND a server that could
+provide it is still ``connecting``. The wait re-reads the inventory as each
+awaited server settles (``McpManager.wait_settled(first=True)``) and ends the
+moment every declared name is reachable. A tool name cannot be split back into (server, tool):
 ``mcp__bd_x_search`` is server ``bd`` + ``x_search`` or server ``bd_x`` +
 ``search``, so every configured server whose prefix matches is a candidate.
 Deciding on reachability is what keeps a wedged ``bd`` from holding, or
@@ -27,6 +26,13 @@ failing, a run whose ``mcp__bd_x_search`` already arrived from ``bd_x``
 (agent review round 1, R1; QA Q-F1). An unrelated slow server is never a
 candidate, undeclared lazy servers keep the 250 ms gate, and a warm tool cache
 (deferred tools already in the inventory) waits on nothing.
+
+NEVER IN A DELEGATED CHILD. A child's declaration is its parent's bound
+carried down and its MCP tools are fixed by the parent's surface on a
+borrowed manager (``Session._mcp_reach_inherited``), so the session skips this
+gate there: the grant step would hand the child tools its parent withheld (an
+``ownTurnOnly`` episode server's, merge-gate run 44707733427), and no wait can
+deliver anything into that fixed surface.
 
 PRELOAD-ONLY SERVERS. A ``preload_tools`` server with no tools yet is awaited
 the same way, but ONLY on a headless host (exec, SDK, scheduler: no front end

@@ -544,3 +544,87 @@ async def test_spill_readability_is_derived_from_holding_read(tmp_path):
     assert bounded._build_tool_context().spill_readable is False
     await with_read.dispose()
     await bounded.dispose()
+
+
+# --------------------------------------------------------------------------
+# A delegated child: the gate must never widen what the parent's surface gave
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_keeps_exactly_its_tool_set_through_its_first_turn(
+    tmp_path, monkeypatch
+):
+    """The merge-gate regression (run 44707733427, OSWorld
+    ``test_a_delegated_child_cannot_drive_or_end_the_episode``): a child's first
+    turn ran this gate, whose ``materialize`` granted every DECLARED name the
+    borrowed manager listed, so the parent's ``ownTurnOnly`` episode tool, which
+    ``_child_mcp_wiring`` withholds from every child, reached the child's
+    request. A child's declaration is the parent's bound carried down, never a
+    grant, and nothing a wait delivers can enter its fixed MCP surface: its
+    first request carries the tools it was built with, and it waits on nothing
+    (not even the headless preload wait, which used to apply to every child).
+    """
+    from local_operator.mcp.config import MCPStdioServerConfig
+    from tests.unit.session.test_launch_subagent import (
+        FakeMcpManager,
+        OneShotStream,
+        attach_manager,
+        build_child,
+        make_session,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    own_turn = MCPStdioServerConfig.model_validate({"command": "x", "ownTurnOnly": True})
+    preload = MCPStdioServerConfig.model_validate({"command": "x", "preloadTools": True})
+
+    class EpisodeManager(FakeMcpManager):
+        """The OSWorld shape: an ``ownTurnOnly`` action server the parent
+        declared, an ordinary one, and a cold ``preload_tools`` server still
+        connecting with no tools, which a headless gate would wait on."""
+
+        def __init__(self) -> None:
+            super().__init__({"episode": ["apply_actions"], "linear": ["list_teams"]})
+            self.waited: list[object] = []
+
+        def get_all_server_names(self) -> list[str]:
+            return [*super().get_all_server_names(), "pl"]
+
+        def get_connection_status(self, name: str) -> str:
+            return "connecting" if name == "pl" else "connected"
+
+        def get_server_config(self, name: str) -> object | None:
+            return {"episode": own_turn, "pl": preload}.get(name)
+
+        async def wait_settled(self, timeout_s: float, *, servers=None, first=False) -> bool:
+            self.waited.append(servers)
+            return True
+
+    manager = EpisodeManager()
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream)
+    attach_manager(parent, manager)
+    parent.refresh_tools([*parent._tools, *manager.get_tools()])
+    parent.set_tool_inventory(
+        ["mcp__episode_apply_actions", "mcp__linear_list_teams"], unattended=True
+    )
+    assert "mcp__episode_apply_actions" in parent.tool_inventory, "precondition"
+
+    child = await build_child(parent)
+    built_with = sorted(tool.name for tool in child._tools)
+    assert "mcp__episode_apply_actions" not in built_with, "precondition: withheld at build"
+    inherited = child._declared_tools or ()
+    assert "mcp__episode_apply_actions" in inherited, "precondition: declaration carried down"
+
+    # The grant path itself refuses, with the borrowed manager attached.
+    assert child.materialize_declared_tools() == ()
+
+    await child.prompt("go")
+
+    assert stream.requests, "the child's turn reached the provider"
+    advertised = [tool.name for tool in stream.requests[-1].tools]
+    assert "mcp__episode_apply_actions" not in advertised
+    assert sorted(tool.name for tool in child._tools) == built_with
+    assert manager.waited == [], "a child waits on nothing it could not receive"
+    await child.dispose()
+    await parent.dispose()

@@ -4770,6 +4770,27 @@ class Session:
         #: gate again, not a silent send without its declared tools (agent
         #: review round 1, R3).
         self._named_mcp_ready_checked = False
+        #: Whether this session's MCP reach is INHERITED: a delegated child whose
+        #: MCP tools are fixed by its parent's ``_child_mcp_wiring`` surface (on
+        #: the parent's BORROWED manager) and whose declaration is the parent's
+        #: bound carried down. Stamped by ``harness.subagent`` before it applies
+        #: that declaration. Two things key on it, both so a child keeps exactly
+        #: the tool set its parent's surface built for it:
+        #:
+        #: * ``materialize_declared_tools`` grants nothing. An inherited
+        #:   declaration NARROWS (``subagent``: "the two intersect rather than
+        #:   either winning"); treating it as a caller's enumeration and granting
+        #:   from the raw shared manager bypasses ``selected``, which withholds
+        #:   every ``ownTurnOnly`` server's tools from children. That is how the
+        #:   OSWorld parent's episode action tool reached a child's request
+        #:   (merge-gate run 44707733427).
+        #: * the first-turn MCP readiness gate does not run. The parent's own
+        #:   gate already settled the declared servers on the manager the child
+        #:   borrows, and nothing a wait could deliver enters a child's fixed
+        #:   surface (only an explicit ``mcp://`` activation does), so a wait
+        #:   would be pure latency and a raise would refuse a child turn over a
+        #:   tool it was never going to hold.
+        self._mcp_reach_inherited = False
         #: The OPS a declared tool may reach, for the few tools whose reach is not
         #: its name. ``None`` means "every op this build's tool accepts", which is
         #: the state every declaration without an op scope is in — see
@@ -15854,7 +15875,11 @@ class Session:
         """
         declared = self._declared_tools
         manager = getattr(self, "mcp_manager", None)
-        if declared is None or manager is None:
+        # An inherited declaration is a bound, never a grant: see
+        # ``_mcp_reach_inherited``. Before the first-turn gate called this on a
+        # child, the only child call (``set_tool_inventory`` in ``subagent``)
+        # ran before the borrowed manager was attached, which hid the leak.
+        if declared is None or manager is None or self._mcp_reach_inherited:
             return ()
         try:
             available = manager.get_tools()
@@ -21401,7 +21426,10 @@ class Session:
         # declared MCP server that is still connecting must be awaited before
         # the request is built, and one that never arrives raises here, where
         # nothing durable has happened yet (the same shape as ``TurnInFlight``).
-        if not self._named_mcp_ready_checked:
+        # Never for a delegated child (``_mcp_reach_inherited``): its parent's
+        # gate settled the borrowed manager, and the gate's grant step would
+        # widen the child's surface past what its parent allowed.
+        if not self._named_mcp_ready_checked and not self._mcp_reach_inherited:
             from local_operator.session.declared_mcp_ready import (
                 await_named_mcp_servers,
             )
