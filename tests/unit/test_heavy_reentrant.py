@@ -561,11 +561,14 @@ def test_bash_tool_refuses_its_own_runtimes_lease_as_an_ancestor(
     monkeypatch.setenv(MARKER, f"{session_a.slot}:{session_a.fileno()}")
     ran = tmp_path / "ran"
     try:
-        result = asyncio.run(
-            builtin.execute_bash(
+        # A local coroutine, as the other execute_bash cells here do: asyncio.run
+        # takes a Coroutine, and execute_bash is typed as returning an Awaitable.
+        async def scenario() -> Any:
+            return await builtin.execute_bash(
                 "t", {"command": f"touch {shlex.quote(str(ran))}" + _HEAVY_TAIL}, None, None, None
             )
-        )
+
+        result = asyncio.run(scenario())
         text = _text(result)
         assert result.is_error and "HEAVY JOB QUEUE FULL" in text, text
         assert "ancestor" not in text, text
