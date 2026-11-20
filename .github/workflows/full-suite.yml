@@ -1102,7 +1102,13 @@ jobs:
     # weighed at its measured 22.714s, so the guard's minimum is
     # ceil((1264.919 + 60)/60) = 23 minutes, leaving +55.081s. Still below
     # the unit shard's projection, so the freeze guard keeps landing first.
-    timeout-minutes: 23
+    # 23 -> 24 on 2026-11-20: #4307 added the voice take-binding E2E file,
+    # charged the manifest's existing 50.058s fallback. On main 598880786039,
+    # the unchanged two-shard partition projects 1339.975s / 1339.328s.
+    # ceil((1339.975 + 60 overhead)/60) = 24 minutes: 1380s for tests,
+    # leaving +40.025s. Keep the measured weights and runner count unchanged;
+    # the old 1320s test budget could not fit the scheduled projection.
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@v7
       # Both platforms test the same fresh merge as the unit shards.
