@@ -237,11 +237,19 @@ STOPPED_OUTCOME_TO_STATUS: Mapping[str, str] = MappingProxyType(
 #: without the summary read following. ``stopped`` and ``deleted`` stay settled: an
 #: outcome-less ending keeps ``stopped``, and a deleted record is gone.
 #:
-#: THE PUBLISHED SET IS DELIBERATELY A SUPERSET of ``client.KNOWN_RUN_STATUSES``:
-#: the outcome join publishes ``expired`` (an OUTCOME word, absent from the
-#: contract's status set) and the other endings under their own names, so the
-#: contract's set answers "what may the server send" and never "what may this
-#: plane publish" (review round 3, MINOR-1).
+#: THIS SET IS NOT THE PUBLISHED VOCABULARY; IT IS THE PART OF IT THAT ENDS A RUN.
+#: The published words are ``client.KNOWN_RUN_STATUSES`` — what the server may send
+#: — plus the outcome words the join promotes out of ``stopped``: ``expired`` is an
+#: OUTCOME word absent from the contract's status set, and ``succeeded``,
+#: ``failed`` and ``cancelled`` are the same kind of thing. So the published
+#: vocabulary is a SUPERSET of the server's, and this set is a SUBSET of the
+#: published words: six of the eight contract statuses (``pending``,
+#: ``reconciling``, ``running``, ``stopping``, ``revoking``, ``error``) are in
+#: flight and are deliberately absent. The direction matters because the set is
+#: read as a DROP predicate — "every known status is settled" is the one wrong
+#: conclusion, and it would settle ``running``. The contract's set answers "what
+#: may the server send"; this one answers "what has this plane settled" (review
+#: round 3, MINOR-1; corrected round 4).
 SETTLED_STATUSES: frozenset[str] = TERMINAL_RUN_STATUSES | frozenset(
     STOPPED_OUTCOME_TO_STATUS.values()
 )
@@ -734,8 +742,13 @@ async def list_runs(
 
     THE MERGE IS ONE ROW PER RUN ID, server first: the server is authoritative about
     a run's present status, and a record row is appended only for an id the server
-    did not return — including one marked ``deleted``, which is kept on purpose so a
-    panel can say a run was deleted instead of silently losing the row.
+    did not return — including one marked ``deleted``, which is kept on purpose so
+    this listing stays an HONEST RECORD of what the device submitted: a reader other
+    than the desktop's panels (the CLI, a script over this route) can then tell a run
+    that was deleted from one this device never sent. The desktop's own surfaces
+    drop the row at the wire — a deleted run leaves the card, the runs dialog and the
+    picker's count — so the reason is those other readers, not a panel that says a
+    run was deleted (review round 4, MINOR-2).
 
     EVERY ROW CARRIES ``id``, whichever half it came from: the server's run object
     names it ``id`` and a record names it ``run_id``, and a renderer that had to try
