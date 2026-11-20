@@ -23,6 +23,7 @@ import contextlib
 import copy
 import email.utils
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -32,9 +33,10 @@ import time
 import unicodedata
 import urllib.parse
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, runtime_checkable
 
 import httpx
 
@@ -6100,6 +6102,178 @@ GOOGLE_API_URL = "https://generativelanguage.googleapis.com"
 VERTEX_API_URL = "https://aiplatform.googleapis.com"
 
 
+_GEMINI_MAJOR_RE = re.compile(r"gemini-(\d+)(?:[.\-]|$)")
+
+
+def _is_gemini_3_or_later(model_id: str) -> bool:
+    """Whether ``model_id`` is a Gemini generation 3 or later model.
+
+    Two wire behaviours started with Gemini 3 and, per Google's Gemini 4 Neon
+    guide, carry forward to Gemini 4: strict ``thoughtSignature`` validation on
+    replayed function calls (so imported/model-switched history needs the
+    ``skip_thought_signature_validator`` marker) and multimodal
+    ``functionResponse.parts``. A literal Gemini-3-only check silently
+    dropped both for ``gemini-4-neon``; parsing the MAJOR number keeps the gate
+    right for every later generation without another edit.
+
+    Only the last path segment is read, so a vendor or resource prefix
+    (``google/``, ``models/``, ``publishers/google/models/``) does not matter.
+    The match is anchored at that segment's start and needs ``-``/``.``/end after
+    the digits, so ``gemini-exp-1206``, ``gemma-3-27b`` and ``xgemini-4`` are
+    not Gemini 3+, and ``gemini-10-ultra`` is (no lexical compare).
+    """
+    bare = model_id.rsplit("/", 1)[-1].strip().lower()
+    match = _GEMINI_MAJOR_RE.match(bare)
+    return match is not None and int(match.group(1)) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Google/Vertex prompt-cache miss telemetry (silent: analytics + logs only)
+# ---------------------------------------------------------------------------
+#
+# WHY: Anthropic's ``diagnostics`` object names the prefix section that broke a
+# cache (``_anthropic_cache_diagnosis``); Gemini's ``generateContent`` returns
+# no such thing, only ``usageMetadata`` (``promptTokenCount``,
+# ``cachedContentTokenCount``) at the end of the stream. Without a local
+# comparison every Google row left ``calls.cache_miss_type`` blank, so a ledger
+# reader could not tell an idle/routing eviction (nothing we can fix) from a
+# prefix mutation (something we can). This classifier answers that locally.
+#
+# CONSTRAINTS: purely in-memory and local. Nothing here adds a network call or
+# touches the body sent to Google; the digests are taken from the body AFTER it
+# is built. The result reaches ``StreamEndEvent.cache_miss_type`` and from there
+# only ``analytics.db`` and the log file -- it is never rendered anywhere.
+#
+# SCOPING mirrors Anthropic's chain: only requests ``SessionStreamFn`` opted in
+# (``ChatRequest.cache_diagnostics``, conversation turns) are classified, and
+# the chain is that stream fn's own ``cache_diagnostics_chain`` token, so a fork
+# (which shares its parent's ``prompt_cache_key``) or an aside never compares
+# against another conversation. The wire client is rebuilt per attempt, so the
+# state cannot live on ``GoogleClient``; it lives here, keyed by chain plus
+# route, model and credential scope (any change of those is a new cache, hence
+# ``baseline``), and bounded so it never grows with process lifetime.
+
+#: Most chains kept. One entry per (conversation, route, model, credential); a
+#: process hosts a handful of live conversations, so 128 keeps every live one
+#: while bounding a long-running daemon. Evicting a live chain only costs one
+#: ``baseline`` row, never a turn.
+_GOOGLE_PREFIX_SNAPSHOTS_MAX = 128
+
+#: The implicit-caching minimum below which a zero cache read is expected, not
+#: an eviction. 4096 is the LARGEST documented Gemini minimum (Pro tiers;
+#: Flash tiers document less), chosen so a sub-minimum prompt is never blamed on
+#: eviction; a smaller-minimum model merely under-reports a few evictions.
+_GOOGLE_IMPLICIT_CACHE_MIN_TOKENS = 4096
+
+#: Local diagnostic tolerance, NOT a claim about Google's cache block size.
+#: The operator's 2049-token boundary tolerates a <=2048-token shortfall;
+#: greater losses get their own label rather than calling a partial hit full.
+_GOOGLE_PARTIAL_EVICTION_TOKENS = 2048
+
+
+class _GooglePrefixSnapshot(NamedTuple):
+    system_hash: str
+    tools_hash: str
+    tool_config_hash: str
+    contents_hashes: tuple[str, ...]
+    prompt_tokens: int = 0
+
+
+_GOOGLE_PREFIX_SNAPSHOTS: OrderedDict[tuple[str, ...], _GooglePrefixSnapshot] = OrderedDict()
+
+
+def _google_digest(value: Any) -> str:
+    # Canonical JSON (sorted keys, no whitespace) so a dict-ordering difference
+    # that Google would never see is not reported as a break.
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _google_prefix_snapshot(body: Mapping[str, Any]) -> _GooglePrefixSnapshot:
+    contents = body.get("contents") or []
+    return _GooglePrefixSnapshot(
+        system_hash=_google_digest(body.get("systemInstruction")),
+        tools_hash=_google_digest(body.get("tools")),
+        tool_config_hash=_google_digest(body.get("toolConfig")),
+        contents_hashes=tuple(_google_digest(item) for item in contents),
+    )
+
+
+def _google_cache_diagnosis(
+    previous: _GooglePrefixSnapshot | None,
+    current: _GooglePrefixSnapshot,
+    cached_tokens: int,
+) -> tuple[str, int]:
+    """``(cache_miss_type, cache_missed_tokens)`` for one Google request.
+
+    Section order and names follow Anthropic's ``cache_miss_reason.type`` so
+    one ledger query spans providers; ``tool_config_changed``,
+    ``evicted_or_rerouted`` and ``partial_eviction`` are Google-only.
+    ``cache_missed_tokens`` is the previously-cacheable prompt that was not
+    read back: ``previous.prompt_tokens - cached_tokens`` (never negative), or
+    0 when nothing was lost (``baseline``, ``unchanged``).
+    """
+    if previous is None:
+        return "baseline", 0
+    shortfall = max(0, previous.prompt_tokens - max(0, cached_tokens))
+    if current.system_hash != previous.system_hash:
+        return "system_changed", shortfall
+    if current.tools_hash != previous.tools_hash:
+        return "tools_changed", shortfall
+    if current.tool_config_hash != previous.tool_config_hash:
+        return "tool_config_changed", shortfall
+    prev_contents = previous.contents_hashes
+    if len(current.contents_hashes) < len(prev_contents) or any(
+        a != b for a, b in zip(current.contents_hashes, prev_contents)
+    ):
+        return "messages_changed", shortfall
+    # The whole previous prompt is a byte-identical prefix of this one.
+    if cached_tokens <= 0:
+        if previous.prompt_tokens >= _GOOGLE_IMPLICIT_CACHE_MIN_TOKENS:
+            return "evicted_or_rerouted", previous.prompt_tokens
+        return "unchanged", 0
+    if shortfall > _GOOGLE_PARTIAL_EVICTION_TOKENS:
+        return "partial_eviction", shortfall
+    return "unchanged", 0
+
+
+def _google_chain_key(
+    request: ChatRequest, base_url: str, vertex: bool, scope: str
+) -> tuple[str, ...] | None:
+    chain = request.cache_diagnostics_chain
+    if not request.cache_diagnostics or request.purpose != "turn" or not chain:
+        return None
+    return (chain, base_url, "vertex" if vertex else "ai-studio", request.model.model_id, scope)
+
+
+def _google_record_prefix(
+    key: tuple[str, ...],
+    snapshot: _GooglePrefixSnapshot,
+    *,
+    prompt_tokens: int,
+    cached_tokens: int,
+) -> tuple[str, int]:
+    """Classify against the chain's last snapshot, then store this one.
+
+    Called only once ``usageMetadata`` reported ``prompt_tokens > 0``: a 4xx/5xx
+    raises before it and an aborted or usage-less stream never reaches it, so a
+    failed attempt never becomes the baseline the next call is compared with.
+    """
+    miss = _google_cache_diagnosis(_GOOGLE_PREFIX_SNAPSHOTS.get(key), snapshot, cached_tokens)
+    # A routing/model/account switch starts a fresh chain, including when the
+    # user later switches BACK: an old route's snapshot is no longer adjacent.
+    for old_key in tuple(_GOOGLE_PREFIX_SNAPSHOTS):
+        if old_key[0] == key[0] and old_key != key:
+            del _GOOGLE_PREFIX_SNAPSHOTS[old_key]
+    _GOOGLE_PREFIX_SNAPSHOTS[key] = snapshot._replace(prompt_tokens=prompt_tokens)
+    _GOOGLE_PREFIX_SNAPSHOTS.move_to_end(key)
+    while len(_GOOGLE_PREFIX_SNAPSHOTS) > _GOOGLE_PREFIX_SNAPSHOTS_MAX:
+        _GOOGLE_PREFIX_SNAPSHOTS.popitem(last=False)
+    return miss
+
+
 class GoogleClient:
     """Minimal Gemini client: ``streamGenerateContent?alt=sse``.
 
@@ -6197,11 +6371,13 @@ class GoogleClient:
                     for call in message.tool_calls
                 ]
                 rendered_call_ids.update((call.id, call.id) for call in message.tool_calls)
-                if request.model.model_id.startswith("gemini-3"):
+                if _is_gemini_3_or_later(request.model.model_id):
                     # Imported/model-switched history has no valid signature.
                     # Google's documented migration marker avoids a 400 while
                     # making no claim to preserve another model's reasoning.
                     # Real same-route signatures take the native path above.
+                    # Gemini 4 enforces the same strict validation as 3 (the
+                    # Neon guide), so the gate is "3 or later", not "3".
                     call_parts[0]["thoughtSignature"] = "skip_thought_signature_validator"
                 parts.extend(call_parts)
             if message.role == "tool":
@@ -6209,8 +6385,10 @@ class GoogleClient:
                     "name": message.tool_name or "",
                     "response": {"content": self._tool_response_content(message)},
                 }
-                # Gemini 3 supports images inside functionResponse. Older
-                # models accept image parts alongside it in the user content.
+                # Gemini 3 and later (Gemini 4's Neon guide documents the same
+                # multimodal ``functionResponse.parts``) take images inside
+                # functionResponse. Older models accept image parts alongside
+                # it in the user content.
                 # Both paths preserve actual image bytes; prose saying an
                 # image existed leaves screenshot-driven loops blind.
                 images = [
@@ -6219,7 +6397,7 @@ class GoogleClient:
                     if isinstance(block, ImageContent)
                 ]
                 result_parts: list[dict[str, Any]] = [{"functionResponse": response_part}]
-                if images and request.model.model_id.startswith("gemini-3"):
+                if images and _is_gemini_3_or_later(request.model.model_id):
                     response_part["parts"] = images
                 else:
                     result_parts.extend(images)
@@ -6563,9 +6741,11 @@ class GoogleClient:
         #: carrier wins and ``None`` means it was never named.
         served_model: str | None = None
 
-        async with self._open_content_stream(
-            request, url, self._build_body(request, scope=scope), headers
-        ) as response:
+        body = self._build_body(request, scope=scope)
+        cache_key = _google_chain_key(request, self._base_url, self._is_vertex(request), scope)
+        prefix = _google_prefix_snapshot(body) if cache_key is not None else None
+        prompt_tokens = 0
+        async with self._open_content_stream(request, url, body, headers) as response:
             started = False
             async for data in _iter_sse_lines(response):
                 try:
@@ -6682,11 +6862,32 @@ class GoogleClient:
             )
         elif stop_reason == "error":
             error = f"model call failed ({defect_marker or 'unknown finishReason'})"
+        cache_miss_type: str | None = None
+        cache_missed_tokens = 0
+        if (
+            cache_key is not None
+            and prefix is not None
+            and usage is not None
+            and prompt_tokens > 0
+            and error is None
+            and (visible_text or replay_calls)
+        ):
+            # Commit only after a successful, non-empty stream. GeneratorExit,
+            # transport failures and provider-error finishes leave the last
+            # usable baseline intact, even when a partial usage chunk arrived.
+            cache_miss_type, cache_missed_tokens = _google_record_prefix(
+                cache_key,
+                prefix,
+                prompt_tokens=prompt_tokens,
+                cached_tokens=usage.cache_read_tokens,
+            )
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,
             error=error,
             served_model=served_model,
+            cache_miss_type=cache_miss_type,
+            cache_missed_tokens=cache_missed_tokens,
             provider_payload=(
                 native_payload(
                     request.model,

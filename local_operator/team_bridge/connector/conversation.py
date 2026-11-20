@@ -100,6 +100,10 @@ logger = logging.getLogger(__name__)
 #: course-correct / ask, no new work, scope) live in that served text; the card
 #: deliberately does not duplicate them. Bump WITH the served version (§11.3).
 GUIDANCE_VERSION = "bridge-guidance-v2"
+#: The per-wake reply style line (operator, 2026-11-17, Team Bridge #general
+#: seq 94 and the earlier no-sign-off ask). Billed on every wake, so it is one
+#: short line; the served guidance text (``GUIDANCE_VERSION``) is unchanged.
+REPLY_STYLE_LINE = "style: in channels/groups reply in the thread; no sign-off line"
 
 #: ``detail`` of a hand-off that deliberately posted NO card because the hub marked
 #: the delivery passive (see ``_hand_off_card``). Terminal, never buffered.
@@ -383,6 +387,12 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
             lines.append("view: bridge channel_thread with this thread_root_id returns the files")
         else:
             lines.append("view: bridge channel_history returns the admitted files")
+    # ONE style line, on the card rather than the tool description for the
+    # same budget reason as the route lines below (operator, 2026-11-17,
+    # #general seq 94: channel replies in threads; no sign-off lines in agent
+    # messages). Placed ABOVE the route lines so the route stays directly over
+    # the guidance footer, the shape the route tests pin.
+    lines.append(REPLY_STYLE_LINE)
     if metadata.thread_root_id:
         # Thread context: where the reply lives and how to answer IN it, so an
         # agent coordinating in a thread does not answer at channel level.
@@ -409,11 +419,30 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # (scripts/bench_context_budget.py --kind child) had ~2 tokens of
         # headroom, while this card costs only when a conversation message
         # arrives — exactly when the choice between the two routes is made.
-        lines.append(
-            "if you reply: bridge channel_post with channel_id = this conversation_id"
-            + (" and in_reply_to_message_id = this message_id" if metadata.routed else "")
-            + "; legacy send/reply never appears in a conversation"
-        )
+        #
+        # Channel/group roots (operator, 2026-11-17, #general seq 94): the
+        # answer goes in THIS message's thread, which the bridge tool does by
+        # default once ``in_reply_to_message_id`` names it, so the route names
+        # that field and the opt-out. A DM, and a card whose kind the hub did
+        # not state, keep the inline route: a DM has no channel timeline to
+        # flood, and an unknown kind must not promise a thread.
+        if metadata.conversation_kind in ("channel", "group"):
+            # A group/channel card is never routed (``plan_route`` refuses any
+            # kind but ``dm``), so the route is the same for every reader there.
+            lines.append(
+                "if you reply: bridge channel_post with channel_id = this conversation_id "
+                "and in_reply_to_message_id = this message_id (threads it; new_post for "
+                "a new topic); legacy send/reply never appears in a conversation"
+            )
+        else:
+            # A DM card CAN be routed (this session is not the designated one and
+            # was woken because it posted here), and then the reply must name the
+            # message it answers: the router decides the next hop from it.
+            lines.append(
+                "if you reply: bridge channel_post with channel_id = this conversation_id"
+                + (" and in_reply_to_message_id = this message_id" if metadata.routed else "")
+                + "; legacy send/reply never appears in a conversation"
+            )
     lines.append(f"guidance: {GUIDANCE_VERSION}")
     return "\n".join(lines)
 
@@ -2608,6 +2637,7 @@ __all__ = [
     "CARD_COALESCED",
     "CARD_PASSIVE",
     "GUIDANCE_VERSION",
+    "REPLY_STYLE_LINE",
     "ConversationCardMetadata",
     "build_conversation_card",
     "card_directed",

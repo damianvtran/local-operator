@@ -29,5 +29,9 @@
   "wire.session_status.delegating_jobs": "{count, plural, one {# trabajo en curso} many {# de trabajos en curso} other {# trabajos en curso}}",
   "wire.session_status.delegating_running": "{count, plural, one {# subagente en curso} many {# de subagentes en curso} other {# subagentes en curso}}",
   "wire.session_status.delegating_queued": "{count, plural, one {# subagente en cola} many {# de subagentes en cola} other {# subagentes en cola}}",
-  "wire.session_status.delegating_queued_addend": "{count, plural, one {# en cola} many {# en cola} other {# en cola}}"
+  "wire.session_status.delegating_queued_addend": "{count, plural, one {# en cola} many {# en cola} other {# en cola}}",
+  "wire.session_status.duration_seconds": "{count, number} s",
+  "wire.session_status.duration_minutes": "{count, number} min",
+  "wire.session_status.duration_hours_minutes": "{hours, number} h {minutes, number} min",
+  "wire.session_status.duration_days_hours": "{days} d {hours, number} h"
 }

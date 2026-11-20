@@ -29,5 +29,9 @@
   "wire.session_status.delegating_jobs": "{count, plural, other {# tác vụ đang chạy}}",
   "wire.session_status.delegating_running": "{count, plural, other {# tác nhân con đang chạy}}",
   "wire.session_status.delegating_queued": "{count, plural, other {# tác nhân con chờ chạy}}",
-  "wire.session_status.delegating_queued_addend": "{count, plural, other {# chờ chạy}}"
+  "wire.session_status.delegating_queued_addend": "{count, plural, other {# chờ chạy}}",
+  "wire.session_status.duration_seconds": "{count, number} giây",
+  "wire.session_status.duration_minutes": "{count, number} phút",
+  "wire.session_status.duration_hours_minutes": "{hours, number} giờ {minutes, number} phút",
+  "wire.session_status.duration_days_hours": "{days} ngày {hours, number} giờ"
 }
