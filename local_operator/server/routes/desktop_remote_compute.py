@@ -35,9 +35,11 @@ filter is defence in depth.
 ONE STATUS VOCABULARY, AND IT IS PUBLISHED HERE. The server ends every run as
 ``status: "stopped"`` plus an ``outcome``, while the desktop's renderer settles on
 a STATUS. :func:`_desktop_status` is the one join (see
-:data:`STOPPED_OUTCOME_TO_STATUS`), applied to every run row this module answers
-with — and deliberately not in the client, whose ``--remote-status`` must keep
-printing the server's own words.
+:data:`STOPPED_OUTCOME_TO_STATUS`), applied to every run row and every run STATUS
+this module answers with — the create receipt, the listing, ``active``, the detail
+read, the cancel/delete echo, and the logs/results pages' ``run_status``. It is
+deliberately not in the client, whose ``--remote-status`` must keep printing the
+server's own words.
 
 THE FLAG IS READ PER REQUEST, from the app's config root. ``is_enabled`` reads
 ``config.yml`` on every call precisely so a live toggle reaches a running daemon.
@@ -840,7 +842,11 @@ async def run_logs(
     return {
         "events": list(page.events),
         "next_token": page.next_token,
-        "run_status": page.run_status,
+        # THE PAGE'S STATUS THROUGH THE ONE JOIN, not republished raw: the same run
+        # must not read ``succeeded`` on /runs/{id} and ``stopped`` here. The page
+        # carries no outcome, so a stopped run stays ``stopped`` — see
+        # :func:`_page_status`.
+        "run_status": _page_status(page.run_status),
     }
 
 
@@ -871,7 +877,9 @@ async def run_results(
     async with _runs(root, credential_id) as runs:
         listing = await runs.client.run_artifacts(identifier)
     return {
-        "run_status": listing.run_status,
+        # The same join the detail read and the log page use; identity for a stopped
+        # page, which carries no outcome. See :func:`_page_status`.
+        "run_status": _page_status(listing.run_status),
         "artifacts": [artifact.to_json() for artifact in listing.artifacts],
         "git": listing.git,
     }
@@ -1299,6 +1307,25 @@ def _desktop_status(payload: Mapping[str, Any]) -> str | None:
     if not isinstance(outcome, str):
         return status
     return STOPPED_OUTCOME_TO_STATUS.get(outcome, status)
+
+
+def _page_status(status: str, *, outcome: str | None = None) -> str:
+    """The published status of a LOGS or RESULTS page, through the same one join.
+
+    THE PAGES CARRY A STATUS AND NO OUTCOME (``client.LogPage``,
+    ``client.RunArtifacts``), so THE JOIN IS IDENTITY FOR THEM TODAY: a stopped page
+    is published ``stopped``, because this plane must not invent an ending the page
+    did not send — the client narrows the server's body to the fields this build
+    names, and ``outcome`` is not one of them. They still GO THROUGH the join rather
+    than republishing the server's token, so the vocabulary is decided in one place:
+    the day a page carries an outcome, ``outcome`` settles here exactly as
+    ``/runs/{id}`` settles its row, with no second table to keep in step.
+    """
+    payload: dict[str, Any] = {"status": status}
+    if outcome is not None:
+        payload["outcome"] = outcome
+    published = _desktop_status(payload)
+    return published if published is not None else status
 
 
 def _published_run(run: dict[str, Any], *, source: str | None = None) -> dict[str, Any]:

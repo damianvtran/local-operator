@@ -828,6 +828,24 @@ async def test_the_summarys_active_list_drops_every_finished_run(api: Api) -> No
     assert "source" not in body["active"][0]
 
 
+def test_a_page_status_settles_through_the_same_join_when_a_page_carries_an_outcome() -> None:
+    """``_page_status`` is the pages' door to the join, and it is the SAME table.
+
+    Both page shapes carry a ``run_status`` and no ``outcome`` today, so the call the
+    routes make is identity — a stopped page stays ``stopped``, which the log and
+    results routes' own tests pin. This is the seam for a page that grows one: it
+    settles here rather than growing a second table beside the first.
+    """
+    assert desktop_remote_compute._page_status("stopped") == "stopped"
+    assert desktop_remote_compute._page_status("stopped", outcome="succeeded") == "succeeded"
+    assert desktop_remote_compute._page_status("stopped", outcome="expired") == "expired"
+    # In flight, and the retryable failure the sweep retries, are published as sent.
+    assert desktop_remote_compute._page_status("error") == "error"
+    # An ending the table does not name keeps the server's own token, exactly as a
+    # run row does.
+    assert desktop_remote_compute._page_status("stopped", outcome="superseded") == "stopped"
+
+
 @pytest.mark.asyncio
 async def test_the_create_receipt_publishes_a_run_that_already_ended(api: Api) -> None:
     """A replay, or a run that ended within the wait, comes back finished."""
@@ -1957,6 +1975,42 @@ async def test_a_log_page_is_passed_through_with_its_token(api: Api) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_log_page_publishes_its_status_through_the_one_join(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page's ``run_status`` is published by the join, not republished raw.
+
+    THE WIRING IS WHAT THIS PINS, and a sentinel is the only way to observe it: the
+    join is identity for a log page (it carries a ``run_status`` and no ``outcome``),
+    so a route that copied the server's token would answer the same word and no
+    assertion on the word could tell the two apart. A route that forgot the join
+    would answer the page's status and never reach the sentinel. Before this change
+    one run could read ``succeeded`` on ``/runs/{id}`` and ``stopped`` here.
+    """
+    api.configure()
+    seen: list[str] = []
+
+    def joined(status: str, **_: Any) -> str:
+        seen.append(status)
+        return "joined-by-the-route"
+
+    monkeypatch.setattr(desktop_remote_compute, "_page_status", joined)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/logs",
+        payload=_log_page(messages=("cloning",), token="tok-2", status="stopped"),
+    )
+
+    body = (await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}/logs")).json()
+
+    assert body["run_status"] == "joined-by-the-route"
+    # The join is handed THE PAGE'S OWN STATUS, and the rest of the page is untouched.
+    assert seen == ["stopped"]
+    assert body["next_token"] == "tok-2"
+    assert [event["message"] for event in body["events"]] == ["cloning"]
+
+
+@pytest.mark.asyncio
 async def test_a_deployment_where_logs_are_not_readable_answers_its_own_code(api: Api) -> None:
     """``not_configured`` is a definite answer: the panel says logs are not offered."""
     api.configure()
@@ -1997,6 +2051,39 @@ async def test_the_results_listing_carries_no_download_urls(api: Api) -> None:
         {"name": "results.tar.gz", "size_bytes": 1234, "expires_at": "2026-11-17T00:05:00Z"}
     ]
     assert body["git"] == {"branch": "lop/run", "commit": "c0ffee", "bundle_present": True}
+
+
+@pytest.mark.asyncio
+async def test_the_results_page_publishes_its_status_through_the_one_join(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artifacts listing's ``run_status`` goes through the join, as the log page's does.
+
+    A sentinel again, for the same reason: an artifact listing carries no ``outcome``,
+    so the join is identity and the command a route that skipped it would produce is
+    the answer itself.
+    """
+    api.configure()
+    seen: list[str] = []
+
+    def joined(status: str, **_: Any) -> str:
+        seen.append(status)
+        return "joined-by-the-route"
+
+    monkeypatch.setattr(desktop_remote_compute, "_page_status", joined)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("results.tar.gz", 1234)),
+    )
+
+    body = (await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results")).json()
+
+    assert body["run_status"] == "joined-by-the-route"
+    assert seen == ["stopped"]
+    assert body["artifacts"] == [
+        {"name": "results.tar.gz", "size_bytes": 1234, "expires_at": "2026-11-17T00:05:00Z"}
+    ]
 
 
 @pytest.mark.asyncio
