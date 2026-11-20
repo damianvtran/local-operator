@@ -248,3 +248,50 @@ def test_shipped_fr_catalogue_paints_the_tool_card(shipped_fr) -> None:
     # `diff` is not sanctioned English in fr (audit round 1, F1): the marker
     # must carry the translated noun.
     assert "comparaison" in got["diff_more"], got["diff_more"]
+
+
+def test_a_finished_card_follows_a_live_language_change(shipped_fr) -> None:
+    """The SAME settled card repaints its structured rows after ``/language``.
+
+    ``_surfaces()`` builds fresh cards after the switch, so it could not see the
+    PR #4360 round-1 defect (R1/Q1/D1): web_fetch's ``Fetched:``/``Rendered:``
+    rows and web_search's fetch hint were composed into plain strings once, at
+    settle time, and a later switch repainted the header but not those rows.
+    """
+    fetch = ToolCard("f", "web_fetch", {"url": "https://example.com/docs"})
+    fetch.mark_done(
+        "[200] https://example.com/docs\n\n# Docs\n\nBody.",
+        {
+            "url": "https://example.com/docs",
+            "final_url": "https://example.com/docs/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 1234,
+            "lines": 40,
+        },
+    )
+    fetch.toggle_expanded()
+    search = ToolCard("s", "web_search", {"query": "q"})
+    search.mark_done(
+        "1 result",
+        {"sources": [{"title": "Docs", "url": "https://example.com", "snippet": "s"}]},
+    )
+    search.toggle_expanded()
+    before = fetch._build_content(160).plain
+    assert "Fetched:" in before and "Rendered:" in before, before
+    assert "web_fetch result N" in search._build_content(160).plain
+
+    text.set_active_locale("fr")
+    after = fetch._build_content(160).plain
+    assert "Récupéré" in after and "Fetched:" not in after, after
+    assert "Rendu" in after and "Rendered:" not in after, after
+    # The body below the rows is the tool's own bytes and must survive intact.
+    assert "Body." in after, after
+    search_after = search._build_content(160).plain
+    assert "web_fetch le résultat N" in search_after, search_after
+
+    # And back: the recomposition tracks every switch, not only the first.
+    text.set_active_locale("en")
+    assert "Fetched:" in fetch._build_content(160).plain

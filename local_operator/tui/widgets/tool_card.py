@@ -117,7 +117,7 @@ from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_tool_card as _tc
-from local_operator.i18n.text import tr, tr_record
+from local_operator.i18n.text import active_locale, tr, tr_record
 from local_operator.tools import diff_archive
 from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
@@ -1974,6 +1974,12 @@ class ToolCard(ExpandableActionBlock):
         self._removed = 0
         #: Cleaned result lines, populated once the tool finishes.
         self._output: list[str] = []
+        #: The ``(result_text, details)`` a structured (search/fetch) output was
+        #: composed from, kept so a live language switch can recompose it;
+        #: ``None`` for plain output. See :meth:`_compose_output`.
+        self._localized_output_inputs: tuple[str, dict[str, Any] | None] | None = None
+        #: The locale ``_output`` was composed under.
+        self._output_locale = ""
         #: The write/edit tool's rendered unified diff (``details["diff"]``),
         #: colourised at render time. ``None`` (not []) when the tool reported
         #: no diff — a read or bash card expands to its raw output instead.
@@ -3346,8 +3352,55 @@ class ToolCard(ExpandableActionBlock):
             and details.get("op") == "stop"
             and details.get("method") == "pending"
         )
-        name = self.tool_name.lower()
         self._absorb_bridge(details)
+        self._compose_output(result_text, details)
+        from local_operator.profile_actions import ProfileAction
+
+        raw = details.get("profile_action") if isinstance(details, Mapping) else None
+        try:
+            action = ProfileAction.model_validate(dict(raw)) if isinstance(raw, Mapping) else None
+        except ValueError:
+            action = None
+        self.set_class(action is not None, "profile-action-card")
+        if action != self._profile_action:
+            self._profile_action = action
+            self._profile_action_state = "unavailable"
+            self._profile_action_checked = False
+            self._profile_action_source = None
+            self._profile_action_live = None
+        # Persisted descriptors/verified flags are display data, not live proof.
+        if action is not None and self.is_mounted:
+            self.post_message(self.ProfileActionCheck(self))
+
+        diff = details.get("diff") if isinstance(details, Mapping) else None
+        # Canonical follower details are immutable sequences, not concrete
+        # lists. They still carry the same unified diff as the live executor.
+        if isinstance(diff, Sequence) and not isinstance(diff, (str, bytes)) and diff:
+            self._diff = [str(line) for line in diff]
+        else:
+            self._diff = None
+        omitted = details.get("diff_truncated_rows") if isinstance(details, Mapping) else None
+        self._diff_omitted = omitted if isinstance(omitted, int) and omitted > 0 else 0
+        full = details.get(DIFF_FULL_KEY) if isinstance(details, Mapping) else None
+        self._diff_full = full if isinstance(full, Mapping) else None
+        self._full_diff_rows = None
+        self._full_diff_shown = False
+
+    def _compose_output(self, result_text: str, details: dict[str, Any] | None) -> None:
+        """Compose ``self._output`` from a result, in the ACTIVE language.
+
+        Split out of :meth:`_absorb_result` so a live language switch can run it
+        again: the web_search and web_fetch rows (``Fetched:``/``Rendered:``,
+        the search hint) are catalogue text composed into plain strings, so a
+        card settled before ``/language`` would otherwise keep the old language
+        under a header that already repainted (PR #4360 round 1, R1/Q1/D1).
+        The inputs and the locale they were composed under are remembered, and
+        :meth:`_refresh_localized_output` recomposes at paint time when the
+        locale moved. Everything here must stay a pure function of
+        ``(result_text, details, args)`` for that to be safe — side effects that
+        must happen once per result belong in :meth:`_absorb_result`.
+        """
+        name = self.tool_name.lower()
         search_output = _search_result_output(details) if name == "web_search" else []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
         # carries a fetch's details shape) leads with structured header rows and
@@ -3414,37 +3467,18 @@ class ToolCard(ExpandableActionBlock):
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
         self._output = search_output or fetch_output or self._clean_output(result_text)
-        from local_operator.profile_actions import ProfileAction
+        # Only cards whose rows carry catalogue text need recomposing; a plain
+        # output is the tool's own bytes and is never re-derived.
+        self._localized_output_inputs = (
+            (result_text, details) if (search_output or fetch_output) else None
+        )
+        self._output_locale = active_locale()
 
-        raw = details.get("profile_action") if isinstance(details, Mapping) else None
-        try:
-            action = ProfileAction.model_validate(dict(raw)) if isinstance(raw, Mapping) else None
-        except ValueError:
-            action = None
-        self.set_class(action is not None, "profile-action-card")
-        if action != self._profile_action:
-            self._profile_action = action
-            self._profile_action_state = "unavailable"
-            self._profile_action_checked = False
-            self._profile_action_source = None
-            self._profile_action_live = None
-        # Persisted descriptors/verified flags are display data, not live proof.
-        if action is not None and self.is_mounted:
-            self.post_message(self.ProfileActionCheck(self))
-
-        diff = details.get("diff") if isinstance(details, Mapping) else None
-        # Canonical follower details are immutable sequences, not concrete
-        # lists. They still carry the same unified diff as the live executor.
-        if isinstance(diff, Sequence) and not isinstance(diff, (str, bytes)) and diff:
-            self._diff = [str(line) for line in diff]
-        else:
-            self._diff = None
-        omitted = details.get("diff_truncated_rows") if isinstance(details, Mapping) else None
-        self._diff_omitted = omitted if isinstance(omitted, int) and omitted > 0 else 0
-        full = details.get(DIFF_FULL_KEY) if isinstance(details, Mapping) else None
-        self._diff_full = full if isinstance(full, Mapping) else None
-        self._full_diff_rows = None
-        self._full_diff_shown = False
+    def _refresh_localized_output(self) -> None:
+        """Recompose structured result rows when the language changed since."""
+        inputs = self._localized_output_inputs
+        if inputs is not None and self._output_locale != active_locale():
+            self._compose_output(*inputs)
 
     def _clean_output(self, result_text: str) -> list[str]:
         """Normalise the result into displayable rows (empty = nothing to show).
@@ -3961,6 +3995,9 @@ class ToolCard(ExpandableActionBlock):
         command — leaving no state of the card, collapsed or expanded, from
         which a user could learn what had run.
         """
+        # Before ANY read of ``_output`` this frame: a language switch since the
+        # result settled must not leave its structured rows in the old language.
+        self._refresh_localized_output()
         row = self._build_row(width)
         if not self._expanded:
             return row
