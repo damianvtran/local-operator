@@ -1,0 +1,194 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+  "target_sha256": "c5a75e07a0be56dba0dcd691d3a04571014dd5e1f028a74a66438788278d51a7",
+  "translator": {
+    "agent": "translator (identity from delegation)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "dc3f9744c5a1",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "dc3f9744c5a1",
+  "files": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/vi/wire.session_status.json",
+      "sha256": "c5a75e07a0be56dba0dcd691d3a04571014dd5e1f028a74a66438788278d51a7"
+    }
+  },
+  "findings_by_severity": {
+    "blocker": [],
+    "major": [],
+    "minor": [
+      {
+        "id": "VI-DUR-01",
+        "severity": "minor",
+        "keys": [
+          "wire.session_status.duration_minutes",
+          "wire.session_status.duration_hours_minutes"
+        ],
+        "current": [
+          "{count, number} phút",
+          "{hours, number} giờ {minutes, number} phút"
+        ],
+        "proposed": [
+          "{count, number} ph",
+          "{hours, number} giờ {minutes, number} ph"
+        ],
+        "reason": "Full phút is idiomatic and matches relay.shell.usage.countdown_minutes/countdown_hours, but the explicit compact role and shipped relay.asks.duration.minutes ({count, number} ph) support ph; rejecting ph as un-Vietnamese is not justified. Use it to reduce width, or retain full words with rendered fit evidence. No measured clipping is claimed."
+      }
+    ],
+    "nit": []
+  },
+  "verdict": "clean-with-findings",
+  "status": "passed",
+  "keys_read": 35,
+  "keys_in_delta": 4,
+  "runtime_cases": [
+    {
+      "case": "0s",
+      "duration": "0 giây",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 0 giây)",
+      "duration_cells_en_vi": [
+        2,
+        6
+      ],
+      "composed_cells_en_vi": [
+        53,
+        77
+      ]
+    },
+    {
+      "case": "42s",
+      "duration": "42 giây",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 42 giây)",
+      "duration_cells_en_vi": [
+        3,
+        7
+      ],
+      "composed_cells_en_vi": [
+        54,
+        78
+      ]
+    },
+    {
+      "case": "1m",
+      "duration": "1 phút",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 1 phút)",
+      "duration_cells_en_vi": [
+        2,
+        6
+      ],
+      "composed_cells_en_vi": [
+        53,
+        77
+      ]
+    },
+    {
+      "case": "4m",
+      "duration": "4 phút",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 4 phút)",
+      "duration_cells_en_vi": [
+        2,
+        6
+      ],
+      "composed_cells_en_vi": [
+        53,
+        77
+      ]
+    },
+    {
+      "case": "1h 0m",
+      "duration": "1 giờ 0 phút",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 1 giờ 0 phút)",
+      "duration_cells_en_vi": [
+        5,
+        12
+      ],
+      "composed_cells_en_vi": [
+        56,
+        83
+      ]
+    },
+    {
+      "case": "3h 12m",
+      "duration": "3 giờ 12 phút",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 3 giờ 12 phút)",
+      "duration_cells_en_vi": [
+        6,
+        13
+      ],
+      "composed_cells_en_vi": [
+        57,
+        84
+      ]
+    },
+    {
+      "case": "21h 0m",
+      "duration": "21 giờ 0 phút",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 21 giờ 0 phút)",
+      "duration_cells_en_vi": [
+        6,
+        13
+      ],
+      "composed_cells_en_vi": [
+        57,
+        84
+      ]
+    },
+    {
+      "case": "1d 1h",
+      "duration": "1 ngày 1 giờ",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 1 ngày 1 giờ)",
+      "duration_cells_en_vi": [
+        5,
+        12
+      ],
+      "composed_cells_en_vi": [
+        56,
+        83
+      ]
+    },
+    {
+      "case": "2d 4h",
+      "duration": "2 ngày 4 giờ",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 2 ngày 4 giờ)",
+      "duration_cells_en_vi": [
+        5,
+        12
+      ],
+      "composed_cells_en_vi": [
+        56,
+        83
+      ]
+    },
+    {
+      "case": "1000d 0h",
+      "duration": "1000 ngày 0 giờ",
+      "heartbeat": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 1000 ngày 0 giờ)",
+      "duration_cells_en_vi": [
+        8,
+        15
+      ],
+      "composed_cells_en_vi": [
+        59,
+        86
+      ]
+    }
+  ],
+  "note": "Independent delta audit: 4 new keys + wedged_heartbeat assessed deeply; all 35 English/vi entries read, 31 original entries unchanged. 0 unresolved blocker/major. Full Vietnamese units are accurate; ph is valid shipped local shorthand, not English. Full words match relay.shell usage countdown keys; no RTL for vi. Runtime string rendering only: no actual UI clipping/fit sign-off. Preserve all older audits; receipt does not replace their scope. No fallback model used."
+}

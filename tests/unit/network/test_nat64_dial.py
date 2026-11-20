@@ -354,8 +354,10 @@ def test_relay_dial_sites_use_the_seam(monkeypatch: pytest.MonkeyPatch) -> None:
         raise OSError(errno.ENETUNREACH, "no route")
 
     monkeypatch.setattr(nat64, "create_connection", fake)
-    probe = relay.probe_candidates(["192.0.2.9:4097"], deadline=None, connect_cap=1.0)
-    assert ("192.0.2.9", 4097) in seen
+    # A NAME: since #4260 an IP literal is dialled on a hand-built socket and
+    # reaches NAT64 through ``nat64.fallback`` instead (pinned further down).
+    probe = relay.probe_candidates(["relay.invalid:4097"], deadline=None, connect_cap=1.0)
+    assert ("relay.invalid", 4097) in seen
     assert probe.sock is None and probe.winner == ""
     # ``RelayServer.dial`` needs a whole relay to drive; its source is the cheap,
     # exact proof that its own connect (the non-probe path) is the same seam.

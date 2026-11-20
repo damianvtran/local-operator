@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tunnel.upgrade",
+  "history_sha256": "4f041d68b2f215d12df49bb708f4a11bf2d056f81dabc04bef8b7259bcbe0492",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tunnel.upgrade",
+      "source_sha256": "8e669c9a495378caa0197b27fb20748a1e3cb14219583c750710ee10b0fe67e7",
+      "translator": {
+        "agent": "LO PR4306 translator allocation, session ff93b5b42f16 (coder role; translation-only lane, independent of English author)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19",
+        "fallback": "anthropic/claude-opus-5-5 quota failure before translation; all translation authored by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "receipt_id": "pr4306-tunnel-upgrade-es-ff93b5b42f16-t1",
+      "note": "Translator-only receipt; independent audit NOT completed. Complete namespace: client.label, client.guidance, client.plain (3 keys). Target sha256 4e9ac678d52130a937453e4e8b6bd3f040a3340a2b1619682fb7de299fe3fc30; source context sha256 048832916bdec9288f14cc3d55ee5af84b440a277938d9542725ccfdc36757ff. Read i18n/glossary.md and locale style guide. Technical/product literals and placeholder order preserved; shell/TUI commands supplied only through placeholders; plain guidance has no terminal command. Conditional override removal, manual update/reconnect, and login/billing non-remedy preserved. Urdu logical storage order, no manual bidi controls. Mechanical/runtime formatting checks separate; no native, visual, pseudo, RTL-rendering or audit sign-off claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "tunnel.upgrade",
+      "source_sha256": "8e669c9a495378caa0197b27fb20748a1e3cb14219583c750710ee10b0fe67e7",
+      "translator": {
+        "agent": "LO PR4306 translator allocation, session ff93b5b42f16 (coder role; translation-only lane, independent of English author)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19",
+        "fallback": "anthropic/claude-opus-5-5 quota failure before translation; all translation authored by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "Independent linguistic auditor, Local Operator session e9cd383653a0; not translator ff93b5b42f16 or implementing agent; authored no translated values",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19",
+        "fallback": "anthropic/claude-opus-5-5 provider quota failure before linguistic review; all semantic audit performed by openai/gpt-6.1-sol",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "receipt_id": "pr4306-tunnel-upgrade-es-e9cd383653a0-a1",
+      "note": "Independent complete linguistic audit of label/guidance/plain (3 keys) against frozen English 8e669c9a495378caa0197b27fb20748a1e3cb14219583c750710ee10b0fe67e7, context SHA256 048832916bdec9288f14cc3d55ee5af84b440a277938d9542725ccfdc36757ff; read AGENTS i18n policy, docs/I18N.md, i18n/glossary.md and locale style guide. Target sha256 4e9ac678d52130a937453e4e8b6bd3f040a3340a2b1619682fb7de299fe3fc30. No findings: idiomatic register and relay terminology; required client update, conditional Cloudflare override removal, ordered reconnect recovery and explicit login/billing non-remedy preserved. Exact placeholders/order, product/config tokens and command-free desktop plain text preserved. Real local_operator.i18n.runtime.render_message passed all 3 keys for CLI/TUI params (6 renders per locale, 42 total); key/argument parity, NFC and no stored bidi controls checked. No translation edits by auditor. Same actual served model as translator, different independent session. No rendered-frame, native RTL, device or UI layout sign-off claimed. Audit only at current uncommitted bytes; PR code-review round is separate.",
+      "keys_audited": 3,
+      "round": "a1",
+      "target_sha256": "4e9ac678d52130a937453e4e8b6bd3f040a3340a2b1619682fb7de299fe3fc30"
+    }
+  ]
+}

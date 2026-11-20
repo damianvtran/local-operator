@@ -1,0 +1,4 @@
+PASS: normal ledger.append admission, apply=False; no history write
+expected_history_sha256=133d29bbc8992b2b92758d4b6ff78407c6fb5ab3b732c863d35b07e0ffe3d27c
+destination=i18n/audit-history/es/wire.session_status.json
+receipt_sha256=1c1fe357ffe269869169355b49b9127c4e9f1ec838df2ea930fea0f61e1e295c

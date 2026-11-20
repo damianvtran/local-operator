@@ -865,6 +865,12 @@ def credential_identity(credential: "StoredCredential | Mapping[str, Any]") -> s
         data: Mapping[str, Any] = credential.data
     else:
         data = getattr(credential, "data", credential)
+    # An Amazon Bedrock row names itself by its connection label ("dev ·
+    # us-east-1"), never by its descriptor ``key`` (design §8): the label is
+    # what the operator chose, and the descriptor is storage plumbing.
+    bedrock = data.get("bedrock")
+    if isinstance(bedrock, Mapping) and bedrock.get("label"):
+        return str(bedrock["label"])[:IDENTITY_LIMIT]
     for field in ("email", "account_id", "org_name"):
         value = data.get(field)
         if value:
@@ -1228,6 +1234,17 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     row — otherwise two logins leave two rows and the older one carries a
     dead rotated refresh token that the cascade keeps selecting.
     """
+    if provider == "bedrock":
+        # BEFORE the api-key early return: a Bedrock row is an api_key-typed
+        # CONNECTION (profile + Region, ambient + Region ...), and re-saving
+        # the same connection must replace its row instead of piling up
+        # duplicates that rotation would then walk. Raw API keys still never
+        # dedupe (``identity_key`` returns None for them).
+        from local_operator.providers.bedrock.store import identity_key
+
+        bedrock_identity = identity_key(credential)
+        if bedrock_identity is not None:
+            return bedrock_identity
     if credential.get("type") == "api_key" or credential.get("source") == "login":
         return None
     custody = credential.get(MESH_CUSTODY_IDENTITY_KEY)
@@ -2606,7 +2623,9 @@ class AuthStore:
             logger.debug("bridge display purge after logout failed", exc_info=True)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
-        """Seal Muse secrets before metadata serialization; preserve other providers."""
+        """Seal Muse/Bedrock secrets before metadata serialization; preserve other providers."""
+        if self._storage_id(provider) == "bedrock":
+            return self._upsert_bedrock_credential(credential)
         if self._storage_id(provider) != "meta-muse":
             return self._upsert_credential_metadata(provider, credential)
         from local_operator.providers.meta_muse_credentials import (
@@ -2631,6 +2650,48 @@ class AuthStore:
         for old in old_rows:
             if old.id == row.id:
                 delete_key(old.data, self._config_dir or self._db_path.parent)
+        return row
+
+    def _upsert_bedrock_credential(self, credential: dict[str, Any]) -> StoredCredential:
+        """Bedrock seal hook: secret -> encrypted store, descriptor -> auth.db.
+
+        Same order and compensation as the Muse branch above: seal first (a
+        fresh ref per write, so a failed metadata write never clobbers a
+        working connection's secret), write metadata, and on failure delete
+        the new ref unless a committed row already owns it. After success the
+        REPLACED row's old ref (same identity, same row id) is deleted. A row
+        with nothing to seal (profile / ambient / env-bearer descriptors) is
+        written as-is.
+        """
+        from local_operator.providers.bedrock.store import (
+            delete_key,
+            needs_seal,
+            seal_credential,
+        )
+
+        base = self._config_dir or self._db_path.parent
+        if not needs_seal(credential):
+            old_rows = self.list_credentials("bedrock", include_disabled=True)
+            row = self._upsert_credential_metadata("bedrock", credential)
+            for old in old_rows:
+                if old.id == row.id and old.data.get("key") != row.data.get("key"):
+                    delete_key(old.data, base)
+            return row
+        old_rows = self.list_credentials("bedrock", include_disabled=True)
+        sealed = seal_credential(credential, base)
+        try:
+            row = self._upsert_credential_metadata("bedrock", sealed)
+        except BaseException:
+            self._conn.rollback()
+            if not any(
+                existing.data.get("key") == sealed["key"]
+                for existing in self.list_credentials("bedrock", include_disabled=True)
+            ):
+                delete_key(sealed, base)
+            raise
+        for old in old_rows:
+            if old.id == row.id and old.data.get("key") != sealed["key"]:
+                delete_key(old.data, base)
         return row
 
     def _upsert_credential_metadata(
@@ -3150,6 +3211,20 @@ class AuthStore:
     def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
         row = self.get_credential(credential_id)
+        if row is not None and row.provider == "bedrock":
+            # Metadata first, then the sealed secret: a failed delete must
+            # never leave a row pointing at a ref that no longer exists.
+            # (``delete_credentials_for_provider`` loops through here.)
+            from local_operator.providers.bedrock.store import delete_key
+
+            self._conn.execute(
+                "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
+            )
+            self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
+            self._conn.commit()
+            self._publish_account_file()
+            delete_key(row.data, self._config_dir or self._db_path.parent)
+            return
         if row is not None and row.provider == "meta-muse":
             from local_operator.providers.meta_muse_credentials import (
                 reversible_key_deletion,
@@ -6781,8 +6856,14 @@ class AuthStore:
         # left usable and only the sticky pointer moves, which is enough to send
         # THIS attempt to a sibling.
         server_side = is_server_side_failure(error)
+        # Same reasoning for a failure the error itself declares row-neutral
+        # (``ProviderError.block_on_rotate=False``: a Bedrock credential chain
+        # that did not resolve, re-read every attempt). Move the sticky pointer
+        # so a sibling serves this attempt, but write no block that would
+        # outlive the user's fix (R3-1 / Q8).
+        row_neutral = server_side or getattr(error, "block_on_rotate", True) is False
         if failing is not None:
-            if server_side:
+            if row_neutral:
                 self.deprioritize_credential(provider, failing.id)
             else:
                 retry_after = retry_after_ms_from_error(error)

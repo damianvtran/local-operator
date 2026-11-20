@@ -8,6 +8,7 @@ in the exec-startup and sdk/spec tests.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -453,6 +454,17 @@ def test_system_block_embeds_the_whole_schema() -> None:
     block = OutputContract(format="json", schema=RAW_SCHEMA).system_block()
     assert "- It must validate against this schema (JSON Schema): {" in block
     assert '"required"' in block
+
+
+def test_system_block_schema_is_compact_and_order_preserving() -> None:
+    """The schema rides every request, so it is announced minified — and the
+    caller's key order is kept (no ``sort_keys``), since it can carry meaning."""
+    block = OutputContract(format="json", schema=RAW_SCHEMA).system_block()
+    line = next(line for line in block.splitlines() if "(JSON Schema): " in line)
+    announced = line.split("(JSON Schema): ", 1)[1]
+    assert announced == json.dumps(RAW_SCHEMA, separators=(",", ":"))
+    assert "\n" not in announced and ": " not in announced and ", " not in announced
+    assert json.loads(announced) == RAW_SCHEMA
 
 
 def test_system_block_for_markdown_lists_sections() -> None:

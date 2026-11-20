@@ -1,0 +1,5 @@
+{
+  "tunnel.upgrade.client.label": "Es necesario actualizar el cliente de túnel",
+  "tunnel.upgrade.client.guidance": "Radient requiere un cliente de túnel compatible con relé. Ejecuta {update_command}, elimina la configuración forzada {override} de config.yml si está definida y vuelve a conectarte con {reconnect_command}. Volver a iniciar sesión o cambiar la facturación no resolverá este problema.",
+  "tunnel.upgrade.client.plain": "Actualiza Local Operator a una versión compatible con túneles que usen solo relé. En config.yml, elimina la configuración forzada tunnel.transport: cloudflare si está definida y vuelve a conectar este equipo. Volver a iniciar sesión o cambiar la facturación no resolverá este problema."
+}

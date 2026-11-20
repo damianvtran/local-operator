@@ -27,7 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from local_operator.info.model import format_duration
 from local_operator.paths import config_dir
@@ -1266,6 +1266,88 @@ def session_id_unowned(error: str) -> bool:
     return (
         "no session found with session id" in error
         or "is stale (its pid no longer exists)" in error
+    )
+
+
+#: The live resolver's pid MISS form (``resolve_scanned_pid``): no record on
+#: THIS device carries the pid at all. The only refusal that may consult the
+#: mesh — a pid this device DID find (wedged, stale, unengaged) is an answer
+#: about a local process and stands, which is what keeps "local wins" exact.
+PID_MISS = "no session found with pid"
+
+
+def pid_not_on_this_device(error: str) -> bool:
+    """True only for the resolver's pid miss form (see :data:`PID_MISS`)."""
+    return error.startswith(PID_MISS)
+
+
+def remote_pid_decision(
+    pid: int,
+    rows: Sequence[Any],
+    *,
+    address: Callable[[str, str], str],
+) -> tuple[Any | None, str]:
+    """Decide a LOCAL pid miss against the remote rows reporting that pid.
+
+    ``rows`` is ``session.peer_rows.peer_pid_rows(pid)`` — one fresh read, each
+    row carrying ``session_id``/``owner_device``/``owner_device_name``/``live``/
+    ``not_live_reason``. ``address(session_id, device_id)`` spells how the
+    CALLER's grammar addresses one remote session (``session=<id>`` for the
+    tool), so every refusal names a form the reader can retype.
+
+    Returns ``(row, "")`` to route to that row by its SESSION ID, else
+    ``(None, refusal)``:
+
+    * exactly ONE live row → route. Pids are device-local, but the owner just
+      reported this pid for exactly one running session, so the call can only
+      have meant that one; the caller says it routed by session id.
+    * several live rows → refuse with every candidate. Pids recycle across
+      devices, so two devices each running a process with this number is
+      ordinary, and picking one is the wrong-recipient guess the mesh refuses
+      everywhere else.
+    * only non-live rows → refuse NAMING each session id: the pid once meant
+      that session, but its owner is not answering for it now, and delivering
+      to a stale guess is worse than a refusal the caller can act on.
+    * no rows → the original miss sentence, now saying pids are device-local
+      and how to address a remote session instead.
+    """
+    live = [row for row in rows if row.live]
+    if len(live) == 1:
+        return live[0], ""
+    if len(live) > 1:
+        lines = [
+            # i18n: ignore model-facing send refusal, unkeyed like the resolver miss it extends
+            f"{PID_MISS} {pid} on this device, and {len(live)} sessions on other devices "
+            "report it (pids are device-local and recycle across devices) — address "
+            "one by its session id:"
+        ]
+        for row in live:
+            lines.append(
+                # i18n: ignore model-facing send refusal, unkeyed like the resolver miss it extends
+                f"  {address(row.session_id, row.owner_device)}  "
+                f"({row.session_id} on {row.owner_device_name})"
+            )
+        return None, "\n".join(lines)
+    if rows:
+        # i18n: ignore model-facing send refusal, unkeyed like the resolver miss it extends
+        lines = [f"{PID_MISS} {pid} on this device, and not routed:"]
+        for row in rows:
+            lines.append(
+                # i18n: ignore model-facing send refusal, unkeyed like the resolver miss it extends
+                f"  session {row.session_id} on {row.owner_device_name} reports pid {pid}, "
+                f"but {row.not_live_reason}"
+            )
+        lines.append(
+            # i18n: ignore model-facing send refusal, unkeyed like the resolver miss it extends
+            "A pid is device-local; once that session is running, address it by "
+            f"its session id: {address(rows[0].session_id, rows[0].owner_device)}"
+        )
+        return None, "\n".join(lines)
+    return None, (
+        # i18n: ignore model-facing send refusal, unkeyed like the resolver miss it extends
+        f"{PID_MISS} {pid} — pids are device-local and no paired device reports this "
+        f"one either; address a session on another device by its session id "
+        f"({address('<id>', '<device>')})"
     )
 
 

@@ -36,6 +36,7 @@ from local_operator.team_bridge import pull as pull_mod
 from local_operator.team_bridge.connector import conversation as conversation_mod
 from local_operator.team_bridge.connector import loop as loop_mod
 from local_operator.team_bridge.connector.conversation import (
+    REPLY_STYLE_LINE,
     ConversationCardMetadata,
     build_conversation_card,
 )
@@ -69,6 +70,7 @@ conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
 conversation_seq: 1
 expect: reply
+{REPLY_STYLE_LINE}
 {ROOT_REPLY_LINE}
 guidance: bridge-guidance-v2"""
 
@@ -806,6 +808,45 @@ def _hold_rows(config_dir: Path) -> list[dict[str, Any]]:
     with sqlite3.connect(state_db_path(config_dir)) as conn:
         conn.row_factory = sqlite3.Row
         return [dict(row) for row in conn.execute("SELECT * FROM screening_holds")]
+
+
+@pytest.mark.parametrize("code", ["sign_in_required", "consent_required", "owner_ineligible"])
+def test_conversation_owner_action_hold_notifies_once_and_delivers_nothing(
+    tmp_path, monkeypatch, code
+) -> None:
+    """The CONVERSATION path raises the same keyed owner-action notice.
+
+    Held, never delivered; the item names no sender, conversation or body; a
+    failing notification store leaves the hold exactly as it was.
+    """
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.team_bridge.screening import ScreenResult
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    async def owner_action(*_a: Any, **_k: Any) -> Any:
+        return ScreenResult("hold", hold_code=code)
+
+    monkeypatch.setattr(conversation_mod, "screen_item", owner_action)
+    out = _run(a, config_dir)
+    assert out["handled"][0]["action"] == "hold" and out["handled"][0]["code"] == code
+    assert transcripts["sess_a"] == []
+    items, _cursor = NotificationStore(config_dir).list_items(state="all", session_id="sess_a")
+    assert [item["key"] for item in items] == [f"team-bridge-owner-action:{a.endpoint_id}:{code}"]
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("notification store unavailable")
+
+    monkeypatch.setattr(NotificationStore, "notify", boom)
+    again = _run(a, config_dir)
+    for row in again["handled"]:
+        assert row["action"] == "hold" and row["code"] == code
+    assert transcripts["sess_a"] == []
 
 
 def test_a_missing_receipt_holds_without_a_card_or_a_row(tmp_path, monkeypatch) -> None:
@@ -2777,3 +2818,77 @@ def test_a_mention_is_never_passive(tmp_path, monkeypatch) -> None:
     out = _run(b, config_dir)
     assert out["handled"][0]["action"] == "delivered"
     assert len(transcripts["sess_b"]) == 1
+
+
+# Default thread placement (operator, 2026-11-17, #general seq 94): a channel
+# or group ROOT card steers the answer into that message's thread through the
+# reply binding, names the opt-out, and every card carries the one style line.
+THREADED_ROOT_REPLY_LINE = (
+    "if you reply: bridge channel_post with channel_id = this conversation_id "
+    "and in_reply_to_message_id = this message_id (threads it; new_post for "
+    "a new topic); legacy send/reply never appears in a conversation"
+)
+
+
+def _kind_card(kind: str | None) -> str:
+    return build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label="#agents" if kind != "dm" else "Ada",
+            sender_label="Ada",
+            sender_kind="human",
+            mention=True,
+            message_id=MESSAGE_ID,
+            conversation_seq=5,
+            conversation_kind=kind,
+        )
+    )
+
+
+def test_channel_root_card_snapshot_steers_the_reply_into_its_thread() -> None:
+    assert _kind_card("channel") == (
+        "Channel message · #agents · from Ada (human, same tenant)\n"
+        f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
+        "\n"
+        "mention: yes\n"
+        "tenant_id: ten_1\n"
+        f"conversation_id: {CONVERSATION_ID}\n"
+        f"message_id: {MESSAGE_ID}\n"
+        "conversation_seq: 5\n"
+        "expect: reply\n"
+        "style: in channels/groups reply in the thread; no sign-off line\n"
+        f"{THREADED_ROOT_REPLY_LINE}\n"
+        "guidance: bridge-guidance-v2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "route"),
+    [
+        ("channel", THREADED_ROOT_REPLY_LINE),
+        ("group", THREADED_ROOT_REPLY_LINE),
+        ("dm", ROOT_REPLY_LINE),
+        (None, ROOT_REPLY_LINE),  # kind unstated: never promise a thread
+    ],
+)
+def test_root_route_by_conversation_kind(kind, route) -> None:
+    lines = _kind_card(kind).splitlines()
+    assert lines[-3:] == [REPLY_STYLE_LINE, route, "guidance: bridge-guidance-v2"]
+
+
+def test_threaded_route_names_only_keys_the_bridge_tool_accepts() -> None:
+    from local_operator.team_bridge.tool import BridgeToolParams
+
+    card = _kind_card("channel")
+    fields = dict(line.split(": ", 1) for line in card.splitlines() if ": " in line)
+    pairs = re.findall(r"(\w+) = this (\w+)", THREADED_ROOT_REPLY_LINE)
+    assert pairs == [("channel_id", "conversation_id"), ("in_reply_to_message_id", "message_id")]
+    params = BridgeToolParams.model_validate(
+        {"op": "channel_post", "body": "ok", **{key: fields[named] for key, named in pairs}}
+    )
+    assert params.in_reply_to_message_id == MESSAGE_ID
+    # The named opt-out is a real field too (extra="forbid" would refuse a typo).
+    assert BridgeToolParams.model_validate(
+        {"op": "channel_post", "body": "ok", "channel_id": CONVERSATION_ID, "new_post": True}
+    ).new_post

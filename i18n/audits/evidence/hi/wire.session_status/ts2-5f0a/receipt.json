@@ -1,0 +1,33 @@
+{
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81",
+  "date": "2026-11-19T21:35:40.608331+00:00",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "terminal-status-hi",
+    "session": "8c6e64f5562b",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model field",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-vi-hi-ur-second-audit",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "8c6e64f5562b",
+    "independent_from_first_auditor_session": "a7fd23e84898",
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "round": "second-ts2-5f0a",
+  "keys_audited": 17,
+  "note": "Second independent safety-copy audit: 17 keys; 0 major. Record: i18n/audits/evidence/hi/wire.session_status/ts2-5f0a/record.json. No visual/runtime/native clearance.",
+  "evidence": "i18n/audits/evidence/hi/wire.session_status/ts2-5f0a/record.json",
+  "evidence_sha256": "5b6332863b8d2117fa7d797ec7968a586420eabdb5971796be459de38aa3878b"
+}

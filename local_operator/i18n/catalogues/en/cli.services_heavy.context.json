@@ -43,5 +43,40 @@
     "role": "lop CLI usage error",
     "tone": "terse, operator-facing, preserves safety and command distinctions",
     "note": "Printed when `run` is given no command; nothing was queued. `--` and the example command are literal."
+  },
+  "cli.services_heavy.events_header": {
+    "role": "lop CLI status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Heading above the last few heavy-job lease audit events in `lop services heavy status`. {path} is a file path, literal. Keep the two leading spaces and the trailing colon."
+  },
+  "cli.services_heavy.event_line": {
+    "role": "lop CLI status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "One audit event under the heading. {time} is an ISO-8601 UTC timestamp, {record} is a literal log excerpt (event name and key=value fields such as take slot=0 pid=123); both stay untranslated. Keep the four leading spaces; usually nothing to translate."
+  },
+  "cli.services_heavy.no_events": {
+    "role": "lop CLI status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Shown instead of the event list when the heavy-job lease audit log has no events yet. {path} is a file path, literal. 'lease events' = slot taken/released/timed out/reclaimed records. Keep the two leading spaces."
+  },
+  "cli.services_heavy.audit_row": {
+    "role": "lop services status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "One-line readiness row in `lop services status`. 'heavy jobs audit' labels the heavy-job lease audit trail. {record} is a literal log excerpt (event name plus key=value fields, untranslated), {age} a compact duration such as 8s or 3m05s, {path} a file path."
+  },
+  "cli.services_heavy.start_by": {
+    "role": "lop CLI option help",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Help for `run --start-by`. 'epoch', 'ISO-8601', 'Z', the example timestamp and the exit status 79 stay literal. The deadline is checked after queueing, so a late run never starts."
+  },
+  "cli.services_heavy.late_start": {
+    "role": "lop CLI refusal",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Printed when `run --start-by` passed before the command could start. 'start-by' is the literal flag name; {start_by} and {now} are UTC ISO timestamps, {late} a number of seconds. Must say the command was NOT started."
+  },
+  "cli.services_heavy.not_start_by": {
+    "role": "lop CLI usage error",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Printed for an unreadable `--start-by` value; {value} is the quoted input. 'epoch', 'ISO-8601' and 'Z' stay literal."
   }
 }

@@ -684,6 +684,7 @@ class AskPickerScreen(Container):
         title: str = "the agent needs your decision",
         exit_hint: tuple[str, str] = ("esc", "skip"),
         caret: str = CARET_FOLLOW_DRAFT,
+        initial_rows: Sequence[int | None] | None = None,
     ) -> None:
         super().__init__(id=widget_id or f"ask-picker-{id(self):x}", classes="prompt-slot")
         if caret not in CARET_MODES:
@@ -736,13 +737,20 @@ class AskPickerScreen(Container):
         self._index = 0
         self._answers: dict[str, list[str]] = {}
         self._states = [_QuestionState() for _ in self._questions]
-        for state, question in zip(self._states, self._questions):
+        initials = list(initial_rows or [])
+        initials += [None] * (len(self._questions) - len(initials))
+        for state, question, initial in zip(self._states, self._questions, initials):
             # The CURSOR starts on the first recommended row (row 0 after the
             # hoist). On a single-select that makes Enter alone take it; on a
             # multi-select NOTHING is ticked — the ticks are the answer, and the
             # user builds them — so a whole recommended set is badged, not taken.
             if question.recommended_rows:
                 state.selected = question.recommended_rows[0]
+            elif initial is not None and 0 <= initial < len(question.options):
+                # A host-chosen starting row WITHOUT the RECOMMENDED badge: a
+                # login's pre-selected default (the `default` AWS profile, the
+                # profile's Region) is a convenience, not advice (#4270 D5).
+                state.selected = initial
             elif question.secret:
                 # The only row. Parking the cursor anywhere else would be a
                 # destination that does not exist.

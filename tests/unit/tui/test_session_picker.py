@@ -2808,7 +2808,7 @@ def test_a_not_answering_row_wears_its_own_shape_and_the_warning_ink() -> None:
     assertions, because either half alone leaves the collision: the shape must
     differ from the failure mark, and the ink must differ from the failure ink.
     """
-    from local_operator.session.catalog import WEDGED_STATUS, CatalogEntry
+    from local_operator.session.catalog import CatalogEntry, wedged_status
     from local_operator.tui.widgets.session_picker import (
         COMPLETION_MARKERS,
         WEDGED_MARKER,
@@ -2826,7 +2826,7 @@ def test_a_not_answering_row_wears_its_own_shape_and_the_warning_ink() -> None:
 
     # The words are the backend's and do not move with the glyph — the pairing
     # the sidebar's own table checks, restated here for the picker's consumers.
-    assert CatalogEntry(row).status == WEDGED_STATUS
+    assert CatalogEntry(row).status == wedged_status()
 
 
 # --- the two-pane telescope layout ------------------------------------------

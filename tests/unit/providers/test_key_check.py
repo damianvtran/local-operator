@@ -209,6 +209,10 @@ def test_every_key_accepting_cloud_provider_has_a_check() -> None:
         storage = get_provider_definition(credential_provider_id(provider.id))
         if storage is None or storage.env_keys is None or storage.allows_missing_api_key:
             continue
+        if storage.wire == "bedrock":
+            # Bedrock validates through its own signed probe
+            # (``providers/bedrock/check.py``), branched before ``_request``.
+            continue
         assert key_check._request(storage, SECRET) is not None, storage.id
 
 
