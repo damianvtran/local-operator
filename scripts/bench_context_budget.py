@@ -1938,7 +1938,22 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #     = +217 chars = ~+78 billed, exactly the sentence; the ceiling moves by
 #     that delta so main's headroom carries over unchanged. (This host reads
 #     main itself 206 over 37,389 — the known local-vs-CI offset.)
-BUDGET_BILLED_TOKENS = 37_467
+# LOWERED 37,467 -> 32,047 by wave 2 (perf/harness-cost-wave2): ten zero-use
+# tools (media, ``tags``, ``harness_import``) ride on demand, the ``ask`` /
+# ``ask_withdraw`` descriptions stop repeating system.md, and params-class
+# docstrings leave every schema's top level. Measured with THIS script,
+# ISOLATED HOME, one host, base checked out then head:
+#   origin/main 1566e04b   104,149 chars = ~37,464 billed (3 of headroom)
+#   this branch             89,080 chars = ~32,043 billed
+#     = -15,069 chars = ~-5,420 billed; lowered by exactly the saving so the
+#     ceiling keeps main's headroom (local-vs-CI offset, notes above).
+# RAISED 32,047 -> 32,135 by the same PR's round-1 remediation (#4326): the
+# media generators' purpose phrases name their guide (review R4, +192 chars)
+# and ``ask_withdraw`` keeps its two moot examples (QA Q-F2, +53). Same script,
+# isolated HOME, one host: 89,080 -> 89,325 chars = ~32,043 -> ~32,131 billed
+# (+88), so the ceiling moves by exactly that and keeps its 4 of headroom.
+# Net wave 2 is still -14,824 chars = ~-5,333 billed against origin/main.
+BUDGET_BILLED_TOKENS = 32_135
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2170,7 +2185,27 @@ BUDGET_BILLED_TOKENS = 37_467
 #   origin/main 2dc66f06   92,817 chars = ~33,387 billed (4 of headroom)
 #   merged head            93,034 chars = ~33,465 billed
 #     = +217 chars = ~+78 billed; the raise keeps main's 4 of headroom.
-BUDGET_CHILD_BILLED_TOKENS = 33_469
+# LOWERED 33,469 -> 32,698 by tool-gated system.md prose (perf/harness-cost-
+# efficiency): a child holds no ``ask``, so the ask mechanics, the queued-ask
+# paragraph and the wake/monitor/no_reply sentences drop out of its block 0,
+# replaced by one no-ask line. Measured locally, isolated HOME:
+#   origin/main cc65674b   92,451 chars = ~33,256 billed / 213 headroom
+#   this branch            90,307 chars = ~32,485 billed
+#     = -2,144 chars = ~-771 billed; lowered by exactly the saving so the
+#     ceiling keeps main's 213 of headroom (CI reads differ from local by tens
+#     of tokens, see the TOP ceiling's notes). The top arm is byte-identical.
+# LOWERED 32,698 -> 27,734 by wave 2 (perf/harness-cost-wave2): the same
+# deferral, docstring and description trims as the top arm (a child holds the
+# media tools, ``tags`` and ``harness_import`` too). Measured locally, isolated
+# HOME, base checked out then head:
+#   origin/main 1566e04b   90,307 chars = ~32,485 billed / 213 headroom
+#   this branch            76,507 chars = ~27,521 billed
+#     = -13,800 chars = ~-4,964 billed; lowered by exactly the saving.
+# NOT raised for the round-1 remediation (#4326): a child holds the media
+# tools, so the R4 guide pointers cost it +192 chars (76,507 -> 76,699 =
+# ~27,590 billed); it has no ``ask_withdraw``. 144 of headroom stays, so the
+# ceiling keeps its wave-2 value rather than loosening.
+BUDGET_CHILD_BILLED_TOKENS = 27_734
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

@@ -1,0 +1,34 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "91fdc2a9fb34b9bd23efce8daabd33a74a7511ad67a9b269e711dd90c96b277e",
+  "date": "2026-11-19T21:50:35.512178+00:00",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "56c3029571f6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session Model header",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-vi-audit",
+    "session": "7a2548e2c7b1",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model header",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_translator": true,
+    "date": "2026-11-19T21:50:35.512178+00:00",
+    "result": "passed",
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "round": "R2-first-independent-ts2a7a",
+  "keys_audited": 17,
+  "evidence": "i18n/audits/evidence/vi/wire.session_status/ts2a7a/record.json",
+  "evidence_sha256": "f431bcc4236f3fb8ad68411052227037a4e0fdba358d4708d92be97c31fe3d38",
+  "note": "R2 first auditor: VI-S2-01 fixed; 2 overdue arms + neighbors pass; unchanged scope retained by reverse-byte proof. Record: i18n/audits/evidence/vi/wire.session_status/ts2a7a/record.json. Second current-hash pass required."
+}

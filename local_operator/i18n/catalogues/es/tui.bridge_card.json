@@ -16,5 +16,6 @@
   "tui.bridge_card.body.show_less": "Ver menos",
   "tui.bridge_card.body.more_messages": "{count, plural, one {# mensaje más en esta tarjeta} many {# de mensajes más en esta tarjeta} other {# mensajes más en esta tarjeta}}",
   "tui.bridge_card.header.held_transient": "Pendiente de filtrado",
-  "tui.bridge_card.header.open_to_load": "Abre para cargar el mensaje"
+  "tui.bridge_card.header.open_to_load": "Abre para cargar el mensaje",
+  "tui.bridge_card.header.offline": "No se pudo conectar con Radient — abre para reintentar"
 }

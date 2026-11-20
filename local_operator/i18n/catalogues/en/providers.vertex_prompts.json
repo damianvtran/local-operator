@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "Google Cloud project ID",
+  "providers.vertex_prompts.field.service_account": "service account JSON or JSON file path",
+  "providers.vertex_prompts.hint.required": "Enter submits; empty Enter or Esc cancels login.",
+  "providers.vertex_prompts.prompt.field": "Enter {field} (empty to cancel): "
+}

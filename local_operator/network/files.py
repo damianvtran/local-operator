@@ -410,10 +410,32 @@ def serve_file(
     phase = str(frame.get("phase") or "")
     source = _resolve_source(Path(root), session_id, frame, owner)
     fd, info = _open_source(source, session_id, owner)
+
+    def admit_span(offset: int, length: int) -> None:
+        # Hashing consumes protected owner bytes just as fetch does. Normalize
+        # only the canonical reference, never target content, before admission.
+        if admit is None:
+            raise _refuse("audit_unavailable", "the owner cannot commit the file read audit")
+        reference = (
+            f"attachment:{source.attachment}"
+            if source.attachment
+            else "scratchpad://" + source.scope.relative_in(source.path).as_posix()
+        )
+        from local_operator.network.audit import file_read_reference
+
+        try:
+            reference = file_read_reference(reference, offset, length, phase=phase)
+        except ValueError:
+            raise _refuse(
+                "audit_unavailable", "the owner cannot commit the file read audit"
+            ) from None
+        admit(reference, offset, length)
+
     try:
         if phase == "stat":
             if info.st_size == 0:
                 raise _refuse("empty_file", f"{source.label} is empty; there is nothing to pull")
+            admit_span(0, info.st_size)
             digest = _hash_fd(fd, info.st_size)
             if source.attachment and digest[len("sha256:") :][:32] != source.attachment:
                 # The store's own name is a digest of its content; a file that no longer
@@ -453,21 +475,7 @@ def serve_file(
             # fewer bytes arrive: this is planned admission, never completion.
             # Bound the read itself to that span even if the source later grows.
             admitted = min(limit, max(0, info.st_size - offset))
-            if admit is None:
-                raise _refuse("audit_unavailable", "the owner cannot commit the file read audit")
-            reference = (
-                f"attachment:{source.attachment}"
-                if source.attachment
-                else "scratchpad://" + source.scope.relative_in(source.path).as_posix()
-            )
-            # Audit fallback names the canonical REFERENCE, never its contents:
-            # hashing this descriptor here would read protected bytes before admission.
-            # Use the real detail sanitizer (including its serialized JSON budget),
-            # not just a character count: short Unicode paths can expand in JSON.
-            from local_operator.network.audit import file_read_reference
-
-            reference = file_read_reference(reference, offset, admitted)
-            admit(reference, offset, admitted)
+            admit_span(offset, admitted)
             span = _read_span(fd, offset, admitted)
             return {
                 "offset": offset,
@@ -484,6 +492,7 @@ def serve_file(
                 raise _refuse("bad_request", "a verify needs an integer prefix_bytes") from None
             if prefix <= 0 or prefix > info.st_size:
                 return {"match": False}
+            admit_span(0, prefix)
             return {"match": _hash_fd(fd, prefix) == str(frame.get("prefix_digest") or "")}
         raise _refuse("bad_request", f"unknown file phase {phase!r}")
     finally:
@@ -509,8 +518,23 @@ def make_handler(server: "RelayServer") -> Callable[["PeerLink", dict[str, Any]]
         if not session_id:
             raise _refuse("bad_request", "a file pull names the session it reads from")
 
+        # Capture the actual serving operation, not an audit-detail override
+        # supplied by a peer. The same frame selects serve_file's closed branch.
+        phase = str(frame.get("phase") or "")
+
         def admit(reference: str, offset: int, admitted: int) -> None:
             from local_operator.network.audit import AuditEvent
+
+            detail: dict[str, Any] = {
+                "reference": reference,
+                "admitted_bytes": admitted,
+                "offset": offset,
+                "decision": "allow",
+            }
+            # Historical AND future fetch rows remain exactly four fields.
+            # Hash reads are distinguishable, never counted as transferred bytes.
+            if phase in {"stat", "verify"}:
+                detail["phase"] = phase
 
             # Only the peer link authenticates WHO requested these bytes. The
             # protocol has no trusted requesting-session identity; session_id
@@ -523,13 +547,9 @@ def make_handler(server: "RelayServer") -> Callable[["PeerLink", dict[str, Any]]
                     network_id=_link.network_id,
                     epoch=_link.epoch,
                     session_id=session_id,
-                    detail={
-                        "reference": reference,
-                        "admitted_bytes": admitted,
-                        "offset": offset,
-                        "decision": "allow",
-                    },
-                )
+                    detail=detail,
+                ),
+                expected_file_phase=phase,
             ):
                 raise _refuse("audit_unavailable", "the owner cannot commit the file read audit")
 

@@ -1,0 +1,51 @@
+{
+  "report_type": "audit_notes_not_execution_log",
+  "locale": "es",
+  "namespace": "wire.session_status",
+  "pass": "first independent safety-copy audit",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "per_key": {
+    "wire.session_status.retired_label": "PASS: frozen existing value preserved exactly; base placeholder retained. Not rewritten for this contribution.",
+    "wire.session_status.interrupted": "PASS: Interrumpida agrees with implicit sesión; not an error or completion.",
+    "wire.session_status.unseen_interruption": "PASS: sin leer denotes read state, not a different cause or a new interruption.",
+    "wire.session_status.retired": "PASS: retirada para actualizar explicitly gives update purpose, not operator stop.",
+    "wire.session_status.unseen_retirement": "PASS: unread and update-retirement meanings both retained.",
+    "wire.session_status.signal_stop": "PASS: señal is distinguished from force; none omits attribution and other uses mediante followed by exact command.",
+    "wire.session_status.unseen_signal_stop": "PASS: unread signal-stop counterpart preserves both command arms and technical command bytes.",
+    "wire.session_status.forced_kill": "PASS: finalizada por la fuerza denotes forced termination, not a graceful signal stop.",
+    "wire.session_status.unseen_forced_kill": "PASS: unread forced termination; no implication that the operator read the result.",
+    "wire.session_status.complete": "PASS: Completada is natural terse session status.",
+    "wire.session_status.unseen_completion": "PASS: Finalización sin leer denotes unread completion, not incomplete execution.",
+    "wire.session_status.recent": "PASS: Reciente preserves recency without inventing running/completed state.",
+    "wire.session_status.dormant": "PASS: Detenida with despertares inactivos matches stopped session and dormant wakes, not cancelled or scheduled-to-fire wakes. one/many/other all present; million arm correctly uses de despertares; zero uses plural.",
+    "wire.session_status.error": "PASS: Error is correct generic status.",
+    "wire.session_status.unseen_error": "PASS: Error sin leer expresses unread status only.",
+    "wire.session_status.error_cause": "PASS: all 13 cause arms independently read; arm-by-arm rationale below.",
+    "wire.session_status.unseen_error_cause": "PASS: all 13 cause arms independently compared with the seen counterparts; each adds sin leer without changing event or attribution. No arm dropped."
+  },
+  "cause_arm_audit_for_both_keys": {
+    "user_stop": "detenida por el usuario preserves explicit user agency; not confused with retirement.",
+    "runtime_stall_bound": "el runtime se cerró preserves self-termination; límite sin avances names the lack-of-progress bound. incidents.py:478-496 confirms that this bound fires after no progress, not an output/token quota.",
+    "continuation_limit": "Continuation limit reached and pending message dropped are both retained; descartado applies to the pending message, not history.",
+    "output_limit": "Model output limit and inability to continue both retained; distinct from continuation limit.",
+    "runtime_retired": "retirada para actualizar expressly names update purpose; no operator stop attribution.",
+    "runtime_shutdown": "el runtime terminó durante el turno states process termination during the turn without inventing a cause.",
+    "runtime_overdue": "salió para actualizar al agotar su margen de progreso retains departure, update purpose, and exhausted bound. incidents.py:445-475 confirms historical no-movement build-drain bound; this is not a successful-progress milestone or a quota.",
+    "runtime_update_failed": "Update did not finish and runtime kept its loaded build both explicit; compilación cargada is comprehensible build wording and runtime is required kept-English terminology.",
+    "runtime_killed": "desapareció sin un cierre limpio; no se solicitó detenerlo preserves lack of clean exit AND no requested stop; does not assert who killed it.",
+    "install_mid_update": "Installation replacement during the turn preserved; no claim of history loss.",
+    "owner_lost": "dejó de responder expresses observed nonresponse, not established process death, matching incidents.py:700-706.",
+    "disposed": "sesión descartada describes disposal of the session during the turn. It does not say eliminada, historial borrado, or any deletion of saved history.",
+    "other": "Generic Error only; unseen counterpart Error sin leer. Unknown cause does not acquire an invented diagnosis."
+  },
+  "register_terminology_fit": "Neutral Spanish, terse sentence case; feminine session agreement; no usted/vosotros; sesión and despertar follow glossary; runtime kept English per guide; em dash spacing correct. No maxCells/maxChars cap is authored for these rows, and source context explicitly says no fixed cell cap. Long error summaries remain a rendered-layout risk to validate separately, not a measured overflow finding. Spanish is LTR; no bidi controls introduced. No markup/backtick literals occur in these messages; synthetic command parameter bytes verified separately.",
+  "mechanical_caveat": "The repository validator admitted a deliberately missing many arm. Independent exact CLDR-set check detects that mutation, and the actual candidate has one/many/other. Confirmed pre-existing validator limitation at scripts/i18n/check.py:712-738 (legal selector validation, not full coverage for plural-to-plural). Not a target translation defect.",
+  "scope_limits": [
+    "First independent pass only; second independent safety-copy pass still required.",
+    "Namespace-only catalogue validator plus isolated ICU formatting; no integrated runtime, pseudo, visual, native UI, or release proof.",
+    "Unknown external diagnostic legacy English branch remains an unresolved programme gap, not an accepted exception.",
+    "No target, repository, generated asset, history, build, install, server or PR writes. Audit artifacts currently in auditor scratch; canonical tracked retention must be completed by the coordinator before claiming durable repo evidence."
+  ]
+}

@@ -362,8 +362,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1352 -> 1386 (+34, PR #4127 R1-M1/Q1): the recovery leads with handing the
     # operator the command and re-asks at most once (a background-started
     # runtime has no proving surface). Notes only; the wire is unchanged.
-    "ask": 1386,
-    "ask_withdraw": 452,
+    # RE-MEASURED (wave 2, perf/harness-cost-wave2, 2026-11-19): ask 1386 ->
+    # 1198 and ask_withdraw 452 -> 378. Both descriptions stop repeating
+    # system.md's "Deciding and asking" rules, which render exactly when ``ask``
+    # is held; limits, refusals and the secret path stay. Same printed table.
+    # ask_withdraw 378 -> 389 (+11, PR #4326 QA Q-F2): the two moot examples
+    # system.md does not carry ("you found the answer yourself or the work moved
+    # on") return to the description; same printed table, nothing else moved.
+    "ask": 1198,
+    "ask_withdraw": 389,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
     # entry that moved. eval carries no pin (context budget; see supplements.pins).
@@ -639,7 +646,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # 739 -> 725 (review round 1, M1): the "per generation ~200 credits" claim
     # was wrong for the request shape this tool always sends; the corrected
     # sentence (40 credits per second of requested duration) is shorter.
-    "generate_sound_effect": 725,
+    # RE-MEASURED (wave 2): 725 -> 741. "never both" moved from the params
+    # docstring (stripped from every schema's top level) into the description.
+    "generate_sound_effect": 741,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -743,7 +752,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # form: the full rule, including the `no_reply` alternative, rides the
     # refusal message and the prompt clause, and the context-budget ratchet bills
     # this surface on every request. Measured by this test's print, never pasted.
-    "notify": 260,
+    # RE-MEASURED (wave 2): 260 -> 268. "metrics as a markdown table in body"
+    # moved from the stripped params docstring into the description.
+    "notify": 268,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now

@@ -1,0 +1,942 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "pass": "SECOND independent full pass",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-fr-zh-second-audit",
+    "session": "3d32baae3ed6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session Model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "independent_from_translator_session": "e9c45b5505eb",
+    "independent_from_translator": true,
+    "independent_from_first_auditor_session": "ba2da228c32c",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/wire.session_status.zh-CN.json",
+      "sha256": "6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649"
+    }
+  },
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "per_key_and_branch_report": [
+    {
+      "key": "wire.session_status.retired_label",
+      "source": "{base} — retired for an update",
+      "current_text": "{base}——因更新已退役",
+      "branches": [
+        {
+          "params": {
+            "base": "BASE_STATUS"
+          },
+          "output": "BASE_STATUS——因更新已退役",
+          "cells": 25,
+          "chars": 19,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Legacy unchanged key: base argument remains opaque, suffix preserves update agency; not used by the new formatter. No new base-label grammar policy inferred.",
+      "context": {
+        "role": "Sidebar/picker row status label (a plain-text suffix) for a session whose turn was cut by a build update",
+        "tone": "terse status label with cause",
+        "note": "EN-only context sidecar. {base} is the row's ALREADY-composed status word (currently `Interrupted`), inserted verbatim; the suffix after the em dash names the cause (the app retired the turn to update; the operator did not stop it). One logical line: keep the cause short."
+      }
+    },
+    {
+      "key": "wire.session_status.interrupted",
+      "source": "Interrupted",
+      "current_text": "已中断",
+      "branches": [
+        {
+          "params": {},
+          "output": "已中断",
+          "cells": 6,
+          "chars": 3,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Session interruption, not completion or deletion; terse status.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_interruption",
+      "source": "Unseen interruption",
+      "current_text": "未读：已中断",
+      "branches": [
+        {
+          "params": {},
+          "output": "未读：已中断",
+          "cells": 12,
+          "chars": 6,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread state qualifies interruption and does not imply a new failure.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.retired",
+      "source": "Interrupted — retired for an update",
+      "current_text": "已中断——为更新而退出",
+      "branches": [
+        {
+          "params": {},
+          "output": "已中断——为更新而退出",
+          "cells": 20,
+          "chars": 11,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Interruption specifically for an update, not operator action.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_retirement",
+      "source": "Unseen interruption — retired for an update",
+      "current_text": "未读：已中断——为更新而退出",
+      "branches": [
+        {
+          "params": {},
+          "output": "未读：已中断——为更新而退出",
+          "cells": 26,
+          "chars": 14,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread marker and update-specific interruption both retained.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+      }
+    },
+    {
+      "key": "wire.session_status.signal_stop",
+      "source": "Interrupted — stopped with a signal{command, select, none {} other { by {command}}}",
+      "current_text": "已中断——收到信号后停止{command, select, none {} other {（通过{command}）}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "已中断——收到信号后停止",
+          "cells": 22,
+          "chars": 12,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "已中断——收到信号后停止（通过/stop --all）",
+          "cells": 41,
+          "chars": 27,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "已中断——收到信号后停止（通过lop sessions stop abc --force）",
+          "cells": 59,
+          "chars": 45,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Signal stop distinct from forced kill; none branch has no attribution; other branches preserve exact command bytes.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_signal_stop",
+      "source": "Unseen interruption — stopped with a signal{command, select, none {} other { by {command}}}",
+      "current_text": "未读：已中断——收到信号后停止{command, select, none {} other {（通过{command}）}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "未读：已中断——收到信号后停止",
+          "cells": 28,
+          "chars": 15,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "未读：已中断——收到信号后停止（通过/stop --all）",
+          "cells": 47,
+          "chars": 30,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "未读：已中断——收到信号后停止（通过lop sessions stop abc --force）",
+          "cells": 65,
+          "chars": 48,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread marker retained independently from signal-stop outcome; none omits attribution; commands unchanged.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.forced_kill",
+      "source": "Interrupted — killed{command, select, none {} other { by {command}}}",
+      "current_text": "已中断——已强制终止{command, select, none {} other {（通过{command}）}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "已中断——已强制终止",
+          "cells": 18,
+          "chars": 10,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "已中断——已强制终止（通过/stop --all）",
+          "cells": 37,
+          "chars": 25,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "已中断——已强制终止（通过lop sessions stop abc --force）",
+          "cells": 55,
+          "chars": 43,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Forced termination distinct from signal stop; none omits attribution; commands unchanged.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_forced_kill",
+      "source": "Unseen interruption — killed{command, select, none {} other { by {command}}}",
+      "current_text": "未读：已中断——已强制终止{command, select, none {} other {（通过{command}）}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "未读：已中断——已强制终止",
+          "cells": 24,
+          "chars": 13,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "未读：已中断——已强制终止（通过/stop --all）",
+          "cells": 43,
+          "chars": 28,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "未读：已中断——已强制终止（通过lop sessions stop abc --force）",
+          "cells": 61,
+          "chars": 46,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread marker independent from forced-termination outcome; none omits attribution; commands unchanged.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.complete",
+      "source": "Complete",
+      "current_text": "已完成",
+      "branches": [
+        {
+          "params": {},
+          "output": "已完成",
+          "cells": 6,
+          "chars": 3,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Completion state, without implying read status.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_completion",
+      "source": "Unseen completion",
+      "current_text": "未读：已完成",
+      "branches": [
+        {
+          "params": {},
+          "output": "未读：已完成",
+          "cells": 12,
+          "chars": 6,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Completion and unread state independently conveyed.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.recent",
+      "source": "Recent",
+      "current_text": "近期活动",
+      "branches": [
+        {
+          "params": {},
+          "output": "近期活动",
+          "cells": 8,
+          "chars": 4,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Recent session activity status; natural locale phrasing.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.dormant",
+      "source": "Stopped ({count, plural, one {# wake dormant} other {# wakes dormant}})",
+      "current_text": "已停止（{count, plural, other {#个唤醒已休眠}}）",
+      "branches": [
+        {
+          "params": {
+            "count": 0
+          },
+          "category": "other",
+          "output": "已停止（0个唤醒已休眠）",
+          "cells": 23,
+          "chars": 12,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1
+          },
+          "category": "other",
+          "output": "已停止（1个唤醒已休眠）",
+          "cells": 23,
+          "chars": 12,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 2
+          },
+          "category": "other",
+          "output": "已停止（2个唤醒已休眠）",
+          "cells": 23,
+          "chars": 12,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 5
+          },
+          "category": "other",
+          "output": "已停止（5个唤醒已休眠）",
+          "cells": 23,
+          "chars": 12,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 21
+          },
+          "category": "other",
+          "output": "已停止（21个唤醒已休眠）",
+          "cells": 24,
+          "chars": 13,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 55
+          },
+          "category": "other",
+          "output": "已停止（55个唤醒已休眠）",
+          "cells": 24,
+          "chars": 13,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1000000
+          },
+          "category": "other",
+          "output": "已停止（1,000,000个唤醒已休眠）",
+          "cells": 31,
+          "chars": 20,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1500000
+          },
+          "category": "other",
+          "output": "已停止（1,500,000个唤醒已休眠）",
+          "cells": 31,
+          "chars": 20,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1000000000000
+          },
+          "category": "other",
+          "output": "已停止（1,000,000,000,000个唤醒已休眠）",
+          "cells": 39,
+          "chars": 28,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 0.5
+          },
+          "category": "other",
+          "output": "已停止（0.5个唤醒已休眠）",
+          "cells": 25,
+          "chars": 14,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1.5
+          },
+          "category": "other",
+          "output": "已停止（1.5个唤醒已休眠）",
+          "cells": 25,
+          "chars": 14,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 2.5
+          },
+          "category": "other",
+          "output": "已停止（2.5个唤醒已休眠）",
+          "cells": 25,
+          "chars": 14,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Stopped plus dormant wakes, not cancelled or scheduled to fire. Glossary wake term and count retained. All locale CLDR categories explicitly present. Fraction probes are formatter robustness samples, not a claim that fractional wakes are real domain input.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {count} is the number of armed wakes made dormant by stopping; use locale plural rules. Not cancelled or scheduled to fire."
+      }
+    },
+    {
+      "key": "wire.session_status.error",
+      "source": "Error",
+      "current_text": "出错",
+      "branches": [
+        {
+          "params": {},
+          "output": "出错",
+          "cells": 4,
+          "chars": 2,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Generic error without inventing diagnostic information.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_error",
+      "source": "Unseen error",
+      "current_text": "未读：出错",
+      "branches": [
+        {
+          "params": {},
+          "output": "未读：出错",
+          "cells": 10,
+          "chars": 5,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread state independent from error outcome.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+      }
+    },
+    {
+      "key": "wire.session_status.error_cause",
+      "source": "{cause, select, user_stop {Error — stopped by the user} runtime_stall_bound {Error — runtime ended itself after its stall bound} continuation_limit {Error — continuation limit reached; pending message dropped} output_limit {Error — model output limit reached; could not continue} runtime_retired {Error — retired for an update} runtime_shutdown {Error — runtime terminated during the turn} runtime_overdue {Error — runtime left for an update after its progress bound} runtime_update_failed {Error — update did not finish; runtime kept its loaded build} runtime_killed {Error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Error — install replaced during the turn} owner_lost {Error — runtime stopped answering during the turn} disposed {Error — session disposed during the turn} other {Error}}",
+      "current_text": "{cause, select, user_stop {出错——用户已停止} runtime_stall_bound {出错——运行时停滞超时后自行退出} continuation_limit {出错——已达续接上限；待处理消息已丢弃} output_limit {出错——已达模型输出上限；无法继续} runtime_retired {出错——为更新而退出} runtime_shutdown {出错——运行时在本轮中终止} runtime_overdue {出错——运行时超过进度时限后退出以更新} runtime_update_failed {出错——更新未完成；运行时仍使用已加载的构建} runtime_killed {出错——运行时未正常退出便消失；未收到停止请求} install_mid_update {出错——安装版本在本轮中被替换} owner_lost {出错——运行时在本轮中停止响应} disposed {出错——会话在本轮中被释放} other {出错}}",
+      "branches": [
+        {
+          "params": {
+            "cause": "user_stop"
+          },
+          "output": "出错——用户已停止",
+          "cells": 16,
+          "chars": 9,
+          "verdict": "passed",
+          "semantic_judgment": "Explicit user agency, unlike update retirement."
+        },
+        {
+          "params": {
+            "cause": "runtime_stall_bound"
+          },
+          "output": "出错——运行时停滞超时后自行退出",
+          "cells": 30,
+          "chars": 16,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime ends itself after its no-progress/stall bound, not a user kill."
+        },
+        {
+          "params": {
+            "cause": "continuation_limit"
+          },
+          "output": "出错——已达续接上限；待处理消息已丢弃",
+          "cells": 36,
+          "chars": 19,
+          "verdict": "passed",
+          "semantic_judgment": "Continuation limit AND dropped pending message both stated."
+        },
+        {
+          "params": {
+            "cause": "output_limit"
+          },
+          "output": "出错——已达模型输出上限；无法继续",
+          "cells": 32,
+          "chars": 17,
+          "verdict": "passed",
+          "semantic_judgment": "Model output limit AND inability to continue both stated."
+        },
+        {
+          "params": {
+            "cause": "runtime_retired"
+          },
+          "output": "出错——为更新而退出",
+          "cells": 18,
+          "chars": 10,
+          "verdict": "passed",
+          "semantic_judgment": "Update-specific retirement; does not blame operator."
+        },
+        {
+          "params": {
+            "cause": "runtime_shutdown"
+          },
+          "output": "出错——运行时在本轮中终止",
+          "cells": 24,
+          "chars": 13,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime termination during the turn; no unsupported shutdown reason added."
+        },
+        {
+          "params": {
+            "cause": "runtime_overdue"
+          },
+          "output": "出错——运行时超过进度时限后退出以更新",
+          "cells": 36,
+          "chars": 19,
+          "verdict": "passed",
+          "semantic_judgment": "Departure for update after the progress allowance/bound, distinct from generic stall self-termination by update purpose."
+        },
+        {
+          "params": {
+            "cause": "runtime_update_failed"
+          },
+          "output": "出错——更新未完成；运行时仍使用已加载的构建",
+          "cells": 42,
+          "chars": 22,
+          "verdict": "passed",
+          "semantic_judgment": "Update incomplete; still-loaded old build retained. No false successful-update claim."
+        },
+        {
+          "params": {
+            "cause": "runtime_killed"
+          },
+          "output": "出错——运行时未正常退出便消失；未收到停止请求",
+          "cells": 44,
+          "chars": 23,
+          "verdict": "passed",
+          "semantic_judgment": "Disappearance without clean exit AND no stop request both retained; not falsely attributed to user."
+        },
+        {
+          "params": {
+            "cause": "install_mid_update"
+          },
+          "output": "出错——安装版本在本轮中被替换",
+          "cells": 28,
+          "chars": 15,
+          "verdict": "passed",
+          "semantic_judgment": "Install replaced during the turn, not deletion of session history."
+        },
+        {
+          "params": {
+            "cause": "owner_lost"
+          },
+          "output": "出错——运行时在本轮中停止响应",
+          "cells": 28,
+          "chars": 15,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime stopped answering during the turn, not necessarily a kill."
+        },
+        {
+          "params": {
+            "cause": "disposed"
+          },
+          "output": "出错——会话在本轮中被释放",
+          "cells": 24,
+          "chars": 13,
+          "verdict": "passed",
+          "semantic_judgment": "Session resource disposed/closed during turn; neither locale asserts history deleted."
+        },
+        {
+          "params": {
+            "cause": "other"
+          },
+          "output": "出错",
+          "cells": 4,
+          "chars": 2,
+          "verdict": "passed",
+          "semantic_judgment": "Generic localized error only."
+        },
+        {
+          "params": {
+            "cause": "unknown_future_cause"
+          },
+          "output": "出错",
+          "cells": 4,
+          "chars": 2,
+          "verdict": "passed",
+          "semantic_judgment": "Unknown cause selects generic other; this synthetic formatter fallback does not claim localization of the separate intentionally unresolved external-diagnostic legacy path."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Every stable cause arm retained with generic other fallback. See branch-level semantic judgments.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_error_cause",
+      "source": "{cause, select, user_stop {Unseen error — stopped by the user} runtime_stall_bound {Unseen error — runtime ended itself after its stall bound} continuation_limit {Unseen error — continuation limit reached; pending message dropped} output_limit {Unseen error — model output limit reached; could not continue} runtime_retired {Unseen error — retired for an update} runtime_shutdown {Unseen error — runtime terminated during the turn} runtime_overdue {Unseen error — runtime left for an update after its progress bound} runtime_update_failed {Unseen error — update did not finish; runtime kept its loaded build} runtime_killed {Unseen error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Unseen error — install replaced during the turn} owner_lost {Unseen error — runtime stopped answering during the turn} disposed {Unseen error — session disposed during the turn} other {Unseen error}}",
+      "current_text": "{cause, select, user_stop {未读：出错——用户已停止} runtime_stall_bound {未读：出错——运行时停滞超时后自行退出} continuation_limit {未读：出错——已达续接上限；待处理消息已丢弃} output_limit {未读：出错——已达模型输出上限；无法继续} runtime_retired {未读：出错——为更新而退出} runtime_shutdown {未读：出错——运行时在本轮中终止} runtime_overdue {未读：出错——运行时超过进度时限后退出以更新} runtime_update_failed {未读：出错——更新未完成；运行时仍使用已加载的构建} runtime_killed {未读：出错——运行时未正常退出便消失；未收到停止请求} install_mid_update {未读：出错——安装版本在本轮中被替换} owner_lost {未读：出错——运行时在本轮中停止响应} disposed {未读：出错——会话在本轮中被释放} other {未读：出错}}",
+      "branches": [
+        {
+          "params": {
+            "cause": "user_stop"
+          },
+          "output": "未读：出错——用户已停止",
+          "cells": 22,
+          "chars": 12,
+          "verdict": "passed",
+          "semantic_judgment": "Explicit user agency, unlike update retirement."
+        },
+        {
+          "params": {
+            "cause": "runtime_stall_bound"
+          },
+          "output": "未读：出错——运行时停滞超时后自行退出",
+          "cells": 36,
+          "chars": 19,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime ends itself after its no-progress/stall bound, not a user kill."
+        },
+        {
+          "params": {
+            "cause": "continuation_limit"
+          },
+          "output": "未读：出错——已达续接上限；待处理消息已丢弃",
+          "cells": 42,
+          "chars": 22,
+          "verdict": "passed",
+          "semantic_judgment": "Continuation limit AND dropped pending message both stated."
+        },
+        {
+          "params": {
+            "cause": "output_limit"
+          },
+          "output": "未读：出错——已达模型输出上限；无法继续",
+          "cells": 38,
+          "chars": 20,
+          "verdict": "passed",
+          "semantic_judgment": "Model output limit AND inability to continue both stated."
+        },
+        {
+          "params": {
+            "cause": "runtime_retired"
+          },
+          "output": "未读：出错——为更新而退出",
+          "cells": 24,
+          "chars": 13,
+          "verdict": "passed",
+          "semantic_judgment": "Update-specific retirement; does not blame operator."
+        },
+        {
+          "params": {
+            "cause": "runtime_shutdown"
+          },
+          "output": "未读：出错——运行时在本轮中终止",
+          "cells": 30,
+          "chars": 16,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime termination during the turn; no unsupported shutdown reason added."
+        },
+        {
+          "params": {
+            "cause": "runtime_overdue"
+          },
+          "output": "未读：出错——运行时超过进度时限后退出以更新",
+          "cells": 42,
+          "chars": 22,
+          "verdict": "passed",
+          "semantic_judgment": "Departure for update after the progress allowance/bound, distinct from generic stall self-termination by update purpose."
+        },
+        {
+          "params": {
+            "cause": "runtime_update_failed"
+          },
+          "output": "未读：出错——更新未完成；运行时仍使用已加载的构建",
+          "cells": 48,
+          "chars": 25,
+          "verdict": "passed",
+          "semantic_judgment": "Update incomplete; still-loaded old build retained. No false successful-update claim."
+        },
+        {
+          "params": {
+            "cause": "runtime_killed"
+          },
+          "output": "未读：出错——运行时未正常退出便消失；未收到停止请求",
+          "cells": 50,
+          "chars": 26,
+          "verdict": "passed",
+          "semantic_judgment": "Disappearance without clean exit AND no stop request both retained; not falsely attributed to user."
+        },
+        {
+          "params": {
+            "cause": "install_mid_update"
+          },
+          "output": "未读：出错——安装版本在本轮中被替换",
+          "cells": 34,
+          "chars": 18,
+          "verdict": "passed",
+          "semantic_judgment": "Install replaced during the turn, not deletion of session history."
+        },
+        {
+          "params": {
+            "cause": "owner_lost"
+          },
+          "output": "未读：出错——运行时在本轮中停止响应",
+          "cells": 34,
+          "chars": 18,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime stopped answering during the turn, not necessarily a kill."
+        },
+        {
+          "params": {
+            "cause": "disposed"
+          },
+          "output": "未读：出错——会话在本轮中被释放",
+          "cells": 30,
+          "chars": 16,
+          "verdict": "passed",
+          "semantic_judgment": "Session resource disposed/closed during turn; neither locale asserts history deleted."
+        },
+        {
+          "params": {
+            "cause": "other"
+          },
+          "output": "未读：出错",
+          "cells": 10,
+          "chars": 5,
+          "verdict": "passed",
+          "semantic_judgment": "Generic localized error only."
+        },
+        {
+          "params": {
+            "cause": "unknown_future_cause"
+          },
+          "output": "未读：出错",
+          "cells": 10,
+          "chars": 5,
+          "verdict": "passed",
+          "semantic_judgment": "Unknown cause selects generic other; this synthetic formatter fallback does not claim localization of the separate intentionally unresolved external-diagnostic legacy path."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Every stable cause arm retained with generic other fallback; unread qualifier preserved in every branch. See branch-level semantic judgments.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+      }
+    }
+  ],
+  "scoped_validator": {
+    "entrypoint": "scripts.i18n.check.check_catalogues()",
+    "isolation": "unittest.mock.patch catalogues.catalogue_root to scratch fixture containing ONLY en/fr/zh-CN wire.session_status, exact candidate content; no production generated assets or repo writes",
+    "normal_admission_problems": [],
+    "negative_controls": {
+      "missing_key": {
+        "rejected": true,
+        "actual_output": [
+          "zh-CN/wire.session_status: missing key 'wire.session_status.complete'"
+        ]
+      },
+      "wrong_placeholder": {
+        "rejected": true,
+        "actual_output": [
+          "zh-CN/wire.session_status: wire.session_status.retired_label: arguments (('wrong', 'simple'),) != en's (('base', 'simple'),): argument 1 is 'wrong', en's is 'base' (renamed or reordered)"
+        ]
+      },
+      "broken_icu": {
+        "rejected": true,
+        "actual_output": [
+          "zh-CN/wire.session_status: wire.session_status.dormant: expected a word (at offset 35 of '已停止（{count, plural, other {#个唤醒已休眠}')"
+        ]
+      },
+      "invalid_locale_category": {
+        "rejected": true,
+        "actual_output": [
+          "zh-CN/wire.session_status: wire.session_status.dormant: plural category 'few' not in ['other']"
+        ]
+      }
+    }
+  },
+  "fit": {
+    "fixed_budget": "No maxCells/maxChars in any of the 17 context entries; one logical line. No overflow finding inferred without layout constraint.",
+    "max_sample_cells": 65,
+    "max_sample_chars": 48,
+    "max_sample": "未读：已中断——收到信号后停止（通过lop sessions stop abc --force）",
+    "width_method": "rich.cells.cell_len on every formatter sample",
+    "visual_validation": false
+  },
+  "idiom_register_terminology": "Simplified Chinese; 会话/唤醒/模型 glossary terms; natural terse status fragments with independent 未读 marker; fullwidth punctuation, Latin tokens unspaced as required. No imperative directive in this namespace, so no 请 required.",
+  "scope_exclusions": [
+    "No visual/runtime-app/pseudo/shaping proof; formatter-only samples.",
+    "Existing retired_label unchanged and unused by new formatter.",
+    "Unknown nonempty external diagnostic legacy English remains intentionally UNRESOLVED outside this namespace.",
+    "No translation service, SDK or machine back-translation used.",
+    "No repository files edited or history applied."
+  ],
+  "first_receipt_crosscheck": {
+    "path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/ledger-receipt.json",
+    "sha256": "7a183235838e3412c3b5afed13098a69c5c1ce188638bc6c5131f431e9e1ba12",
+    "all_three_hashes_match": true,
+    "first_auditor_session": "ba2da228c32c",
+    "ordering": "Read full source/context/targets, independently decided clean, executed scoped admission/branches, then read first receipts and compared hashes."
+  },
+  "execution_log": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/audit.log",
+  "log_disclosure": "Actual log retains initial probe ImportError and a negative-fixture mistake (removed punctuation rather than ICU brace); corrected probe then exited 0. Neither initial error was a target defect.",
+  "retention": "SCRATCH candidate only, prepared for manager-owned tracked retention at i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32; not claimed present on main."
+}

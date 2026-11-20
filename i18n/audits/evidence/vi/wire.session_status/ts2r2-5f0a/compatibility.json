@@ -1,0 +1,26 @@
+{
+  "reverse_byte_replacement_equals_original": true,
+  "old_target_sha256": "963b8bf337981a328bb80b265cb49d033db10c7afb2838c4ec8d5f05df20c1d1",
+  "new_target_sha256": "91fdc2a9fb34b9bd23efce8daabd33a74a7511ad67a9b269e711dd90c96b277e",
+  "changed_keys": [
+    "wire.session_status.error_cause",
+    "wire.session_status.unseen_error_cause"
+  ],
+  "changed_selector_per_key": "runtime_overdue",
+  "unchanged_keys": 15,
+  "unchanged_cause_arms_per_modified_key": 12,
+  "previous_formatter_cases": 54,
+  "retained_case_count": 52,
+  "changed_case_count": 2,
+  "previous_artifact_hashes": {
+    "record.json": "96cb1699dbdf90b84acf7024dc3f6ec355459544628cc6114f5079a8eb0faf73",
+    "receipt.json": "4c8ccf9fdbfa31d6e2d9c2d33c9240a79150591629bfa125272233d719329ee4",
+    "report.json": "3b776addfd7b587270cf547e5821de2f28b96dcd16cb93212b247bf3901a99c5",
+    "audit.log": "2b642eb9f52674d4ad0e532930dea1a2077457b3be694b7a931b4981ec1cfaf8",
+    "first-receipt-verification.json": "4b0703c71e58a870d7010319582abd9c0617a6106b5ebec2eb1ce362cd3b9930",
+    "admission.json": "6907187df21f406d8bee2f318d534c96cec130f4c6901c3fbfb7a54c21002321"
+  },
+  "previous_record_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/record.json",
+  "source_context_unchanged": true,
+  "prior_target_and_receipt_preserved": true
+}

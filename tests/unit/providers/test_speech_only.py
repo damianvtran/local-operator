@@ -139,6 +139,22 @@ def test_only_the_speech_rows_are_speech_only() -> None:
     assert registry.is_speech_only("not-a-provider") is False
 
 
+def test_groq_is_not_a_login_a_user_can_pick() -> None:
+    """V17: only Radient and ElevenLabs are voice choices. A Groq row would let a
+    user paste a key that no voice or Speak path reads."""
+    from local_operator.providers import list_login_providers
+    from local_operator.providers.login_catalog import (
+        DESCRIPTIONS,
+        PICKER_DESCRIPTIONS,
+        PICKER_LABELS,
+    )
+
+    assert "groq" not in {row.id for row in registry.PROVIDER_REGISTRY}
+    assert "groq" not in {row.id for row in list_login_providers()}
+    for table in (DESCRIPTIONS, PICKER_DESCRIPTIONS, PICKER_LABELS):
+        assert "groq" not in table
+
+
 def test_the_speech_only_message_stops_at_the_fact() -> None:
     message = registry.speech_only_message("elevenlabs")
 

@@ -1,5 +1,7 @@
 """Shared fixtures for the API client tests."""
 
+import sys
+from collections.abc import Iterator
 from typing import Callable
 
 import pytest
@@ -33,6 +35,32 @@ def real_response() -> Callable[[int, bytes], requests.Response]:
         return response
 
     return _build
+
+
+@pytest.fixture(autouse=True)
+def _no_borrower_github_revoke_outlives_its_cell() -> Iterator[None]:
+    """No GitHub token revoke armed by one unit cell may fire inside another.
+
+    ``borrowed_git_env`` arms a daemon belt timer that DELETEs the lent token at
+    its hold end (often 600 s out), and ``revoke_now`` starts unawaited DELETE
+    threads; both read the real ``api.github.com`` at fire time. Left alone they
+    land in whatever cell the xdist worker runs next and trip that cell's
+    "tests made real network calls" check (run 44408211857: a belt from
+    ``test_github_helper_diagnostic`` failed ``test_cli_remote``). Package-wide
+    because the arming path is reachable from a dozen modules here, and opt-in
+    by import (``network/self_revoke_guard.py``) had already missed one; the
+    rationale and the measured runs live in that module's docstring.
+
+    Zero cost for cells that never touched the module: nothing can be armed
+    unless ``local_operator.network.credentials.github`` is imported, so the
+    check reads ``sys.modules`` at teardown instead of importing it.
+    """
+    yield
+    if "local_operator.network.credentials.github" not in sys.modules:
+        return
+    from tests.unit.network.self_revoke_guard import stop_every_borrower_revoke
+
+    stop_every_borrower_revoke()
 
 
 @pytest.fixture(autouse=True)

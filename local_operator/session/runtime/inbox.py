@@ -239,6 +239,14 @@ class InboxLine:
     marker-only surfaces paint as the operator's own words (measured on a live
     session: 10 such rows). Absent in rows written before this field existed,
     which reads as False: the old behaviour, a plain message.
+
+    ``mesh_origin`` is the receiving runtime's mesh origin stamp for a REMOTE
+    owner prompt or steer (``network/origin.py``), carried so the successor's row
+    keeps it. Its OWN field, never inside ``sender``: peer rows share ``sender``
+    and a peer chooses its contents (mesh-origin-stamp M-2). Written only on
+    ``SOURCE_USER`` rows and read back only from them (``process._run_owner_prompt``);
+    copied, never raised, and nothing at rest is integrity protected (design §3.3
+    residual 5). Absent in older rows: ``None``, which reads as unverified.
     """
 
     text: str
@@ -289,6 +297,8 @@ class InboxLine:
     #: merges on the next drain without double-counting: the total is the sum of
     #: what each member already stood for. See :func:`coalesce_wake_rows`.
     wake_fires: int = 1
+    #: See the class docstring: an OWNER row's mesh origin stamp, else ``None``.
+    mesh_origin: dict[str, Any] | None = None
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
@@ -319,6 +329,7 @@ class InboxLine:
             bridge_meta=dict(bridge) if isinstance(bridge, dict) else {},
             wake_id=str(payload.get("wake_id", "") or ""),
             wake_fires=_fire_count(payload.get("wake_fires", 1)),
+            mesh_origin=_owner_mesh_origin(payload),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -336,7 +347,18 @@ class InboxLine:
             "bridge_meta": self.bridge_meta,
             "wake_id": self.wake_id,
             "wake_fires": self.wake_fires,
+            # ABSENT, never null, when there is no stamp: every peer and local row
+            # keeps the exact bytes older builds wrote.
+            **({"mesh_origin": self.mesh_origin} if self.mesh_origin is not None else {}),
         }
+
+
+def _owner_mesh_origin(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """A spooled row's mesh origin stamp, honoured on an OWNER row only (M-2)."""
+    raw = payload.get("mesh_origin")
+    if not isinstance(raw, dict) or _known_source(payload.get("source")) != SOURCE_USER:
+        return None
+    return dict(raw)
 
 
 #: Every ``source`` value this build writes, so a reader can tell one of ours
@@ -498,7 +520,11 @@ def claim_inbox_batch(batch: InboxReadBatch) -> None:
         # left", or the session acquires a seat, locks and settles on every
         # pipeline pass for its whole lifetime.
         batch.pending_after_commit = bool(raw)
-        batch.chunks = raw.splitlines(keepends=True)
+        # ``\n``-only framing, the writer's own (mesh-origin-stamp review R3-1):
+        # ``splitlines`` also cuts on ``\r``, so ``b"x\r" + <stamped row>`` would
+        # hand ``_parse`` a clean stamped chunk the import downgrade saw (and
+        # refused) as one line. Identical for every row this module writes.
+        batch.chunks = [chunk for chunk in re.split(rb"(?<=\n)", raw) if chunk]
         parsed: list[tuple[int, InboxLine]] = []
         for ordinal, chunk in enumerate(batch.chunks):
             values = _parse(chunk)
@@ -806,14 +832,13 @@ def _count_rows(path: Path) -> int:
 
 
 def _parse(raw: bytes) -> list[InboxLine]:
+    # ONE STRICT STAMP PARSER (mesh-origin-stamp review R3-1): owner rows carry a
+    # ``mesh_origin`` stamp, so the spool is read through the parser the import
+    # downgrade uses; ordinary rows stay tolerant (a torn line is skipped).
+    from local_operator.network.origin import read_jsonl_rows
+
     lines: list[InboxLine] = []
-    for row in raw.splitlines():
-        if not row.strip():
-            continue
-        try:
-            payload = json.loads(row.decode("utf-8", "replace"))
-        except ValueError:
-            continue  # a torn line is skipped, never fatal
+    for payload in read_jsonl_rows(raw):
         if isinstance(payload, dict):
             lines.append(InboxLine.from_json(payload))
     return lines
