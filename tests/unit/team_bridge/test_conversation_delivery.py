@@ -808,6 +808,45 @@ def _hold_rows(config_dir: Path) -> list[dict[str, Any]]:
         return [dict(row) for row in conn.execute("SELECT * FROM screening_holds")]
 
 
+@pytest.mark.parametrize("code", ["sign_in_required", "consent_required", "owner_ineligible"])
+def test_conversation_owner_action_hold_notifies_once_and_delivers_nothing(
+    tmp_path, monkeypatch, code
+) -> None:
+    """The CONVERSATION path raises the same keyed owner-action notice.
+
+    Held, never delivered; the item names no sender, conversation or body; a
+    failing notification store leaves the hold exactly as it was.
+    """
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.team_bridge.screening import ScreenResult
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    async def owner_action(*_a: Any, **_k: Any) -> Any:
+        return ScreenResult("hold", hold_code=code)
+
+    monkeypatch.setattr(conversation_mod, "screen_item", owner_action)
+    out = _run(a, config_dir)
+    assert out["handled"][0]["action"] == "hold" and out["handled"][0]["code"] == code
+    assert transcripts["sess_a"] == []
+    items, _cursor = NotificationStore(config_dir).list_items(state="all", session_id="sess_a")
+    assert [item["key"] for item in items] == [f"team-bridge-owner-action:{a.endpoint_id}:{code}"]
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("notification store unavailable")
+
+    monkeypatch.setattr(NotificationStore, "notify", boom)
+    again = _run(a, config_dir)
+    for row in again["handled"]:
+        assert row["action"] == "hold" and row["code"] == code
+    assert transcripts["sess_a"] == []
+
+
 def test_a_missing_receipt_holds_without_a_card_or_a_row(tmp_path, monkeypatch) -> None:
     """M3: ``receipt_unavailable`` is exercised, not merely defined."""
 

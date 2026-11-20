@@ -1,0 +1,13 @@
+{
+  "tui.session_move_workset.title_sends": "ورکنگ فائلیں {device} کو بھیجیں؟",
+  "tui.session_move_workset.title_stays": "ورکنگ فائلوں کے بغیر منتقل کریں؟",
+  "tui.session_move_workset.checkbox_sends": "مجھے یقین ہے کہ {device} کو یہ فائلیں ملنی چاہییں",
+  "tui.session_move_workset.checkbox_stays": "مجھے معلوم ہے کہ یہ ورکنگ فائلیں {source} پر رہیں گی",
+  "tui.session_move_workset.confirm": "منتقل کریں",
+  "tui.session_move_workset.cancel": "منسوخ کریں",
+  "tui.session_move_workset.loading": "اس گفتگو کی ورکنگ فائلیں چیک کی جا رہی ہیں…",
+  "tui.session_move_workset.cancelled": "منتقلی منسوخ کر دی گئی — کچھ منتقل نہیں ہوا۔",
+  "tui.session_move_workset.confirm_without": "ورکنگ فائلوں کے بغیر منتقل کریں",
+  "tui.session_move_workset.checkbox_without": "مجھے معلوم ہے کہ ورکنگ فائلیں {source} پر ہی رہیں گی",
+  "tui.session_move_workset.title_blocked": "ابھی منتقل نہیں ہو سکتا"
+}

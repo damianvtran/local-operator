@@ -232,10 +232,11 @@ Check these in order. The receiver is not installed until all of them hold.
    lop team-bridge setup --json
    ```
 
-   It reports one of `ready`, `consent_ui_required`, `enable_in_app_required`,
-   `designation_missing` or `not_ready`. When the machine is ready it places the
-   receiver through the same `sync_connector_service` every surface uses, and
-   says so; otherwise it changes nothing.
+   It reports one of `ready`, `consent_ui_required`, `mesh_node_not_enrolled`,
+   `enable_in_app_required`, `designation_missing` or `not_ready`. When the
+   machine is ready it places the receiver through the same
+   `sync_connector_service` every surface uses, and says so; otherwise it
+   changes nothing.
 6. **The default configuration folder** (`~/.local-operator`). The receiver is
    shared per user, so it is only installed for that folder. A run with a
    different `LOCAL_OPERATOR_CONFIG_DIR` is refused (see troubleshooting).
@@ -361,10 +362,12 @@ Every hold ends in one of two ways; none waits forever:
   and the holds list offers **Deliver** or **Discard**. Prompt injection, social
   engineering, `out_of_scope_work`, `personal_info_request` and any answer with
   more than one category are still rejected. Only a preferred, allowlisted
-  screener's answer converts; others reject as before. It has no
-  `lop config edit` key: set `hold_release: false` (an unquoted `false`; a
-  quoted `"false"`, `off` or `0` still reads on, and the receiver logs that once)
-  under `values:` > `team_bridge:` (via `lop config open`) to reject these again.
+  screener's answer converts; others reject as before. Turn it off with the
+  **Hold work requests for review** row in `/settings`, or
+  `lop config edit team_bridge.hold_release false`, to reject these again. A
+  hand-edited `hold_release:` under `values:` > `team_bridge:` reads the same
+  way as that row (`false`, `"false"`, `off`, `no` or `0` is off); a value that
+  is neither on nor off reads on, and the receiver logs that once.
   A screener outside the preferred allowlist (a fallback after the preferred
   models fail) still rejects these requests.
 
@@ -504,6 +507,15 @@ back** and never assumes it worked:
   granted in the Local Operator app, not from a terminal — have the user open the
   app once and enable Agent messages. On a headless machine, see the limit in
   "Prerequisites".
+- `mesh_node_not_enrolled` (from `setup`): this device joined a mesh network as
+  a node and is not enrolled. Team Bridge is never set up on nodes (consent
+  cannot be proven remotely): `send` the message to the operator's
+  chief-of-staff session on their primary device instead (see
+  `guide://network` "Team Bridge does not travel"). "Node" is a heuristic: a
+  device with no operator key whose networks were all created by another device
+  is treated as a node. If this is actually the operator's primary and it only
+  joined someone else's network, run `lop operator setup` there (or ignore this
+  line and enable Agent messages in the app).
 - `enable_in_app_required` (from `setup`): an account is enrolled but agent
   messages are not switched on for this machine. Same fix: the app, once.
 - `designation_missing` (from `setup`): enrolled, but no chief-of-staff session is

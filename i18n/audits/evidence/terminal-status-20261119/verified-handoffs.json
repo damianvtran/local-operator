@@ -1,0 +1,132 @@
+{
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-terminal-status",
+  "head": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "targets": {
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/wire.session_status.fr.json",
+      "sha256": "1b48011bda6364f5091c78e236020980018fa15934ff9424feca4280f5a9429d",
+      "translator_session": "a14cc322d1da",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/wire.session_status.zh-CN.json",
+      "sha256": "6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649",
+      "translator_session": "e9c45b5505eb",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/b39246e0d986/scratchpad/terminal-status-es/wire.session_status.json",
+      "sha256": "b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128",
+      "translator_session": "b39246e0d986",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/wire.session_status.json",
+      "sha256": "b15cc559652777694f2e252404862095bbdc902f90fe72fcee930a03b698f47c",
+      "translator_session": "3f1cf5b56ba0",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/56c3029571f6/scratchpad/wire.session_status.vi.json",
+      "sha256": "963b8bf337981a328bb80b265cb49d033db10c7afb2838c4ec8d5f05df20c1d1",
+      "translator_session": "56c3029571f6",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "hi": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/wire.session_status.json",
+      "sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81",
+      "translator_session": "8c6e64f5562b",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "ur": {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur.json",
+      "sha256": "4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b",
+      "translator_session": "7b97856c53df",
+      "model": "openai/gpt-6.1-sol"
+    }
+  },
+  "first_audits": {
+    "fr": {
+      "receipt": "/Users/damian/.local-operator/sessions/4730cb4c2fb8/scratchpad/first-receipt.fr.json",
+      "sha256": "c692ae7a5a699e4d808791efb0a5bce685d2b2c9fe3b9aff595571caff4a9cf9",
+      "session": "4730cb4c2fb8"
+    },
+    "zh-CN": {
+      "receipt": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/ledger-receipt.json",
+      "sha256": "7a183235838e3412c3b5afed13098a69c5c1ce188638bc6c5131f431e9e1ba12",
+      "session": "ba2da228c32c"
+    },
+    "es": {
+      "receipt": "/Users/damian/.local-operator/sessions/f9eeb42530ec/scratchpad/es-first/receipt.json",
+      "sha256": "1c1fe357ffe269869169355b49b9127c4e9f1ec838df2ea930fea0f61e1e295c",
+      "session": "f9eeb42530ec"
+    },
+    "ru": {
+      "receipt": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/receipt.json",
+      "sha256": "a0ac1fc7dee593ba2eaa3156b0e6fa1752c4d10d6f2749ae37cc8c5df0f06c81",
+      "session": "56bc997306a1"
+    },
+    "vi": {
+      "receipt": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-first-receipt.json",
+      "sha256": "cc450c1a6ffb9c456e77c4a74d81a11b7ff5b08d7147146a0e17759d5e52bbc8",
+      "session": "7a2548e2c7b1"
+    },
+    "hi": {
+      "receipt": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/receipt.json",
+      "sha256": "e4232f083067efc3bc91e9394d5237c4078f124766871e9bf62e3e562ed3e556",
+      "session": "a7fd23e84898"
+    },
+    "ur": {
+      "receipt": "/Users/damian/.local-operator/sessions/9075da90042e/scratchpad/receipt.json",
+      "sha256": "fa2bdbe7012ec4341bb6d903ef3f3223b6d0a41d41b6c574cf9df729bb40ddf3",
+      "session": "9075da90042e"
+    }
+  },
+  "second_audits": {
+    "fr": {
+      "receipt": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/receipt.json",
+      "sha256": "c1f4a1a2823266264b564cbd24bd54289078ca5ddcb39e7c7798bb6442cef2af",
+      "session": "3d32baae3ed6",
+      "result": "passed"
+    },
+    "zh-CN": {
+      "receipt": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/receipt.json",
+      "sha256": "d884d44c322eeb2193a42c1ee156ee3429f8ce3a857db825b555b0b5fad71a50",
+      "session": "3d32baae3ed6",
+      "result": "passed"
+    },
+    "es": {
+      "receipt": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/receipt.json",
+      "sha256": "b0e463cecb2fe52efaa68d9fcd4ae627e7bcd82b1211b61a0c831974db0fbe44",
+      "session": "191daf68e868",
+      "result": "passed"
+    },
+    "ru": {
+      "receipt": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/ru/receipt.json",
+      "sha256": "bb538a6ac22b8eb30c16b4d9af0b5abcc783e64d622111f9abdc4a95e3459dc5",
+      "session": "191daf68e868",
+      "result": "passed"
+    },
+    "hi": {
+      "receipt": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/hi/receipt.json",
+      "sha256": "529a63d7dce05e00ba48bced015aae0f14b072e09a76b209fc25972c853ae16c",
+      "session": "5f0a2918d2f2",
+      "result": "passed"
+    },
+    "ur": {
+      "receipt": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/ur/receipt.json",
+      "sha256": "6c216549069c9d535e3ff0c4f136ca388fc61278b0c75af5fa46edffc8dab39b",
+      "session": "5f0a2918d2f2",
+      "result": "passed"
+    },
+    "vi": {
+      "receipt": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/receipt.json",
+      "sha256": "4c8ccf9fdbfa31d6e2d9c2d33c9240a79150591629bfa125272233d719329ee4",
+      "session": "5f0a2918d2f2",
+      "result": "changes_requested"
+    }
+  },
+  "vi_state": "MAJOR VI-S2-01, translator fe03ff28ea11 revising two runtime_overdue arms; no passing status for revised target yet"
+}

@@ -1,0 +1,29 @@
+{
+  "locale": "ur",
+  "namespace": "providers.vertex_prompts",
+  "source_sha256": "27eea2d21975bd655a616bb412364c855c753c8256eed8a1fa42cc83869d10ae",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "541740ac0ac6",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19",
+    "identity_source": "manager task brief; completed 16:19:22Z"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "02e2a562a33a",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "541740ac0ac6",
+    "actual_model_source": "Host model-switch event: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "i18n/audits/evidence/ur/providers.vertex_prompts/vp1-02e2/record.json; R2 i18n-auditor/03178f8c9cba openai/gpt-6.1-sol PASS; en=27eea2d21975bd655a616bb412364c855c753c8256eed8a1fa42cc83869d10ae"
+}

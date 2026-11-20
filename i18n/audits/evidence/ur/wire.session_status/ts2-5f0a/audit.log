@@ -1,0 +1,387 @@
+{
+  "execution": "scoped check.check_catalogues() with scratch catalogue root; runtime.render_message on actual submitted messages; independent AST category/select completeness guard",
+  "validator_problems": [],
+  "negative_controls": {
+    "missing_key_rejected": true,
+    "renamed_placeholder_rejected": true,
+    "bad_syntax_rejected": true,
+    "missing_one_repo_accepted_known_gap": true,
+    "missing_one_independent_guard_rejected": true,
+    "missing_cause_independent_guard_rejected": true,
+    "missing_cause_repo_accepted": true
+  },
+  "formatter_cases": [
+    {
+      "message_id": "wire.session_status.retired_label",
+      "parameters": {
+        "base": "Interrupted"
+      },
+      "formatted": "Interrupted — اپ ڈیٹ کے لیے ریٹائر کیا گیا"
+    },
+    {
+      "message_id": "wire.session_status.interrupted",
+      "parameters": {},
+      "formatted": "درمیان میں رکا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_interruption",
+      "parameters": {},
+      "formatted": "درمیان میں رکا — کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "message_id": "wire.session_status.retired",
+      "parameters": {},
+      "formatted": "درمیان میں رکا — رن ٹائم اپ ڈیٹ کے لیے بند ہوا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_retirement",
+      "parameters": {},
+      "formatted": "درمیان میں رکا — رن ٹائم اپ ڈیٹ کے لیے بند ہوا؛ کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "درمیان میں رکا — سگنل سے روکا گیا"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "درمیان میں رکا — سگنل سے روکا گیا؛ کمانڈ: /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "درمیان میں رکا — سگنل سے روکا گیا؛ کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "درمیان میں رکا — سگنل سے روکا گیا؛ کیفیت ابھی نہیں پڑھی گئی؛ کمانڈ: /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "درمیان میں رکا — زبردستی بند کیا گیا"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "درمیان میں رکا — زبردستی بند کیا گیا؛ کمانڈ: /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "درمیان میں رکا — زبردستی بند کیا گیا؛ کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "درمیان میں رکا — زبردستی بند کیا گیا؛ کیفیت ابھی نہیں پڑھی گئی؛ کمانڈ: /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.complete",
+      "parameters": {},
+      "formatted": "مکمل"
+    },
+    {
+      "message_id": "wire.session_status.unseen_completion",
+      "parameters": {},
+      "formatted": "مکمل — کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "message_id": "wire.session_status.recent",
+      "parameters": {},
+      "formatted": "حالیہ"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 0
+      },
+      "formatted": "رکا ہوا (0 بیداریاں غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 1
+      },
+      "formatted": "رکا ہوا (1 بیداری غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 2
+      },
+      "formatted": "رکا ہوا (2 بیداریاں غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 5
+      },
+      "formatted": "رکا ہوا (5 بیداریاں غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 21
+      },
+      "formatted": "رکا ہوا (21 بیداریاں غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 101
+      },
+      "formatted": "رکا ہوا (101 بیداریاں غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 0.5
+      },
+      "formatted": "رکا ہوا (0.5 بیداریاں غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 1.5
+      },
+      "formatted": "رکا ہوا (1.5 بیداریاں غیر فعال)"
+    },
+    {
+      "message_id": "wire.session_status.error",
+      "parameters": {},
+      "formatted": "خرابی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error",
+      "parameters": {},
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "user_stop"
+      },
+      "formatted": "خرابی — صارف نے روکا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "خرابی — پیش رفت رکے رہنے کی حد کے بعد رن ٹائم خود بند ہوا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "continuation_limit"
+      },
+      "formatted": "خرابی — جاری رکھنے کی حد پوری؛ زیرِ انتظار پیغام چھوڑ دیا گیا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "output_limit"
+      },
+      "formatted": "خرابی — ماڈل کے آؤٹ پٹ کی حد پوری؛ جاری نہ رہ سکا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "خرابی — رن ٹائم اپ ڈیٹ کے لیے بند ہوا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_shutdown"
+      },
+      "formatted": "خرابی — باری کے دوران رن ٹائم بند ہو گیا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "خرابی — پیش رفت کی حد کے بعد رن ٹائم اپ ڈیٹ کے لیے بند ہوا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "خرابی — اپ ڈیٹ مکمل نہیں ہوئی؛ رن ٹائم نے پہلے سے لوڈ شدہ بلڈ برقرار رکھی"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_killed"
+      },
+      "formatted": "خرابی — رن ٹائم باقاعدہ بند ہوئے بغیر غائب ہو گیا؛ روکنے کی درخواست نہیں کی گئی تھی"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "install_mid_update"
+      },
+      "formatted": "خرابی — باری کے دوران تنصیب بدل دی گئی"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "owner_lost"
+      },
+      "formatted": "خرابی — باری کے دوران رن ٹائم نے جواب دینا بند کر دیا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "disposed"
+      },
+      "formatted": "خرابی — باری کے دوران سیشن ختم کر دیا گیا"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "خرابی"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "خرابی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "user_stop"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ صارف نے روکا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ پیش رفت رکے رہنے کی حد کے بعد رن ٹائم خود بند ہوا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "continuation_limit"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ جاری رکھنے کی حد پوری؛ زیرِ انتظار پیغام چھوڑ دیا گیا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "output_limit"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ ماڈل کے آؤٹ پٹ کی حد پوری؛ جاری نہ رہ سکا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ رن ٹائم اپ ڈیٹ کے لیے بند ہوا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_shutdown"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران رن ٹائم بند ہو گیا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ پیش رفت کی حد کے بعد رن ٹائم اپ ڈیٹ کے لیے بند ہوا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ اپ ڈیٹ مکمل نہیں ہوئی؛ رن ٹائم نے پہلے سے لوڈ شدہ بلڈ برقرار رکھی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_killed"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ رن ٹائم باقاعدہ بند ہوئے بغیر غائب ہو گیا؛ روکنے کی درخواست نہیں کی گئی تھی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "install_mid_update"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران تنصیب بدل دی گئی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "owner_lost"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران رن ٹائم نے جواب دینا بند کر دیا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "disposed"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران سیشن ختم کر دیا گیا"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "خرابی — کیفیت ابھی نہیں پڑھی گئی"
+    }
+  ],
+  "counts": {
+    "keys": 17,
+    "cause_arms_per_seen_unseen": 13,
+    "rendered_cases": 54
+  },
+  "not_claimed": [
+    "runtime",
+    "visual",
+    "pseudo",
+    "native RTL",
+    "admission to shipped locales"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "ID du projet Google Cloud",
+  "providers.vertex_prompts.field.service_account": "JSON du compte de service ou chemin du fichier JSON",
+  "providers.vertex_prompts.hint.required": "Enter pour envoyer ; Enter à vide ou Esc pour annuler la connexion.",
+  "providers.vertex_prompts.prompt.field": "Saisir {field} (laisser vide pour annuler) : "
+}

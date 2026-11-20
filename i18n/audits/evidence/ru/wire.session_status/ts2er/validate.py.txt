@@ -1,0 +1,133 @@
+import sys, os, json, hashlib, re, importlib.util
+from pathlib import Path
+from decimal import Decimal
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-terminal-status')
+OUT=Path(__file__).resolve().parent
+sys.path.insert(0,str(ROOT))
+from local_operator.i18n import runtime as rt, format as fmt
+spec=importlib.util.spec_from_file_location('i18n_check',ROOT/'scripts/i18n/check.py')
+check=importlib.util.module_from_spec(spec); sys.modules[spec.name]=check; spec.loader.exec_module(check)
+EN=ROOT/'local_operator/i18n/catalogues/en/wire.session_status.json'
+CTX=EN.with_name('wire.session_status.context.json')
+sha=lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def load(p):
+ def unique(pairs):
+  d={}
+  for k,v in pairs:
+   assert k not in d, f'duplicate key {k}'
+   d[k]=v
+  return d
+ return json.loads(Path(p).read_text(),object_pairs_hook=unique)
+en=load(EN)
+assert sha(EN)=='52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326'
+assert sha(CTX)=='5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525'
+plural=load(ROOT/'local_operator/i18n/data/plural_rules.json')
+locales={
+'es':('/Users/damian/.local-operator/sessions/b39246e0d986/scratchpad/terminal-status-es/wire.session_status.json','b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128','b39246e0d986','f9eeb42530ec','es-first'),
+'ru':('/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/wire.session_status.json','b15cc559652777694f2e252404862095bbdc902f90fe72fcee930a03b698f47c','3f1cf5b56ba0','56bc997306a1','ru-status-a1')}
+
+def nodes(ast):
+ for n in ast:
+  if isinstance(n,rt._Arg):
+   yield n
+   for _,part in n.parts: yield from nodes(part)
+def admission(target,locale):
+ problems=[]
+ if set(target)!=set(en): problems.append('key parity mismatch')
+ for k,v in target.items():
+  if k not in en: continue
+  try:
+   problem=check._arguments_problem(rt.message_arguments(en[k]),rt.message_arguments(v),translated_source=v,locale=locale,plural=plural)
+   if problem: problems.append(k+': '+str(problem))
+   check._check_plural_categories(problems,locale,'wire.session_status',k,v,plural,locale)
+  except rt.MessageError as exc: problems.append(k+': '+str(exc))
+ return problems
+
+def complete(target,locale):
+ problems=[]
+ for k,v in target.items():
+  want_select=[(n.name,set(dict(n.parts))) for n in nodes(rt.parse_message(en[k])) if n.kind=='select']
+  got_select=[(n.name,set(dict(n.parts))) for n in nodes(rt.parse_message(v)) if n.kind=='select']
+  if want_select!=got_select: problems.append(k+': select arm parity')
+  for n in nodes(rt.parse_message(v)):
+   if n.kind=='plural':
+    if set(dict(n.parts)) != set(fmt.plural_categories(locale)): problems.append(k+': missing/extra CLDR categories')
+    for arm,part in n.parts:
+     if not any(isinstance(x,rt._Hash) or (isinstance(x,rt._Arg) and x.name==n.name) for x in part): problems.append(k+': missing count in '+arm)
+ return problems
+
+for locale,(path,expected,translator,first_session,first_dir) in locales.items():
+ out=OUT/locale; out.mkdir(exist_ok=True)
+ log=[]
+ def emit(s): log.append(s)
+ target=load(path); assert sha(path)==expected
+ emit('COMMAND: isolated PYTHONDONTWRITEBYTECODE=1 Python '+str(Path(__file__))+'; scoped repo checker functions plus independent AST completeness guard; no full-repo suite')
+ emit('HEAD frozen 2930492e05a6968a2e1adfe34a091b94802bacd0')
+ emit(f'INPUT source={sha(EN)} context={sha(CTX)} target={sha(path)}')
+ assert len(target)==17 and set(en)==set(target)
+ problems=admission(target,locale); assert not problems,problems
+ emit('PASS repo checker _arguments_problem + _check_plural_categories: 17/17; valid JSON, duplicate rejection and exact key parity')
+ assert not complete(target,locale)
+ emit('PASS independent AST guard: exact command/cause selectors, full CLDR set '+str(fmt.plural_categories(locale))+' and count in every arm')
+ # Prove negatives discriminate (the known missing-category repository gap is recorded, not hidden).
+ key='wire.session_status.dormant'
+ missing=dict(target); missing[key]=re.sub(r' (many|few) \{[^{}]*\}','',target[key],count=1)
+ assert not admission(missing,locale), 'expected documented repository missing-arm acceptance gap'
+ assert complete(missing,locale)
+ emit('PASS negative control: repository accepts removed CLDR arm (KNOWN GAP); independent completeness guard rejects')
+ bad=dict(target); bad[key]=target[key].replace('count','wrong_count'); assert admission(bad,locale)
+ emit('PASS negative control: renamed placeholder rejected by repository validator')
+ bad=dict(target); bad[key]=target[key]+'{'; assert admission(bad,locale)
+ emit('PASS negative control: malformed ICU rejected by repository validator')
+ bad=dict(target); bad.pop('wire.session_status.recent'); assert admission(bad,locale)
+ emit('PASS negative control: missing key rejected')
+ bad=dict(target); bad[key]=target[key].replace('many {','bogus {'); assert admission(bad,locale)
+ emit('PASS negative control: unsupported plural category rejected')
+ bad=dict(target); ck='wire.session_status.error_cause'; bad[ck]=target[ck].replace(' user_stop {',' renamed_cause {',1); assert complete(bad,locale)
+ emit('PASS negative control: renamed cause arm rejected by independent guard')
+ count=0
+ for k,v in target.items():
+  if k.endswith(('error_cause','unseen_error_cause')):
+   arm_names=list(dict(next(n for n in nodes(rt.parse_message(v)) if n.name=='cause').parts))
+   assert len(arm_names)==13
+   for cause in arm_names+['unknown_future_cause']:
+    rendered=rt.render_message(v,{'cause':cause},locale); assert '\n' not in rendered
+    if cause=='unknown_future_cause': assert rendered==rt.render_message(v,{'cause':'other'},locale)
+    emit(f'RENDER {k} cause={cause}: {rendered}'); count+=1
+  elif 'command' in dict(rt.message_arguments(v)):
+   for command in ['none','/stop --all','/kill']:
+    rendered=rt.render_message(v,{'command':command},locale)
+    assert (command in rendered) if command!='none' else 'none' not in rendered
+    assert '\n' not in rendered
+    emit(f'RENDER {k} command={command}: {rendered}'); count+=1
+  elif k==key:
+   covered=set()
+   values=[0,1,2,4,5,11,21,22,25,1000000,1500000,Decimal('1.5'),Decimal('2.5'),Decimal('1.0')]
+   for value in values:
+    cat=fmt.plural_category(locale,value); covered.add(cat)
+    rendered=rt.render_message(v,{'count':value},locale); assert '\n' not in rendered
+    emit(f'RENDER {k} count={value!r} category={cat}: {rendered}'); count+=1
+   assert covered==set(fmt.plural_categories(locale))
+  else:
+   rendered=rt.render_message(v,{'base':'LEGACY_BASE'} if k.endswith('retired_label') else {},locale)
+   assert '\n' not in rendered
+   emit(f'RENDER {k}: {rendered}'); count+=1
+ # First-pass binding checked only after the independent semantic review was written.
+ first=Path('/Users/damian/.local-operator/sessions')/first_session/'scratchpad'/first_dir
+ receipt=load(first/'receipt.json'); record=load(first/'record.json')
+ rh=sha(first/'receipt.json')
+ if locale=='ru': assert rh=='a0ac1fc7dee593ba2eaa3156b0e6fa1752c4d10d6f2749ae37cc8c5df0f06c81'
+ assert receipt['locale']==locale and receipt['namespace']=='wire.session_status'
+ assert receipt['source_sha256']==sha(EN)
+ assert receipt['auditor']['session']==first_session and first_session!='191daf68e868' and first_session!=translator
+ # Pin all claimed source/context/target hashes even if first receipt delegates them to its record.
+ record_text=json.dumps(record)
+ for h in (sha(EN),sha(CTX),sha(path)): assert h in record_text,(locale,h)
+ if 'target_sha256' in receipt: assert receipt['target_sha256']==sha(path)
+ if 'record_sha256' in receipt: assert receipt['record_sha256']==sha(first/'record.json')
+ assert receipt['status']=='passed'
+ emit(f'PASS prior receipt SHA256 {rh}; record SHA256 {sha(first/"record.json")}; record binds exact en/context/target; independent sessions')
+ emit(f'PASS formatter samples {count}; semantic notes are separate, not executable proof; no visual or integrated/native runtime clearance')
+ (out/'audit.log').write_text('\n'.join(log)+'\n')
+ (out/'mechanical.json').write_text(json.dumps({'locale':locale,'key_count':17,'source_sha256':sha(EN),'context_sha256':sha(CTX),'target_sha256':sha(path),'formatter_samples':count,'repo_validator':'passed scoped functions','independent_full_cldr_guard':'passed','known_repo_missing_cldr_acceptance':True,'first_receipt':{'path':str(first/'receipt.json'),'sha256':rh,'record_path':str(first/'record.json'),'record_sha256':sha(first/'record.json'),'target_binding_verified':True}},ensure_ascii=False,indent=2)+'\n')
+ print(locale, 'PASS',17,'keys;',count,'samples; prior receipt',rh)

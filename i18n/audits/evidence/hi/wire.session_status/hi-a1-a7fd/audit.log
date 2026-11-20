@@ -1,0 +1,5 @@
+PASS 17/17 keys; frozen hashes; valid duplicate-free JSON; placeholder names/types; exact machine arms; full Hindi CLDR categories; count preservation; legacy retired_label unchanged
+PASS 65 formatter-only samples (all cause arms, fallback, command none/opaque, counts 0/1/2/5/21/55/1234567/0.5/1.5)
+PASS 7 meaningful negative controls rejected by scoped admission
+GAP CONFIRMED: repo same-kind plural checker admits missing Hindi one; actual target has one/other. Not a target finding.
+NOT PERFORMED: full suite, integrated runtime, visual, pseudo, shaping, native-client proof, repository writes, history apply

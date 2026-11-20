@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from local_operator.mcp import manager as mcp_manager
 from local_operator.mcp.config import load_all_mcp_configs
 from local_operator.mcp.manager import McpManager
 from local_operator.secrets import access
@@ -240,12 +241,40 @@ async def test_encrypted_mcp_http_rpc_restart(headless_tui_env, workspace, monke
                 # The startup-failure map, which `session_factory` turns into
                 # `McpStartupOutcome.failures` -> the toast, `/mcp` and
                 # `frontend_state.mcp_startup` / `McpServerState.error`.
-                await manager._connect_round(manager._configs, manager._sources)
-                failures = manager.startup_failures()
-                assert wrong not in str(failures), "the credential reached the failure map"
-                # Not vacuous: the server's own sentence is there, with the value
-                # replaced — so the round recorded THIS failure, in the echo shape.
-                assert "rejected credential" in failures.get("api", ""), failures
+                #
+                # `_connect_round` returns at the 250 ms startup gate, and a
+                # server still connecting then has its failure recorded LATER by
+                # the background continuation (`_finish_pending` ->
+                # `_note_startup_failure`). On a loaded CI runner the rejected
+                # initialize missed the gate and this map was read empty
+                # (`AssertionError: {}`, tui-e2e shard, runs 44283966096 and
+                # 44308005046: "failed to connect after the gate" logged ~250 ms
+                # after the round began). The product's own reporters await
+                # `wait_settled` before reading the outcome (`mcp/desktop.py`,
+                # `session.py`), so this reads it the same way.
+                #
+                # Both arms are asserted, the second deterministically: the round
+                # runs once with the real gate (whichever arm the machine lands
+                # in) and once with the gate forced to zero, so the continuation
+                # arm — the one that flaked — is exercised on every run. A
+                # continuation that dropped or leaked the failure stays red.
+                real_gate_ms = mcp_manager.STARTUP_GATE_MS
+                for gate_ms in (real_gate_ms, 0):
+                    monkeypatch.setattr(mcp_manager, "STARTUP_GATE_MS", gate_ms)
+                    await manager._connect_round(manager._configs, manager._sources)
+                    if gate_ms == 0:
+                        # Proves the forced leg really took the continuation arm.
+                        assert manager.startup_settling()
+                    assert await manager.wait_settled(10), "the round never settled"
+                    failures = manager.startup_failures()
+                    assert wrong not in str(failures), "the credential reached the failure map"
+                    # Not vacuous: the server's own sentence is there, with the
+                    # value replaced — so the round recorded THIS failure, in the
+                    # echo shape.
+                    assert "rejected credential" in failures.get("api", ""), failures
+                # Restore the real gate for the legs below (not `undo()`, which
+                # would also drop the env and broker patches this test needs).
+                monkeypatch.setattr(mcp_manager, "STARTUP_GATE_MS", real_gate_ms)
                 try:
                     await asyncio.wait_for(manager.wait_for_connection("api"), 5)
                 except Exception:

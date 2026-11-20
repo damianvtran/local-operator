@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import sys
 import threading
 import weakref
 
@@ -744,6 +745,120 @@ async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monk
     await parent.dispose()
 
 
+def _describe_referrer(obj: object) -> str:
+    """One cheap line naming what a gc referrer is, for leak diagnostics."""
+    kind = type(obj).__name__
+    if isinstance(obj, dict):
+        if isinstance(obj.get("__name__"), str) and "__file__" in obj:
+            return f"module globals {obj['__name__']}"
+        keys = [repr(k) for k in list(obj)[:6]]
+        return f"dict keys=[{', '.join(keys)}{', ...' if len(obj) > 6 else ''}]"
+    code = getattr(obj, "f_code", None)
+    if code is not None:
+        return f"frame {getattr(code, 'co_qualname', code.co_name)}"
+    qualname = getattr(obj, "__qualname__", None)
+    if isinstance(qualname, str):
+        return f"{kind} {qualname}"
+    return f"{kind} ({type(obj).__qualname__})"
+
+
+def _safe_describe(obj: object) -> str:
+    """Describe a referrer without letting a hostile ``__getattr__`` or a
+    half-torn-down object raise from inside the assertion message, which
+    would replace the leak report with an unrelated traceback."""
+    try:
+        return _describe_referrer(obj)
+    except Exception:
+        return type(obj).__name__
+
+
+def _referrer_report(obj: object, limit: int = 20) -> str:
+    """Name who still holds ``obj`` (two levels), so a CI-only retention
+    failure reports its holder instead of just "still a live Session".
+
+    The report's own frames (and the calling test's coroutine) and the
+    referrer lists it builds are excluded; they hold ``obj`` only because we
+    are looking at it. So is ``obj``'s own ``__dict__``: it is its cycle,
+    not an outside holder.
+
+    Methods bound to ``obj`` are kept, because a live bound method held by a
+    task done-callback, a ``call_soon`` handle or a subscriber list is exactly
+    the holder class this report exists to name. Only a bound method whose
+    sole holder is ``obj``'s own ``__dict__`` (a cached self-reference) is
+    skipped as noise; every other bound method is listed with its holder on
+    the line under it.
+
+    Ordering, not filtering, keeps the capped report useful: a referrer whose
+    every holder is ``obj``'s ``__dict__`` or one of ``obj``'s own attribute
+    values (e.g. a Session's job manager holding ``Session._on_job_completed``)
+    is a collectible internal cycle, so it is listed after the referrers held
+    from outside. Without that, a Session's dozen self-wired callbacks fill
+    the cap before the outside holder appears. A holder that a module's
+    globals keep alive gets that module named, since "<- list" alone does not
+    say which list.
+    """
+    if obj is None:
+        return "collected during report"
+    here = sys._getframe()
+    caller = here.f_back
+    own: list[object] = [here, caller]
+    gc.collect()
+    obj_dict = getattr(obj, "__dict__", None)
+    internal_ids = {id(obj_dict)}
+    if isinstance(obj_dict, dict):
+        internal_ids.update(id(v) for v in obj_dict.values())
+    candidates = gc.get_referrers(obj)
+    own.append(candidates)
+    external: list[tuple[object, list[object]]] = []
+    internal: list[tuple[object, list[object]]] = []
+    own.append(external)
+    own.append(internal)
+
+    # A plain function, not ``any(x is o for o in own)``: a generator closing
+    # over the loop variable turns it into a cell, and that cell then shows
+    # up as a holder of every referrer, defeating the internal-cycle ordering.
+    def is_own(x: object) -> bool:
+        for o in own:
+            if x is o:
+                return True
+        return False
+
+    for r in candidates:
+        if is_own(r):
+            continue
+        if getattr(r, "cr_frame", None) is caller or r is obj_dict:
+            continue
+        raw = gc.get_referrers(r)
+        own.append(raw)
+        holders = [h for h in raw if not is_own(h)]
+        own.append(holders)
+        if getattr(r, "__self__", None) is obj and len(holders) == 1 and holders[0] is obj_dict:
+            continue
+        if holders and all(id(h) in internal_ids for h in holders):
+            internal.append((r, holders))
+        else:
+            external.append((r, holders))
+    lines = [f"live {type(obj).__name__} still referenced by:"]
+    for ref, holders in external + internal:
+        lines.append(f"  {_safe_describe(ref)}")
+        for up in holders:
+            line = f"    <- {_safe_describe(up)}"
+            if not isinstance(up, dict) and getattr(up, "f_code", None) is None:
+                modules = [
+                    g["__name__"]
+                    for g in gc.get_referrers(up)
+                    if isinstance(g, dict)
+                    and isinstance(g.get("__name__"), str)
+                    and "__file__" in g
+                ]
+                if modules:
+                    line += f" in module globals {', '.join(modules)}"
+            lines.append(line)
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines[:limit])
+
+
 @pytest.mark.asyncio
 async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monkeypatch):
     """The accounting snapshot must not keep an observability-to-owner edge."""
@@ -763,10 +878,20 @@ async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monk
         lambda: (row := parent.jobs.get(job_id)) is not None and row.status == "completed"
     )
     await wait_for(lambda: bool(captured))
-    for _ in range(3):
+    # Why a bounded wait rather than a fixed handful of gc/yield rounds: the
+    # fixed three rounds failed intermittently on CI full-suite gates (8 of 20
+    # failed gate runs after 2026-11-19T01:04Z, py3.12 and 3.13, unrelated PRs)
+    # while always passing locally, i.e. the child's teardown can lag a few
+    # loop turns under xdist/CI load. The deadline keeps the guarded property
+    # honest: a real owner edge from the accounting snapshot never clears, so
+    # it still fails, just after ~3 s, and the message names the holder.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 3.0
+    while captured[0]() is not None and loop.time() < deadline:
         gc.collect()
-        await asyncio.sleep(0)
-    assert captured[0]() is None
+        await asyncio.sleep(0.01)
+    gc.collect()
+    assert captured[0]() is None, _referrer_report(captured[0]())
     assert parent.jobs.get(job_id) is not None
     await parent.dispose()
 

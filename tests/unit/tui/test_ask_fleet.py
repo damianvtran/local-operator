@@ -1574,7 +1574,7 @@ async def test_a_session_at_the_projection_cap_withholds_the_split(enabled, isol
     _seed(isolated_index, "s-big", [_row(f"c{i}") for i in range(policy.PROJECTION_CAP)])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         app.action_open_fleet_asks()
         await _settle(pilot, 6)
         listing = app.query_one(AskQueueList)

@@ -18,6 +18,7 @@ import json
 import threading
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1549,7 +1550,10 @@ def test_the_cli_envelope_is_the_published_bound_less_its_margin(
         return None  # no relay answer: the refusal path, which is all this measures
 
     monkeypatch.setattr(relay, "control_request", _capture)
-    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda root=None: object())
+    # A CURRENT relay's record: one without ``session-move-workset-v1`` is refused
+    # before any control request (review R9), which is not the envelope measured here.
+    current = SimpleNamespace(capabilities=list(relay.wire.LINK_CAPABILITIES))
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda root=None: current)
 
     for keep, to in ((False, "build-box"), (True, "build-box"), (False, "local")):
         seen.clear()
