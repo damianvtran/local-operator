@@ -4812,6 +4812,39 @@ _DIAGNOSTICS_REFUSAL = re.compile(
 )
 
 
+def _refuses_thinking_level(response: httpx.Response) -> bool:
+    """Whether an already-read Gemini error is the thinking-level refusal.
+
+    Matched on status 400 plus Google's own phrase, measured live on Vertex
+    2026-11-19: ``Thinking level is unsupported: THINKING_LEVEL_MINIMAL``. Not
+    on status alone — an ordinary 400 (a bad tool schema, an invalid enum like
+    ``bogus``, which Google words differently) is a request defect that must
+    surface unchanged rather than be silently retried.
+    """
+    if response.status_code != 400:
+        return False
+    try:
+        text = response.text
+    except Exception:  # noqa: BLE001 — an unreadable body is not this refusal
+        return False
+    return "thinking level is unsupported" in text.lower()
+
+
+#: ``(route, model_id, level)`` thinking levels Google has refused in THIS
+#: process (400 ``Thinking level is unsupported``). Without it the shed in
+#: ``GoogleClient._open_content_stream`` healed one request only: the session's
+#: ``reasoning_effort`` keeps the refused rung, so every later turn repaid a
+#: 400 round trip and re-logged the warning. Remembering the refusal lets
+#: ``_build_body`` omit the level up front -- the same request the retry sends
+#: -- so the warning is logged once per (route, model, level). In-process only
+#: on purpose: a refusal is evidence about the ladder source being stale, and a
+#: restart (typically after the catalogue is refreshed) should re-try it.
+_REFUSED_THINKING_LEVELS: set[tuple[str, str, str]] = set()
+#: Leak ceiling for :data:`_REFUSED_THINKING_LEVELS`; clearing costs at most
+#: one extra 400 per entry.
+_REFUSED_THINKING_LEVELS_MAX = 256
+
+
 async def _refuses_diagnostics(response: httpx.Response) -> bool:
     """Whether an error response is the API rejecting the ``diagnostics`` key.
 
@@ -6231,23 +6264,51 @@ class GoogleClient:
         if max_tokens and max_tokens > 0:
             generation_config["maxOutputTokens"] = max_tokens
         generation_config.update(_sampling_params(request, top_p_key="topP"))
-        # No effort key here, deliberately: Gemini's named thinking tiers belong
-        # to the Interactions API, while this client speaks `generateContent`,
-        # where the shipped 2.5-series models take a token budget instead. No
-        # Gemini model is given an effort ladder for that reason
-        # (``model.effort``), so `_reasoning_effort` would return None anyway —
-        # the note is here because its absence is a decision, not an oversight.
+        # Gemini 3+ takes a NAMED thinking tier on `generateContent` itself:
+        # ``generationConfig.thinkingConfig.thinkingLevel``. Probed live on Vertex
+        # 2026-11-19: gemini-4-neon answers 200 for low/medium/high/xhigh and 400
+        # "Thinking level is unsupported" for minimal; gemini-3.8-flash answers
+        # 200 for low/medium/high and 400 for minimal/xhigh. So the value is the
+        # ladder word verbatim, and it is sent ONLY when `_reasoning_effort`
+        # finds the chosen level on this model's ladder (``model.effort`` /
+        # the models.dev projection). Unset sends no ``thinkingConfig`` at all,
+        # so the model's own default depth applies — never a guessed tier. A
+        # stale ladder that offers a rung the model refuses is healed in
+        # ``stream`` (one retry without the key), not here.
+        thinking_level = _reasoning_effort(request)
+        if (
+            thinking_level is not None
+            and (
+                self._thinking_route(request),
+                request.model.model_id,
+                thinking_level,
+            )
+            not in _REFUSED_THINKING_LEVELS
+        ):
+            generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
         if request.stop_sequences:
             generation_config["stopSequences"] = list(request.stop_sequences)
         body["generationConfig"] = generation_config
         if request.tools:
+            # Vertex AI's ``parameters`` is the strict OpenAPI-subset ``Schema``
+            # message, and it 400s on the JSON-Schema keywords our tool schemas
+            # use (``Unknown name "exclusiveMinimum"`` / ``"$defs"`` / ``"$ref"``),
+            # which failed EVERY tool-carrying Vertex turn. Vertex's
+            # ``parametersJsonSchema`` takes standard JSON Schema verbatim — live
+            # probe 2026-11-19: 200 with correct functionCall args for a schema
+            # holding all three keywords — so Vertex gets that key on every
+            # endpoint (project/location OAuth+SA and the API-key publisher
+            # path share this body). AI Studio (``google`` hosting) keeps
+            # ``parameters``, byte-identical to before: it is a working path,
+            # and nothing here has verified the swap against it.
+            schema_key = "parametersJsonSchema" if self._is_vertex(request) else "parameters"
             body["tools"] = [
                 {
                     "function_declarations": [
                         {
                             "name": tool.name,
                             "description": tool.description,
-                            "parameters": tool.parameters or {"type": "object", "properties": {}},
+                            schema_key: tool.parameters or {"type": "object", "properties": {}},
                         }
                         for tool in request.tools
                     ]
@@ -6301,6 +6362,76 @@ class GoogleClient:
         if has_image:
             return "[tool returned image content]"
         return EMPTY_TOOL_RESULT_TEXT
+
+    def _is_vertex(self, request: ChatRequest) -> bool:
+        """Whether ``request`` goes to Vertex AI rather than AI Studio.
+
+        The ONE spelling of the rule ``stream`` routes on, so the body builder
+        (which picks the tool-schema key) and the URL choice cannot disagree.
+        """
+        return self._vertex or request.model.provider == "google-vertex"
+
+    def _thinking_route(self, request: ChatRequest) -> str:
+        """The key a thinking-level refusal is remembered under.
+
+        Vertex and AI Studio are separate backends that may disagree about one
+        model's ladder, so a refusal on one must not strip the level on the other.
+        """
+        return "google-vertex" if self._is_vertex(request) else "google"
+
+    @contextlib.asynccontextmanager
+    async def _open_content_stream(
+        self,
+        request: ChatRequest,
+        url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+    ) -> AsyncIterator[httpx.Response]:
+        """Open the SSE stream, shedding a REFUSED ``thinkingConfig`` once.
+
+        The ladder that decides which thinking levels we offer comes from a
+        live third-party catalogue (models.dev) or an offline family rule, and
+        either can be wrong for a model released or changed after it was
+        written. A wrong rung must cost the user one turn's worth of depth, not
+        the turn: when Google answers 400 ``Thinking level is unsupported`` and
+        this body carried a ``thinkingConfig``, the identical request is sent
+        again without it (the model's own default depth) and a warning names
+        the model and level so the stale ladder is visible. Nothing has been
+        streamed yet, so the retry is invisible to the turn. Same shape as the
+        Anthropic client's ``diagnostics`` shed (``_open_messages_stream``).
+        Every other error passes through unchanged.
+        """
+        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+            if response.status_code < 400:
+                yield response
+                return
+            await response.aread()
+            if not (
+                "thinkingConfig" in body.get("generationConfig", {})
+                and _refuses_thinking_level(response)
+            ):
+                raise_for_status(response)
+        generation_config = dict(body["generationConfig"])
+        refused = generation_config.pop("thinkingConfig")
+        refused_level = refused.get("thinkingLevel") if isinstance(refused, Mapping) else None
+        if isinstance(refused_level, str):
+            if len(_REFUSED_THINKING_LEVELS) >= _REFUSED_THINKING_LEVELS_MAX:
+                _REFUSED_THINKING_LEVELS.clear()
+            _REFUSED_THINKING_LEVELS.add(
+                (self._thinking_route(request), request.model.model_id, refused_level)
+            )
+        logger.warning(
+            "google: %s refused thinking level %r (HTTP 400 'Thinking level is "
+            "unsupported'); retrying once at the model's default depth",
+            request.model.model_id,
+            refused.get("thinkingLevel") if isinstance(refused, Mapping) else refused,
+        )
+        retry_body = {**body, "generationConfig": generation_config}
+        async with self._http.stream("POST", url, json=retry_body, headers=headers) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                raise_for_status(response)
+            yield response
 
     def _vertex_endpoint_and_headers(
         self,
@@ -6386,7 +6517,7 @@ class GoogleClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
-        if self._vertex or request.model.provider == "google-vertex":
+        if self._is_vertex(request):
             url, headers = self._vertex_endpoint_and_headers(
                 request.model.model_id, api_key, oauth_access
             )
@@ -6432,12 +6563,9 @@ class GoogleClient:
         #: carrier wins and ``None`` means it was never named.
         served_model: str | None = None
 
-        async with self._http.stream(
-            "POST", url, json=self._build_body(request, scope=scope), headers=headers
+        async with self._open_content_stream(
+            request, url, self._build_body(request, scope=scope), headers
         ) as response:
-            if response.status_code >= 400:
-                await response.aread()
-                raise_for_status(response)
             started = False
             async for data in _iter_sse_lines(response):
                 try:

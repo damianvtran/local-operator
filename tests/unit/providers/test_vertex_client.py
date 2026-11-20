@@ -476,7 +476,7 @@ def test_vertex_models_dev_projection_and_long_context_cost_for_usage() -> None:
     from local_operator.model.prices import PRICE_CATALOGUE_CAPTURE, price_row, project
     from local_operator.model.registry import ModelInfo
 
-    assert PRICE_CATALOGUE_CAPTURE == 4
+    assert PRICE_CATALOGUE_CAPTURE >= 4
     assert _cache_tokens_are_inside_input("google-vertex") is True
 
     body = {
@@ -511,7 +511,7 @@ def test_vertex_models_dev_projection_and_long_context_cost_for_usage() -> None:
         }
     }
     projected = project(body, '"etag-v4"')
-    assert projected["capture"] == 4
+    assert projected["capture"] == PRICE_CATALOGUE_CAPTURE
     assert "google-vertex" in projected["providers"]
 
     row = price_row(

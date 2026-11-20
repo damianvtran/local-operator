@@ -261,6 +261,9 @@ def test_the_projection_keeps_only_mapped_providers_and_the_seven_fields() -> No
         # Carried so ``_row`` can answer the audio-input question (OQ-2); same
         # normalisation, ``[]`` when models.dev said nothing.
         "input_modalities",
+        # Named thinking tiers (``reasoning_options`` of type ``effort``),
+        # raw on disk; ``[]`` when models.dev said nothing (capture 5).
+        "effort_levels",
     }
     assert "description" not in json.dumps(document)
     assert fable["cost"] == {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5}
@@ -523,10 +526,10 @@ def test_models_dev_states_audio_input_three_valued() -> None:
 
 
 def test_the_price_capture_version_carries_the_audio_field() -> None:
-    """Version 4 adds ``google-vertex`` and ``context_over_200k`` on top of
-    version 3's ``input_modalities``, so an existing cached projection is
-    refetched once instead of serving missing Vertex or >200k tier prices."""
-    assert PRICE_CATALOGUE_CAPTURE == 4
+    """Version 5 adds ``effort_levels`` on top of version 4's ``google-vertex``
+    key and ``context_over_200k``, so an existing cached projection is
+    refetched once instead of serving no Gemini thinking ladder for a day."""
+    assert PRICE_CATALOGUE_CAPTURE == 5
 
 
 # -- the ranked chain: models.dev, then OpenRouter, then nothing ----------------
