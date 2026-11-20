@@ -13,12 +13,24 @@ def access_denied(*, region: str) -> Msg:
     return Msg("wire.errors.bedrock.access_denied", {"region": region})
 
 
+def aws_cli_missing() -> Msg:
+    return Msg("wire.errors.bedrock.aws_cli_missing", {})
+
+
 def check_list_denied(*, region: str) -> Msg:
     return Msg("wire.errors.bedrock.check_list_denied", {"region": region})
 
 
 def check_unverified(*, region: str) -> Msg:
     return Msg("wire.errors.bedrock.check_unverified", {"region": region})
+
+
+def connection_missing() -> Msg:
+    return Msg("wire.errors.bedrock.connection_missing", {})
+
+
+def context_failed(*, detail: str) -> Msg:
+    return Msg("wire.errors.bedrock.context_failed", {"detail": detail})
 
 
 def credential_resolution_failed(*, detail: str) -> Msg:
@@ -35,6 +47,10 @@ def credentials_rejected(*, region: str) -> Msg:
 
 def iam_denied(*, action: str, resource: str) -> Msg:
     return Msg("wire.errors.bedrock.iam_denied", {"action": action, "resource": resource})
+
+
+def input_invalid(*, field: str) -> Msg:
+    return Msg("wire.errors.bedrock.input_invalid", {"field": field})
 
 
 def invalid_connection(*, detail: str) -> Msg:
@@ -64,9 +80,29 @@ def profile_not_found(*, profile: str) -> Msg:
     return Msg("wire.errors.bedrock.profile_not_found", {"profile": profile})
 
 
+def region_invalid(*, region: str) -> Msg:
+    return Msg("wire.errors.bedrock.region_invalid", {"region": region})
+
+
 def secret_missing(*, command: str) -> Msg:
     return Msg("wire.errors.bedrock.secret_missing", {"command": command})
 
 
 def session_expired(*, profile: str, command: str) -> Msg:
     return Msg("wire.errors.bedrock.session_expired", {"profile": profile, "command": command})
+
+
+def sso_busy(*, profile: str) -> Msg:
+    return Msg("wire.errors.bedrock.sso_busy", {"profile": profile})
+
+
+def sso_headless(*, command: str) -> Msg:
+    return Msg("wire.errors.bedrock.sso_headless", {"command": command})
+
+
+def sso_not_applicable(*, profile: str) -> Msg:
+    return Msg("wire.errors.bedrock.sso_not_applicable", {"profile": profile})
+
+
+def use_aws_panel() -> Msg:
+    return Msg("wire.errors.bedrock.use_aws_panel", {})

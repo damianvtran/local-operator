@@ -94,6 +94,11 @@ def static_feature_flags() -> dict[str, Any]:
     """
     return {
         "auth": 1,
+        # Amazon Bedrock's AWS panel routes (``routes/auth.py``: context,
+        # connection, sso-login, check; bedrock design §7). The desktop shows
+        # the AWS panel only when this is present; older backends answer the
+        # generic API-key path only.
+        "bedrock_auth": 1,
         "settings": 1,
         # 2 narrows the messages endpoint's slash policy: it now accepts a
         # message that merely BEGINS with a command word (`/mcp logout

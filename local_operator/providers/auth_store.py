@@ -865,6 +865,12 @@ def credential_identity(credential: "StoredCredential | Mapping[str, Any]") -> s
         data: Mapping[str, Any] = credential.data
     else:
         data = getattr(credential, "data", credential)
+    # An Amazon Bedrock row names itself by its connection label ("dev ·
+    # us-east-1"), never by its descriptor ``key`` (design §8): the label is
+    # what the operator chose, and the descriptor is storage plumbing.
+    bedrock = data.get("bedrock")
+    if isinstance(bedrock, Mapping) and bedrock.get("label"):
+        return str(bedrock["label"])[:IDENTITY_LIMIT]
     for field in ("email", "account_id", "org_name"):
         value = data.get(field)
         if value:

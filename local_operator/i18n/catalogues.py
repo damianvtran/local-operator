@@ -235,8 +235,18 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.errors.bedrock": (
         "Amazon Bedrock error remedies and connection-check results rendered "
         "in-process by providers/bedrock/errors.py and providers/bedrock/check.py "
-        "(_text = render_resolved); ProviderError and KeyCheck carry finished "
-        "text, never a catalogue key"
+        "(_text = render_resolved), and server/routes/auth.py renders refusal "
+        "envelopes with machine-category codes; all carry finished text, never "
+        "a catalogue key"
+    ),
+    # Login copy is composed before callbacks: CLI/TUI pickers and desktop
+    # operation snapshots receive strings, not keys for a client to resolve.
+    # Keep it out of the eager bundle rather than raising the total ceiling.
+    "wire.login.bedrock": (
+        "Amazon Bedrock login copy rendered in-process through render_resolved "
+        "by providers/bedrock/login.py, providers/bedrock/sso_login.py, "
+        "providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; "
+        "callbacks and operation snapshots carry finished text, never a catalogue key"
     ),
 }
 

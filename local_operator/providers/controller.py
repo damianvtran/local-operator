@@ -1640,7 +1640,12 @@ class ProviderController:
             from local_operator.aida.profile import record_radient_login
 
             record_radient_login(result, config_dir=self.config_dir)
-        identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
+        # The one label derivation (email -> account_id -> org_name, and an
+        # Amazon Bedrock connection's own label first), so the receipt names a
+        # Bedrock connection "dev · us-east-1", never its storage identity.
+        from local_operator.providers.auth_store import credential_identity
+
+        identity = credential_identity(result) or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
         if storage == "radient":

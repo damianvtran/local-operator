@@ -68,6 +68,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Amazon Bedrock connect/credential refusals (`providers/bedrock/errors.py`),
         # rendered verbatim by the desktop's provider-connect surface.
         "wire.errors.bedrock",
+        # The Bedrock sign-in flow's progress/prompt copy (`providers/bedrock/login.py`,
+        # `sso_login.py`) shown by `lop login bedrock`, the TUI and desktop connect.
+        "wire.login.bedrock",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
         # imaging_unavailable, empty_body), rendered by the desktop and phone

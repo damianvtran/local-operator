@@ -312,6 +312,12 @@ class ProviderDefinition:
             return None
         if getattr(self.login, "__lo_api_key_login__", False):
             return "api_key"
+        # A login that is neither a paste nor a browser/device flow names its
+        # own kind (Amazon Bedrock's structured AWS chooser is "aws"); hosts
+        # branch on the kind, so the TUI, CLI and desktop census agree.
+        declared = getattr(self.login, "__lo_login_kind__", None)
+        if isinstance(declared, str) and declared:
+            return declared
         return "browser" if self.callback_port is not None else "device"
 
     @property
@@ -404,6 +410,18 @@ def _token_plan_wire_key(creds: dict[str, Any]) -> str:
     credential still authenticates something rather than raising KeyError.
     """
     return creds.get("api_key") or creds["access"]
+
+
+def _bedrock_login() -> LoginFn:
+    """Amazon Bedrock's structured AWS login, imported lazily like OAuth flows.
+
+    The kind marker is set on the THUNK (the registry never imports the login
+    module at build time), mirroring how ``_lazy_login`` carries the paste
+    flags: ``login_kind`` reads it off this callable to answer "aws".
+    """
+    login = _lazy_login("local_operator.providers.bedrock.login", "login_bedrock")
+    setattr(login, "__lo_login_kind__", "aws")
+    return login
 
 
 def create_api_key_login(provider_label: str, auth_url: str, instructions: str = "") -> LoginFn:
@@ -592,8 +610,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
     # or a raw Bedrock API key; secrets are sealed in the encrypted store by the
     # AuthStore seal hook. ``base_url=None`` because the endpoint is per Region
     # and derived from the credential. The paste-a-key login covers method 1
-    # (Bedrock API key, provider-level Region); the AWS-profile/SSO/access-key
-    # login surfaces are Slice A2. Never lent over the mesh (device-bound: a
+    # (Bedrock API key, provider-level Region) for older desktop renderers via
+    # ``PUT /key``; the interactive login is the structured AWS chooser
+    # (``providers/bedrock/login.py``, login_kind "aws"). Never lent over the mesh (device-bound: a
     # descriptor names a local profile or a local sealed ref).
     ProviderDefinition(
         id="bedrock",
@@ -601,11 +620,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         brand="Amazon Bedrock",
         search_aliases=("aws", "claude-bedrock", "bedrock-claude"),
         env_keys=_bedrock_env_key,
-        login=create_api_key_login(
-            "Amazon Bedrock",
-            "https://console.aws.amazon.com/bedrock/home#/api-keys",
-            "Paste an Amazon Bedrock API key (set the Region with providers.bedrock.region).",
-        ),
+        login=_bedrock_login(),
         base_url=None,
         wire="bedrock",
     ),

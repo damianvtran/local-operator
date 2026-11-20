@@ -57,6 +57,40 @@ def _text(message) -> str:  # noqa: ANN001
     return render_resolved(message)
 
 
+#: Machine codes for a REJECTED connection (``KeyCheck.code``), the vocabulary
+#: the desktop AWS panel switches on (local-operator-ui ``refusalTitle``). An
+#: unverified verdict (``valid is None``) carries NO code by contract: the
+#: renderer distinguishes those by ``reason`` alone (contract delta 6).
+CODE_REJECTED = "bedrock_credentials_rejected"
+CODE_SSO_EXPIRED = "bedrock_sso_expired"
+CODE_PROFILE_NOT_FOUND = "bedrock_profile_not_found"
+CODE_NO_CREDENTIALS = "bedrock_no_credentials"
+
+
+def credential_error_code(exc: BaseException | None) -> str:
+    """The rejection code for a credential-resolution failure.
+
+    Classified from the ORIGINAL botocore exception (``__cause__`` of the
+    :class:`~local_operator.providers.bedrock.auth.BedrockCredentialError`), by
+    class name like ``errors.classify_credential_error``, so the code and the
+    sentence can never disagree about what went wrong.
+    """
+    names = {cls.__name__ for cls in type(exc).__mro__} if exc is not None else set()
+    if names & {
+        "SSOTokenLoadError",
+        "UnauthorizedSSOTokenError",
+        "SSOError",
+        "LoginTokenLoadError",
+        "LoginError",
+    } or ("TokenRetrievalError" in names and "sso" in str(exc).lower()):
+        return CODE_SSO_EXPIRED
+    if "ProfileNotFound" in names:
+        return CODE_PROFILE_NOT_FOUND
+    if exc is None or names & {"NoCredentialsError", "PartialCredentialsError"}:
+        return CODE_NO_CREDENTIALS
+    return CODE_REJECTED
+
+
 async def check_connection(
     key: str, timeout: float, *, client: httpx.AsyncClient | None = None
 ) -> "KeyCheck":
@@ -70,7 +104,22 @@ async def check_connection(
         # A credential timeout (IMDS/SSO endpoint slow) is "could not tell".
         if error.retryable:
             return KeyCheck(None, str(error))
-        return KeyCheck(False, str(error))
+        return KeyCheck(False, str(error), credential_error_code(exc.__cause__))
+    return await probe(resolved, timeout, client=client)
+
+
+async def probe(
+    resolved: "bauth.ResolvedAuth", timeout: float, *, client: httpx.AsyncClient | None = None
+) -> "KeyCheck":
+    """The signed control-plane probe for credentials already in hand.
+
+    Split from :func:`check_connection` so a login can validate secret
+    material BEFORE it is sealed (an access-key pair or API key typed into the
+    connect form has no ``ref`` yet, and storing an unchecked secret is the
+    exact thing ``save_key`` exists to avoid). Never raises.
+    """
+    from local_operator.providers.key_check import KeyCheck
+
     url = str(
         httpx.URL(
             f"{bconn.control_base(resolved.region)}/inference-profiles",
@@ -93,7 +142,9 @@ async def check_connection(
         return KeyCheck(True, None)
     error_type = (response.headers.get("x-amzn-ErrorType") or "").split(":", 1)[0].lower()
     if status == 401 or error_type in _REJECTED_TYPES:
-        return KeyCheck(False, _text(_keys().credentials_rejected(region=resolved.region)))
+        return KeyCheck(
+            False, _text(_keys().credentials_rejected(region=resolved.region)), CODE_REJECTED
+        )
     if status == 403:
         # Credentials resolved and signed fine, but this identity may not list
         # profiles (invoke-only role): it may still run models.
