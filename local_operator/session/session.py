@@ -3950,6 +3950,7 @@ class Session:
         # messages. Completed consumers verify disk, not this runtime object.
         self._file_provenance_state = None
         self._init_bridge_taint(inherited_bridge_taint)
+        self._init_community_taint()
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
         # its own). Anything raising here kills the runtime process before it
@@ -4647,6 +4648,19 @@ class Session:
                 "notify_available",
                 lambda: any(tool.name == "notify" for tool in self._tools),
             )
+        if getattr(system_blocks_provider, "session_tool_membership", False):
+            # The factory provider closes over the PRE-narrowing tool list, but
+            # block zero's tool-gated prose (browser/console usage, library,
+            # todo, ask mechanics ...) must describe the tools this session
+            # actually holds: an SDK ``ApprovalPolicy.declared([...])`` run
+            # narrowed to three tools used to ship the browser playbook in block
+            # 0 while block 1 said "This session was not given the browser
+            # tool". ``self._tools`` is the live, already-narrowed set (every
+            # rebinding goes through ``refresh_tools``), deferred tools included.
+            # The provider keys its cache on these names, so a change before the
+            # first turn reaches the frozen prefix and a later one is an ordinary
+            # head change handled by ``_prepare_system_blocks``.
+            setattr(system_blocks_provider, "live_tools", lambda: list(self._tools))
         if getattr(system_blocks_provider, "session_cos_identity", False):
             # Her configured name for the prompt (``_cos_display_name``). The
             # factory cannot answer it: it must not import her package (R17),
@@ -4747,6 +4761,36 @@ class Session:
         #: runtime rather than a trusted one — an unattended compliance worker
         #: that must reach its screening tools and nothing else.
         self._declared_tools: frozenset[str] | None = None
+        #: Whether the bounded wait for declared/preloaded MCP servers has
+        #: SUCCEEDED (``session/declared_mcp_ready.py``). Once per session: the
+        #: wait exists for the cold-start race, and a server that drops later is
+        #: the reconnect path's job, not a per-turn stall. Set only after the gate
+        #: settles, never before it runs: an SDK caller retrying ``prompt()``
+        #: after the gate raised (or after an abort cut it short) must meet the
+        #: gate again, not a silent send without its declared tools (agent
+        #: review round 1, R3).
+        self._named_mcp_ready_checked = False
+        #: Whether this session's MCP reach is INHERITED: a delegated child whose
+        #: MCP tools are fixed by its parent's ``_child_mcp_wiring`` surface (on
+        #: the parent's BORROWED manager) and whose declaration is the parent's
+        #: bound carried down. Stamped by ``harness.subagent`` before it applies
+        #: that declaration. Two things key on it, both so a child keeps exactly
+        #: the tool set its parent's surface built for it:
+        #:
+        #: * ``materialize_declared_tools`` grants nothing. An inherited
+        #:   declaration NARROWS (``subagent``: "the two intersect rather than
+        #:   either winning"); treating it as a caller's enumeration and granting
+        #:   from the raw shared manager bypasses ``selected``, which withholds
+        #:   every ``ownTurnOnly`` server's tools from children. That is how the
+        #:   OSWorld parent's episode action tool reached a child's request
+        #:   (merge-gate run 44707733427).
+        #: * the first-turn MCP readiness gate does not run. The parent's own
+        #:   gate already settled the declared servers on the manager the child
+        #:   borrows, and nothing a wait could deliver enters a child's fixed
+        #:   surface (only an explicit ``mcp://`` activation does), so a wait
+        #:   would be pure latency and a raise would refuse a child turn over a
+        #:   tool it was never going to hold.
+        self._mcp_reach_inherited = False
         #: The OPS a declared tool may reach, for the few tools whose reach is not
         #: its name. ``None`` means "every op this build's tool accepts", which is
         #: the state every declaration without an op scope is in — see
@@ -5110,6 +5154,11 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        #: Team Bridge card excerpt decisions, frozen at each card's first render
+        #: in this process (``card_projection.attach_history_excerpts``): keeps
+        #: already-cached card bytes stable. Cleared whenever standing fails and
+        #: at every compaction commit (``_finish_compaction``).
+        self._bridge_excerpt_memo: dict[str, Any] = {}
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
         self._body_answered_turn: Any | None = None
@@ -5357,6 +5406,13 @@ class Session:
         self._seed_cache_diagnostics(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
+        #: The generation of the last ``agent_start`` this session EMITTED, kept
+        #: after the turn ends (unlike ``_logical_generation``). It is what the
+        #: frontend snapshot publishes, so snapshots, updates and turn events
+        #: share one counter; the raw ``_generation`` also counts continuation
+        #: runs and runs that never announce a start. The next announced start
+        #: is always above it, because ``_run_turn`` bumps the raw counter first.
+        self._turn_generation = 0
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
         # Todo-continuation latch: the full todo fingerprint captured at the
         # last guardrail nudge in THIS user turn, so a model that yields twice
@@ -5959,6 +6015,10 @@ class Session:
         # session's own context exists. This pass cannot cover a capability that
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
+        # Observe authority before the initial merge so a grant arriving before
+        # the first prompt remains a transition. Inventory replacement is not an
+        # authority change: unchanged authority must preserve refresh_tools exactly.
+        self._notify_authority_available = self._notify_tool_callable() is not None
         self._merge_capability_tools()
         # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
         # below must see the whole inventory it narrows.
@@ -15827,7 +15887,11 @@ class Session:
         """
         declared = self._declared_tools
         manager = getattr(self, "mcp_manager", None)
-        if declared is None or manager is None:
+        # An inherited declaration is a bound, never a grant: see
+        # ``_mcp_reach_inherited``. Before the first-turn gate called this on a
+        # child, the only child call (``set_tool_inventory`` in ``subagent``)
+        # ran before the borrowed manager was attached, which hid the leak.
+        if declared is None or manager is None or self._mcp_reach_inherited:
             return ()
         try:
             available = manager.get_tools()
@@ -16692,6 +16756,11 @@ class Session:
         """
         if self._yolo:
             return None
+        from local_operator.harness.bridge_egress import (
+            ApprovalGrant,
+            session_grant_covers,
+        )
+
         base = self._request_approval
         declared = self._declared_tools
         if base is None or declared is None or not self._declared_tools_unattended:
@@ -16705,7 +16774,13 @@ class Session:
             taint_raised: bool = False,
             bridge_latched: bool = False,
         ) -> bool:
-            if tool_name in declared:
+            if tool_name in declared and session_grant_covers(
+                ApprovalGrant(auto=True), title=tool_name
+            ):
+                # A person-only gate is never answered by declaration: its title
+                # holds a space no tool name can, so this is belt and braces for
+                # a future gate whose title could be declared (review R1-2).
+                #
                 # A declared unattended inventory approves by declaration even
                 # in a Team-Bridge-latched session: the S-51 carve-out, left
                 # as is (accepted risk outside ask mode).
@@ -19195,8 +19270,30 @@ class Session:
             return None
         return self._notify_inbox
 
+    def _reconcile_notify_tool(self) -> None:
+        """Apply external authority changes at the next turn's inventory boundary.
+
+        The CLI writes a sidecar, not this owner's in-memory tool list. Only an
+        observed authority transition may change inventory: unchanged authority
+        must not undo a caller's exact refresh_tools replacement. Rescue only
+        notify through declaration filtering; cached invocations independently
+        recheck revocation, so this observation is never a permission cache.
+        """
+        available = self._notify_tool_callable() is not None
+        if available == self._notify_authority_available:
+            return
+        self._notify_authority_available = available
+        present = any(tool.name == "notify" for tool in self._tools)
+        if available:
+            if not present:
+                self._merge_capability_tools(("notify",))
+        elif present:
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name != "notify"], republish=False
+            )
+
     def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
-        """The door the ``notify`` TOOL is built on: the inbox door, minus agent-spawned sessions.
+        """The deliberate-notify door: inbox reachability plus reporting authority.
 
         WHY A SEPARATE DOOR (review round 1, R1-2 / QA Q1): the agent-spawned
         exclusion first sat in :meth:`_notify_inbox_callable`, which
@@ -19209,10 +19306,18 @@ class Session:
         door = self._notify_inbox_callable()
         if door is None or self._session_was_agent_spawned():
             return None
-        return door
+        return self._notify_authorized_item
+
+    async def _notify_authorized_item(self, **kwargs: Any) -> str:
+        # Tool contexts can outlive an operator revocation. Recheck the same
+        # authority at invocation, not just when constructing the inventory.
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return "Notification authority is unavailable; report to your delegating agent."
+        return await door(**kwargs)
 
     def _session_was_agent_spawned(self) -> bool:
-        """Whether ANOTHER AGENT started this session, so it reports to that agent.
+        """Whether this session still reports to the agent that started it.
 
         OPERATOR RULE (2026-11-13): "child/reviewer/QA sessions never notify the
         operator directly." A delegated child (``_job_id``) and a hidden run
@@ -19222,7 +19327,9 @@ class Session:
         * a ``sessions spawn`` workstream (``origin.json`` =
           ``resume.ORIGIN_AGENT_WORKSTREAM``, the spawn tool's default) — listed
           so the operator can watch it, but its findings go back to the agent
-          that spawned it, which decides whether the operator needs an item;
+          that spawned it, which decides whether the operator needs an item.
+          An explicit local standalone-notification grant can change this
+          reporting policy without changing the spawn provenance;
         * a session placed here at another device's request (a ``peer``
           placement) whose stamp does NOT positively say the operator started
           it (``remote_attention.origin_is_operator_started``): an AGENT's
@@ -19251,7 +19358,10 @@ class Session:
             from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp
 
             if session_origin(Path(directory)) == ORIGIN_AGENT_WORKSTREAM:
-                return True
+                from local_operator.notifications.authority import granted
+
+                if not granted(Path(directory)):
+                    return True
             stamp_file = Path(directory) / MESH_STAMP_NAME
             if not stamp_file.is_file():
                 return False
@@ -20007,6 +20117,42 @@ class Session:
                     "needs_user": needs_user,
                 },
             )
+            # A notify-requested delivery owes a durable inbox entry as well as
+            # the completion signal. The normal-priority item deliberately does
+            # NOT banner: this run's already-finalized completion owns the OS
+            # route. High explicit notify items retain their own delivery ladder.
+            # Use the tool's authority gate, not the broader gate-item door, so
+            # delegated agents cannot turn a wake into operator attention.
+            if (
+                kind == "complete"
+                and notify
+                and self._run_notify_requested
+                and not self._run_notified
+                and messages
+                and isinstance(messages[-1], Message)
+            ):
+                door = self._notify_tool_callable()
+                if door is not None:
+                    try:
+                        from local_operator.tui.notify import scrub_banner_text
+
+                        text = scrub_banner_text(
+                            self._redact_tool_result_text(messages[-1].text)
+                        ).strip()
+                        if text:
+                            await door(
+                                title=text.splitlines()[0],
+                                body=text,
+                                priority="normal",
+                                key=f"completion:{token}",
+                                links=[],
+                                anchor_id=anchor,
+                                raise_banner=False,
+                            )
+                    except Exception:  # noqa: BLE001 — preserve completion on an inbox outage
+                        logger.warning(
+                            "notify: could not persist delivery completion", exc_info=True
+                        )
             try:
                 # BOUNDED WAIT, NOT A BOUNDED THREAD: ``wait_for`` cancels our
                 # await, but a running worker thread cannot be killed. The
@@ -21288,6 +21434,36 @@ class Session:
         # idle+supervisor decision before this admission may proceed.
         from local_operator.session.runtime import restart_fence
 
+        # FIRST, before anything about this run is published or journalled: a
+        # declared MCP server that is still connecting must be awaited before
+        # the request is built, and one that never arrives raises here, where
+        # nothing durable has happened yet (the same shape as ``TurnInFlight``).
+        # Never for a delegated child (``_mcp_reach_inherited``): its parent's
+        # gate settled the borrowed manager, and the gate's grant step would
+        # widen the child's surface past what its parent allowed.
+        if not self._named_mcp_ready_checked and not self._mcp_reach_inherited:
+            from local_operator.session.declared_mcp_ready import (
+                await_named_mcp_servers,
+            )
+
+            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
+            # the TUI/desktop subscribed to this runtime) merges a late
+            # ``preload_tools`` server mid-session, the contract documented on
+            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
+            # a headless host (exec, SDK, scheduler) holds the turn for one.
+            # The same "no UI, no attach subscriber" test the turn-end
+            # checkpoint uses to tell a headless store apart (review R4).
+            store = getattr(self, "_frontend_state_store", None)
+            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
+            self._named_mcp_ready_checked = await await_named_mcp_servers(
+                self.mcp_manager,
+                declared=self._declared_tools,
+                reachable=lambda: self.tool_inventory,
+                materialize=self.materialize_declared_tools,
+                wait_for_preload=not front_end,
+                # Esc lands here as the sticky flag (no turn signal exists yet).
+                cancelled=lambda: self._abort_requested,
+            )
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:
             publish_admission = getattr(self, "_publish_turn_admitted", None)
@@ -21872,6 +22048,11 @@ class Session:
         excerpts at the next request (design §5, property C). It never mutates
         the context: cards get request-local copies (``card_projection``).
         Any failure is "no excerpts", which is today's ids-only marker.
+        STANDING is re-proved per call; each card's excerpt DECISION is frozen at
+        its first render (``_bridge_excerpt_memo``) so cached card bytes do not
+        move. NOT covered: the stranded-card reorder
+        (``_fallback_card_wake_initial``) still moves a card to the tail, which
+        re-writes the cache from its old position; the memo leaves it alone.
         """
         runtime = getattr(self, "bridge_runtime", None)
         if runtime is None or not any(
@@ -21891,8 +22072,13 @@ class Session:
             )
             from local_operator.team_bridge.store import _owner_key
 
+            # Frozen decisions hold body text; they ride only while standing
+            # does, so every refusal below drops them with the excerpts.
+            memo = getattr(self, "_bridge_excerpt_memo", None)
             refusal = authority_fence(runtime)
             if refusal is not None:
+                if memo is not None:
+                    memo.clear()
                 code = refusal.get("code")
                 if code == "feature_off":
                     # A torn config read also answers ``feature_off``; only a
@@ -21914,9 +22100,14 @@ class Session:
                 # sign-in itself is part of the standing (QA Q1). The logout
                 # hook purged the rows already; this withholds excerpts even
                 # if a row survived (fail closed: the ids-only marker).
+                if memo is not None:
+                    memo.clear()
                 return messages
             return attach_history_excerpts(
-                messages, config_dir=runtime.config_dir, owner_key=_owner_key(runtime.owner)
+                messages,
+                config_dir=runtime.config_dir,
+                owner_key=_owner_key(runtime.owner),
+                memo=memo,
             )
         except Exception:  # noqa: BLE001 — excerpts are optional; never fail a request
             logger.debug("bridge: history excerpts skipped", exc_info=False)
@@ -22367,6 +22558,9 @@ class Session:
             # turn, so the schema the model sees is consistent for the whole
             # turn (see ``_reconcile_web_tools`` for why not on the tick).
             self._reconcile_web_tools()
+            # Local CLI grants/revocations are external to this live owner;
+            # apply them before either prompt inventory or wire tools freeze.
+            self._reconcile_notify_tool()
             # This turn has published nothing yet, so the first provider call
             # below captures the inventory as it stands NOW — with the web-tool
             # reconcile above already applied — and every later call in the turn
@@ -22625,6 +22819,7 @@ class Session:
                         # the UI sees, and its generation stamps the eventual
                         # end. Continuation runs re-enter here and are silent.
                         self._logical_generation = event.generation
+                        self._turn_generation = event.generation
                         await self._emit(event)
                     else:
                         # A continuation's provider receipt is newer than the
@@ -23814,6 +24009,66 @@ class Session:
                 "bridge taint latch row write failed; latch held in memory", exc_info=True
             )
 
+    # -- Community read taint (RFC v2.4 §5.9; community/taint.py) ---------------
+
+    def _init_community_taint(self) -> None:
+        """Own the session's "read community content" flag, fed from durable commits.
+
+        The bridge latch's wiring, one source narrower: every transcript commit
+        is observed so a ``community_read`` result is seen whatever path
+        appended it, and the backstop scan reads the journal from row 0 — which
+        a resume, a fork (it copies ``transcript.jsonl``) and a ``/move``
+        replica all load. Compaction appends a marker and never rewrites rows,
+        so it cannot lift the flag; only ``/new`` or a fresh session starts
+        clean.
+        """
+        from local_operator.community.taint import CommunityTaint
+
+        transcript = self._transcript
+
+        def journal() -> list[tuple[str, dict[str, Any]]]:
+            return [(entry.type, entry.payload) for entry in transcript.entries()]
+
+        self._community_taint = CommunityTaint(entries=journal)
+        self._community_taint_row_task: asyncio.Task[None] | None = None
+        subscribe = getattr(transcript, "subscribe_commits", None)
+        if subscribe is not None:
+            subscribe(self._on_community_taint_commit)
+
+    @property
+    def community_tainted(self) -> bool:
+        """Whether this session has read community content. Fail-closed."""
+        return self._community_taint.tainted
+
+    def _on_community_taint_commit(self, entries: Any, _source: Any = None) -> None:
+        taint = self._community_taint
+        taint.observe_entries((entry.type, entry.payload) for entry in entries)
+        if taint.tainted and not taint.row_present:
+            task = self._community_taint_row_task
+            if task is not None and not task.done():
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("community taint row not written: no running loop")
+                return
+            self._community_taint_row_task = loop.create_task(self._write_community_taint_row())
+
+    async def _write_community_taint_row(self) -> None:
+        from local_operator.community.taint import COMMUNITY_TAINT_ROW_TYPE
+
+        taint = self._community_taint
+        if taint.row_present:
+            return
+        if self._transcript.latest_custom_entry(COMMUNITY_TAINT_ROW_TYPE) is not None:
+            taint.row_present = True
+            return
+        try:
+            # The commit observer sees this row too and sets ``row_present``.
+            await self._transcript.append_custom(COMMUNITY_TAINT_ROW_TYPE, taint.row_details())
+        except Exception:  # noqa: BLE001 - the in-memory flag stays set; warned
+            logger.warning("community taint row write failed; flag held in memory", exc_info=True)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -23863,6 +24118,7 @@ class Session:
             ancestor_session_ids=self._ancestor_session_ids(),
             bridge_taint=self._bridge_taint,
             inherited_bridge_taint=self._bridge_taint.inherited,
+            community_taint=self._community_taint,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             # On a CHILD this resolves to the parent's title (see
@@ -23901,6 +24157,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The BASE gate, kept under --yolo, for person-only cards a tool
+            # raises itself (a community post): yolo skips the tool gate, not
+            # the person (the profile save's route, ``_request_approval``).
+            person_approval=self._request_approval,
             # The host's consent seam for tool-issued ACCOUNT writes. Held on
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
@@ -23977,6 +24237,8 @@ class Session:
             # ``agent_shell.MAY_DELEGATE_ENV`` for the commands it runs; see
             # ``agent_shell.py`` for what reads it and why it is asymmetric.
             may_delegate=any(tool.name == "task" for tool in self._tools),
+            # Same derivation, for the spill footer (see the field's comment).
+            spill_readable=any(tool.name == "read" for tool in self._tools),
             jobs=self.jobs,
             peer_arrival=self._peer_arrival,
             subagent_comms=self.subagent_comms,
@@ -30264,6 +30526,17 @@ class Session:
             # ...]`` already. The preserved turns carry no tool_call pairing, so
             # none of the orphan invariants can be affected.
             self._context.messages = [marker, *preserved_messages, *kept]
+            # The Team Bridge excerpt memo exists only to keep ALREADY-CACHED
+            # card bytes stable. This swap puts a new marker ahead of every kept
+            # card, so the cache is cold from here regardless, and a frozen
+            # "sent ids-only" decision now protects nothing. Compaction keeps the
+            # kept cards' message ids, so without this a long-lived bridge
+            # session (which rarely restarts) never regained an excerpt for a
+            # card a body turn delivered (agent review R1). ``getattr`` matches
+            # the transform's own read: partial hosts may never have built one.
+            excerpt_memo = getattr(self, "_bridge_excerpt_memo", None)
+            if excerpt_memo is not None:
+                excerpt_memo.clear()
             history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )
@@ -31219,8 +31492,12 @@ class Session:
         propagate: the guardrail turns every failure into a block.
         """
         spec = self._lowest_effort(self.effective_model)
+        # Cache the STATIC judge prompt only (``guardrails/judge.py``, ~1.3k
+        # tokens, re-sent at a 68 s median gap — inside the 5m TTL). The
+        # default marker sat on the unique user turn after it, so the 7-day
+        # ledger showed a 0% hit rate on writes paid for every check.
         request = self._errand_request(spec, system, prompt).model_copy(
-            update={"purpose": "guardrail"}
+            update={"purpose": "guardrail", "cache_markers": "system"}
         )
         return await self._drain_errand(request)
 

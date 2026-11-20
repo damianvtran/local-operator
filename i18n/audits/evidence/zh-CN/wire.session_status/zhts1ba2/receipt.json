@@ -1,0 +1,69 @@
+{
+  "record_reference": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/record.json",
+  "record": {
+    "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/record.json",
+    "sha256": "838cb32d583e80a5670a1e991e5d46eb3d15b3611b2e7ea8959dd73e1e4ad7bc"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "ba2da228c32c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session context Model: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_from_translator_session": "e9c45b5505eb",
+    "independent_from_translator": true,
+    "date": "2026-11-19T20:54:08.494255+00:00",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "scope": "FIRST independent full 17-key safety-copy audit; all ICU select arms and count 0/1/2/55"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/audit.log",
+      "sha256": "416691e5b8f7c2114297ce167b7469e408a96bafd73ebc90b620fd2b94030333"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/candidate.json",
+      "sha256": "6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/initial-failed-audit.log",
+      "sha256": "26d9cc8fb1928825107a5dc202e3b37e5ac2e414d8faf978a965d0d1d267b366"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/input-hashes.json",
+      "sha256": "3b46ad4e37d06c4e129cd3ecdc63b564d8a0bfafba50adf12e2017b33fba9076"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/ledger-dry-run.log",
+      "sha256": "7f8a9b076380998672a38877dd242ba933746715889a5680eac3f2b5ec10c6c2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/ledger-receipt.json",
+      "sha256": "7a183235838e3412c3b5afed13098a69c5c1ce188638bc6c5131f431e9e1ba12"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/report.md",
+      "sha256": "4aeb54bcff0642864234b814cc96c4ba56af010de596ebdf3524daa4d11ab5ca"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/runner.py.txt",
+      "sha256": "80efe810d5234eab8e43c6a46e186e5d68682aa74f5b7696f82fa8844414d879"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/samples.json",
+      "sha256": "40c55c55bde9264ee2a0528da087384acd6167cba22bed545f31c29013af4d31"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/translator-receipt.json",
+      "sha256": "8c8583ce1b467365cf3ac4fcdde0042d454cb2bf55c635af77600716b8c85d0d"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "retention_pending": true
+}

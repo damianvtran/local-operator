@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "audit_id": "secondary-c739715f0519-vi",
+  "audit_kind": "approval_card_second_pass_same_auditor",
+  "locale": "vi",
+  "namespaces": [
+    "tui.community",
+    "wire.community"
+  ],
+  "audit_date": "2026-11-18",
+  "audited_revision": {
+    "head": "bd219f20b928f570b0230bac1197173267f04a74",
+    "patch": "pr4221-i18n.patch (held, applied on head)",
+    "patch_sha256": "fcf8ed47f7d7fa28a4ab4ab4e728ac4efdc0da489d71911ed82ccdb68762a7c5",
+    "pr": "https://github.com/damianvtran/local-operator/pull/4221"
+  },
+  "key_count": {
+    "tui.community": 3,
+    "wire.community": 5
+  },
+  "auditor": {
+    "agent": "reviewer / i18n-auditor (second pass)",
+    "session": "c739715f0519",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header; no fallback",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": false,
+    "independence": "Same session and model as audit A; separate key-by-key pass with its own receipt. Not model-independent of the translator."
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "guides": [
+    "i18n/style-guides/vi.md",
+    "i18n/glossary.md"
+  ],
+  "terminology_reference": "local-operator-ui origin/feat/community-ui @ 1b1c4d31875dcbc44cc76f82b9a339278d93419d src/i18n/catalogues/<loc>/ui.community.json",
+  "input_hashes": {
+    "en": {
+      "tui.community": "cf2cc44838daed3feee13561e45dac11ddce031ac3fa702854a3215536671ac1",
+      "wire.community": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff"
+    },
+    "context": {
+      "tui.community": "00a728518f28f592f4135c9bffd77617d187e96611e79b99f26166af6a40cc90",
+      "wire.community": "b0c568ca3380d372c4f2ca43f2046ccc9dd8bf19e4c22014e037dcb63518e769"
+    },
+    "target": {
+      "tui.community": {
+        "path": "local_operator/i18n/catalogues/vi/tui.community.json",
+        "sha256": "bac6e6b8ee32ef9c70972d655a9eeb21bbed21a02ac9bcb81bf5db1b81f0df44"
+      },
+      "wire.community": {
+        "path": "local_operator/i18n/catalogues/vi/wire.community.json",
+        "sha256": "70cd8f2d3a6c0e98c4a787178c829e92000ccc1153788c6d1e15618e4cb48ff5"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/community-secondary/report.md",
+      "sha256": "ef49f0fcce30aa30dcf2a63a9c42e759af17aee9b3ae0ab1cf42337bd4905027"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/community-secondary/audit.log",
+      "sha256": "5aae03c85855909bd58b9a3d4f5bf1b7f1ac9a24eb238b8327cc367eec352f33"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    }
+  }
+}

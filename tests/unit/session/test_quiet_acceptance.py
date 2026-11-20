@@ -142,7 +142,7 @@ async def test_person_arriving_during_host_settlement_is_consumed_once_before_ac
         await session.dispose()
 
 
-# THE SETTLE BUDGET IS LOOP-THREAD CPU, NOT WALL TIME (AGENTS.md "If you must
+# THE SETTLE BUDGET IS OBSERVER CPU, NOT TOTAL LOOP-THREAD CPU (AGENTS.md "If you must
 # measure, measure CPU, not wall time"). The old flat 8 s ``wait_for`` was a
 # wall-clock bet: hosted runs (main 44041716956 test(3.12,5), the #3664 gate
 # test(3.13,4)) failed with the new owner parked in the publish's bounded
@@ -154,6 +154,16 @@ async def test_person_arriving_during_host_settlement_is_consumed_once_before_ac
 # (it exited 3 ms later). The process not being scheduled is not the code
 # holding the lock, and a wall clock cannot tell those apart; the loop thread's
 # CPU clock can, because a descheduled or GIL-waiting thread accrues none.
+#
+# A second failure mode remained: thread_time also charges OTHER loop tasks.
+# A controlled 8.1 CPU-second executor-submission phase reproduced the same
+# locked-tail failure even though the store worker had already completed. This
+# proves a failure class, not that GC caused the hosted failure. The overdue
+# product timer simply had not been delivered yet. Charge only this
+# observer's executing segments, never the interval across its sleep(0): that
+# interval belongs to the owner, GC, and event-loop callback delivery. Keep the
+# same CPU budget and wall backstop; a genuinely held lock still spends the
+# observer's CPU budget (or reaches the catastrophe backstop).
 #
 # Derivation, not a tuning: the waiter spins on ``sleep(0)``, so while it is
 # scheduled it burns loop CPU at most at wall rate. The longest LEGITIMATE wait
@@ -237,7 +247,7 @@ def timeout_state(session, events, steer_attempts, steer_returns, *, cpu_s, wall
         )
     )
     return (
-        f"cause unknown, not a fix: new owner never settled in {cpu_s:.2f}s loop CPU "
+        f"cause unknown, not a fix: new owner never settled in {cpu_s:.2f}s observer CPU "
         f"(budget {SETTLE_CPU_BUDGET_S:g}s) / {wall_s:.2f}s wall "
         f"(backstop {SETTLE_WALL_BACKSTOP_S:g}s); "
         f"agent_end_count={len(ends)} (needs 2), "
@@ -248,6 +258,118 @@ def timeout_state(session, events, steer_attempts, steer_returns, *, cpu_s, wall
         f"continuation_queue={field(lambda: len(session._continuation_queue))}, "
         f"last_events=[{tail}], tasks=[{tasks}]"
     )
+
+
+async def wait_for_new_owner_settlement(
+    session,
+    events,
+    steer_attempts,
+    steer_returns,
+    *,
+    cpu_clock=time.thread_time,
+    wall_clock=time.monotonic,
+    yield_once=asyncio.sleep,
+):
+    """Bound this observer's work, without billing it for the owner it awaits.
+
+    Clock/yield seams make both attribution and the deadlock negative control
+    deterministic; the real pipeline always uses the real clocks and scheduler.
+    """
+    cpu_s = 0.0
+    cpu_mark, wall_start = cpu_clock(), wall_clock()
+    while (
+        sum(isinstance(event, AgentEndEvent) for event in events) < 2
+        or session.is_streaming
+        or session._turn_lock.locked()
+    ):
+        cpu_s += cpu_clock() - cpu_mark
+        wall_s = wall_clock() - wall_start
+        if cpu_s > SETTLE_CPU_BUDGET_S or wall_s > SETTLE_WALL_BACKSTOP_S:
+            raise AssertionError(
+                timeout_state(
+                    session, events, steer_attempts, steer_returns, cpu_s=cpu_s, wall_s=wall_s
+                )
+            )
+        await yield_once(0)
+        # The yielded interval includes every other task and callback on this
+        # loop, including CPU-heavy GC before the owner's timeout can deliver.
+        cpu_mark = cpu_clock()
+
+
+@pytest.mark.asyncio
+async def test_settlement_observer_does_not_charge_other_loop_work():
+    clock = [0.0]
+    held = [True]
+    yields = []
+    session = SimpleNamespace(
+        is_streaming=False, _turn_lock=SimpleNamespace(locked=lambda: held[0])
+    )
+    events = [AgentEndEvent(), AgentEndEvent()]
+
+    def cpu_clock():
+        clock[0] += 0.001
+        return clock[0]
+
+    async def other_loop_work(_):
+        yields.append(held[0])
+        if len(yields) == 1:
+            clock[0] += SETTLE_CPU_BUDGET_S + 1
+            # Keep the lock held for the next CPU-budget check: releasing it
+            # here would let the old total-loop accounting exit untested.
+        else:
+            # The owner's next scheduled step, not the external CPU work,
+            # releases the lock after the observer has rechecked its budget.
+            held[0] = False
+
+    await wait_for_new_owner_settlement(
+        session,
+        events,
+        [1],
+        [1],
+        cpu_clock=cpu_clock,
+        wall_clock=lambda: 0.0,
+        yield_once=other_loop_work,
+    )
+    assert clock[0] > SETTLE_CPU_BUDGET_S
+    assert not held[0]
+    assert yields == [True, True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "held,streaming,end_count,diagnostic",
+    [
+        (True, False, 2, "turn_lock_locked=True"),
+        (False, True, 2, "is_streaming=True"),
+        (False, False, 1, "agent_end_count=1"),
+    ],
+)
+async def test_settlement_observer_still_rejects_unsettled_owner(
+    held, streaming, end_count, diagnostic
+):
+    clock = [0.0]
+    session = SimpleNamespace(
+        is_streaming=streaming, _turn_lock=SimpleNamespace(locked=lambda: held)
+    )
+    events = [AgentEndEvent() for _ in range(end_count)]
+
+    def cpu_clock():
+        clock[0] += SETTLE_CPU_BUDGET_S / 2
+        return clock[0]
+
+    async def still_held(_):
+        pass
+
+    with pytest.raises(AssertionError, match=diagnostic):
+        await wait_for_new_owner_settlement(
+            session,
+            events,
+            [1],
+            [1],
+            cpu_clock=cpu_clock,
+            wall_clock=lambda: 0.0,
+            yield_once=still_held,
+        )
 
 
 @pytest.mark.asyncio
@@ -273,25 +395,7 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
     try:
         await session._prompt_messages([peer_input()])
 
-        # Runs on the loop thread, so ``thread_time`` is the loop's own CPU (see
-        # SETTLE_CPU_BUDGET_S). The predicate is re-tested after every yield, so
-        # the wait lasts exactly as long as the work; the budgets only decide
-        # when "not yet" has become "never".
-        cpu_start, wall_start = time.thread_time(), time.monotonic()
-        while (
-            sum(isinstance(event, AgentEndEvent) for event in events) < 2
-            or session.is_streaming
-            or session._turn_lock.locked()
-        ):
-            cpu_s = time.thread_time() - cpu_start
-            wall_s = time.monotonic() - wall_start
-            if cpu_s > SETTLE_CPU_BUDGET_S or wall_s > SETTLE_WALL_BACKSTOP_S:
-                raise AssertionError(
-                    timeout_state(
-                        session, events, steer_attempts, steer_returns, cpu_s=cpu_s, wall_s=wall_s
-                    )
-                )
-            await asyncio.sleep(0)
+        await wait_for_new_owner_settlement(session, events, steer_attempts, steer_returns)
         ends = [event for event in events if isinstance(event, AgentEndEvent)]
         starts = [event for event in events if getattr(event, "type", "") == "agent_start"]
         assert len(stream.requests) == 2 and len(ends) == len(starts) == 2

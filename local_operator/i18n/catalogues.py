@@ -226,6 +226,28 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "network/credentials/messages.py and network/credentials/github.py; "
         "the wire and stderr carry finished text, never a catalogue key"
     ),
+    # Deferred rather than raising the eager total ceiling (PR #4266, merge
+    # gate run 44521486072): the Amazon Bedrock remedies (4,166 B in hi) took
+    # hi's eager total to 74,237 B, past EAGER_TOTAL_MAX_BYTES, yet no client
+    # resolves one of its keys. providers/bedrock/errors.py and check.py render
+    # every key in-process through ``_text`` (``render_resolved``) and hand on a
+    # FINISHED sentence as ProviderError / KeyCheck text.
+    "wire.errors.bedrock": (
+        "Amazon Bedrock error remedies and connection-check results rendered "
+        "in-process by providers/bedrock/errors.py and providers/bedrock/check.py "
+        "(_text = render_resolved), and server/routes/auth.py renders refusal "
+        "envelopes with machine-category codes; all carry finished text, never "
+        "a catalogue key"
+    ),
+    # Login copy is composed before callbacks: CLI/TUI pickers and desktop
+    # operation snapshots receive strings, not keys for a client to resolve.
+    # Keep it out of the eager bundle rather than raising the total ceiling.
+    "wire.login.bedrock": (
+        "Amazon Bedrock login copy rendered in-process through render_resolved "
+        "by providers/bedrock/login.py, providers/bedrock/sso_login.py, "
+        "providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; "
+        "callbacks and operation snapshots carry finished text, never a catalogue key"
+    ),
 }
 
 

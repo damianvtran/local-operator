@@ -304,3 +304,29 @@ def test_the_fallback_constant_is_whisper_one() -> None:
     assert clients.OPENAI_STT_FALLBACK_MODEL == "whisper-1"
     assert clients.OPENAI_STT_MODEL == "gpt-4o-transcribe"
     assert clients.ELEVENLABS_STT_MODEL == "scribe_v2"
+
+
+# h11 puts the WHOLE header value in its message when a value has a character a header
+# may not carry, so a transport failure can quote the key that was being sent.
+_SYNTH_KEY = "xk9Q7m2ZrTb4WcL8vNd3Hs5Yp"
+
+
+def _illegal_header(_request: httpx.Request) -> httpx.Response:
+    raise httpx.LocalProtocolError(f"Illegal header value b'{_SYNTH_KEY} '")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda http: clients.ElevenLabsSttClient(_SYNTH_KEY, client=http),
+        lambda http: clients.OpenAiSttClient(_SYNTH_KEY, client=http),
+    ],
+    ids=["elevenlabs", "openai"],
+)
+async def test_a_transport_failure_never_quotes_the_key(build) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_illegal_header)) as http:
+        with pytest.raises(APIError) as caught:
+            await build(http).transcribe(b"RIFFdata", mime="audio/wav")
+    assert "request failed" in str(caught.value)
+    assert _SYNTH_KEY not in str(caught.value) and _SYNTH_KEY[:8] not in str(caught.value)

@@ -13,6 +13,7 @@ from local_operator.clients.radient_cost import cost_from_headers
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
 from local_operator.i18n.keys import wire_errors_media as _wm
+from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg
 from local_operator.model.configure import configure_model
 from local_operator.providers.auth_store import AuthStore
@@ -35,6 +36,7 @@ from local_operator.tts.cascade import (
     synthesize_speech,
 )
 from local_operator.tts.descriptor import DEFAULT_GENDER, descriptor_from_config
+from local_operator.voice import provider as speech_provider
 
 router = APIRouter()
 logger = logging.getLogger("local_operator.server.routes.speech")
@@ -160,6 +162,7 @@ _SPEECH_REFUSALS: Dict[int, Msg] = {
 _RUNG_VENDOR_LABELS: Dict[VoicePath, str] = {
     VoicePath.PROVIDER_TTS_ELEVENLABS: "ElevenLabs",
     VoicePath.PROVIDER_TTS_OPENAI: "OpenAI",
+    VoicePath.PROVIDER_TTS_GROQ: "Groq",
 }
 
 
@@ -282,6 +285,35 @@ def _speech_refusal(exc: APIError, *, rung: Optional[VoicePath] = None) -> HTTPE
     return HTTPException(status_code=502, detail=_upstream_failure_detail(exc).envelope())
 
 
+def _chosen_rung(config_manager: ConfigManager) -> Optional[VoicePath]:
+    """The one rung the user's ``speech.provider`` pins speech to, or ``None``.
+
+    ``None`` (nothing chosen) keeps the whole cascade: the Speak button's
+    behaviour before a provider existed. Read from disk per request, because the
+    choice decides whose account is billed.
+    """
+    chosen = speech_provider.configured_provider(config_manager.config_dir)
+    return speech_provider.PINNED_TTS[chosen] if chosen is not None else None
+
+
+def _no_speech_path_refusal(
+    resolution: VoicePathResolution, pinned: Optional[VoicePath]
+) -> HTTPException:
+    """The 401 for "no rung can serve", in the chosen provider's own words.
+
+    A pinned ElevenLabs request must not tell the user to sign in to Radient: it
+    names the pinned rung's own gap ("No ElevenLabs API key is stored."). The
+    Radient sentence (sign in) is already Radient's own remedy, so it stays for
+    a Radient pin and for an unpinned walk.
+    """
+    if pinned is None or pinned == VoicePath.PROVIDER_TTS_RADIENT:
+        return HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
+    return HTTPException(
+        status_code=401,
+        detail=_wv.unavailable(reason=resolution.reason).envelope(code="voice_unavailable"),
+    )
+
+
 async def _synthesize_with_descriptor(
     text: str,
     *,
@@ -296,6 +328,7 @@ async def _synthesize_with_descriptor(
     resolution: Optional[VoicePathResolution] = None,
     session_id: str = "",
     request_id: str = "",
+    only: Optional[VoicePath] = None,
 ) -> Response:
     """Build the descriptor, resolve the rung, synthesize, and report the leg.
 
@@ -311,6 +344,10 @@ async def _synthesize_with_descriptor(
     nothing-available refusal still precedes the classifier call, and a probe is
     not free (an expired OAuth row gets its refresh attempted and persisted, so
     a redundant one is a redundant network write).
+
+    ``only`` is the rung the user's ``speech.provider`` pins this request to
+    (:func:`_chosen_rung`); ``None`` walks the whole cascade. When a caller
+    passes its own ``resolution`` it must have resolved with the same ``only``.
 
     ``label`` is the caller's own name for its subject (the agent id, or the
     route's name); it rides the log lines only, never the response copy.
@@ -333,10 +370,11 @@ async def _synthesize_with_descriptor(
             config_dir=config_manager.config_dir,
             base_url=env_config.radient_api_base_url,
             store=provider_auth_store,
+            only=only,
         )
     if not resolution.servable:
         logger.warning("Speech request refused for %s: no speech path", label)
-        raise HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
+        raise _no_speech_path_refusal(resolution, only)
 
     descriptor = descriptor_from_config(config_manager, resolved_gender=resolved_gender)
     try:
@@ -352,6 +390,7 @@ async def _synthesize_with_descriptor(
             radient_client=radient_client,
             correlation_session_id=session_id,
             client_request_id=request_id,
+            only=only,
         )
     except TtsUnavailable as unavailable:
         error = unavailable.error
@@ -437,6 +476,12 @@ async def create_speech(
     is the exception: the descriptor has no field that could carry it, so a
     caller naming one is asking for the legacy pass-through and gets it.
 
+    The descriptor shape (and the agent route) follows the user's
+    ``speech.provider`` when one is chosen: only that provider's rung may serve
+    it, and when it cannot the request is refused in its own words rather than
+    served by another. Nothing chosen keeps the whole cascade. The legacy shape
+    never reads the setting.
+
     A HALF-SPECIFIED legacy request -- ``model`` alone, ``voice`` alone, or
     ``provider`` alone -- is forwarded as sent, with the absent fields omitted
     (review round 3, M4, kept deliberately and pinned by
@@ -483,6 +528,7 @@ async def create_speech(
                 label="direct route",
                 session_id=session_id,
                 request_id=request_id,
+                only=_chosen_rung(config_manager),
             )
 
         _require_radient_credential(radient_client)
@@ -627,14 +673,20 @@ async def create_agent_speech(
         # its own ElevenLabs→OpenAI cascade and maps the descriptor for
         # whichever leg serves), and a BYO-only machine maps and calls the
         # vendor itself.
+        #
+        # The user's ``speech.provider`` choice, when there is one, narrows the
+        # walk to that provider alone: no other rung is probed as a stand-in and
+        # none is tried after a failure.
+        pinned = _chosen_rung(config_manager)
         resolution = await resolve_voice_path(
             config_dir=config_manager.config_dir,
             base_url=env_config.radient_api_base_url,
             store=provider_auth_store,
+            only=pinned,
         )
         if not resolution.servable:
             logger.warning("Speech request refused for agent %s: no speech path", agent_id)
-            raise HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
+            raise _no_speech_path_refusal(resolution, pinned)
 
         hosting = agent.hosting or config_manager.get_config_value("hosting")
         model_name = agent.model or config_manager.get_config_value("model_name")
@@ -727,6 +779,7 @@ async def create_agent_speech(
             label=f"agent {agent_id}",
             resolved_gender=resolved_gender,
             resolution=resolution,
+            only=pinned,
         )
 
     except HTTPException as http_exc:

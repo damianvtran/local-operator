@@ -1,0 +1,1011 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20T10:20:58.585470+00:00",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/zh-CN/wire.session_status.json",
+  "target_sha256": "8876bbe8d440ce6debed20610ae8ff3697a1312b74cd7b7cc3074ad7f9ad3a5a",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance_source": "Delegation brief; translator identity not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "c28ec059601b",
+    "session": "c28ec059601b",
+    "actual_model_source": "Host session Model: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "date": "2026-11-20T10:20:58.585470+00:00",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "result": "clean",
+  "findings_count": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "scope": {
+    "keys_read": 31,
+    "new_keys": 14,
+    "preexisting_keys": 17,
+    "head": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+    "namespace_verdict": "clean",
+    "overall_verdict": "clean"
+  },
+  "evidence": {
+    "preexisting_byte_check": "17/17 decoded UTF-8 value bytes identical to HEAD; all 17 serialized entry lines identical excluding JSON separator comma. Git diff 15 insertions/1 deletion: only former last entry gains a comma; 14 entries appended.",
+    "runtime_api_note": "runtime.py provides message_arguments, plural_selectors and render_message. plural_categories is in local_operator/i18n/format.py, not runtime.py; attempted runtime lookup raised AttributeError, then verified definition and used repository implementation.",
+    "plural_categories": [
+      "other"
+    ],
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000000
+    ],
+    "argument_parity_keys": 31,
+    "plural_arguments_checked": 8,
+    "plural_arms": [
+      {
+        "key": "wire.session_status.dormant",
+        "selectors": [
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "selectors": [
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "selectors": [
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "selectors": [
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "selectors": [
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "selectors": [
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "selectors": [
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "selectors": [
+          "other"
+        ]
+      }
+    ],
+    "renders": [
+      {
+        "key": "wire.session_status.retired_label",
+        "params": {
+          "base": "已中断"
+        },
+        "en": "已中断 — retired for an update",
+        "zh-CN": "已中断——因更新已退役",
+        "cells_en": 30,
+        "cells_zh-CN": 20
+      },
+      {
+        "key": "wire.session_status.interrupted",
+        "params": {},
+        "en": "Interrupted",
+        "zh-CN": "已中断",
+        "cells_en": 11,
+        "cells_zh-CN": 6
+      },
+      {
+        "key": "wire.session_status.unseen_interruption",
+        "params": {},
+        "en": "Unseen interruption",
+        "zh-CN": "未读：已中断",
+        "cells_en": 19,
+        "cells_zh-CN": 12
+      },
+      {
+        "key": "wire.session_status.retired",
+        "params": {},
+        "en": "Interrupted — retired for an update",
+        "zh-CN": "已中断——为更新而退出",
+        "cells_en": 35,
+        "cells_zh-CN": 20
+      },
+      {
+        "key": "wire.session_status.unseen_retirement",
+        "params": {},
+        "en": "Unseen interruption — retired for an update",
+        "zh-CN": "未读：已中断——为更新而退出",
+        "cells_en": 43,
+        "cells_zh-CN": 26
+      },
+      {
+        "key": "wire.session_status.signal_stop",
+        "params": {
+          "command": "none"
+        },
+        "en": "Interrupted — stopped with a signal",
+        "zh-CN": "已中断——收到信号后停止",
+        "cells_en": 35,
+        "cells_zh-CN": 22
+      },
+      {
+        "key": "wire.session_status.unseen_signal_stop",
+        "params": {
+          "command": "none"
+        },
+        "en": "Unseen interruption — stopped with a signal",
+        "zh-CN": "未读：已中断——收到信号后停止",
+        "cells_en": 43,
+        "cells_zh-CN": 28
+      },
+      {
+        "key": "wire.session_status.forced_kill",
+        "params": {
+          "command": "none"
+        },
+        "en": "Interrupted — killed",
+        "zh-CN": "已中断——已强制终止",
+        "cells_en": 20,
+        "cells_zh-CN": 18
+      },
+      {
+        "key": "wire.session_status.unseen_forced_kill",
+        "params": {
+          "command": "none"
+        },
+        "en": "Unseen interruption — killed",
+        "zh-CN": "未读：已中断——已强制终止",
+        "cells_en": 28,
+        "cells_zh-CN": 24
+      },
+      {
+        "key": "wire.session_status.complete",
+        "params": {},
+        "en": "Complete",
+        "zh-CN": "已完成",
+        "cells_en": 8,
+        "cells_zh-CN": 6
+      },
+      {
+        "key": "wire.session_status.unseen_completion",
+        "params": {},
+        "en": "Unseen completion",
+        "zh-CN": "未读：已完成",
+        "cells_en": 17,
+        "cells_zh-CN": 12
+      },
+      {
+        "key": "wire.session_status.recent",
+        "params": {},
+        "en": "Recent",
+        "zh-CN": "近期活动",
+        "cells_en": 6,
+        "cells_zh-CN": 8
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "params": {
+          "count": 0
+        },
+        "en": "Stopped (0 wakes dormant)",
+        "zh-CN": "已停止（0个唤醒已休眠）",
+        "cells_en": 25,
+        "cells_zh-CN": 23
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "params": {
+          "count": 1
+        },
+        "en": "Stopped (1 wake dormant)",
+        "zh-CN": "已停止（1个唤醒已休眠）",
+        "cells_en": 24,
+        "cells_zh-CN": 23
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "params": {
+          "count": 2
+        },
+        "en": "Stopped (2 wakes dormant)",
+        "zh-CN": "已停止（2个唤醒已休眠）",
+        "cells_en": 25,
+        "cells_zh-CN": 23
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "params": {
+          "count": 5
+        },
+        "en": "Stopped (5 wakes dormant)",
+        "zh-CN": "已停止（5个唤醒已休眠）",
+        "cells_en": 25,
+        "cells_zh-CN": 23
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "params": {
+          "count": 21
+        },
+        "en": "Stopped (21 wakes dormant)",
+        "zh-CN": "已停止（21个唤醒已休眠）",
+        "cells_en": 26,
+        "cells_zh-CN": 24
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "params": {
+          "count": 1000000
+        },
+        "en": "Stopped (1,000,000 wakes dormant)",
+        "zh-CN": "已停止（1,000,000个唤醒已休眠）",
+        "cells_en": 33,
+        "cells_zh-CN": 31
+      },
+      {
+        "key": "wire.session_status.error",
+        "params": {},
+        "en": "Error",
+        "zh-CN": "出错",
+        "cells_en": 5,
+        "cells_zh-CN": 4
+      },
+      {
+        "key": "wire.session_status.unseen_error",
+        "params": {},
+        "en": "Unseen error",
+        "zh-CN": "未读：出错",
+        "cells_en": 12,
+        "cells_zh-CN": 10
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "params": {
+          "cause": "other"
+        },
+        "en": "Error",
+        "zh-CN": "出错",
+        "cells_en": 5,
+        "cells_zh-CN": 4
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "params": {
+          "cause": "other"
+        },
+        "en": "Unseen error",
+        "zh-CN": "未读：出错",
+        "cells_en": 12,
+        "cells_zh-CN": 10
+      },
+      {
+        "key": "wire.session_status.approval_needed",
+        "params": {},
+        "en": "Approval needed",
+        "zh-CN": "需要审批",
+        "cells_en": 15,
+        "cells_zh-CN": 8
+      },
+      {
+        "key": "wire.session_status.answer_needed",
+        "params": {},
+        "en": "Answer needed",
+        "zh-CN": "需要回答",
+        "cells_en": 13,
+        "cells_zh-CN": 8
+      },
+      {
+        "key": "wire.session_status.wedged",
+        "params": {},
+        "en": "Not answering · process alive",
+        "zh-CN": "无应答 · 进程仍在运行",
+        "cells_en": 29,
+        "cells_zh-CN": 21
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "4m"
+        },
+        "en": "Not answering · process alive (last heartbeat 4m ago)",
+        "zh-CN": "无应答 · 进程仍在运行（上次心跳在4m前）",
+        "cells_en": 53,
+        "cells_zh-CN": 39
+      },
+      {
+        "key": "wire.session_status.working",
+        "params": {},
+        "en": "Working",
+        "zh-CN": "工作中",
+        "cells_en": 7,
+        "cells_zh-CN": 6
+      },
+      {
+        "key": "wire.session_status.attached",
+        "params": {},
+        "en": "Open",
+        "zh-CN": "已打开",
+        "cells_en": 4,
+        "cells_zh-CN": 6
+      },
+      {
+        "key": "wire.session_status.ready",
+        "params": {},
+        "en": "Ready",
+        "zh-CN": "就绪",
+        "cells_en": 5,
+        "cells_zh-CN": 4
+      },
+      {
+        "key": "wire.session_status.exec_headless",
+        "params": {},
+        "en": "Running headless (exec)",
+        "zh-CN": "无界面运行（exec）",
+        "cells_en": 23,
+        "cells_zh-CN": 18
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "params": {
+          "jobs": 0
+        },
+        "en": "Waiting on 0 jobs",
+        "zh-CN": "等待0个任务",
+        "cells_en": 17,
+        "cells_zh-CN": 11
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "params": {
+          "jobs": 1
+        },
+        "en": "Waiting on 1 job",
+        "zh-CN": "等待1个任务",
+        "cells_en": 16,
+        "cells_zh-CN": 11
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "params": {
+          "jobs": 2
+        },
+        "en": "Waiting on 2 jobs",
+        "zh-CN": "等待2个任务",
+        "cells_en": 17,
+        "cells_zh-CN": 11
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "params": {
+          "jobs": 5
+        },
+        "en": "Waiting on 5 jobs",
+        "zh-CN": "等待5个任务",
+        "cells_en": 17,
+        "cells_zh-CN": 11
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "params": {
+          "jobs": 21
+        },
+        "en": "Waiting on 21 jobs",
+        "zh-CN": "等待21个任务",
+        "cells_en": 18,
+        "cells_zh-CN": 12
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "params": {
+          "jobs": 1000000
+        },
+        "en": "Waiting on 1,000,000 jobs",
+        "zh-CN": "等待1,000,000个任务",
+        "cells_en": 25,
+        "cells_zh-CN": 19
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "params": {
+          "jobs": 0,
+          "subagents": 0
+        },
+        "en": "Waiting on 0 jobs · 0 subagents running",
+        "zh-CN": "等待0个任务 · 0个子智能体运行中",
+        "cells_en": 39,
+        "cells_zh-CN": 31
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "params": {
+          "jobs": 1,
+          "subagents": 1
+        },
+        "en": "Waiting on 1 job · 1 subagent running",
+        "zh-CN": "等待1个任务 · 1个子智能体运行中",
+        "cells_en": 37,
+        "cells_zh-CN": 31
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "params": {
+          "jobs": 2,
+          "subagents": 2
+        },
+        "en": "Waiting on 2 jobs · 2 subagents running",
+        "zh-CN": "等待2个任务 · 2个子智能体运行中",
+        "cells_en": 39,
+        "cells_zh-CN": 31
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "params": {
+          "jobs": 5,
+          "subagents": 5
+        },
+        "en": "Waiting on 5 jobs · 5 subagents running",
+        "zh-CN": "等待5个任务 · 5个子智能体运行中",
+        "cells_en": 39,
+        "cells_zh-CN": 31
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "params": {
+          "jobs": 21,
+          "subagents": 21
+        },
+        "en": "Waiting on 21 jobs · 21 subagents running",
+        "zh-CN": "等待21个任务 · 21个子智能体运行中",
+        "cells_en": 41,
+        "cells_zh-CN": 33
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "params": {
+          "jobs": 1000000,
+          "subagents": 1000000
+        },
+        "en": "Waiting on 1,000,000 jobs · 1,000,000 subagents running",
+        "zh-CN": "等待1,000,000个任务 · 1,000,000个子智能体运行中",
+        "cells_en": 55,
+        "cells_zh-CN": 47
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "params": {
+          "count": 0
+        },
+        "en": "0 jobs running",
+        "zh-CN": "0个任务运行中",
+        "cells_en": 14,
+        "cells_zh-CN": 13
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "params": {
+          "count": 1
+        },
+        "en": "1 job running",
+        "zh-CN": "1个任务运行中",
+        "cells_en": 13,
+        "cells_zh-CN": 13
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "params": {
+          "count": 2
+        },
+        "en": "2 jobs running",
+        "zh-CN": "2个任务运行中",
+        "cells_en": 14,
+        "cells_zh-CN": 13
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "params": {
+          "count": 5
+        },
+        "en": "5 jobs running",
+        "zh-CN": "5个任务运行中",
+        "cells_en": 14,
+        "cells_zh-CN": 13
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "params": {
+          "count": 21
+        },
+        "en": "21 jobs running",
+        "zh-CN": "21个任务运行中",
+        "cells_en": 15,
+        "cells_zh-CN": 14
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "params": {
+          "count": 1000000
+        },
+        "en": "1,000,000 jobs running",
+        "zh-CN": "1,000,000个任务运行中",
+        "cells_en": 22,
+        "cells_zh-CN": 21
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "params": {
+          "count": 0
+        },
+        "en": "0 subagents running",
+        "zh-CN": "0个子智能体运行中",
+        "cells_en": 19,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "params": {
+          "count": 1
+        },
+        "en": "1 subagent running",
+        "zh-CN": "1个子智能体运行中",
+        "cells_en": 18,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "params": {
+          "count": 2
+        },
+        "en": "2 subagents running",
+        "zh-CN": "2个子智能体运行中",
+        "cells_en": 19,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "params": {
+          "count": 5
+        },
+        "en": "5 subagents running",
+        "zh-CN": "5个子智能体运行中",
+        "cells_en": 19,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "params": {
+          "count": 21
+        },
+        "en": "21 subagents running",
+        "zh-CN": "21个子智能体运行中",
+        "cells_en": 20,
+        "cells_zh-CN": 18
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "params": {
+          "count": 1000000
+        },
+        "en": "1,000,000 subagents running",
+        "zh-CN": "1,000,000个子智能体运行中",
+        "cells_en": 27,
+        "cells_zh-CN": 25
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 0
+        },
+        "en": "0 subagents queued",
+        "zh-CN": "0个子智能体排队中",
+        "cells_en": 18,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 1
+        },
+        "en": "1 subagent queued",
+        "zh-CN": "1个子智能体排队中",
+        "cells_en": 17,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 2
+        },
+        "en": "2 subagents queued",
+        "zh-CN": "2个子智能体排队中",
+        "cells_en": 18,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 5
+        },
+        "en": "5 subagents queued",
+        "zh-CN": "5个子智能体排队中",
+        "cells_en": 18,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 21
+        },
+        "en": "21 subagents queued",
+        "zh-CN": "21个子智能体排队中",
+        "cells_en": 19,
+        "cells_zh-CN": 18
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 1000000
+        },
+        "en": "1,000,000 subagents queued",
+        "zh-CN": "1,000,000个子智能体排队中",
+        "cells_en": 26,
+        "cells_zh-CN": 25
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 0
+        },
+        "en": "0 queued",
+        "zh-CN": "0个排队中",
+        "cells_en": 8,
+        "cells_zh-CN": 9
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 1
+        },
+        "en": "1 queued",
+        "zh-CN": "1个排队中",
+        "cells_en": 8,
+        "cells_zh-CN": 9
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 2
+        },
+        "en": "2 queued",
+        "zh-CN": "2个排队中",
+        "cells_en": 8,
+        "cells_zh-CN": 9
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 5
+        },
+        "en": "5 queued",
+        "zh-CN": "5个排队中",
+        "cells_en": 8,
+        "cells_zh-CN": 9
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 21
+        },
+        "en": "21 queued",
+        "zh-CN": "21个排队中",
+        "cells_en": 9,
+        "cells_zh-CN": 10
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 1000000
+        },
+        "en": "1,000,000 queued",
+        "zh-CN": "1,000,000个排队中",
+        "cells_en": 16,
+        "cells_zh-CN": 17
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "1h 5m"
+        },
+        "zh-CN": "无应答 · 进程仍在运行（上次心跳在1h 5m前）"
+      }
+    ],
+    "unchanged_select_branch_renders": [
+      {
+        "key": "wire.session_status.signal_stop",
+        "argument": "command",
+        "value": "none",
+        "rendered": "已中断——收到信号后停止"
+      },
+      {
+        "key": "wire.session_status.signal_stop",
+        "argument": "command",
+        "value": "/stop --all",
+        "rendered": "已中断——收到信号后停止（通过/stop --all）"
+      },
+      {
+        "key": "wire.session_status.unseen_signal_stop",
+        "argument": "command",
+        "value": "none",
+        "rendered": "未读：已中断——收到信号后停止"
+      },
+      {
+        "key": "wire.session_status.unseen_signal_stop",
+        "argument": "command",
+        "value": "/stop --all",
+        "rendered": "未读：已中断——收到信号后停止（通过/stop --all）"
+      },
+      {
+        "key": "wire.session_status.forced_kill",
+        "argument": "command",
+        "value": "none",
+        "rendered": "已中断——已强制终止"
+      },
+      {
+        "key": "wire.session_status.forced_kill",
+        "argument": "command",
+        "value": "/stop --all",
+        "rendered": "已中断——已强制终止（通过/stop --all）"
+      },
+      {
+        "key": "wire.session_status.unseen_forced_kill",
+        "argument": "command",
+        "value": "none",
+        "rendered": "未读：已中断——已强制终止"
+      },
+      {
+        "key": "wire.session_status.unseen_forced_kill",
+        "argument": "command",
+        "value": "/stop --all",
+        "rendered": "未读：已中断——已强制终止（通过/stop --all）"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "user_stop",
+        "rendered": "出错——用户已停止"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "runtime_stall_bound",
+        "rendered": "出错——运行时停滞超时后自行退出"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "continuation_limit",
+        "rendered": "出错——已达续接上限；待处理消息已丢弃"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "output_limit",
+        "rendered": "出错——已达模型输出上限；无法继续"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "runtime_retired",
+        "rendered": "出错——为更新而退出"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "runtime_shutdown",
+        "rendered": "出错——运行时在本轮中终止"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "runtime_overdue",
+        "rendered": "出错——运行时超过进度时限后退出以更新"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "runtime_update_failed",
+        "rendered": "出错——更新未完成；运行时仍使用已加载的构建"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "runtime_killed",
+        "rendered": "出错——运行时未正常退出便消失；未收到停止请求"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "install_mid_update",
+        "rendered": "出错——安装版本在本轮中被替换"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "owner_lost",
+        "rendered": "出错——运行时在本轮中停止响应"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "disposed",
+        "rendered": "出错——会话在本轮中被释放"
+      },
+      {
+        "key": "wire.session_status.error_cause",
+        "argument": "cause",
+        "value": "other",
+        "rendered": "出错"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "user_stop",
+        "rendered": "未读：出错——用户已停止"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "runtime_stall_bound",
+        "rendered": "未读：出错——运行时停滞超时后自行退出"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "continuation_limit",
+        "rendered": "未读：出错——已达续接上限；待处理消息已丢弃"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "output_limit",
+        "rendered": "未读：出错——已达模型输出上限；无法继续"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "runtime_retired",
+        "rendered": "未读：出错——为更新而退出"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "runtime_shutdown",
+        "rendered": "未读：出错——运行时在本轮中终止"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "runtime_overdue",
+        "rendered": "未读：出错——运行时超过进度时限后退出以更新"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "runtime_update_failed",
+        "rendered": "未读：出错——更新未完成；运行时仍使用已加载的构建"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "runtime_killed",
+        "rendered": "未读：出错——运行时未正常退出便消失；未收到停止请求"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "install_mid_update",
+        "rendered": "未读：出错——安装版本在本轮中被替换"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "owner_lost",
+        "rendered": "未读：出错——运行时在本轮中停止响应"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "disposed",
+        "rendered": "未读：出错——会话在本轮中被释放"
+      },
+      {
+        "key": "wire.session_status.unseen_error_cause",
+        "argument": "cause",
+        "value": "other",
+        "rendered": "未读：出错"
+      }
+    ],
+    "glossary_comparisons": [
+      {
+        "term": "工作中",
+        "keys": [
+          "relay.chrome.session.subtitle.working_plain",
+          "tui.status.band.working"
+        ]
+      },
+      {
+        "term": "子智能体 / 任务",
+        "keys": [
+          "wire.sessions.park_self_refused_busy",
+          "wire.sessions.stop_refused_busy"
+        ]
+      },
+      {
+        "term": "审批",
+        "keys": [
+          "cli.config.running_sessions_unchanged",
+          "cli.exec_help.control"
+        ]
+      },
+      {
+        "term": "就绪",
+        "keys": [
+          "cli.team_bridge.setup.ready",
+          "mobile.setup.apply_plain"
+        ]
+      },
+      {
+        "term": "无界面",
+        "keys": [
+          "browser.site_approval.sites_revoke_limits",
+          "cli.browser_node.help_setup"
+        ]
+      },
+      {
+        "term": "回答",
+        "keys": [
+          "browser.site_approval.question"
+        ]
+      }
+    ],
+    "semantic_review": "Read all 31 English/Chinese keys and every English context note side by side; reviewed 14 new live-state labels for role, agency, no-turn versus child-running states, headless exec, and observational wedged wording. New strings are idiomatic terse Chinese; no grammatical gender or plural agreement applies. 个 classifier is consistent and acceptable. 已打开 means open/attached in a window, not available. 无应答 preserves cautious observed non-answer; 进程仍在运行 preserves alive qualifier.",
+    "overflow": "Measured CJK terminal-cell widths on actual runtime renders. Only new attached exceeds English by 2 cells (已打开: 6; Open: 4), and queued addend by 1 cell at counts 0/1/2/5. Not material; context specifies no fixed cell cap. No rendered desktop/mobile screenshot taken; cell measurements are not visual-fit proof.",
+    "rtl": "Not applicable: zh-CN is LTR; no manual bidi controls found in rendered strings.",
+    "untranslated_text": "Only required technical exec and supplied compact durations remain Latin in new renderings; no untranslated English prose.",
+    "limits": "Catalogue audit only; not a full application no-English or rendered UI certification. Unchanged historic wording retained, not retranslated. No catalogue, code, test, ledger or history edits."
+  },
+  "note": "Independent read-only zh-CN audit of all 31 keys, including the 14 live-status additions. No findings; source and target hashes measured during audit. This receipt alone does not replace any separately required second high-visibility audit or rendered UI gates."
+}

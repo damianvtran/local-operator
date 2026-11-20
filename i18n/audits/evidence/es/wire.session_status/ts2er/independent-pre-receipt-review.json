@@ -1,0 +1,9 @@
+{
+  "audit_date": "2026-11-19",
+  "auditor": {"agent":"i18n-auditor", "session":"191daf68e868", "model":"openai/gpt-6.1-sol", "actual_model_source":"session runtime Model header", "fallback":"none observed"},
+  "sequence":"Independent source/context/style/glossary/target semantic reading completed before opening either first-pass receipt. Mechanical execution follows; this is not an execution log.",
+  "scope":"17 keys each, including legacy retired_label, all 13 cause arms in both seen/unseen selects, signal/forced command none/other, dormant plural categories",
+  "es":{"semantic_verdict":"passed", "findings":[], "reasoning":"Neutral terse Spanish; sin leer marks unreadness rather than causation. Retirada para actualizar describes update-purpose interruption, not operator action. Señal and finalizada por la fuerza remain distinct. Inactivo does not claim a wake was cancelled or will fire. Sesión descartada does not assert data deletion. Runtime update failure retains the loaded build. All cause arms, including fallback, preserve the source meaning."},
+  "ru":{"semantic_verdict":"passed", "findings":[], "reasoning":"Impersonal professional Russian; не просмотрено/не просмотрена agree with their event/status heads and denote unreadness. Прервано для обновления is update-purpose interruption, not an operator stop. Остановлен сигналом versus принудительно завершён preserves signal/kill. Пробуждение приостановлено denotes dormant rather than cancelled. Окончательно закрыта conveys session disposal without claiming deletion of data. Plural one/few/many/other noun/agreement are grammatical, including fractional пробуждения приостановлено. All 13 cause summaries preserve meaning."},
+  "limits":"No visual, native runtime, pseudo or release clearance. Unknown external diagnostic legacy English remains an unresolved programme gap. Sidecar specifies no fixed cell cap; length still requires downstream visual proof. No translation service used."
+}

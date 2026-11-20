@@ -101,7 +101,8 @@ _VOICEOVER_DESCRIPTION = (
 )
 _SOUND_EFFECT_DESCRIPTION = (
     "Generate a sound effect or named batch via the configured provider; "
-    "audio is attached for the user. "
+    "audio is attached for the user. One sound is prompt + duration_s, a batch is "
+    "sounds; never both. "
     "Docs: `tool://generate_sound_effect`; playbook: `guide://sound-generation`."
 )
 

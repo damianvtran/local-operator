@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.session_status",
-  "history_sha256": "133d29bbc8992b2b92758d4b6ff78407c6fb5ab3b732c863d35b07e0ffe3d27c",
+  "history_sha256": "c40af70d513a4f23adcf61b8cd96b147c065377b9e0d430f3f14973f5ad31eef",
   "entries": [
     {
       "locale": "es",
@@ -39,6 +39,109 @@
       },
       "status": "passed",
       "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 0 minor, 4 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.session_status",
+      "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+      "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+      "target_sha256": "b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128",
+      "translator": {
+        "agent": "i18n-translator (terminal-status-es)",
+        "session": "b39246e0d986",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "session-state Model field",
+        "fallback": "No fallback reported in this session",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (terminal-status-es-audit; first independent pass)",
+        "session": "f9eeb42530ec",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "b39246e0d986",
+        "actual_model_source": "developer session-state Model field: openai/gpt-6.1-sol",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "First independent pass, 17 keys; 0 blocker/major. Record: i18n/audits/evidence/es/wire.session_status/ts1/record.json. Second independent safety audit required; no visual/integrated-runtime clearance.",
+      "evidence": "i18n/audits/evidence/es/wire.session_status/ts1/record.json",
+      "record_sha256": "0bfd56772aa519f899fdbe484f3a463e2c1e631a6bd62a6a8c473fbf24f9907d"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.session_status",
+      "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+      "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+      "target_sha256": "b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128",
+      "translator": {
+        "agent": "i18n-translator (terminal-status-es)",
+        "session": "b39246e0d986",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "session-state Model field",
+        "fallback": "No fallback reported in this session",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "191daf68e868",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "session runtime Model header",
+        "fallback": "none observed",
+        "independent_from_translator_session": "b39246e0d986",
+        "independent_from_first_auditor_session": "f9eeb42530ec",
+        "result": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [],
+        "date": "2026-11-19"
+      },
+      "status": "passed",
+      "note": "Second independent 17-key safety-copy pass; 0 blocker/major. Record: i18n/audits/evidence/es/wire.session_status/ts2er/record.json. No visual/native/runtime clearance.",
+      "evidence": "i18n/audits/evidence/es/wire.session_status/ts2er/record.json",
+      "record_sha256": "29b1984e1a3ffe34fa3c763dafbcb1f0ab042736b2e4c370b0211be784d24baf",
+      "round": "second",
+      "keys_audited": 17
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.session_status",
+      "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+      "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+      "target_sha256": "de08e8b447356705e112a12b67c39b8814fe69d1e6b98d407f33338d0e9bf485",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "320153d86770",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "ES-1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Round 1 independent audit of the live session-status labels (wire.session_status). Auditor 320153d86770 (openai/gpt-6.1-sol, no fallback) verdict CLEAN-WITH-FINDINGS: 0 blocker, 0 major, 1 minor, 0 nit ['ES-1']. Scope: full namespace (31 keys incl. 14 new live-status keys) at worktree head 514d51243ce3. ES-1 (minor) deferred: 'many' arm '{# de …}' follows the es style guide and the shipped tui.status.jobs form; programme-wide wording question, not changed here. Record: i18n/audits/evidence/es/wire.session_status/ls1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.session_status/ls1/record.json",
+      "round": "ls1"
     }
   ]
 }

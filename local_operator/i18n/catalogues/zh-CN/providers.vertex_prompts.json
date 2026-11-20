@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "Google Cloud项目ID",
+  "providers.vertex_prompts.field.service_account": "服务账号JSON或JSON文件路径",
+  "providers.vertex_prompts.hint.required": "按Enter提交；留空按Enter或按Esc取消登录。",
+  "providers.vertex_prompts.prompt.field": "请输入{field}（留空取消）： "
+}

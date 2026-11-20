@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "cli.services_heavy",
-  "history_sha256": "49208f29d5b7b369cd04eceb3140a3e2a010eed0e51227cde2f4536901d2cbbb",
+  "history_sha256": "61336d32ed3fb3dfea07ee37c6e08df20f79a9ddcbd47084ae69335598135a03",
   "entries": [
     {
       "locale": "hi",
@@ -28,6 +28,56 @@
       },
       "status": "passed",
       "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target hi/cli.services_heavy.json sha256 655ace5920c9bb4e34b56d809279b112faf4a3915ec62119cd866f7642c443a5 (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. N2 (NIT, not changed): subcommand names quoted with straight ' ' rather than “ ”; kept, matches the English source and the existing hi cli.services_help precedent for literal subcommand tokens. Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "6030d2a2f32786c31c223706df5364c383eb04bc7d9df6e23dd9c5d2870d7d52",
+      "translator": {
+        "agent": "coder agent (lopdev team; commits 002ba4840 + remediation d1c53d681; session id not relayed)",
+        "model": "not relayed to auditor",
+        "fallback": "unknown",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 1 session 50f2395eb392, round 2 session 02399cb08595); wrote no locale value",
+        "session": "02399cb08595",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 2 for PR #4264 (fix/heavy-lease-audit) at head d1c53d681, 2026-11-19. Target hi/cli.services_heavy.json sha256 8f53b791f41f6f15816fcdcace90e19031e9bba7b583cadb3ceb529a422e93ff. New keys audited: events_header, event_line, no_events, audit_row. Round 2 re-audit of the round-1 failures, now fixed in d1c53d681: audit_row (I3: भारी-काम). Each value is byte-identical to the corrected strings from round 1, checked by codepoint compare; placeholders, indentation and colons kept; no stray Cc/Cf. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4264 '### i18n audit — round 1' (#issuecomment-6999094193) and '### i18n audit — round 2'."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "44fd63869090faf44a686b6561444685b71d314f60c7b74fd2c895405e04aeff",
+      "translator": {
+        "agent": "coder agent (lopdev team; PR #4279 keys at 677e51c23 + remediation a8bfabbd1; PR #4264 keys at 002ba4840 + d1c53d681); convergence merge d58b77b13 changed no value",
+        "model": "anthropic/claude-opus-5-5 for the #4279 keys (per #issuecomment-7003591943); not relayed for the #4264 keys",
+        "fallback": "unknown",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team, PR #4279 round 3); wrote no locale value",
+        "session": "e1afd72e36ff",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 3 for PR #4279 (feat/run-bounded-start-by) at head da210a7fb, 2026-11-20, after convergence merge d58b77b13 with origin/main 73f021ab2 (#4264). Target hi/cli.services_heavy catalogue_sha256 319abf4d1f07f1c77c98623faa8dff127386dcd9aa2e392370bf7a02ada19472 (16 keys). The 3 PR keys start_by, late_start, not_start_by are codepoint-equal to the values passed at R2 head a8bfabbd1 (#issuecomment-7003667726), and their en text and context notes are unchanged since a8bfabbd1; the 13 main keys are codepoint-equal to origin/main 73f021ab2, whose chain passed at en 6030d2a2. Re-read the 3 PR keys against the current en (which adds only #4264's events_header, event_line, no_events, audit_row): no shared terminology moved (queue, exit status/code, seconds and lease/log terms consistent within the namespace); placeholders {start_by} {now} {late} {value} and code spans match en; NFC; no Cc/Cf/NBSP/bidi controls. Commits d2b2f3242 and da210a7fb touch no i18n file. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comment: PR #4279 '### i18n audit — round 3 (post-convergence receipts)'."
     }
   ]
 }

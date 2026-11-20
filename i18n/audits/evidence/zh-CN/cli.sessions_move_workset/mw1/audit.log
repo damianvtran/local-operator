@@ -1,0 +1,35 @@
+# mechanical checks (scratch mech.py, git objects at ca98f378922f65363815ab2d4c27e93e73b66f1e)
+rev ca98f3789
+en cli.sessions_move_workset source sha256 36523ab68a809138158b8530cf502be76b67de6c5b557835b25dd66e7c928df3  context 3319039021cfb5d67440dee390a42986af6a6f7c8be57d4de6e3d3dc56f21bce
+en tui.session_move_workset source sha256 3642654e8391378afe0454ceaa2b31fb416302ebad3c43463fd4d49d2c2e59a8  context 4110dcee6c6db14e948c2f9e58cd34303263501ae151275ef102939ffb3628ef
+fr cli.sessions_move_workset: keys 62/62 target sha256 6dcd3fd222600870e7638c4cc2c412662e21ec1699660ecde6c9d30ecc764e26 plural categories ['one', 'other'] mechanical problems 0 typography: plain-space-before-:;?! 0, U+202F 33, ASCII apostrophe 0, U+2019 26
+fr tui.session_move_workset: keys 10/10 target sha256 70b7f28e1af81d568e59da1bd928692c3d97c3ac0a6fef1687cbdf6293dfb622 plural categories [] mechanical problems 0 typography: plain-space-before-:;?! 0, U+202F 2, ASCII apostrophe 0, U+2019 1
+es cli.sessions_move_workset: keys 62/62 target sha256 22e8d0f41db9f1e3c144bedc01c387a190e13df9518af82d08a6709791b7d11e plural categories ['one', 'other'] mechanical problems 0
+es tui.session_move_workset: keys 10/10 target sha256 d86e3141a2e4c2c18ba348c6832d09d09d637840222f6133c5201b9211933628 plural categories [] mechanical problems 0
+zh-CN cli.sessions_move_workset: keys 62/62 target sha256 aaa1adbe496c1a37b3c314669616c49328379f9c4068dc27b3bc414d3f21ef07 plural categories ['other'] mechanical problems 0 typography: CJK/Latin space junctions 0, single-mark ellipsis 0
+zh-CN tui.session_move_workset: keys 10/10 target sha256 dbc30b277d0a08778fc423e92e50fb3fac2c8c427e8da44e4b7c1a4224bf6808 plural categories [] mechanical problems 0 typography: CJK/Latin space junctions 0, single-mark ellipsis 0
+ru cli.sessions_move_workset: keys 62/62 target sha256 5a6f3d75b1b67523c5416e77813272c489bc74413d443dc7264790c5d97959f8 plural categories ['few', 'many', 'one', 'other'] mechanical problems 0
+ru tui.session_move_workset: keys 10/10 target sha256 0c8d7c72499f6529a69eaf9247458c125949d47236ab982275ed664d3ec632a5 plural categories [] mechanical problems 0
+vi cli.sessions_move_workset: keys 62/62 target sha256 6f2cd11ee763496b8ab0fb4565e1817fdc60de4a413b9a7718344a4d3d154040 plural categories ['other'] mechanical problems 0
+vi tui.session_move_workset: keys 10/10 target sha256 8dd3b2b88af3142701169ba7dc1357308b9147449d008639d72e825fcaf2a771 plural categories [] mechanical problems 0
+ur cli.sessions_move_workset: keys 62/62 target sha256 380ff268d17f5f73b9f30eed7ac977841eeed0a6a0609b102f2db9f3372b674d plural categories ['one', 'other'] mechanical problems 0 typography: Latin/Hindi prose punctuation outside LTR islands 2
+ur tui.session_move_workset: keys 10/10 target sha256 63d6b9d47ac2f6a76c19495f6e79c6bb4de3662b6e5c1dfcc6768995eaf43644 plural categories [] mechanical problems 0 typography: Latin/Hindi prose punctuation outside LTR islands 0
+hi cli.sessions_move_workset: keys 62/62 target sha256 d106a81df7783608a251800593aca176fbbe30a0b43245bc9fe3ea336c861d5a plural categories ['one', 'other'] mechanical problems 0
+hi tui.session_move_workset: keys 10/10 target sha256 6f28788ba2e0b57ed217e211283c06bccc8b23bc4df6bfeed5a8be1bafe2e6ba plural categories [] mechanical problems 0
+
+# product ICU runtime render (render2.py; all keys, plurals 0/1/2/5/21/1e6)
+fr | Raison donnée par git : le dépôt appartient à un autre utilisateur (contrôle safe.directory de git). Pour la voir vous-même, exécutez : git -C ~/src/app status
+es | Motivo de git: el repositorio pertenece a otro usuario (comprobación safe.directory de git). Para verlo tú mismo, ejecuta: git -C ~/src/app status
+zh-CN | git给出的原因：该仓库属于其他用户（git的safe.directory检查）。如需自行查看，请运行：git -C ~/src/app status
+ru | Причина от git: репозиторий принадлежит другому пользователю (проверка safe.directory в git). Чтобы увидеть её самостоятельно, выполните: git -C ~/src/app status
+vi | Lý do từ git: kho thuộc về một người dùng khác (kiểm tra safe.directory của git). Để tự xem, hãy chạy: git -C ~/src/app status
+ur | git کی وجہ: ریپوزیٹری کسی دوسرے صارف کی ہے (git کی safe.directory جانچ)۔ اسے خود دیکھنے کے لیے چلائیں: git -C ~/src/app status
+hi | git का कारण: रिपॉज़िटरी किसी दूसरे यूज़र की है (git की safe.directory जाँच)। इसे खुद देखने के लिए चलाएँ: git -C ~/src/app status
+rendered 623 messages without MessageError
+
+# python scripts/i18n/check.py --audit-base origin/main at ca98f3789 (before any receipt): rc=1
+hi/cli.sessions_move_workset: cli.sessions_move_workset.desktop_refused: arguments (('device', 'simple'), ('source', 'simple')) != en's (('source', 'simple'), ('device', 'simple')): argument 1 is 'device', en's is 'source' (renamed or reordered)
+ru/cli.sessions_move_workset: cli.sessions_move_workset.desktop_refused: arguments (('device', 'simple'), ('source', 'simple')) != en's (('source', 'simple'), ('device', 'simple')): argument 1 is 'device', en's is 'source' (renamed or reordered)
+ur/cli.sessions_move_workset: cli.sessions_move_workset.desktop_refused: arguments (('device', 'simple'), ('source', 'simple')) != en's (('source', 'simple'), ('device', 'simple')): argument 1 is 'device', en's is 'source' (renamed or reordered)
+zh-CN/cli.sessions_move_workset: cli.sessions_move_workset.desktop_refused: arguments (('device', 'simple'), ('source', 'simple')) != en's (('source', 'simple'), ('device', 'simple')): argument 1 is 'device', en's is 'source' (renamed or reordered)
+check.py: FAILED — 0 ratchet finding(s) in the enforced scope, 4 catalogue problem(s) (106 advisory finding(s) outside it). Extract the string, add `# i18n: ignore <reason>`, or (for a file-level exemption) record it in i18n/allowlist.toml with a reason.
