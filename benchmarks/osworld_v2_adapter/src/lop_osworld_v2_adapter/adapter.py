@@ -50,7 +50,7 @@ from lop_osworld_v2_adapter import actions
 from lop_osworld_v2_adapter import cleanup as cleanup_mod
 from lop_osworld_v2_adapter import diagnostics, provisioning
 from lop_osworld_v2_adapter import requirements as requirements_mod
-from lop_osworld_v2_adapter import scoring, taskfile, vendor_bridge
+from lop_osworld_v2_adapter import scorer_preflight, scoring, taskfile, vendor_bridge
 from lop_osworld_v2_adapter.observation import ObservationBuilder
 from lop_osworld_v2_adapter.providers.base import (
     EnvironmentProvider,
@@ -332,6 +332,7 @@ class OSWorldV2Adapter:
         # the workspace's adapter-provider.json selects the backend (AWS by
         # default).
         self._provider_factory = provider_factory
+        self._scorer_runtime: scorer_preflight.FreeCADRuntime | None = None
         # The workspace root is where task modules live (``tasks/<id>.py``).
         # Defaulted to the worker's cwd, which the supervisor sets to the
         # workspace (supervisor.py:270).
@@ -643,15 +644,30 @@ class OSWorldV2Adapter:
             secret_refs=params.secrets,
             infra_values=self._infra_values,
         )
+        # The artifact root is first named here. Refuse unsafe tool paths and
+        # an unavailable host scorer before installing secrets or building AWS.
+        forbidden_roots = (self._workspace_root, Path(params.artifact_root))
+        provisioning.resolve_evaluator_tool_path(
+            self._infra_values,
+            forbidden_roots=tuple(str(root) for root in forbidden_roots),
+        )
+        self._scorer_runtime = None
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",
         ):
-            # Tasks are first named here. Check packaging before constructing a
-            # cloud provider; importing the task itself could run arbitrary code.
+            # Tasks are first named here. Check packaging and native imports
+            # without importing the task itself (which could run arbitrary code).
             from lop_osworld_v2_adapter.dependencies import validate_task_dependencies
 
-            validate_task_dependencies(self._load_task_source(params.task_id))
+            source = self._load_task_source(params.task_id)
+            validate_task_dependencies(source)
+            self._scorer_runtime = await scorer_preflight.require_runtime(
+                self._workspace_root,
+                task_id=params.task_id,
+                source=source,
+                forbidden_roots=forbidden_roots,
+            )
         self._plan = provisioning.resolve(
             self._task,
             episode_id=params.episode_id,
@@ -659,12 +675,6 @@ class OSWorldV2Adapter:
         )
         self._secrets = {secret.name: secret.value for secret in params.secrets}
         self._install_secret_environment()
-        # Second half of the ``prepare`` check: the episode's own root is
-        # first named here. Before the provider exists, so a refusal is free.
-        provisioning.resolve_evaluator_tool_path(
-            self._infra_values,
-            forbidden_roots=(str(self._workspace_root), str(params.artifact_root)),
-        )
 
         provider = self._build_provider()
         # The cache root exists BEFORE allocate so a provider that downloads
@@ -1254,9 +1264,10 @@ class OSWorldV2Adapter:
         # alters the return value: the score is mapped from ``raw`` exactly as
         # before, and a capture that retained nothing leaves the staged detail
         # bytes unchanged.
-        with diagnostics.capture_evaluator_diagnostics(
-            cache_dir=self._evaluator_cache_dir
-        ) as capture:
+        with (
+            diagnostics.capture_evaluator_diagnostics(cache_dir=self._evaluator_cache_dir) as capture,
+            scorer_preflight.score_environment(self._scorer_runtime),
+        ):
             raw = await self._provider.evaluate()
         return ScoreResult(
             score=scoring.score_to_artifact(

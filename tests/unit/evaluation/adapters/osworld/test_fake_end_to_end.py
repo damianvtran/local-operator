@@ -24,12 +24,15 @@ asserted only in ``test_spawn.py``, and none of them are asserted here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from lop_osworld_v2_adapter import scorer_preflight, vendor_bridge
 from lop_osworld_v2_adapter.adapter import OSWorldV2Adapter
 from lop_osworld_v2_adapter.providers.fake import FakeProvider
 
@@ -43,7 +46,9 @@ from local_operator.evaluation.adapters.api import (
     PrepareParams,
     PythonRuntime,
     ResetStartParams,
+    ResolvedSecret,
     ScopedInfraValue,
+    ScoreParams,
 )
 from local_operator.evaluation.adapters.rpc import MAX_DETAIL_MESSAGE, RpcRemoteError
 from local_operator.evaluation.adapters.supervisor import (
@@ -1123,3 +1128,139 @@ async def test_reset_start_refuses_a_tool_path_inside_the_episode_root(
             )
         )
     assert provider.allocated is False
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "incompatible", "timeout", "unsafe", "ready", "unrelated", "other-release", "drifted"],
+)
+@pytest.mark.asyncio
+async def test_host_scorer_preflight_at_reset(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Drive the production reset branch; neither native imports nor AWS run."""
+    from lop_osworld_v2_adapter.provisioning import ProvisioningError
+
+    task_id = "task_plain" if case == "unrelated" else "task_103"
+    known_release = b'{"release":"synthetic-v2.1"}'
+    monkeypatch.setattr(
+        scorer_preflight, "_FREECAD_RELEASE", hashlib.sha256(known_release).hexdigest()
+    )
+    workspace = tmp_path / "workspace"
+    (workspace / "tasks").mkdir(parents=True)
+    source = ('raise RuntimeError("preflight imported a task")\n' + fixtures.PLAIN).encode()
+    (workspace / "tasks" / f"{task_id}.py").write_bytes(source)
+    if case != "drifted":
+        monkeypatch.setitem(
+            scorer_preflight._FREECAD_TASKS, "task_103", ("103", hashlib.sha256(source).hexdigest())
+        )
+    (workspace / "benchmark_release.json").write_bytes(
+        b'{"release":"other"}' if case == "other-release" else known_release
+    )
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    tools = tmp_path / "operator-tools"
+    tools.mkdir()
+    python = tools / "python"
+    python.touch()
+    library = tools / "lib"
+    library.mkdir()
+    if case == "unsafe":
+        (artifacts / "caller-lib").mkdir()
+        library = tools / "masquerading-lib"
+        library.symlink_to(artifacts / "caller-lib", target_is_directory=True)
+    runtime = scorer_preflight.FreeCADRuntime("103", python, (library,))
+
+    def candidates(scorer_id: str) -> tuple[scorer_preflight.FreeCADRuntime, ...]:
+        assert scorer_id == "103"
+        assert case not in {"unrelated", "other-release", "drifted"}
+        assert vendor_bridge.GITLAB_TOKEN_ENV not in os.environ
+        return () if case == "missing" else (runtime,)
+
+    monkeypatch.setattr(scorer_preflight, "_standard_candidates", candidates)
+    python_key, lib_key = "TASK_103_FREECAD_PYTHON", "TASK_103_FREECAD_LIB"
+    for name in (python_key, lib_key, vendor_bridge.GITLAB_TOKEN_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AMBIENT_PROBE_CANARY", "must-not-be-inherited")
+    probe_calls: list[Path] = []
+
+    def run_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        assert case in {"ready", "incompatible", "timeout"}
+        assert argv[:2] == [str(python), "-c"]
+        assert argv[2].startswith("import FreeCAD, Part,")
+        assert vendor_bridge.GITLAB_TOKEN_ENV not in os.environ
+        env = kwargs["env"]
+        assert set(env) <= {
+            "HOME",
+            "PYTHONPATH",
+            "PATH",
+            "LC_ALL",
+            "TMPDIR",
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+        }
+        assert env["PYTHONPATH"] == str(library)
+        assert kwargs["cwd"] == Path(env["HOME"])
+        assert not list(kwargs["cwd"].iterdir())
+        assert 0 < kwargs["timeout"] <= scorer_preflight._IMPORT_BUDGET_S
+        probe_calls.append(kwargs["cwd"])
+        if case == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, 1 if case == "incompatible" else 0)
+
+    monkeypatch.setattr(scorer_preflight.subprocess, "run", run_probe)
+
+    class ScoreProbe(FakeProvider):
+        async def observe(self) -> Any:
+            assert python_key not in os.environ and lib_key not in os.environ
+            return await super().observe()
+
+        async def evaluate(self) -> Any:
+            assert os.environ[python_key] == str(python)
+            assert os.environ[lib_key] == str(library)
+            raise RuntimeError("synthetic score failure")
+
+    provider = ScoreProbe()
+    builds: list[FakeProvider] = []
+
+    def build_provider(_adapter: OSWorldV2Adapter) -> FakeProvider:
+        assert python_key not in os.environ and lib_key not in os.environ
+        builds.append(provider)
+        return provider
+
+    monkeypatch.setattr(OSWorldV2Adapter, "_build_provider", build_provider)
+    adapter = OSWorldV2Adapter(workspace_root=workspace)
+    await adapter.prepare(
+        PrepareParams(
+            operation_id=f"prepare-{episode_id}",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_INFRA_VALUES,
+        )
+    )
+    reset = ResetStartParams(
+        operation_id=f"reset-{episode_id}",
+        episode_id=episode_id,
+        task_id=task_id,
+        artifact_root=str(artifacts),
+        secrets=(ResolvedSecret(name=vendor_bridge.GITLAB_TOKEN_ENV, value="synthetic"),),
+    )
+    if case in {"missing", "incompatible", "timeout", "unsafe", "drifted"}:
+        with pytest.raises(ProvisioningError, match="Host FreeCAD Python"):
+            await adapter.reset_start(reset)
+        assert not builds and not provider.allocated
+        assert vendor_bridge.GITLAB_TOKEN_ENV not in os.environ
+    else:
+        await adapter.reset_start(reset)
+        assert builds == [provider] and provider.allocated
+        assert python_key not in os.environ and lib_key not in os.environ
+    assert bool(probe_calls) == (case in {"ready", "incompatible", "timeout"})
+    assert all(not path.exists() for path in probe_calls)
+    if case == "ready":
+        # The exact probed runtime is only present for evaluate(). Restore
+        # both a preexisting selector and an absent one even if evaluate fails.
+        monkeypatch.setenv(python_key, "previous-value")
+        with pytest.raises(RuntimeError, match="synthetic score failure"):
+            await adapter.score(ScoreParams(operation_id=f"score-{episode_id}", episode_id=episode_id))
+        assert os.environ[python_key] == "previous-value"
+        assert lib_key not in os.environ
