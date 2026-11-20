@@ -12434,7 +12434,7 @@ def arm_adopted_boot_deadline(
                 continue
             # Flushed explicitly: ``os._exit`` skips the interpreter's buffer flush,
             # and this line is the only record of why the daemon left.
-            print(  # i18n: ignore serve daemon stderr log line for journald/systemctl status; English-only diagnostic
+            print(  # i18n: ignore serve daemon stderr log line; English-only
                 f"serve: adopted listener fd {fd} on port {port} not serving after "
                 f"{elapsed:.1f}s (boot deadline {budget:g}s); closing it and exiting "
                 f"{SERVE_ADOPT_BOOT_DEADLINE_EXIT} so a cold start can re-bind the port",
