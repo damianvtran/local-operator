@@ -201,6 +201,7 @@ LEASE_PENDING = "authorization_lease_pending"
 LOGIN_REQUIRED = "login_required"
 LOCAL_PREREQUISITE = "local_prerequisite"
 REENROLMENT_REQUIRED = "reenrolment_required"
+CLIENT_UPGRADE_REQUIRED = "client_upgrade_required"
 #: The tunnel's OWNING login is gone from this device: `tunnel/config.json` names
 #: a credential row that is no longer in the store (or one that is not a Radient
 #: oauth row at all). NOT `LOGIN_REQUIRED`, and the difference is the whole point:
@@ -471,6 +472,7 @@ TERMINAL_REMEDY = {
     # COMMAND the operator has to run is pinned in one place.
     LOCAL_PREREQUISITE: "lop tunnel install",
     REENROLMENT_REQUIRED: "lop tunnel connect",
+    CLIENT_UPGRADE_REQUIRED: "lop update",
     # The guided setup reads fresh billing and names the one step that clears
     # each of these (reconnect, accept the quote, add credit, or the console);
     # never `lop login radient`, which is the misdirection these codes remove.
@@ -512,6 +514,7 @@ REMEDY_KIND = {
     LOGIN_SUPERSEDED: "run",
     LOCAL_PREREQUISITE: "run",
     REENROLMENT_REQUIRED: "run",
+    CLIENT_UPGRADE_REQUIRED: "update_client",
     TUNNEL_INACTIVE: "run",
     TUNNEL_DISABLED: "open_console",
     BILLING_INACTIVE: "accept_quote",
@@ -612,6 +615,10 @@ def _localized(reason: str) -> tuple[str, str, str] | None:
     `terminal_detail` and `relay_detail`. Imported lazily to keep this module's
     import graph (pinned in `tests/unit/test_import_graph.py`) unchanged.
     """
+    if reason == CLIENT_UPGRADE_REQUIRED:
+        from local_operator.tunnels import upgrade
+
+        return (upgrade.label(), upgrade.detail(), upgrade.plain())
     if (
         reason not in (SERVER_UNAVAILABLE, AUTHORIZATION_UNAVAILABLE)
         and reason not in _INACTIVE_REASONS

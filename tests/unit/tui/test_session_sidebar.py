@@ -584,8 +584,12 @@ async def test_switch_burst_in_one_event_batch_steps_once_per_press():
         await _await_first_attach(app, pilot)
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
+        # Pausing the poll alone leaves the open-time ONE-SHOT catalog worker
+        # in flight; if it lands on top of these rows the presses compute their
+        # target from the real (empty) list and this burst steps once, not three
+        # times. Quiescing retires that read as well (the failing witness: CI
+        # shard 3.13/4, `AssertionError: ['c']`).
+        _quiesce_sidebar_refresh(app)
         app._session_sidebar.set_entries(_hover_entries(("a", "sess", "c", "d")))
         hops: list[str] = []
 
@@ -615,8 +619,9 @@ async def test_switch_burst_with_a_drain_between_presses_still_steps_once_each()
         await _await_first_attach(app, pilot)
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
+        # Same reason as the batched twin above: the drain between presses is
+        # exactly the window a late catalog landing needs to overwrite the rows.
+        _quiesce_sidebar_refresh(app)
         app._session_sidebar.set_entries(_hover_entries(("a", "sess", "c", "d")))
         hops: list[str] = []
 

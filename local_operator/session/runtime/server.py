@@ -432,9 +432,14 @@ def document_blocks(
     supports_images = bool(getattr(model, "supports_images", True))
     form = document_form(
         provider,
-        admission_wire(provider, supports_responses_api=supports_responses),
+        admission_wire(
+            provider,
+            supports_responses_api=supports_responses,
+            model_id=getattr(model, "model_id", None),
+        ),
         supports_images=supports_images,
         context_window=getattr(model, "context_window", None),
+        model_id=getattr(model, "model_id", None),
     )
     store = AttachmentStore()
     out: list[DocumentContent] = []

@@ -9,5 +9,69 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def complete() -> Msg:
+    return Msg("wire.session_status.complete", {})
+
+
+def dormant(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.dormant", {"count": count})
+
+
+def error() -> Msg:
+    return Msg("wire.session_status.error", {})
+
+
+def error_cause(*, cause: str) -> Msg:
+    return Msg("wire.session_status.error_cause", {"cause": cause})
+
+
+def forced_kill(*, command: str) -> Msg:
+    return Msg("wire.session_status.forced_kill", {"command": command})
+
+
+def interrupted() -> Msg:
+    return Msg("wire.session_status.interrupted", {})
+
+
+def recent() -> Msg:
+    return Msg("wire.session_status.recent", {})
+
+
+def retired() -> Msg:
+    return Msg("wire.session_status.retired", {})
+
+
 def retired_label(*, base: str) -> Msg:
     return Msg("wire.session_status.retired_label", {"base": base})
+
+
+def signal_stop(*, command: str) -> Msg:
+    return Msg("wire.session_status.signal_stop", {"command": command})
+
+
+def unseen_completion() -> Msg:
+    return Msg("wire.session_status.unseen_completion", {})
+
+
+def unseen_error() -> Msg:
+    return Msg("wire.session_status.unseen_error", {})
+
+
+def unseen_error_cause(*, cause: str) -> Msg:
+    return Msg("wire.session_status.unseen_error_cause", {"cause": cause})
+
+
+def unseen_forced_kill(*, command: str) -> Msg:
+    return Msg("wire.session_status.unseen_forced_kill", {"command": command})
+
+
+def unseen_interruption() -> Msg:
+    return Msg("wire.session_status.unseen_interruption", {})
+
+
+def unseen_retirement() -> Msg:
+    return Msg("wire.session_status.unseen_retirement", {})
+
+
+def unseen_signal_stop(*, command: str) -> Msg:
+    return Msg("wire.session_status.unseen_signal_stop", {"command": command})

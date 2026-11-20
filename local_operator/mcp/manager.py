@@ -37,7 +37,14 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Coroutine,
+    Sequence,
+)
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2494,7 +2501,13 @@ class McpManager:
         result.tools = self.get_tools()
         return result
 
-    async def wait_settled(self, timeout_s: float) -> bool:
+    async def wait_settled(
+        self,
+        timeout_s: float,
+        *,
+        servers: Collection[str] | None = None,
+        first: bool = False,
+    ) -> bool:
         """Wait, bounded, for servers deferred past the startup gate to settle.
 
         ``reload()`` and ``discover_and_connect()`` return at the 250 ms gate
@@ -2509,11 +2522,33 @@ class McpManager:
         Waits on the continuations only — never cancels them on timeout, so a
         server slower than the bound keeps connecting and honestly reads
         ``connecting``. Returns whether everything settled within the bound.
+
+        ``servers`` narrows the wait to those names' continuations. The
+        declared-tool first-turn gate (``session/declared_mcp_ready.py``) needs
+        exactly the servers a run NAMED, and waiting on every continuation
+        would make it hostage to an unrelated slow server (an OAuth endpoint
+        that takes its whole connect budget to fail) the run never declared.
+        ``None`` keeps the whole-round wait every other caller relies on.
+
+        ``first`` returns as soon as ANY of them settles. The same gate decides
+        on tool reachability, so it re-reads the inventory after each server
+        lands and stops once every declared tool is there; waiting for all of
+        them would make a run whose tool already arrived from ``bd_x`` pay a
+        wedged prefix sibling ``bd``'s whole bound (agent review round 1, R1).
+        The return value still means "nothing in scope is left pending".
         """
-        pending = [continuation for continuation, _ in self._pending_continuations.values()]
+        pending = [
+            continuation
+            for name, (continuation, _) in self._pending_continuations.items()
+            if (servers is None or name in servers) and not continuation.done()
+        ]
         if not pending:
             return True
-        _done, still = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        _done, still = await asyncio.wait(
+            pending,
+            timeout=max(0.0, timeout_s),
+            return_when=asyncio.FIRST_COMPLETED if first else asyncio.ALL_COMPLETED,
+        )
         return not still
 
     async def wait_for_connection(self, name: str) -> ServerConnection:

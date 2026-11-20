@@ -1,0 +1,27 @@
+{
+  "wire.community.post_card_audience": {
+    "note": "Approval card for an agent's community post, every surface: post card audience. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "Approval card for an agent's community post, every surface",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "wire.community.post_card_each_time": {
+    "note": "Approval card for an agent's community post, every surface: post card each time. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "Approval card for an agent's community post, every surface",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "wire.community.post_card_label": {
+    "note": "Approval card for an agent's community post, every surface: post card label. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "Approval card for an agent's community post, every surface",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "wire.community.post_card_tainted": {
+    "note": "Approval card for an agent's community post, every surface: post card tainted. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "Approval card for an agent's community post, every surface",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "wire.community.post_card_title": {
+    "note": "Approval card for an agent's community post, every surface: post card title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "Approval card for an agent's community post, every surface",
+    "tone": "plain, kind, sentence case, no emoji"
+  }
+}

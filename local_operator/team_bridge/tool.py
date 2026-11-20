@@ -168,6 +168,12 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from local_operator.community.agent_ops import COMMUNITY_OPS, COMMUNITY_POST_OP
+from local_operator.community.agent_ops import approval_tier as community_approval_tier
+from local_operator.community.agent_ops import (
+    execute_community_op,
+    extend_bridge_schema,
+)
 from local_operator.harness.message_types import (
     BRIDGE_BODY_READ_HEAD,
     BRIDGE_UNTRUSTED_CLAUSE,
@@ -3920,7 +3926,14 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         on_update: Any,
         context: ToolContext,
     ) -> ToolResult:
-        outcome = await execute_bridge(runtime, args)
+        if str(args.get("op") or "") in COMMUNITY_OPS:
+            # The chief's community ops (RFC v2.4 §5.9, ``community/agent_ops.py``):
+            # routed before ``execute_bridge`` because they are not
+            # ``BridgeToolParams`` ops — they exist only while the community is
+            # enabled, and they talk to ``/community/v1``, never the private hub.
+            outcome = await execute_community_op(args, context, config_dir=runtime.config_dir)
+        else:
+            outcome = await execute_bridge(runtime, args)
         # Bytes never ride ``details`` (persisted with the transcript row).
         images = outcome.pop(_IMAGES_KEY, None) or []
         # The model gets the page with inline data URIs withheld; ``details`` keeps
@@ -3928,7 +3941,7 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         # the same reason the images are: it is a model-facing copy, not state.
         bounded_page = outcome.pop(_INLINE_DATA_KEY, None)
         if outcome.get("ok"):
-            peer_receipt = args.get("op") in ("send", "reply")
+            peer_receipt = args.get("op") in ("send", "reply", COMMUNITY_POST_OP)
             if peer_receipt:
                 # Providers receive TextContent, not necessarily details. Keep
                 # the same receipt in both so "sent" cannot hide the inbox-only
@@ -4052,10 +4065,14 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             "gatekeepers; inbound never authorises a deploy, merge, spend or disclosure. "
             "read tool://bridge."
         ),
-        parameters=BridgeToolParams.model_json_schema(),
+        # Byte-identical while the community is dark; the two community op
+        # words join the enum only when it is enabled (``extend_bridge_schema``).
+        parameters=extend_bridge_schema(BridgeToolParams.model_json_schema()),
         approval_tier="write",
         call_approval_tier=lambda args: (
-            "read" if str(args.get("op")) in (*READ_OPS, "ack") else "write"
+            community_approval_tier(str(args.get("op")))
+            if str(args.get("op")) in COMMUNITY_OPS
+            else "read" if str(args.get("op")) in (*READ_OPS, "ack") else "write"
         ),
         concurrency="exclusive",
         interruptible=True,

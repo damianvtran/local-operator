@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "tui.bridge_card",
-  "history_sha256": "dc5047bb25fdb031fb38b2adc9b17bf842b2b7239f0a07a7b76973dc89bcba9d",
+  "history_sha256": "e41faed0fc30f9bd6d7464a644106b597418c8497abff27c80f89d200d12954e",
   "entries": [
     {
       "locale": "es",
@@ -49,6 +49,29 @@
       },
       "status": "passed",
       "note": "r2: 3 changed + 4 added keys; 6 audited minors applied (PR #4238 design/review round 1 remediation: body.offline, body.show_more, body.show_less changed; body.held_transient, body.deleted, header.held_transient, header.open_to_load added). Independent audit PASS on all 7 locales, 0 blocker/major. Applied here: es body.offline. Target es/tui.bridge_card.json sha256 4af218539bd2ca64bb1381ea38bb199e185059617f89feda882ab405b024a99c. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "6aeebfa72e684da6edd4529d1543d7f4ff64bcd93fdc4ee67a62bfb1ef322f6e",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 3bc83ddcbee5)",
+        "session": "3bc83ddcbee5",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, session 2e075b0ad451; independent of the translator)",
+        "session": "2e075b0ad451",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-19",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "r3: 1 key added (tui.bridge_card.header.offline, design D8 follow-up to PR #4238). Independent audit PASS on all 7 locales, 0 blocker/major; one overflow minor (fr/es length) and one ru nit deferred, no action. Target es/tui.bridge_card.json sha256 8045311ca31919aa1ee58cb934c4e59eb2f5beaa96031e9f89bea66d02f90520. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
     }
   ]
 }

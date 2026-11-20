@@ -1,3 +1,19 @@
 {
-  "wire.session_status.retired_label": "{base} — đã ngừng để cập nhật"
+  "wire.session_status.retired_label": "{base} — đã ngừng để cập nhật",
+  "wire.session_status.interrupted": "Gián đoạn",
+  "wire.session_status.unseen_interruption": "Gián đoạn — chưa đọc",
+  "wire.session_status.retired": "Gián đoạn — đã ngừng để cập nhật",
+  "wire.session_status.unseen_retirement": "Gián đoạn — chưa đọc — đã ngừng để cập nhật",
+  "wire.session_status.signal_stop": "Gián đoạn — đã dừng bằng tín hiệu{command, select, none {} other { qua {command}}}",
+  "wire.session_status.unseen_signal_stop": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu{command, select, none {} other { qua {command}}}",
+  "wire.session_status.forced_kill": "Gián đoạn — bị buộc kết thúc{command, select, none {} other { qua {command}}}",
+  "wire.session_status.unseen_forced_kill": "Gián đoạn — chưa đọc — bị buộc kết thúc{command, select, none {} other { qua {command}}}",
+  "wire.session_status.complete": "Hoàn tất",
+  "wire.session_status.unseen_completion": "Hoàn tất — chưa đọc",
+  "wire.session_status.recent": "Gần đây",
+  "wire.session_status.dormant": "Đã dừng ({count, plural, other {# lượt thức dậy tạm ngưng}})",
+  "wire.session_status.error": "Lỗi",
+  "wire.session_status.unseen_error": "Lỗi — chưa đọc",
+  "wire.session_status.error_cause": "{cause, select, user_stop {Lỗi — người dùng đã dừng} runtime_stall_bound {Lỗi — runtime tự kết thúc khi chạm ngưỡng đình trệ} continuation_limit {Lỗi — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ} output_limit {Lỗi — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục} runtime_retired {Lỗi — đã ngừng để cập nhật} runtime_shutdown {Lỗi — runtime bị kết thúc trong lượt} runtime_overdue {Lỗi — runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển} runtime_update_failed {Lỗi — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp} runtime_killed {Lỗi — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng} install_mid_update {Lỗi — bản cài đặt bị thay thế trong lượt} owner_lost {Lỗi — runtime ngừng phản hồi trong lượt} disposed {Lỗi — phiên bị giải phóng trong lượt} other {Lỗi}}",
+  "wire.session_status.unseen_error_cause": "{cause, select, user_stop {Lỗi — chưa đọc — người dùng đã dừng} runtime_stall_bound {Lỗi — chưa đọc — runtime tự kết thúc khi chạm ngưỡng đình trệ} continuation_limit {Lỗi — chưa đọc — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ} output_limit {Lỗi — chưa đọc — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục} runtime_retired {Lỗi — chưa đọc — đã ngừng để cập nhật} runtime_shutdown {Lỗi — chưa đọc — runtime bị kết thúc trong lượt} runtime_overdue {Lỗi — chưa đọc — runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển} runtime_update_failed {Lỗi — chưa đọc — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp} runtime_killed {Lỗi — chưa đọc — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng} install_mid_update {Lỗi — chưa đọc — bản cài đặt bị thay thế trong lượt} owner_lost {Lỗi — chưa đọc — runtime ngừng phản hồi trong lượt} disposed {Lỗi — chưa đọc — phiên bị giải phóng trong lượt} other {Lỗi — chưa đọc}}"
 }

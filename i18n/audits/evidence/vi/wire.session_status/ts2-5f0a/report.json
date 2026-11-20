@@ -1,0 +1,274 @@
+{
+  "audit_kind": "second_independent_safety_copy_pass",
+  "audit_timestamp": "2026-11-19T21:32:00.930977+00:00",
+  "locale": "vi",
+  "scope": "wire.session_status: all 17 keys, seen/unseen cause arms, command arms, fallback, count plurals",
+  "independent_verdict_before_first_receipt_read": "changes_requested",
+  "first_receipt_consulted": false,
+  "per_key": [
+    {
+      "message_id": "wire.session_status.retired_label",
+      "source": "{base} — retired for an update",
+      "target": "{base} — đã ngừng để cập nhật",
+      "assessment": "Legacy suffix only: base placeholder preserved; update-related retirement, not deletion. Not used by new formatter; no new-formatter clearance inferred.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.interrupted",
+      "source": "Interrupted",
+      "target": "Gián đoạn",
+      "assessment": "Interrupted outcome preserved, no cause invented.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.unseen_interruption",
+      "source": "Unseen interruption",
+      "target": "Gián đoạn — chưa đọc",
+      "assessment": "Unread status distinct from interrupted outcome; not a second interruption.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.retired",
+      "source": "Interrupted — retired for an update",
+      "target": "Gián đoạn — đã ngừng để cập nhật",
+      "assessment": "Update-related runtime stopping distinct from explicit user stop.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.unseen_retirement",
+      "source": "Unseen interruption — retired for an update",
+      "target": "Gián đoạn — chưa đọc — đã ngừng để cập nhật",
+      "assessment": "Unread modifier preserves update-related stopping cause.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "source": "Interrupted — stopped with a signal{command, select, none {} other { by {command}}}",
+      "target": "Gián đoạn — đã dừng bằng tín hiệu{command, select, none {} other { qua {command}}}",
+      "assessment": "Signal stopping distinguished from forced kill; exact command token retained and none omits attribution.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "source": "Unseen interruption — stopped with a signal{command, select, none {} other { by {command}}}",
+      "target": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu{command, select, none {} other { qua {command}}}",
+      "assessment": "Same signal semantics with separate unread modifier; both command arms checked.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "source": "Interrupted — killed{command, select, none {} other { by {command}}}",
+      "target": "Gián đoạn — bị buộc kết thúc{command, select, none {} other { qua {command}}}",
+      "assessment": "Forced termination distinct from signal stopping; no data deletion asserted; both command arms checked.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "source": "Unseen interruption — killed{command, select, none {} other { by {command}}}",
+      "target": "Gián đoạn — chưa đọc — bị buộc kết thúc{command, select, none {} other { qua {command}}}",
+      "assessment": "Unread modifier does not change forced termination outcome; both command arms checked.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.complete",
+      "source": "Complete",
+      "target": "Hoàn tất",
+      "assessment": "Completed outcome, not merely started or acknowledged.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.unseen_completion",
+      "source": "Unseen completion",
+      "target": "Hoàn tất — chưa đọc",
+      "assessment": "Completed outcome remains completed; unread qualifier applies to status.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.recent",
+      "source": "Recent",
+      "target": "Gần đây",
+      "assessment": "Recency only; no busy/completed implication.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "source": "Stopped ({count, plural, one {# wake dormant} other {# wakes dormant}})",
+      "target": "Đã dừng ({count, plural, other {# lượt thức dậy tạm ngưng}})",
+      "assessment": "Stopped with wakes inactive/temporarily suspended, not cancelled, deleted, or promised to fire; locale plural categories complete.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.error",
+      "source": "Error",
+      "target": "Lỗi",
+      "assessment": "Generic error without invented forensic cause.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error",
+      "source": "Unseen error",
+      "target": "Lỗi — chưa đọc",
+      "assessment": "Unread error; no causal claim that unreadness caused failure.",
+      "status": "passed"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "source": "{cause, select, user_stop {Error — stopped by the user} runtime_stall_bound {Error — runtime ended itself after its stall bound} continuation_limit {Error — continuation limit reached; pending message dropped} output_limit {Error — model output limit reached; could not continue} runtime_retired {Error — retired for an update} runtime_shutdown {Error — runtime terminated during the turn} runtime_overdue {Error — runtime left for an update after its progress bound} runtime_update_failed {Error — update did not finish; runtime kept its loaded build} runtime_killed {Error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Error — install replaced during the turn} owner_lost {Error — runtime stopped answering during the turn} disposed {Error — session disposed during the turn} other {Error}}",
+      "target": "{cause, select, user_stop {Lỗi — người dùng đã dừng} runtime_stall_bound {Lỗi — runtime tự kết thúc khi chạm ngưỡng đình trệ} continuation_limit {Lỗi — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ} output_limit {Lỗi — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục} runtime_retired {Lỗi — đã ngừng để cập nhật} runtime_shutdown {Lỗi — runtime bị kết thúc trong lượt} runtime_overdue {Lỗi — runtime rời đi để cập nhật sau ngưỡng tiến triển} runtime_update_failed {Lỗi — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp} runtime_killed {Lỗi — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng} install_mid_update {Lỗi — bản cài đặt bị thay thế trong lượt} owner_lost {Lỗi — runtime ngừng phản hồi trong lượt} disposed {Lỗi — phiên bị giải phóng trong lượt} other {Lỗi}}",
+      "assessment": "All 13 arms reviewed individually; detailed assessment below.",
+      "status": "changes_requested"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "source": "{cause, select, user_stop {Unseen error — stopped by the user} runtime_stall_bound {Unseen error — runtime ended itself after its stall bound} continuation_limit {Unseen error — continuation limit reached; pending message dropped} output_limit {Unseen error — model output limit reached; could not continue} runtime_retired {Unseen error — retired for an update} runtime_shutdown {Unseen error — runtime terminated during the turn} runtime_overdue {Unseen error — runtime left for an update after its progress bound} runtime_update_failed {Unseen error — update did not finish; runtime kept its loaded build} runtime_killed {Unseen error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Unseen error — install replaced during the turn} owner_lost {Unseen error — runtime stopped answering during the turn} disposed {Unseen error — session disposed during the turn} other {Unseen error}}",
+      "target": "{cause, select, user_stop {Lỗi — chưa đọc — người dùng đã dừng} runtime_stall_bound {Lỗi — chưa đọc — runtime tự kết thúc khi chạm ngưỡng đình trệ} continuation_limit {Lỗi — chưa đọc — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ} output_limit {Lỗi — chưa đọc — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục} runtime_retired {Lỗi — chưa đọc — đã ngừng để cập nhật} runtime_shutdown {Lỗi — chưa đọc — runtime bị kết thúc trong lượt} runtime_overdue {Lỗi — chưa đọc — runtime rời đi để cập nhật sau ngưỡng tiến triển} runtime_update_failed {Lỗi — chưa đọc — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp} runtime_killed {Lỗi — chưa đọc — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng} install_mid_update {Lỗi — chưa đọc — bản cài đặt bị thay thế trong lượt} owner_lost {Lỗi — chưa đọc — runtime ngừng phản hồi trong lượt} disposed {Lỗi — chưa đọc — phiên bị giải phóng trong lượt} other {Lỗi — chưa đọc}}",
+      "assessment": "All 13 arms reviewed individually; unread prefix does not change any causal/outcome proposition.",
+      "status": "changes_requested"
+    }
+  ],
+  "cause_assessments": [
+    {
+      "selector": "user_stop",
+      "assessment": "Explicit user stop; only this arm assigns stop agency to the user.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "runtime_stall_bound",
+      "assessment": "Runtime ends itself after stalled-progress bound; not external kill.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "continuation_limit",
+      "assessment": "Continuation limit and pending message dropped both preserved.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "output_limit",
+      "assessment": "Model output limit and inability to continue preserved.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "runtime_retired",
+      "assessment": "Update-related runtime stopping, not user stop.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "runtime_shutdown",
+      "assessment": "Runtime terminated during turn; not successful completion.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "runtime_overdue",
+      "assessment": "Update departure after progress bound; see locale finding if any.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": [
+        "VI-S2-01"
+      ]
+    },
+    {
+      "selector": "runtime_update_failed",
+      "assessment": "Update did not finish; runtime retained already-loaded build. Does not claim new build loaded.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "runtime_killed",
+      "assessment": "Unclean disappearance and absence of requested stop both preserved.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "install_mid_update",
+      "assessment": "Installation replaced during the turn, not installation merely pending.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "owner_lost",
+      "assessment": "Runtime stopped responding during turn; no invented deletion or completed update.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "disposed",
+      "assessment": "Session lifecycle ended/disposed during turn; does not claim transcript/data deletion.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    },
+    {
+      "selector": "other",
+      "assessment": "Generic error fallback; unknown select value renders the same fallback, with unread qualification only in unseen key.",
+      "reviewed_in": [
+        "error_cause",
+        "unseen_error_cause"
+      ],
+      "finding_ids": []
+    }
+  ],
+  "findings": [
+    {
+      "id": "VI-S2-01",
+      "severity": "MAJOR",
+      "keys": [
+        "wire.session_status.error_cause:runtime_overdue",
+        "wire.session_status.unseen_error_cause:runtime_overdue"
+      ],
+      "current": "runtime rời đi để cập nhật sau ngưỡng tiến triển",
+      "problem": "Literal anthropomorphic “runtime leaves” plus “after a progress threshold” is not idiomatic Vietnamese product copy and obscures that the runtime stopped for an update after its allowed progress window. The separate source runtime_stall_bound and runtime_retired arms confirm this is a bounded runtime-exit diagnosis, not movement or a user stop.",
+      "suggested": "runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển"
+    }
+  ],
+  "locale_notes": "NFC verified. other-only plural; “lượt thức dậy tạm ngưng” preserves dormant wake meaning. Update intent retained in “ngừng để cập nhật”; no operator attribution invented.",
+  "fit": "No maxCells/maxChars cap in source sidecar; one logical line. Long error causes may wrap; actual terminal geometry/rendering not tested.",
+  "residual_gap": "Unknown nonempty external diagnostic retains legacy English prose outside this namespace; unresolved and not approved as localized.",
+  "evidence_type": "audit_notes_not_execution_log; execution is in audit.log",
+  "not_claimed": [
+    "visual",
+    "runtime",
+    "pseudo",
+    "native RTL",
+    "release or shipping eligibility"
+  ]
+}

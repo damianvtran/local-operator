@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.network_uplink",
+  "history_sha256": "82baa3da8da3733dc3e4319010a49a53d77c8bfcde4b87b938a026ce1f41a1e7",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.network_uplink",
+      "source_sha256": "7338a854f52e313c4407c9b384a3cd78a9afeef1dafbbda1226dd967dee4cef0",
+      "translator": {
+        "agent": "coder — PR #4260 translator (lopdev team; values at 9151744c0, remediation at d5d513f24 applying the round-1 i18n corrections)",
+        "model": "unrecorded — the translator's serving model is not stated in the PR or commits; not inferred",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 2 (lopdev team reviewer, task 4260-i18n-audit-r2), independent of the translator; did not edit any value",
+        "session": "fa68116fa0b9",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "PR #4260 round 2, head d5d513f24 on base 1d7e456af, scope 9151744c0..d5d513f24 (round 1 at 9151744c0, #issuecomment-6995231938). Audited against the en values and context notes at d5d513f24: no_connection ('no route to the internet'; must not claim no network/connection), no_ipv4_for_peer/no_ipv6_for_peer ('{peer} has only IPv4/IPv6 addresses'; states only what the peer advertises, never reachability), plus every value this locale changed in the remediation. Mechanical (all 8 keys): key parity 8/8; {peer} placeholder identical to en; IPv4/IPv6 verbatim with en counts; no Cc/Cf/bidi controls; final punctuation only on no_connection; no firewall/allowlist/ISP cause named; not_answering stays causeless. zh-CN: I2 (round 1, CJK/Latin spacing) fixed — no space at any Han↔Latin/placeholder boundary in any value (scripted); '没有通往互联网的路由' says route to the internet, not 'no network'; '{peer}只有IPv4地址' states addresses only. No open findings. Round-1 findings now resolved: I2. Single independent semantic audit by reading; no rendered-frame or native-speaker review claimed."
+    }
+  ]
+}

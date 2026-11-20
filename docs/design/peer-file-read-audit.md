@@ -15,8 +15,12 @@ not a preview/download alias; do not infer that every mesh byte is audited here.
 
 ## Admission and durability
 
-Every owner `net_file_get` **fetch** phase calls the same admission callback
-before reading file content for its response. The owner emits
+Every owner `net_file_get` **fetch**, nonempty **stat**, and valid-prefix
+**verify** phase calls the same admission callback immediately before its first
+source content read. Stat admits the owner-observed file size at offset zero;
+verify admits exactly its validated prefix at offset zero; fetch retains its
+existing clipped chunk plan. Empty stat and invalid-prefix verify perform no
+content read and need no admission. The owner emits
 `session_file_read_admitted` through the existing rotating `AuditLog` writer.
 The callback requires an enabled, non-degraded writer and an exact-row receipt
 while holding the writer's existing lock. The receipt binds the requested
@@ -29,8 +33,9 @@ that copy and refuses content. The active receipt's generation is not pruned
 before acknowledgement. Later `audit_rotated` bookkeeping does not invalidate a
 healthy admission or certify an unrelated replacement inode. A failed append,
 file/archive/directory fsync, buffered-only acceptance, disabled writer or already
-degraded writer refuses that fetch with `audit_unavailable`. Refusal/control frames are
-not FILE content. Direct fetch calls without an admission callback also refuse.
+degraded writer refuses that read with `audit_unavailable`, without target reads
+or a digest/match response. Refusal/control frames are not FILE content. Direct
+calls to a content-reading phase without an admission callback also refuse.
 Other existing events retain their existing batching/durability policy.
 
 The row records the authenticated **requester device** as `actor` (device kind),
@@ -39,12 +44,28 @@ the owner session as `session_id`, and an allow decision, offset, and
 this protocol; it is intentionally absent, not copied from an arbitrary peer
 field or confused with the owner session. Network and epoch come from the link.
 
-`admitted_bytes = min(bounded chunk limit, max(0, owner stat size - offset))`
+Historical **and future fetch** rows have exactly the original four detail
+fields (`reference`, `admitted_bytes`, `offset`, `decision`), with `phase` **absent**.
+For fetch, `admitted_bytes = min(bounded chunk limit, max(0, owner stat size - offset))`
 is a **planned maximum for this fetch**, never actual transfer completion.
 The actual read is bounded to that admitted span, including at/beyond EOF.
 A source read error, truncation, interrupted response or lost link can leave
 an allow row with fewer (even zero) delivered bytes. A resumed fetch is a new
 admission: authorization and source checks happen again for each request.
+
+Stat/verify hashing extends the producer with a closed five-field detail variant:
+the same four fields plus literal `phase: "stat"` or `phase: "verify"`. These are
+planned **owner hash reads**, not fetch bytes, delivered bytes or completion.
+Fetch consumers select key **absence** (`"phase" not in detail`), never null,
+truthiness or an unknown-phase fallback. There is no `phase: "fetch"` variant.
+Counts/offsets are strict nonnegative integers, not booleans or floats; extra,
+missing, null, unknown or scrubbed fields fail closed. The trusted owner branch
+passes `expected_file_phase` outside mutable event detail, so a missing hash
+phase cannot be accepted as a historical fetch row. Raw, sanitized, rendered and
+durable-receipt detail must match an independent snapshot with the same strict
+shape/types/values. Rendered candidates are checked under the existing writer
+lock **before append**; rejected candidates consume no sequence or row/counter.
+The durable acknowledgement remains bound to the exact published inode/row.
 
 References contain only a canonical pad-relative `scratchpad://` reference,
 an attachment digest, or a typed `reference:sha256:<hex>` fallback. The fallback
@@ -54,8 +75,10 @@ existing sanitizer's actual serialized detail budget as well as string/control
 scrubbing: legal short Unicode paths can expand under JSON ASCII escaping.
 Required acknowledgement refuses missing/changed detail fields, including the
 actual rendered row, rather than silently accepting `truncated=true`. Neither
-caps nor authority are widened. Existing stat/verify content hashing is separate
-metadata/integrity behavior, not a fetch admission or an all-reads guarantee.
+caps nor authority are widened. Reference normalization budgets the **final**
+four- or five-field variant, including the hash phase, before target content is
+read. Stat/verify admission covers these S1 hash reads only, not unrelated local
+reads, net_sync replication, P3 provenance or final socket-release fencing.
 Compression/content hashing remain streamed and fetch buffering remains bounded
 by the existing chunk size.
 
@@ -93,9 +116,13 @@ source fetch reads/received FILE bytes/landed payload for pad and digest sources
 Archive fault controls target the generation holding that admission and preserve
 the prior copy. Descriptor-aware controls cover first creation, complete archive
 publication-before-unlink, healthy pre/post-append rotation and wrong-inode sync.
-Long/control/Unicode fallback controls instrument all source `pread` calls only
-within fetch, retaining separate stat/verify behavior, and require exact usable
-fields before content. EOF plans, post-admission read failure, sanitizer refusal
+The original #4228 evidence instrumented fetch only and did not claim audited
+stat/verify hashing. This A extension intentionally adds hash-phase admission;
+new direct-handler controls observe durable exact-phase rows before target
+`pread`, and reject failed hash admission without digest/match disclosure.
+Long/control/Unicode fallback controls now observe stat/verify/fetch source
+`pread` and require each operation's own exact usable receipt. Fetch totals
+remain fetch-only by phase-key absence, not sums of all owner-read work. EOF plans, post-admission read failure, sanitizer refusal
 and buffer-only acceptance remain covered. Existing S1 authorization/path/
 sensitivity tests remain neighbors.
 

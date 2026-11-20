@@ -88,5 +88,10 @@
     "note": "One-line collapsed card header (after the sender's name) when this machine has no local copy of the message text: opening (expanding) the card loads it from Radient. Imperative, short.",
     "role": "collapsed card summary",
     "tone": "plain instruction, terse"
+  },
+  "tui.bridge_card.header.offline": {
+    "note": "One-line collapsed card header (after the sender's name) when Radient could not be reached while loading this message. The card is closed here, so the retry is to open (expand) it — the open card's body line, tui.bridge_card.body.offline, says 'close and reopen' instead. 'Radient' is a product name, not translated. Keep it short.",
+    "role": "collapsed card summary",
+    "tone": "plain, terse"
   }
 }

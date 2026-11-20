@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 import pytest
@@ -531,6 +532,82 @@ class TestFormatMcpResult:
         lines, total = stored
         assert lines == ["Error: MCP evidence line", "MCP evidence line"]
         assert total > 1_000
+
+    @staticmethod
+    def _bd_fetch_result() -> tuple[dict[str, Any], str]:
+        """A result at bd_tools' own 12,000-char cap: the benchmark's commonest fetch.
+
+        One JSON line, the shape every MCP JSON result has (no line structure).
+        """
+        frame = json.dumps({"url": "https://example.test/judges", "text": ""})
+        page = json.dumps(
+            {"url": "https://example.test/judges", "text": "J" * (12_000 - len(frame))}
+        )
+        assert len(page) == 12_000
+        return {"content": [{"type": "text", "text": page}], "isError": False}, page
+
+    def test_without_read_a_result_at_the_servers_cap_arrives_whole(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """REPRODUCTION (benchmark, 2026-11-20): under ``--tools mcp__bd_search,
+        mcp__bd_fetch`` lop cut 62 of 159 MCP results at 8 KiB and pointed at a
+        ``spill://`` handle the run had no ``read`` to open, so the model fetched
+        the handle with its MCP ``fetch`` or re-searched. A session that cannot
+        read spills now gets the result inline, with no route it cannot take."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        result, page = self._bd_fetch_result()
+        assert len(page) > 8 * 1024, "precondition: over the readable-session cap"
+        context = ToolContext(session_id="no-read", spill_readable=False)
+
+        formatted = format_mcp_result(result, "call", "mcp__bd_fetch", context)
+
+        assert formatted.text == page
+        assert "spill://" not in formatted.text and "read(" not in formatted.text
+        assert formatted.details == {"server_result": result}
+
+    def test_without_read_an_oversized_result_names_no_unreachable_route(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from local_operator.tools.builtin import (
+            BASH_TRUNCATION_MARKER,
+            UNREADABLE_SPILL_INLINE_LIMIT_CHARS,
+        )
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        body = "row\n" * 20_000  # 80,000 chars: past even the wider bound
+        result = {"content": [{"type": "text", "text": body}], "isError": False}
+        context = ToolContext(session_id="no-read-big", spill_readable=False)
+
+        formatted = format_mcp_result(result, "call", "mcp__bd_fetch", context)
+
+        assert len(formatted.text) <= UNREADABLE_SPILL_INLINE_LIMIT_CHARS
+        assert BASH_TRUNCATION_MARKER in formatted.text
+        assert "spill://" not in formatted.text and "read(" not in formatted.text
+        # The full result is still STORED, for the harness rather than the
+        # model (passage ranking, monitors, renderers: review round 1, R2), and
+        # the de-duplicated ``server_result`` rides along as it does with read.
+        details = formatted.details or {}
+        assert details["spill"]["complete"] is True
+        assert "server_result" in details
+
+    def test_with_read_the_same_result_keeps_todays_cap_and_footer(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Byte-for-byte the shape that shipped: ``spill_readable`` defaults True,
+        and an explicit True is the same as a context that predates the field."""
+        from local_operator.tools.builtin import spill_truncate
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        result, page = self._bd_fetch_result()
+        readable = ToolContext(session_id="with-read", spill_readable=True)
+
+        formatted = format_mcp_result(result, "call", "mcp__bd_fetch", readable)
+        expected, _details = spill_truncate(page, "mcp__bd_fetch", readable)
+
+        assert ToolContext(session_id="default").spill_readable is True
+        assert formatted.text == expected
+        assert "spill://" in formatted.text and 'read(path="spill://' in formatted.text
+        assert len(formatted.text) < len(page), "cut at the 8 KiB cap, as before"
 
 
 class TestIsRetriableConnectionError:

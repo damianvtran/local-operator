@@ -254,3 +254,78 @@ def test_body_markdown_uses_the_brand_markdown_theme() -> None:
         if span.start <= start < span.end and isinstance(span.style, Style) and span.style.color
     ]
     assert expected is not None and expected in painted
+
+
+# -- #4238 deferred follow-ups ------------------------------------------------
+
+
+def _recording_block(calls: list[bool]) -> TeamBridgeBlock:
+    """A card whose loads are recorded, with the real ``_body_loading`` latch.
+
+    The latch is the point: the bug was the open being swallowed because the
+    mount pass was still marked in flight.
+    """
+    block = TeamBridgeBlock("x", {"name": "Ola"}, body_loader=_no_load)
+
+    def record(*, local_only: bool) -> None:
+        block._body_loading = True
+        calls.append(local_only)
+
+    block._start_load = record  # type: ignore[method-assign]
+    return block
+
+
+def test_opening_while_the_mount_pass_is_in_flight_still_runs_the_full_pass() -> None:
+    """Review m1: an open during the mount pass must not strand 'Loading message…'."""
+    calls: list[bool] = []
+    block = _recording_block(calls)
+    block.on_mount()
+    # The reader opens the card before the local-only answer lands: the open is
+    # refused by the in-flight latch, so nothing else would ever start it.
+    block._expanded = True
+    block._maybe_load_body()
+    assert calls == [True]
+    block.apply_card_body(_answer(_item("unavailable", reason="not_loaded")), verified=False)
+    assert calls == [True, False]
+
+
+def test_a_closed_card_does_not_go_to_the_hub_when_the_mount_pass_lands() -> None:
+    """The mount pass stays local-only for cards nobody has opened (D1)."""
+    calls: list[bool] = []
+    block = _recording_block(calls)
+    block.on_mount()
+    block.apply_card_body(_answer(_item("unavailable", reason="not_loaded")), verified=False)
+    assert calls == [True]
+
+
+def test_the_closed_offline_header_says_open_not_close_and_reopen() -> None:
+    """Design D8: the collapsed card is already closed, so its retry is to open it."""
+    row = _collapsed(_answer(_item("unavailable", reason="offline")))
+    assert "Couldn't reach Radient — open to retry" in row
+    assert "close and reopen" not in row
+    # The open card keeps the body line: there the retry IS close and reopen.
+    body = _open(_answer(_item("unavailable", reason="offline")))._build_content(110).plain
+    assert "Couldn't reach Radient — close and reopen to retry" in body
+
+
+def test_an_open_offline_card_header_does_not_contradict_its_body() -> None:
+    """QA Q1 (#4277): "open to retry" is only for the CLOSED card.
+
+    On an open card the header sits right above the body's "close and reopen
+    to retry", so it keeps the string main showed there (the body line), and it
+    follows the card through both directions of the toggle.
+    """
+    offline = _answer(_item("unavailable", reason="offline"))
+    block = TeamBridgeBlock("(no preview available)", {"name": "Ola"}, body_loader=_no_load)
+    block.apply_card_body(offline, verified=True)
+    assert "open to retry" in block._build_content(110).plain.splitlines()[0]
+    block.toggle_expanded()
+    header = block._build_content(110).plain.splitlines()[0]
+    assert "Couldn't reach Radient — close and reopen to retry" in header
+    assert "— open to retry" not in header
+    block.toggle_expanded()
+    closed = block._build_content(110).plain.splitlines()[0]
+    assert "Couldn't reach Radient — open to retry" in closed
+    # Opened before the answer lands: the header is built open from the start.
+    opened = _open(offline)
+    assert "— open to retry" not in opened._build_content(110).plain.splitlines()[0]

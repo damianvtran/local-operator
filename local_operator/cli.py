@@ -165,6 +165,25 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
+def _start_by_time(text: str) -> float:
+    """argparse ``type`` for ``lop services heavy run --start-by``.
+
+    Epoch seconds or ISO-8601 with an offset/Z (``bounded_contract.parse_start_by``,
+    shared with ``scripts/run_bounded.py``). Unreadable is a usage error (exit 2)
+    before any queue wait; a past deadline is NOT one: it parses, and the run is
+    refused at spawn time with the late-start code instead.
+    """
+    from local_operator import bounded_contract
+    from local_operator.i18n.keys import cli_services_heavy as _shv_copy
+
+    try:
+        return bounded_contract.parse_start_by(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            tr("cli.services_heavy")(_shv_copy.not_start_by(value=repr(text)))
+        ) from None
+
+
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
@@ -224,6 +243,16 @@ def _add_services_heavy_parser(
     )
     run.add_argument(
         "--timeout", type=_positive_seconds, default=None, metavar="SECONDS", help=timeout_help
+    )
+    # Latest-start window granted by a node host ("start by 08:05Z"). An
+    # unreadable value is a usage error here, before any queue wait; a deadline
+    # already past parses and is refused at spawn time with the breach code.
+    run.add_argument(
+        "--start-by",
+        type=_start_by_time,
+        default=None,
+        metavar="WHEN",
+        help=_shv.start_by().envelope(locale=help_locale)["text"],
     )
     # REMAINDER after `--`: the wrapped command's own flags (`pytest -x`) must
     # reach it untouched instead of being parsed as lop's.
@@ -356,6 +385,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
             "kimi",
             "alibaba",
             "google",
+            "google-vertex",
             "mistral",
             "openrouter",
             "xai",
@@ -1261,6 +1291,15 @@ def build_cli_parser() -> LocalizedArgumentParser:
 
     add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
 
+    # `lop community …` (RFC v2.4; the TUI doc's "Commands for scripts"). Hidden
+    # from `lop --help` while the community ships dark: its subparser takes no
+    # `help=` (the `resume-click` idiom) and every verb refuses unless
+    # LOCAL_OPERATOR_COMMUNITY=1. The CLI module defers the client (httpx) to
+    # the verb, so registration stays cheap on every `lop` start.
+    from local_operator.community.cli import add_parser as add_community_parser
+
+    add_community_parser(subparsers, parent_parser)
+
     # `lop disk reclaim` (issue #2676): the sanctioned disk-pressure front door.
     # Stdlib-only registration for the same reason as `network`: the planner is
     # imported by the handler, never while the parser is built.
@@ -1623,7 +1662,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # in `guides/configuration/GUIDE.md`. They are added below, after the other
     # visible commands, and a new visible command must be added here too.
     sessions_subparsers = sessions_parser.add_subparsers(
-        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync}"
+        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync,notifications}"
     )
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
@@ -2009,6 +2048,13 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # holds and the store audit" section of `guides/configuration/GUIDE.md`;
     # the handlers and `session/cleanup.py`'s holds block carry the semantics
     # for a code reader. Follow-up: one help-tranche key per argument/command.
+    notifications_parser = sessions_subparsers.add_parser("notifications", parents=[parent_parser])
+    notifications_parser.add_argument("session")
+    notifications_action = notifications_parser.add_mutually_exclusive_group()
+    notifications_action.add_argument("--grant", action="store_true")
+    notifications_action.add_argument("--revoke", action="store_true")
+    notifications_parser.add_argument("--reason", default="")
+
     hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
     hold_parser.add_argument("session")
     hold_parser.add_argument("--reason", required=True)
@@ -5085,6 +5131,7 @@ def send_command(args: argparse.Namespace) -> int:
     # unique match come back, and neither may be converted into a stored send).
     from local_operator.mobile.peer_send import (
         live_scan_found_nothing,
+        pid_not_on_this_device,
         session_id_unowned,
     )
 
@@ -5206,6 +5253,41 @@ def send_command(args: argparse.Namespace) -> int:
             cold_session_id = stored_id
         elif stored_error:
             error = stored_error
+    if (
+        record is None
+        and getattr(args, "pid", None) is not None
+        and pid_not_on_this_device(error or "")
+    ):
+        # A REMOTE PID: same rule and same fresh read as the in-session `send`
+        # tool (``peer_send.remote_pid_decision``), so a pid copied from a
+        # remote row of `lop sessions` gets an answer naming the session it
+        # is. `lop send` has no cross-device route of its own (a remote
+        # `--session` is not routed here either), so the ONE-live-match case
+        # names the mesh command that delivers by session id instead of
+        # inventing a transport; every other case is the tool's refusal in
+        # this command's grammar. Entered only on the local MISS form, so a
+        # local pid hit never reads the catalogue: local wins.
+        from local_operator.mobile.peer_send import remote_pid_decision
+        from local_operator.session.peer_rows import peer_pid_rows
+
+        def _mesh_address(session_id: str, device: str) -> str:
+            return (
+                f"lop network sessions --peer {device} --send {session_id} "
+                "--mailbox -- '<message>'"
+            )
+
+        routed_row, pid_refusal = remote_pid_decision(
+            args.pid, peer_pid_rows(args.pid, config_dir()), address=_mesh_address
+        )
+        if routed_row is not None:
+            pid_refusal = (
+                f"pid {args.pid} is session {routed_row.session_id} on "
+                f"{routed_row.owner_device_name}; `lop send` does not cross devices — "
+                f"deliver by session id with "
+                f"`{_mesh_address(routed_row.session_id, routed_row.owner_device)}`"
+            )
+        _peer_red(pid_refusal)
+        return 1
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             # The stored fallback just failed too, so the message names BOTH
@@ -8031,6 +8113,41 @@ def sessions_sync_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sessions_notifications_command(args: argparse.Namespace) -> int:
+    """Explicit operator-authorized local notification policy; JSON control output.
+
+    No spawn/profile field or agent registration calls this operation. Like other
+    local operator controls it may be executed by an assistant only when the
+    operator actually authorized this routing change, not on its own initiative.
+    This is not an authenticated-human or same-uid security boundary.
+    """
+    import json
+
+    from local_operator.notifications.authority import granted, read_decision, set_grant
+    from local_operator.session.cleanup import resolve_session_reference
+
+    root = config_dir() / "sessions"
+    session_id, candidates = resolve_session_reference(root, str(args.session))
+    if session_id is None:
+        print(json.dumps({"error": "ambiguous_session" if candidates else "session_not_found"}))
+        return 2
+    directory = root / session_id
+    try:
+        if args.grant or args.revoke:
+            decision = set_grant(directory, allow=bool(args.grant), reason=str(args.reason))
+        else:
+            decision = read_decision(directory)
+        print(
+            json.dumps(
+                {"session_id": session_id, "granted": granted(directory), "decision": decision}
+            )
+        )
+        return 0
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"error": str(exc), "session_id": session_id}))
+        return 2
+
+
 def sessions_hold_command(args: argparse.Namespace) -> int:
     """``lop sessions hold`` — record an operator value hold on one conversation.
 
@@ -8221,6 +8338,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
+
+    if getattr(args, "sessions_command", None) == "notifications":
+        return sessions_notifications_command(args)
 
     if getattr(args, "sessions_command", None) == "hold":
         return sessions_hold_command(args)
@@ -17891,6 +18011,9 @@ def _preflight_api_key(
         import asyncio
 
         from local_operator.network.credentials import build_auth_store
+        from local_operator.providers.bedrock.connection import (
+            configure_invocation_auth,
+        )
         from local_operator.providers.registry import credential_provider_id
 
         # THE STORE THE SESSION WILL USE, not a plain ``AuthStore`` (mesh credentials,
@@ -17902,6 +18025,7 @@ def _preflight_api_key(
         # row for a borrowable key otherwise; either way this stays a presence check
         # with no network call, which is the rule this function's docstring states.
         auth_store = build_auth_store(config_dir)
+        configure_invocation_auth(auth_store, canonical)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
@@ -17927,6 +18051,14 @@ def _preflight_api_key(
     key_name = env_key_name(canonical)
     credential_hint = f", `local-operator credential update {key_name}`" if key_name else ""
     env_hint = f", or set {key_name} in the environment" if key_name else ""
+    # Bedrock has no single key variable (env_key_name is None) and several
+    # ways to connect; name them (AWS_BEARER_TOKEN_BEDROCK, the ambient switch
+    # for headless workers) from the same catalogued copy the runtime uses.
+    provider_hint = ""
+    if canonical == "bedrock":
+        from local_operator.providers.bedrock.errors import no_credentials_text
+
+        provider_hint = f" {no_credentials_text()}"
 
     if not require_key:
         # Interactive start: name the fact and the remedies, then let the app
@@ -17938,7 +18070,8 @@ def _preflight_api_key(
             paint(
                 f"Warning: no credentials are configured for hosting platform "
                 f"'{hosting}'. Starting anyway — run `/login {canonical}` in the "
-                f"TUI, `local-operator login {canonical}` from a shell{env_hint}.",
+                f"TUI, `local-operator login {canonical}` from a shell{env_hint}."
+                f"{provider_hint}",
                 WARNING,
                 stream=sys.stderr,
             ),
@@ -17953,7 +18086,7 @@ def _preflight_api_key(
         paint(
             f"Error: {subject} is required for hosting platform '{hosting}' but "
             f"is not configured. Set it via `local-operator login {canonical}`"
-            f"{credential_hint}, or the environment.",
+            f"{credential_hint}, or the environment.{provider_hint}",
             ERROR,
             stream=sys.stderr,
         ),
@@ -19046,6 +19179,10 @@ def main() -> int:
             from local_operator.tunnels.cli import main as tunnel_main
 
             return tunnel_main(args)
+        elif args.subcommand == "community":
+            from local_operator.community.cli import main as community_main
+
+            return community_main(args)
         elif args.subcommand == "team-bridge":
             if getattr(args, "team_bridge_command", None) == "avatar":
                 from local_operator.team_bridge.cli import main as team_bridge_avatar
@@ -19231,7 +19368,11 @@ def main() -> int:
                     # REMAINDER keeps the separator when it follows an option.
                     if argv and argv[0] == "--":
                         argv = argv[1:]
-                    return heavy_cli.run_command(argv, getattr(args, "timeout", None))
+                    return heavy_cli.run_command(
+                        argv,
+                        getattr(args, "timeout", None),
+                        start_by=getattr(args, "start_by", None),
+                    )
                 if heavy == "status":
                     return heavy_cli.status_command()
                 print(

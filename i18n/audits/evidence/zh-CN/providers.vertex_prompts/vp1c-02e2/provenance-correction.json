@@ -1,0 +1,7 @@
+{
+  "record_reference": "i18n/audits/evidence/zh-CN/providers.vertex_prompts/vp1c-02e2/record.json",
+  "actual_secondary_model": "openai/gpt-6.1-sol",
+  "stale_secondary_ack_model": "anthropic/claude-opus-5-5",
+  "source": "Manager parent message: wait result for resumed secondary job aa11cca2cfaa explicitly served model=openai/gpt-6.1-sol; static host model declaration in ack was stale. Original semantic audit also openai/gpt-6.1-sol.",
+  "original_ack_preserved_byte_identical": true
+}

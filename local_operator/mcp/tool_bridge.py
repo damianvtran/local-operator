@@ -99,7 +99,20 @@ def create_mcp_tool_name(server_name: str, tool_name: str) -> str:
 
     prefix = f"{server}_"
     tool = tool.removeprefix(prefix)
-    return f"mcp__{server}_{tool}"
+    return f"{mcp_tool_name_prefix(server_name)}{tool}"
+
+
+def mcp_tool_name_prefix(server_name: str) -> str:
+    """The prefix every harness-visible tool name of ``server_name`` starts with.
+
+    The inverse direction of :func:`create_mcp_tool_name`, for a caller holding
+    a tool NAME (a ``--tools`` declaration) that needs the server owning it
+    before that server has listed any tools. A name cannot be split back into
+    its parts — ``mcp__foo_bar_x`` is server ``foo`` + tool ``bar_x`` or server
+    ``foo_bar`` + tool ``x`` — so the owner is found by matching configured
+    server names against this prefix instead.
+    """
+    return f"mcp__{_sanitize_part(server_name, 'server')}_"
 
 
 def normalize_input_schema(input_schema: dict[str, Any] | None) -> dict[str, Any]:
@@ -551,9 +564,12 @@ def format_mcp_result(
         # Keep the optional SDK isolated at this module boundary: importing the
         # established built-in spill path locally preserves config-only callers'
         # cheap ``tool_bridge`` import when MCP support is absent.
-        from local_operator.tools.builtin import spill_truncate
+        from local_operator.tools.builtin import result_inline_limit, spill_truncate
 
-        text, spill = spill_truncate(text, tool_name, context)
+        # A session without ``read`` cannot page a spill, so its MCP results are
+        # inlined up to the larger bound instead of cut at 8 KiB behind a footer
+        # it cannot follow (see ``UNREADABLE_SPILL_INLINE_LIMIT_CHARS``).
+        text, spill = spill_truncate(text, tool_name, context, result_inline_limit(context))
         if spill is not None:
             details.update(spill)
             if server_result is not None:

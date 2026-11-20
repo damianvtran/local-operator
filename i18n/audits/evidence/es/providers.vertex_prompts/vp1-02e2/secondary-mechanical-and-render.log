@@ -1,0 +1,41 @@
+Executed checkout .venv/bin/python -c <scoped probe>; probe source follows:
+import json,re,unicodedata
+from pathlib import Path
+from rich.cells import cell_len
+from local_operator.i18n.messages import render
+root=Path.cwd(); ns='providers.vertex_prompts'; en=json.loads((root/f'local_operator/i18n/catalogues/en/{ns}.json').read_text())
+for loc in ['fr','es','zh-CN','ru','vi','ur','hi']:
+ data=json.loads((root/f'local_operator/i18n/catalogues/{loc}/{ns}.json').read_text()); assert set(data)==set(en)
+ for k,v in data.items():
+  assert re.findall(r'\{[^{}]+\}',v)==re.findall(r'\{[^{}]+\}',en[k]),(loc,k)
+  assert not any(unicodedata.bidirectional(c) in ['LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI'] or c in '\u200e\u200f\u061c' for c in v),(loc,k)
+  assert unicodedata.normalize('NFC',v)==v,(loc,k)
+  assert v.endswith(' ')==en[k].endswith(' '),(loc,k)
+  if k.endswith('project_id'): assert 'Google Cloud' in v and 'JSON' not in v
+  if k.endswith('service_account'): assert v.count('JSON')==2
+  if k.endswith('hint.required'): assert v.count('Enter')==2 and v.count('Esc')==1
+  assert '<' not in v and '`' not in v and ', plural,' not in v and ', select,' not in v
+ print(loc,'PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells='+str({k.rsplit('.',1)[-1]:cell_len(v) for k,v in data.items()}))
+ label=data[ns+'.field.project_id']; composed=render(ns+'.prompt.field',{'field':label},locale=loc)
+ assert composed==data[ns+'.prompt.field'].replace('{field}',label),(loc,composed)
+ print('actual messages.render composition:',composed)
+
+STDOUT
+fr PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells={'project_id': 25, 'service_account': 51, 'required': 67, 'field': 45}
+actual messages.render composition: Saisir ID du projet Google Cloud (laisser vide pour annuler) : 
+es PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells={'project_id': 31, 'service_account': 53, 'required': 75, 'field': 46}
+actual messages.render composition: Introduce ID del proyecto de Google Cloud (deja vacío para cancelar): 
+zh-CN PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells={'project_id': 18, 'service_account': 26, 'required': 41, 'field': 28}
+actual messages.render composition: 请输入Google Cloud项目ID（留空取消）： 
+ru PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells={'project_id': 34, 'service_account': 46, 'required': 59, 'field': 46}
+actual messages.render composition: Введите Идентификатор проекта Google Cloud (оставьте пустым для отмены): 
+vi PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells={'project_id': 21, 'service_account': 50, 'required': 69, 'field': 32}
+actual messages.render composition: Nhập ID dự án Google Cloud (để trống để hủy): 
+ur PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells={'project_id': 23, 'service_account': 40, 'required': 87, 'field': 50}
+actual messages.render composition: Google Cloud پروجیکٹ ID درج کریں (منسوخ کرنے کے لیے خالی چھوڑیں): 
+hi PASS: 4 keys, placeholder/NFC/token/bidi/trailing-space checks; cells={'project_id': 21, 'service_account': 28, 'required': 60, 'field': 37}
+actual messages.render composition: Google Cloud प्रोजेक्ट ID दर्ज करें (रद्द करने के लिए खाली छोड़ें): 
+
+STDERR
+
+exit=0

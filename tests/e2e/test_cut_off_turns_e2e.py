@@ -315,8 +315,14 @@ async def test_a_turn_cut_off_by_a_killed_runtime_reports_an_error_with_a_reason
                 registry.scan(config)
                 rows = {entry.id: entry for entry in load_catalog(config)}
                 sidebar = rows[session_id].status
-                assert sidebar.startswith("Unseen error"), sidebar
-                assert sidebar.split(" — ", 1)[-1] in state["reason"], sidebar
+                # The visible summary names the stable cause; it is no longer
+                # a substring of the raw diagnostic (which retains PID/detail).
+                # Pin the human meaning independently of the formatter, while
+                # the full incident reason and killed PID stay asserted below.
+                assert rows[session_id].status_code == "error", rows[session_id]
+                assert sidebar == (
+                    "Unseen error — runtime disappeared without a clean exit; no stop requested"
+                ), sidebar
 
                 projection = _durable_projection(session_id)
                 assert projection is not None, "the phone projection vanished"

@@ -1,0 +1,92 @@
+{
+  "status": "translated",
+  "audited": false,
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "key_count": 17,
+  "new_values_translated": 16,
+  "historical_values_preserved": 1,
+  "frozen_commit": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "translator": {
+    "agent": "i18n-translator / terminal-status-fr",
+    "session": "a14cc322d1da",
+    "actual_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session system model declaration",
+    "fallback_used": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "previous_fr": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/fr/wire.session_status.json",
+      "sha256": "f32da9ee051a367d213620dc59370b77e4994362dc84561cf8fc560307ad2518"
+    },
+    "style_guide": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "howto": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    "rfc": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    }
+  },
+  "artifacts": {
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/wire.session_status.fr.json",
+      "sha256": "1b48011bda6364f5091c78e236020980018fa15934ff9424feca4280f5a9429d"
+    },
+    "check_script": {
+      "path": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/check_fr.py",
+      "sha256": "6220aa3921a24deef99a1c77f76a5df7ec1a6418319e1d70cc8fea4ec4aa1690"
+    },
+    "execution_log": {
+      "path": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/translator-checks.fr.log",
+      "sha256": "e4f34db6923160978a1018230de27696f31a46bafbed3c4889f6888927c0208f",
+      "kind": "actual_execution_log",
+      "provenance_reference": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/translator-receipt.fr.json"
+    }
+  },
+  "validation": {
+    "command": "PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/check_fr.py\"",
+    "repo_catalogue_validator": "scripts/i18n/check.py --catalogues-only via main() with scratch-only catalogue root",
+    "exit_code": 0,
+    "scope": "17-key en/fr namespace fixture only; mechanical structural checks, not semantic audit or app/runtime/visual evidence"
+  },
+  "decisions": [
+    "Unseen = non lue (not yet read), never invisible or failed; completion = Fin de session non lue.",
+    "Signal stop = arrêtée par un signal; killed = arrêt forcé. Unknown command does not imply user attribution.",
+    "Retired = retirée pour une mise à jour, not operator stop. Historical retired_label kept byte-identical as a VALUE, including its masculine retiré.",
+    "runtime_stall_bound explicitly self-termination; runtime_overdue update-related departure after no-progress deadline. incidents.py _stall_bound_cause_sentence/_overdue_cause_sentence confirm deadline semantics.",
+    "runtime_update_failed states loaded version retained, unlike update-related departure.",
+    "disposed rendered session fermée, not supprimée: disposal does not assert historical data deletion.",
+    "dormant = réveils en sommeil, not cancelled or scheduled to fire. one/many/other, with de after million multiples."
+  ],
+  "glossary_proposals": {
+    "unseen": "non lu / non lue",
+    "forced kill": "arrêt forcé",
+    "dormant wake": "réveil en sommeil",
+    "turn": "tour",
+    "stall/progress bound": "délai maximal sans progression"
+  },
+  "length": "No fixed cap in source sidecar; all values one logical line; no truncation.",
+  "limitations": [
+    "Not independently audited. Two independent safety-copy audits pending under manager ownership.",
+    "Unknown nonempty external reason remains the legacy English path outside this namespace: UNRESOLVED programme gap. Stored prose not translated.",
+    "No application runtime or rendered/visual proof; no complete-status-copy localization claim.",
+    "No repo/generated/ledger writes, build, install, test suite, commit or PR. Scratch artifacts are handoff candidates, not tracked audit records."
+  ]
+}
