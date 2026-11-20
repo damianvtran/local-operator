@@ -77,6 +77,7 @@ from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.keys import wire_settings_keymap as _wk
+from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
@@ -139,6 +140,7 @@ _CHILD_SETTINGS_NAMESPACES = (
     # locale (#3945 review round 1, D1/Q1); `test_no_registry_string_is_its_own_code`
     # now fails for any child namespace left out of this tuple.
     "wire.phone_access",
+    "wire.voice",
 )
 
 
@@ -1114,6 +1116,17 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.speech_title()),
         Scope.LIVE,
         _t(_ws.speech_description()),
+    ),
+    # Per-session voice mode (docs/design/qwen-voice.md). LIVE: ``/voice/text``
+    # reads its key per request, so an edit changes the next spoken reply. Its
+    # own section rather than rows under ``speech``: that section is about how
+    # the assistant SOUNDS on every surface, this one is about the hands-free
+    # conversation with one session.
+    Section(
+        "voice",
+        _t(_wv.title()),
+        Scope.LIVE,
+        _t(_wv.description()),
     ),
     # Agent messages (Team Bridge, RFC §5): the local half of a feature whose
     # eligibility, consent and endpoint state are SERVER state. LIVE because
@@ -6365,6 +6378,57 @@ SETTINGS: tuple[Setting, ...] = (
             ),
         ),
         synonyms=("stt", "speech to text", "voice", "audio"),
+    ),
+    # -- speech provider (the ONE provider hearing and speaking use) -----------
+    # Unset (``None``) means no provider chosen yet, the tri-state shape
+    # ``display.nerd_icons`` uses: the "not chosen" choice writes nothing and
+    # ``write_setting`` deletes the key. The values are literals here
+    # (``settings_io`` stays off ``local_operator.voice``'s import path);
+    # tests/unit/voice/test_speech_provider.py pins them against
+    # ``voice.provider.PROVIDERS``. OpenAI and Groq are deliberately absent.
+    Setting(
+        key="speech.provider",
+        path=("speech", "provider"),
+        section="speech",
+        label=_t(_wv.provider_label()),
+        kind=Kind.ENUM,
+        default=None,
+        help=_t(_wv.provider_help()),
+        choices=(
+            Choice(
+                None,
+                _t(_wv.provider_choice_none_label()),
+                _t(_wv.provider_choice_none_description()),
+            ),
+            Choice(
+                "radient",
+                _t(_wv.provider_choice_radient_label()),
+                _t(_wv.provider_choice_radient_description()),
+            ),
+            Choice(
+                "elevenlabs",
+                _t(_wv.provider_choice_elevenlabs_label()),
+                _t(_wv.provider_choice_elevenlabs_description()),
+            ),
+        ),
+        synonyms=("tts", "stt", "audio", "text to speech", "speech to text"),
+    ),
+    # -- voice mode (docs/design/qwen-voice.md) -------------------------------
+    # Literals, not imports: this module stays off ``local_operator.voice``'s
+    # import path, and ``_consumer_defaults()`` in tests/unit/test_settings_io.py
+    # pins the default and bounds against ``voice.speakable``'s constants.
+    Setting(
+        key="voice.max_spoken_chars",
+        path=("voice", "max_spoken_chars"),
+        section="voice",
+        label=_t(_wv.max_spoken_chars_label()),
+        kind=Kind.INT,
+        default=800,
+        minimum=100,
+        maximum=4000,
+        # No ``unit``: the help text already names characters, and
+        # test_desktop_controls pins that only the hours row declares a unit.
+        help=_t(_wv.max_spoken_chars_help()),
     ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import

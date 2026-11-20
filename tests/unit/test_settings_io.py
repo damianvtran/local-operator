@@ -580,7 +580,26 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.stt import cleanup as cleanup_policy
 
     consumers["speech.transcription.cleanup"] = cleanup_policy.DEFAULT_CLEANUP
+    # Voice mode's cap: the registry literal against ``/voice/text``'s own
+    # fallback (``voice.speakable``), imported here for the same reason.
+    from local_operator.voice import speakable as voice_speakable
+
+    consumers["voice.max_spoken_chars"] = voice_speakable.DEFAULT_MAX_SPOKEN_CHARS
+    # The chosen speech provider: the reader's own "nothing valid chosen" answer
+    # (``voice.provider``), asked of an empty directory.
+    from local_operator.voice import provider as voice_provider
+
+    consumers["speech.provider"] = voice_provider.configured_provider(Path("/nonexistent"))
     return consumers
+
+
+def test_the_voice_cap_bounds_match_the_reader_clamp() -> None:
+    """Every value the settings page accepts is applied as stored, no more and no less."""
+    from local_operator.voice import speakable
+
+    setting = settings_io.BY_KEY["voice.max_spoken_chars"]
+    assert setting.minimum == speakable.MIN_MAX_SPOKEN_CHARS
+    assert setting.maximum == speakable.MAX_MAX_SPOKEN_CHARS
 
 
 def _classification_consumer_defaults() -> dict[str, object]:

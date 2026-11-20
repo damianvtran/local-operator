@@ -2218,7 +2218,7 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     _tick(feed)
     _queued(subscription)
 
-    # ALL SEVEN 1 Hz probes are gated shut, so what is measured is the
+    # ALL EIGHT 1 Hz probes are gated shut, so what is measured is the
     # DOORBELL's cost: the catalogue probe legitimately walks the sessions
     # directory, the authoring probe stats the profile and team rows, the
     # code-requests probe scans the code_requests directory, and any of them in
@@ -2255,6 +2255,9 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     # ``root/code_requests`` — under the store, so an expired clock puts a
     # product walk inside the window and fails ``scandir_scoped``.
     feed._code_requests_probed_at = future
+    # The eighth: the voice probe (per-session voice slot), also a 1 Hz gate that
+    # must not open inside the measured window.
+    feed._voice_probed_at = future
     with _io_watch(feed._registry_dir, stats_under=root) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
@@ -2592,6 +2595,7 @@ def test_the_status_probe_reads_only_the_records_and_never_walks_the_store(tmp_p
 
     feed._catalogue_probed_at = time.monotonic()  # see the note above
     feed._authoring_probed_at = time.monotonic()
+    feed._voice_probed_at = time.monotonic()
     feed._status_probed_at = 0.0
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
