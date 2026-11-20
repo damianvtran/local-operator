@@ -7,6 +7,7 @@
   "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' opens a viewer for spec.resume; it does not attach teams, profiles, tools, names, goals or approval policies — that is the owner''s side. Set only resume on this spec (or use mode=''own''). Offending fields: {fields}.",
   "wire.errors.sdk_spec.attach_output_unsupported": "output enforcement cannot be set on an attached session; the owning runtime decides",
   "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' needs spec.resume: a viewer attaches to an id",
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": "mcp_ready_timeout_s: timeout_s must be a finite number >= 0",
   "wire.errors.sdk_spec.mode_invalid": "mode must be ''own'' or ''attach'', not {mode}",
   "wire.errors.sdk_spec.output_format_invalid": "output_format must be one of {formats}",
   "wire.errors.sdk_spec.output_retries_range": "output_retries must be between 0 and 5",

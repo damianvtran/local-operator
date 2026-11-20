@@ -630,17 +630,17 @@ class SessionSpec:
             or not math.isfinite(timeout)
             or timeout < 0
         ):
-            # The exact technical sentence ``Session.wait_for_tools`` and
-            # ``Session.set_first_turn_mcp_wait`` raise for the same parameter,
-            # prefixed with the field so the caller knows which spec value.
-            # Deliberately NOT keyed like ``output_retries_range`` (PR #4349
-            # review N2): it is an SDK developer's parameter check (identifier
-            # plus bound, the same unkeyed text the two methods raise), and a new
-            # ``wire.errors.sdk_spec`` key would need a translator and an
-            # independent audit in every locale for a string no end user reads.
+            # Keyed like every other ``SessionSpec`` refusal (PR #4349 review
+            # N2): ``tests/unit/i18n/test_sdk_spec_slice.py`` requires each
+            # owned ``SessionSpecError`` raise here to render a
+            # ``wire.errors.sdk_spec`` message, so a selected language leaves no
+            # English in the refusal. The English source is the sentence
+            # ``Session.wait_for_tools`` / ``set_first_turn_mcp_wait`` raise for
+            # the same bound, prefixed with the spec field the caller set.
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
             raise SessionSpecError(
-                # i18n: ignore technical parameter validation (identifier + bound)
-                "mcp_ready_timeout_s: timeout_s must be a finite number >= 0"
+                spec_refusal_text(wire_errors_sdk_spec.mcp_ready_timeout_invalid())
             )
 
     def to_namespace(self) -> argparse.Namespace:
