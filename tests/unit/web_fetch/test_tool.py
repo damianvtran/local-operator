@@ -90,6 +90,36 @@ async def test_large_page_spills_and_chunk_reads(context: ToolContext) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("query", [None, "Line number 42"])
+async def test_without_read_a_large_page_is_inlined_and_names_no_spill_route(
+    tmp_path, query: str | None
+) -> None:
+    """A session that cannot ``read`` cannot expand the handle the preview
+    points at, so the page is inlined up to the wider bound and neither the
+    plain nor the query-shaped preview names ``read``/``spill://``. The URL
+    cache still gets its handle (``_shape_from_content`` writes it either way)."""
+    from local_operator.tools.builtin import TOOL_OUTPUT_LIMIT_CHARS
+
+    no_read = ToolContext(cwd=str(tmp_path), session_id="fetch-no-read", spill_readable=False)
+    page = _html_page(400)
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, text=page, headers={"content-type": "text/html"})
+    )
+    preview, details, is_error = await run_fetch(
+        "https://example.com/big",
+        tool_name="web_fetch",
+        context=no_read,
+        transport=transport,
+        query=query,
+    )
+    assert is_error is False
+    assert "spill" not in details
+    assert "spill://" not in preview and "read(" not in preview
+    assert len(preview) > TOOL_OUTPUT_LIMIT_CHARS, "inlined past the readable-session cap"
+    assert "Line number 42 " in preview
+
+
+@pytest.mark.asyncio
 async def test_cache_hit_makes_no_network_call(context: ToolContext) -> None:
     page = _html_page(50)
     transport = _CountingTransport(

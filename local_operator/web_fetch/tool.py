@@ -39,6 +39,7 @@ from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
     _elide_inline,
     _spill_footer,
+    result_inline_limit,
     spill_truncate,
     validation_error_result,
 )
@@ -394,7 +395,10 @@ def _shape_from_content(
     skipped rather than pointing at nothing).
     """
     header = _header_line(result_like)
-    body, spill_details = spill_truncate(content, tool_name, context)
+    # Without ``read`` the spill handle is unreachable, so the page is inlined
+    # up to the larger bound and the query reshape (which pages the handle) is
+    # skipped because no spill is returned; see ``result_inline_limit``.
+    body, spill_details = spill_truncate(content, tool_name, context, result_inline_limit(context))
     preview = f"{header}\n\n{body}" if body else header
     details = dict(result_like)
     wants_passages = (

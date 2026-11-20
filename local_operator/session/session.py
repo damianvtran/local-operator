@@ -4761,6 +4761,11 @@ class Session:
         #: runtime rather than a trusted one — an unattended compliance worker
         #: that must reach its screening tools and nothing else.
         self._declared_tools: frozenset[str] | None = None
+        #: Whether the first turn's bounded wait for declared/preloaded MCP
+        #: servers has run (``session/declared_mcp_ready.py``). Once per session:
+        #: the wait exists for the cold-start race, and a server that drops
+        #: later is the reconnect path's job, not a per-turn stall.
+        self._named_mcp_ready_checked = False
         #: The OPS a declared tool may reach, for the few tools whose reach is not
         #: its name. ``None`` means "every op this build's tool accepts", which is
         #: the state every declaration without an op scope is in — see
@@ -21388,6 +21393,22 @@ class Session:
         # idle+supervisor decision before this admission may proceed.
         from local_operator.session.runtime import restart_fence
 
+        # FIRST, before anything about this run is published or journalled: a
+        # declared MCP server that is still connecting must be awaited before
+        # the request is built, and one that never arrives raises here, where
+        # nothing durable has happened yet (the same shape as ``TurnInFlight``).
+        if not self._named_mcp_ready_checked:
+            self._named_mcp_ready_checked = True
+            from local_operator.session.declared_mcp_ready import (
+                await_named_mcp_servers,
+            )
+
+            await await_named_mcp_servers(
+                self.mcp_manager,
+                declared=self._declared_tools,
+                reachable=lambda: self.tool_inventory,
+                materialize=self.materialize_declared_tools,
+            )
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:
             publish_admission = getattr(self, "_publish_turn_admitted", None)
@@ -24145,6 +24166,8 @@ class Session:
             # ``agent_shell.MAY_DELEGATE_ENV`` for the commands it runs; see
             # ``agent_shell.py`` for what reads it and why it is asymmetric.
             may_delegate=any(tool.name == "task" for tool in self._tools),
+            # Same derivation, for the spill footer (see the field's comment).
+            spill_readable=any(tool.name == "read" for tool in self._tools),
             jobs=self.jobs,
             peer_arrival=self._peer_arrival,
             subagent_comms=self.subagent_comms,

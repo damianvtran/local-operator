@@ -96,6 +96,7 @@ __all__ = [
     "DEFAULT_REPLAY_BOUND_CHARS",
     "DEFAULT_REPLAY_RESULT_BOUND_CHARS",
     "READ_REPLAY_BOUND_CHARS",
+    "WIDE_RESULT_REPLAY_BOUND_CHARS",
     "REPLAY_ARGUMENT_MARKER",
     "REPLAY_RESULT_MARKER",
     "bound_replay_payloads",
@@ -133,6 +134,19 @@ DEFAULT_REPLAY_RESULT_BOUND_CHARS = DEFAULT_REPLAY_BOUND_CHARS + REPLAY_RESULT_H
 #: literal (``harness`` must not import the tools module); a unit test pins it
 #: to ``INTERNAL_READ_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS``.
 READ_REPLAY_BOUND_CHARS = 16 * 1024 + REPLAY_RESULT_HEADROOM_CHARS
+
+#: Production bound for an MCP (``mcp__*``) or ``web_fetch`` result. In a
+#: session that cannot read spills those results are inlined up to
+#: ``tools.builtin.UNREADABLE_SPILL_INLINE_LIMIT_CHARS`` (24,000) instead of
+#: 8 KiB, because nothing it cut could be recovered; a 9 KiB replay bound would
+#: then middle-elide on the very first view (this bound applies to the current
+#: turn's results too) exactly the bytes that change exists to deliver. Derived
+#: from that cap plus the usual footer/header room, by tool name, so it stays a
+#: pure function of the message: a row's wire bytes are the same on every turn.
+#: A session WITH ``read`` caps these results at 8 KiB + footer, under the
+#: default bound, so this changes nothing for it. Kept as a literal (``harness``
+#: must not import the tools module); a unit test pins it.
+WIDE_RESULT_REPLAY_BOUND_CHARS = 24_000 + REPLAY_RESULT_HEADROOM_CHARS
 
 #: Written into a tool result where its middle was elided on replay. Distinct
 #: from ``text_bounds.OUTPUT_TRUNCATION_MARKER`` on purpose: that one means "the
@@ -174,7 +188,8 @@ def bound_replay_payloads(
     ``bound_chars=None`` (the production default) bounds tool-call arguments at
     :data:`DEFAULT_REPLAY_BOUND_CHARS` and tool RESULTS at the tools layer's own
     caps plus footer room (:data:`DEFAULT_REPLAY_RESULT_BOUND_CHARS`,
-    :data:`READ_REPLAY_BOUND_CHARS` for ``read``), so a result a tool already
+    :data:`READ_REPLAY_BOUND_CHARS` for ``read``,
+    :data:`WIDE_RESULT_REPLAY_BOUND_CHARS` for MCP and ``web_fetch``), so a result a tool already
     capped is never elided a second time. An explicit ``bound_chars`` is one
     uniform bound for every payload, the historical meaning. Either way the
     bound is a pure function of the message, so a row's wire bytes are the same
@@ -203,6 +218,9 @@ def _result_bound(message: Message, bound_chars: int | None) -> int:
         return bound_chars
     if message.tool_name == "read":
         return READ_REPLAY_BOUND_CHARS
+    name = message.tool_name or ""
+    if name == "web_fetch" or name.startswith("mcp__"):
+        return WIDE_RESULT_REPLAY_BOUND_CHARS
     return DEFAULT_REPLAY_RESULT_BOUND_CHARS
 
 

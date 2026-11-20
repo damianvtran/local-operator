@@ -37,7 +37,14 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Coroutine,
+    Sequence,
+)
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2493,7 +2500,9 @@ class McpManager:
         result.tools = self.get_tools()
         return result
 
-    async def wait_settled(self, timeout_s: float) -> bool:
+    async def wait_settled(
+        self, timeout_s: float, *, servers: Collection[str] | None = None
+    ) -> bool:
         """Wait, bounded, for servers deferred past the startup gate to settle.
 
         ``reload()`` and ``discover_and_connect()`` return at the 250 ms gate
@@ -2508,8 +2517,19 @@ class McpManager:
         Waits on the continuations only — never cancels them on timeout, so a
         server slower than the bound keeps connecting and honestly reads
         ``connecting``. Returns whether everything settled within the bound.
+
+        ``servers`` narrows the wait to those names' continuations. The
+        declared-tool first-turn gate (``session/declared_mcp_ready.py``) needs
+        exactly the servers a run NAMED, and waiting on every continuation
+        would make it hostage to an unrelated slow server (an OAuth endpoint
+        that takes its whole connect budget to fail) the run never declared.
+        ``None`` keeps the whole-round wait every other caller relies on.
         """
-        pending = [continuation for continuation, _ in self._pending_continuations.values()]
+        pending = [
+            continuation
+            for name, (continuation, _) in self._pending_continuations.items()
+            if servers is None or name in servers
+        ]
         if not pending:
             return True
         _done, still = await asyncio.wait(pending, timeout=max(0.0, timeout_s))

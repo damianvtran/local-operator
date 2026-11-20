@@ -243,6 +243,47 @@ logger = logging.getLogger(__name__)
 #: than destroyed, which is what makes a cap this tight safe at all.
 TOOL_OUTPUT_LIMIT_CHARS = 8 * 1024
 
+#: Inline bound for an MCP or ``web_fetch`` result in a session that CANNOT read
+#: spills (no ``read`` tool, deferred included — ``ToolContext.spill_readable``).
+#:
+#: WHY A SECOND BOUND. :data:`TOOL_OUTPUT_LIMIT_CHARS` is safe only because
+#: "anything the clip drops is recoverable by handle" (above). Without ``read``
+#: nothing is recoverable: the model re-searches or calls its own MCP ``fetch``
+#: on the ``spill://`` handle. Measured in the 2026-11-20 head-to-head benchmark
+#: (``--tools mcp__bd_search,mcp__bd_fetch``, Haiku 5.5): 62 of 159 lop MCP
+#: results were cut at 8 KiB, 11 calls went to ``fetch("spill://…")``, and lop
+#: made 13.2 tool calls per task against Claude Code's 8.6 for the same
+#: accuracy, at 1.54x the cost.
+#:
+#: WHY THIS VALUE. The benchmark's MCP server log (1,453 results) peaked at
+#: exactly 12,000 chars — bd_tools' own cap, which 322 of 509 fetches hit
+#: (fetch p50 = p99 = max = 12,000); searches peaked at 10,672. 24,000 is 2x
+#: that observed max, so a result at a server's own cap plus its JSON framing
+#: arrives whole, and under half of Claude Code's own inline threshold for MCP
+#: text results (50,000 chars before it saves to a file; 25,000-token
+#: ``MAX_MCP_OUTPUT_TOKENS`` default; code.claude.com/docs/en/mcp, "MCP output
+#: limits and warnings"). Lower than Claude Code on purpose: an inlined result
+#: is replayed on every later turn, and a 24,000-char result is ~6k tokens.
+#: Sessions WITH ``read`` keep the 8 KiB cap and its recovery footer.
+UNREADABLE_SPILL_INLINE_LIMIT_CHARS = 24_000
+
+
+def spills_readable(context: ToolContext | None) -> bool:
+    """Whether a ``spill://`` handle is a route this session can take.
+
+    ``None`` (no host context) reads as readable: that is every caller that
+    predates the field, and it keeps their footer byte-identical.
+    """
+    return context is None or bool(getattr(context, "spill_readable", True))
+
+
+def result_inline_limit(context: ToolContext | None) -> int:
+    """The inline bound for an MCP / ``web_fetch`` result in this session."""
+    if spills_readable(context):
+        return TOOL_OUTPUT_LIMIT_CHARS
+    return UNREADABLE_SPILL_INLINE_LIMIT_CHARS
+
+
 #: Back-compat name for the bash-specific budget. Same value: there is one
 #: per-result budget, and a second knob would let the two drift.
 BASH_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
@@ -1385,10 +1426,16 @@ def spill_truncate(
     (output fit, or the store refused it). ``details`` never reaches a
     provider, so recording the handle there costs no prompt tokens while still
     letting renderers, transcripts and compaction see what happened.
+
+    A session that cannot read spills (``spills_readable``) gets the same
+    store-free shape as the degraded path below, and no handle: a footer naming
+    ``read``/``spill://`` would teach a call the run cannot make, and the model
+    spends a tool call on it (see :data:`UNREADABLE_SPILL_INLINE_LIMIT_CHARS`).
+    The plain truncation marker names no route at all.
     """
     if len(text) <= limit:
         return text, None
-    meta = _spill(text, tool_name, context)
+    meta = _spill(text, tool_name, context) if spills_readable(context) else None
     if meta is None:
         # Degraded path: there is no handle to expand, so the shape here is all
         # the model gets. A JSON payload still comes back as JSON — otherwise a
