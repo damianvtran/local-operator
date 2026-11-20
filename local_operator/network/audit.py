@@ -154,6 +154,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "session_file_read_admitted",
         "link_closed",
         "link_idle",
+        # Host clock-gap diagnostics and coalesced scheduler failures: technical
+        # facts only, never raw exception messages or another credential path.
+        "host_resumed",
+        "redial_failed",
         "link_replaced",
         "duplicate_identity",
         "self_link",
@@ -536,6 +540,8 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "link_closed": frozenset({"cause", "frames_in", "frames_out"}),
     "link_idle": frozenset({"last_seen_at", "missed_beats"}),
+    "host_resumed": frozenset({"gap_s"}),
+    "redial_failed": frozenset({"device", "code", "attempt", "next_retry_at", "repeats"}),
     "link_replaced": frozenset({"instance_id", "age_s"}),
     "duplicate_identity": frozenset({"instance_id", "duplicate_count"}),
     "self_link": frozenset({"instance_id"}),

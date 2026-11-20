@@ -277,6 +277,12 @@ def _loop_server(
     server: Any = object.__new__(relay.RelayServer)
     server.root = None
     server.redial = redial.RedialTracker(clock=clock, rand=lambda: 0.5)
+    # This stand-in bypasses __init__; a failed redial now runs the coalesced
+    # ``redial_failed`` audit path (#4192), so supply its dependencies rather
+    # than stubbing that path away.
+    server._refusal_rows = redial.RefusalCoalescer(clock=clock)
+    server.identity = SimpleNamespace(device_id="d_uplink")
+    server.audit = SimpleNamespace(record=lambda event: None)
     dial_times: list[float] = []
     waits = [0]
     if routes is not None:

@@ -77,7 +77,7 @@ def test_a_silent_peer_gets_one_ping_per_keepalive_not_two_per_second(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _FakeClock(1_000_000.0)
-    monkeypatch.setattr(relay, "time", SimpleNamespace(time=clock.time))
+    monkeypatch.setattr(relay, "time", SimpleNamespace(time=clock.time, monotonic=clock.time))
 
     def no_disk_scan() -> Any:
         raise AssertionError("the keepalive must not rebuild the peer record per ping")
@@ -102,7 +102,8 @@ def test_a_writer_exception_outside_the_network_set_logs_and_closes_the_link(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     link = _writer_link(SimpleNamespace())
-    link.last_frame_at = 0.0
+    # This cell tests a seal failure, not an already-expired idle deadline.
+    link.last_frame_at = relay.time.time()
     link.last_ping_sent_at = 0.0
     link._wake = threading.Event()
     closes: list[tuple[str, float]] = []
@@ -125,6 +126,129 @@ def test_a_writer_exception_outside_the_network_set_logs_and_closes_the_link(
     rows = [r for r in caplog.records if "closed by its writer" in r.getMessage()]
     assert len(rows) == 1 and "ValueError" in rows[0].getMessage()
     assert rows[0].exc_info is not None, "an unexpected writer death carries its traceback"
+
+
+def _writer_after_clock_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wall_gap: float,
+    monotonic_gap: float,
+    queued_after_wake: bool = False,
+    written: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Run the actual writer across one synthetic sleep, never sleeping the host."""
+    wall, monotonic = _FakeClock(1_000_000.0), _FakeClock(100.0)
+    monkeypatch.setattr(relay, "time", SimpleNamespace(time=wall.time, monotonic=monotonic.time))
+    rows: list[dict[str, Any]] = []
+    server: Any = SimpleNamespace(
+        audit=SimpleNamespace(
+            record=lambda event: rows.append({"event": event.event, "detail": event.detail})
+        ),
+        identity=SimpleNamespace(device_id="d_local"),
+        _links_lock=threading.RLock(),
+    )
+    server.audit_idle = lambda link: relay.RelayServer.audit_idle(server, link)
+    server.audit_host_resume = lambda **kwargs: relay.RelayServer.audit_host_resume(
+        server, **kwargs
+    )
+    link = _writer_link(server)
+    link.network_id = "n_sleep"
+    link.epoch = 1
+    server.settings = link.settings
+    link.last_frame_at = wall.now
+    link.last_ping_sent_at = wall.now
+    link._write = lambda frame: written.append(frame) if written is not None else None
+    closed: list[str] = []
+
+    def close(reason: str, **_kwargs: Any) -> None:
+        closed.append(reason)
+        link._closed.set()
+
+    class Wake:
+        waits = 0
+
+        def wait(self, timeout: float | None = None) -> bool:
+            self.waits += 1
+            if self.waits == 1:
+                wall.now += wall_gap
+                monotonic.now += monotonic_gap
+                if queued_after_wake:
+                    link._reliable.put({"op": "net_ping", "req": 1})
+            else:
+                # Finite negative control: the unfixed writer must return too.
+                link._closed.set()
+            return False
+
+        def clear(self) -> None:
+            pass
+
+    link.close = close
+    link._wake = Wake()
+    link._write_loop()
+    if closed:
+        # A reader timeout can race the writer's wall-idle check. It must not
+        # turn one dead link into two idle incidents.
+        server.audit_idle(link)
+    return rows, closed
+
+
+def test_a_wall_idle_deadline_closes_on_the_first_tick_after_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows, closed = _writer_after_clock_gap(monkeypatch, wall_gap=121.0, monotonic_gap=0.0)
+    assert closed == ["timeout"], "a sleep-stale link survived its first wake tick"
+    assert len([row for row in rows if row["event"] == "link_idle"]) == 1
+
+
+def test_the_first_wake_tick_does_not_drain_work_into_a_sleep_stale_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written: list[dict[str, Any]] = []
+    _, closed = _writer_after_clock_gap(
+        monkeypatch,
+        wall_gap=121.0,
+        monotonic_gap=0.0,
+        queued_after_wake=True,
+        written=written,
+    )
+    assert closed == ["timeout"]
+    assert written == [], "queued work was sent before the wall-stale link closed"
+
+
+def test_a_host_resume_is_audited_once_without_exposing_clock_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows, closed = _writer_after_clock_gap(monkeypatch, wall_gap=31.0, monotonic_gap=0.0)
+    resumed = [row for row in rows if row["event"] == "host_resumed"]
+    assert len(resumed) == 1, "the writer did not explain the host's wall-clock gap"
+    assert resumed[0]["detail"] == {"gap_s": 31.0}
+    assert closed == [], "resume alone must not close a link inside its idle deadline"
+
+
+def test_equal_wall_and_monotonic_progress_neither_resumes_nor_closes_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows, closed = _writer_after_clock_gap(monkeypatch, wall_gap=31.0, monotonic_gap=31.0)
+    assert rows == []
+    assert closed == []
+
+
+def test_all_waking_links_share_one_host_resume_row_but_a_later_gap_is_new() -> None:
+    rows: list[Any] = []
+    server: Any = SimpleNamespace(
+        _links_lock=threading.RLock(),
+        settings=relay.NetworkSettings(port=4097),
+        identity=SimpleNamespace(device_id="d_local"),
+        audit=SimpleNamespace(record=rows.append),
+    )
+    # Two writer ticks observe the same host discontinuity, with normal sampling
+    # skew. A later discontinuity is not suppressed by a fixed audit time window.
+    relay.RelayServer.audit_host_resume(server, gap_s=31.0, clock_offset=1_000.0)
+    relay.RelayServer.audit_host_resume(server, gap_s=31.0, clock_offset=1_000.001)
+    assert len(rows) == 1
+    relay.RelayServer.audit_host_resume(server, gap_s=31.0, clock_offset=1_031.0)
+    assert len(rows) == 2
+    assert all(row.event == "host_resumed" and row.detail == {"gap_s": 31.0} for row in rows)
 
 
 # ---------------------------------------------------------------------------
