@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
 
 from local_operator.harness.rows import is_harness_chrome, is_harness_injection
+from local_operator.session.row_clip import clip_row
 from local_operator.session.transcript_index import RunRecord, TranscriptIndex
 
 if TYPE_CHECKING:
@@ -884,8 +885,12 @@ def build_frame(
     supplements: bool = False,
     memo: StripMemo | None = None,
     diff_bindings: str | None = None,
+    session_id: str | None = None,
 ) -> FrameResult:
     """Strip, cap and publish one page from rows already read, newest last.
+
+    ``session_id`` binds the ``truncated.ref`` of a clipped row (see below and
+    ``session.row_clip``); without it a clipped row still clips, with no ref.
 
     The caps apply to the SERVED page — the bytes that cross the IPC hop — and
     ``head_cut`` is set by the caller when it asked for the extension and could
@@ -911,8 +916,28 @@ def build_frame(
     # exceeds the cap by itself is still served, because a page with no rows is
     # not a smaller page, it is a blank transcript, and today's reader serves
     # that row too.
-    painted = [stripped for stripped in (strip(raw) for raw in ordered) if stripped is not None]
+    pairs = [(raw, stripped) for raw in ordered if (stripped := strip(raw)) is not None]
+    painted = [stripped for _, stripped in pairs]
     sizes = [len(json.dumps(entry, separators=(",", ":"))) for entry in painted]
+    # A ROW OVER THE WHOLE PAGE BUDGET IS PROJECTED, NOT DROPPED. Such a row can
+    # only ever be admitted alone (the newest-row and anchor exceptions above),
+    # and admitted whole it made the opening snapshot larger than the
+    # renderer's 8 MiB per-record cap — measured: one 12.58 MB tool row gave a
+    # 12.59 MB snapshot the UI refused, so the conversation could not open.
+    # Clipped to the same 1.5 MiB budget it keeps its position and id, and its
+    # ``truncated`` marker names the ref that fetches the rest.
+    for pos, size in enumerate(sizes):
+        if size > OPEN_FRAME_MAX_BYTES:
+            painted[pos] = dict(
+                clip_row(
+                    painted[pos],
+                    full=pairs[pos][0],
+                    session_id=session_id,
+                    reason="open_frame_cap",
+                    budget=OPEN_FRAME_MAX_BYTES,
+                )
+            )
+            sizes[pos] = len(json.dumps(painted[pos], separators=(",", ":")))
     anchor_index = None
     if anchor_id is not None:
         anchor_index = next(

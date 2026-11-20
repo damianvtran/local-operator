@@ -713,6 +713,25 @@ class TranscriptEntryEnvelope(BaseModel):
 HistoryTsSource = Literal["entry", "unstated", "served"]
 
 
+class RowTruncation(BaseModel):
+    """The marker on a clipped history row (``session.row_clip.clip_row``)."""
+
+    #: Byte length of the FULL row: what ``GET .../history/rows/{ref}``
+    #: reassembles to (compact JSON of the desktop wire row, UTF-8).
+    bytes_total: int = Field(ge=0)
+    #: Compact-JSON byte length of the row as served, without this marker.
+    shown_bytes: int = Field(ge=0)
+    #: Opaque and bound to this session; ``None`` when no ref could be minted
+    #: (a peer's row clipped by its owner, which this device cannot fetch).
+    ref: str | None
+    #: Which bound clipped it: the open frame's page budget or the bare
+    #: ``/history`` page's.
+    reason: Literal["open_frame_cap", "history_cap"]
+    #: True when the payload was WITHHELD rather than cut: a non-message row
+    #: (the frontend checkpoint) is not meaningful half-present.
+    omitted: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
 class HistoryEntry(BaseModel):
     """A desktop history row: the envelope's four keys plus its stamp's provenance.
 
@@ -748,6 +767,25 @@ class HistoryEntry(BaseModel):
     # reader with a verified page/index view. None must not add strict DTO keys
     # to legacy responses (the same exclude_if policy as open-frame facts).
     journal_seq: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    #: PRESENT ONLY ON A CLIPPED ROW (``session.row_clip``; ``docs/DESKTOP_API.md``
+    #: §"Clipped rows"): the row was larger than its read's per-row budget, so
+    #: its content is a projection and the full row is one ref fetch away. Absent
+    #: on every row that fits, so an unclipped page keeps today's bytes.
+    truncated: RowTruncation | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class HistoryRowRange(BaseModel):
+    """``GET /v1/desktop/sessions/{id}/history/rows/{ref}``: one byte range of a full row."""
+
+    bytes_total: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    #: The limit APPLIED — the request's, clamped to ``ROW_RANGE_MAX_BYTES``.
+    limit: int = Field(ge=1)
+    length: int = Field(ge=0)
+    eof: bool
+    #: Standard base64 of the range's bytes; a range may split a UTF-8
+    #: character, so decode after concatenating, never per range.
+    data: str
 
 
 class RunFacts(BaseModel):

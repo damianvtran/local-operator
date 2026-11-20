@@ -299,6 +299,11 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/session/row_clip.py": (
+        1,
+        "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "
+        "(``row_ref``), a wire token, never a session-directory entry.",
+    ),
     "local_operator/session/temporary.py": (
         3,
         "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "

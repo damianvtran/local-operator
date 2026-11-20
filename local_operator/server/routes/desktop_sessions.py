@@ -71,6 +71,7 @@ from local_operator.server.models.desktop_sessions import (
     DraftPreviewPayload,
     DraftReceipt,
     HistoryPage,
+    HistoryRowRange,
     InterruptReceipt,
     JobCancelReceipt,
     MessageAdmission,
@@ -157,6 +158,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.index_prewarm import start_session_warm
 from local_operator.session.remote_open import PeerSessionUnresolved
+from local_operator.session.row_clip import ROW_RANGE_MAX_BYTES, RowRangeUnsatisfiable
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -3945,6 +3947,54 @@ async def history(
                 **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
             )
         )
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/history/rows/{ref}",
+    response_model=CRUDResponse[HistoryRowRange],
+)
+async def history_row(
+    session_id: str,
+    ref: str,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    # No ``le``: an oversized limit is CLAMPED to ``ROW_RANGE_MAX_BYTES`` (1 MiB)
+    # and the answer's ``limit`` states the clamp, so a reader that asks for
+    # "the rest" in one call still makes progress instead of failing.
+    limit: int = Query(default=ROW_RANGE_MAX_BYTES, ge=1),
+):
+    """One byte range of the FULL content of a row ``/history`` served clipped.
+
+    A clipped row (``truncated`` on a history entry, ``docs/DESKTOP_API.md``
+    §"Clipped rows") names an opaque ``ref``; the reader pages this route with
+    ``offset``/``limit`` and concatenates the decoded ranges, which reassemble
+    to exactly ``truncated.bytes_total`` bytes of the row's wire JSON.
+
+    THE SAME DOOR AS ``/history``, deliberately: this router's bearer auth and
+    the identical ``host(request).session(session_id, read=True,
+    allow_draft=True)`` admission, so placement, the retiring latch, the
+    remote-owner refusal and the read-only engagement are whatever ``/history``
+    gets — a full row is never reachable where its clipped page is not.
+    ``/history`` writes no route-level audit record; neither does this (the
+    request log is the shared middleware's, identical for both).
+
+    THREAT MODEL: the ref is the only new input. It is an HMAC over
+    ``(session_id, row_id)`` under a per-process secret
+    (``session.row_clip.row_ref``), so a ref from another session, a forged
+    or guessed ref, and a ref from an earlier serve process all fail the same
+    constant-time check and answer the same 404 as a row that no longer
+    exists. ``limit`` is clamped so one request can never re-create the
+    oversized response the clip exists to prevent. An ``offset`` past the end
+    answers 416; ``offset == bytes_total`` is an empty, ``eof`` range.
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        try:
+            return reply(await bridge.history_row(ref=ref, offset=offset, limit=limit))
+        except RowRangeUnsatisfiable as error:
+            raise HTTPException(416, {"code": "row_offset_past_end", "error": str(error)}) from None
 
 
 @router.get(

@@ -154,6 +154,12 @@ from local_operator.session.retention import (
     read_desktop_purpose,
     session_activity,
 )
+from local_operator.session.row_clip import (
+    bound_history_entries,
+    canonical_row_bytes,
+    resolve_ref,
+    row_range,
+)
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
@@ -660,6 +666,15 @@ def _wire_entries(entries: Sequence[Any]) -> list[dict[str, Any]]:
     return visible_transcript_rows(
         [{**json.loads(row.to_json()), "ts_source": "entry"} for row in entries]
     )
+
+
+def _bounded_page(entries: Sequence[Any], session_id: str) -> tuple[list[Mapping[str, Any]], bool]:
+    """A bare page's rows clipped and bounded, for the event loop's thread.
+
+    ``_wire_entries`` is the expensive half (a JSON round trip per row, tens of
+    ms on a fat page), so both it and the clip stay off the loop.
+    """
+    return bound_history_entries(_wire_entries(entries), session_id=session_id)
 
 
 def _own_wire_state(shared: dict[str, Any]) -> dict[str, Any]:
@@ -4703,6 +4718,14 @@ class DesktopSessionBridge:
                 "has_more": False,
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
+        # THE BARE PAGE IS BOUNDED TOO (``session.row_clip``): it is what the
+        # snapshot embeds when the renderer did not ask for ``open_frame``, and
+        # what every in-band resync re-reads, and it used to serve rows whole —
+        # one 10.59 MB ``frontend_state_checkpoint_v1`` row made a 12.13 MB
+        # snapshot the renderer's 8 MiB per-record cap refused. Each row is
+        # clipped to 1.5 MiB (a checkpoint is withheld, not cut) and the page
+        # to 4 MiB, newest rows first; the full rows stay one ref away.
+        entries, capped = await asyncio.to_thread(_bounded_page, page.entries, self.session_id)
         answer = {
             # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
             # construction — the ``entry`` value of the closed vocabulary, and the
@@ -4712,8 +4735,10 @@ class DesktopSessionBridge:
             # Encoded in a thread: a page of fat rows (whole tool results) is
             # tens of ms of JSON round trip, and the snapshot asks for one on
             # every open (serve stall, 2026-11-15 real-path sampler).
-            "entries": await asyncio.to_thread(_wire_entries, page.entries),
-            "has_more": page.has_more,
+            "entries": entries,
+            # ``capped`` left OLDER rows for the next page, so there is more
+            # even when the journal page itself reached the head.
+            "has_more": page.has_more or capped,
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
@@ -4723,6 +4748,44 @@ class DesktopSessionBridge:
             if journal_order
             else answer
         )
+
+    async def history_row(self, *, ref: str, offset: int, limit: int) -> dict[str, Any]:
+        """One byte range of the FULL row a clipped ``truncated.ref`` names.
+
+        The content is the row's desktop wire form (:meth:`_wire_rows`, the one
+        spelling every local read serves) in ``row_clip.canonical_row_bytes``,
+        so the ranges reassemble to exactly ``truncated.bytes_total`` bytes.
+
+        THREAT MODEL (``session.row_clip.row_ref``): the caller already passed
+        the same door ``/history`` uses (bearer auth, session placement, read
+        admission), so the ref only has to stop a CROSS-SESSION read. A ref
+        that is malformed, minted for another session, or minted by an earlier
+        serve process answers ``KeyError`` — the route's ordinary 404, the same
+        answer as a row that no longer exists, so the status is no oracle for
+        which of those it was. A peer session's rows live on its owner and
+        this device has no mesh lane that fetches one, so refs are never minted
+        for them (the owner's frame clips with no ref) and this refuses.
+        """
+        row_id = resolve_ref(self.session_id, ref)
+        if row_id is None:
+            raise KeyError(ref)
+        if self.remote_row is not None:
+            raise ValueError("full rows are served for local sessions only")
+        try:
+            page = await load_transcript_page(
+                self.root / "sessions" / self.session_id,
+                around_id=row_id,
+                before=0,
+                after=0,
+                limit=1,
+            )
+        except FileNotFoundError:
+            raise KeyError(ref) from None
+        rows = [row for row in self._wire_rows(page.entries) if row.get("id") == row_id]
+        if not rows:
+            raise KeyError(ref)
+        content = await asyncio.to_thread(canonical_row_bytes, rows[0])
+        return row_range(content, offset=offset, limit=limit)
 
     async def _open_frame_history(
         self,
@@ -4815,6 +4878,7 @@ class DesktopSessionBridge:
             )
             result = build_frame(
                 anchored,
+                session_id=self.session_id,
                 supplements=supplements,
                 diff_bindings=binding_view,
                 memo=StripMemo(supplements=supplements, diff_bindings=binding_view),
@@ -5050,6 +5114,7 @@ class DesktopSessionBridge:
         )
         result = build_frame(
             kept,
+            session_id=self.session_id,
             supplements=supplements,
             memo=strip_memo,
             diff_bindings=binding_view,

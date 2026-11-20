@@ -1677,6 +1677,60 @@ changes: the row keeps the serve-stamp it has always received and carries
 `ts_source: "served"`. The matching capability key is `entry_ts` in
 `GET /v1/capabilities`' `features`, so a renderer can check before asking.
 
+### Clipped rows: `truncated` and `GET .../{id}/history/rows/{ref}`
+
+The renderer refuses any single IPC record over 8 MiB, and the opening reads —
+the open frame, the bare `/history` page, and the snapshot that embeds either
+(including every in-band resync snapshot) — used to serve journal rows whole:
+one 12.58 MB tool result made a 12.59 MB opening snapshot and the conversation
+could not open. Rows are now bounded per row, and the bare page in total
+(`local_operator/session/row_clip.py`):
+
+| read | per-row budget | page budget | `reason` |
+| --- | --- | --- | --- |
+| open frame (`open_frame=1`) | 1.5 MiB (`OPEN_FRAME_MAX_BYTES`) | 1.5 MiB (unchanged; the newest row is always admitted) | `"open_frame_cap"` |
+| bare `/history` | 1.5 MiB | 4 MiB, newest rows first; older rows go to the next page and `has_more` is `true` | `"history_cap"` |
+
+A row over its budget stays on the page, at its position, with its id, and
+carries an ADDITIVE field (absent on every row that fits, so unclipped pages
+keep today's bytes):
+
+```
+truncated: {
+  bytes_total: int,   // bytes of the FULL row: what the rows route reassembles to
+  shown_bytes: int,   // compact-JSON bytes of the row as served, without `truncated`
+  ref: str | null,    // opaque, bound to this session; null = not fetchable here
+  reason: "open_frame_cap" | "history_cap",
+  omitted?: true      // payload WITHHELD rather than cut (see below)
+}
+```
+
+**Message rows are cut, other rows are withheld.** A `message` row keeps its
+shape; every string leaf longer than one shared ceiling is cut to it, so every
+part keeps its start. A non-message row (a `frontend_state_checkpoint_v1`, a
+spend receipt) cannot be meaningfully half-present: it keeps its envelope and
+`payload.custom_type` only, with `omitted: true`. No surface paints those rows.
+A peer's row clipped by its owner carries `ref: null` — this device has no mesh
+lane that fetches one.
+
+**The rows route.** `GET /v1/desktop/sessions/{id}/history/rows/{ref}?offset=&limit=`
+answers `{bytes_total, offset, limit, length, eof, data}`, where `data` is
+standard base64 of bytes `[offset, offset+length)` of the full row's compact
+JSON (UTF-8, the desktop wire envelope `{id, ts, type, payload, ts_source}`).
+Concatenate the decoded ranges, then decode UTF-8 once (a range may split a
+character). `limit` defaults to and is CLAMPED at 1 MiB (the answer's `limit`
+states the applied value); `offset == bytes_total` is an empty `eof` range;
+`offset > bytes_total` is 416 `row_offset_past_end`.
+
+**Authority and threat model.** The route passes the same door as `/history`
+(bearer auth, the same read-mode session admission, the same remote-owner and
+draft handling), so a full row is never reachable where its page is not. The
+`ref` is `r1.<base64url row id>.<base64url HMAC-SHA256(session_id NUL row_id)
+truncated to 128 bits>` under a per-process secret: a ref from another session,
+a forged or guessed one, and one minted by an earlier serve process all answer
+404 — the same answer as a row that no longer exists. After a serve restart a
+reader re-reads `/history` for fresh refs.
+
 ### The open frame: a turn-aligned, paint-only page (`open_frame: 1`)
 
 The open is the one read every surface performs and the one whose shape every
