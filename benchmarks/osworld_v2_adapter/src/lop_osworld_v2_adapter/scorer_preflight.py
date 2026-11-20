@@ -136,18 +136,22 @@ def _require_standard_runtime(scorer_id: str, forbidden_roots: tuple[Path, ...])
     deadline = time.monotonic() + _IMPORT_BUDGET_S
     with tempfile.TemporaryDirectory(prefix="osworld-freecad-", dir=temp_root) as directory:
         scratch = Path(directory)
-        for runtime in _standard_candidates(scorer_id):
-            if not all(
+        candidates = [
+            runtime
+            for runtime in _standard_candidates(scorer_id)
+            if all(
                 path.is_absolute() and os.pathsep not in str(path) and _outside(path, roots)
                 for path in (runtime.python, runtime.python.parent, *runtime.libraries)
-            ):
-                continue
-            if not runtime.python.is_file():
-                continue
+            )
+            and runtime.python.is_file()
+        ]
+        for index, runtime in enumerate(candidates):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            if _probe(runtime, scratch, timeout=remaining):
+            # A stalled launcher must leave time for the matching Python, and
+            # candidates after a fast failure can use the time it didn't need.
+            if _probe(runtime, scratch, timeout=remaining / (len(candidates) - index)):
                 return runtime
     raise ProvisioningError(
         "Host FreeCAD Python is unavailable or incompatible for this OSWorld release; "

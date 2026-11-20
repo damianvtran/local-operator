@@ -1005,6 +1005,7 @@ class OSWorldV2Adapter:
             region=self._plan.region,
             lease_ref=self._refs.lease_ref,
             ttl_seconds=self._ttl_seconds(),
+            scorer_runtime=self._scorer_runtime,
         )
 
     # ------------------------------------------------------------------
@@ -1264,10 +1265,9 @@ class OSWorldV2Adapter:
         # alters the return value: the score is mapped from ``raw`` exactly as
         # before, and a capture that retained nothing leaves the staged detail
         # bytes unchanged.
-        with (
-            diagnostics.capture_evaluator_diagnostics(cache_dir=self._evaluator_cache_dir) as capture,
-            scorer_preflight.score_environment(self._scorer_runtime),
-        ):
+        with diagnostics.capture_evaluator_diagnostics(
+            cache_dir=self._evaluator_cache_dir
+        ) as capture:
             raw = await self._provider.evaluate()
         return ScoreResult(
             score=scoring.score_to_artifact(

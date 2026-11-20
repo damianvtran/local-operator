@@ -24,16 +24,21 @@ asserted only in ``test_spawn.py``, and none of them are asserted here.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from lop_osworld_v2_adapter import scorer_preflight, vendor_bridge
 from lop_osworld_v2_adapter.adapter import OSWorldV2Adapter
+from lop_osworld_v2_adapter.providers import aws
 from lop_osworld_v2_adapter.providers.fake import FakeProvider
 
 from local_operator.evaluation.adapters.api import (
@@ -1132,7 +1137,18 @@ async def test_reset_start_refuses_a_tool_path_inside_the_episode_root(
 
 @pytest.mark.parametrize(
     "case",
-    ["missing", "incompatible", "timeout", "unsafe", "ready", "unrelated", "other-release", "drifted"],
+    [
+        "missing",
+        "incompatible",
+        "timeout",
+        "timeout-fallback",
+        "unsafe",
+        "ready",
+        "cancelled",
+        "unrelated",
+        "other-release",
+        "drifted",
+    ],
 )
 @pytest.mark.asyncio
 async def test_host_scorer_preflight_at_reset(
@@ -1170,23 +1186,31 @@ async def test_host_scorer_preflight_at_reset(
         library = tools / "masquerading-lib"
         library.symlink_to(artifacts / "caller-lib", target_is_directory=True)
     runtime = scorer_preflight.FreeCADRuntime("103", python, (library,))
+    launcher = tools / "launcher"
+    launcher.touch()
 
     def candidates(scorer_id: str) -> tuple[scorer_preflight.FreeCADRuntime, ...]:
         assert scorer_id == "103"
         assert case not in {"unrelated", "other-release", "drifted"}
         assert vendor_bridge.GITLAB_TOKEN_ENV not in os.environ
+        if case == "timeout-fallback":
+            return scorer_preflight.FreeCADRuntime("103", launcher, (library,)), runtime
         return () if case == "missing" else (runtime,)
 
     monkeypatch.setattr(scorer_preflight, "_standard_candidates", candidates)
+    now = 0.0
+    # Spend the full granted timeout in virtual time; do not patch asyncio's clock.
+    monkeypatch.setattr(scorer_preflight, "time", SimpleNamespace(monotonic=lambda: now))
     python_key, lib_key = "TASK_103_FREECAD_PYTHON", "TASK_103_FREECAD_LIB"
     for name in (python_key, lib_key, vendor_bridge.GITLAB_TOKEN_ENV):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AMBIENT_PROBE_CANARY", "must-not-be-inherited")
-    probe_calls: list[Path] = []
+    probe_calls: list[tuple[str, Path, float]] = []
 
     def run_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        assert case in {"ready", "incompatible", "timeout"}
-        assert argv[:2] == [str(python), "-c"]
+        nonlocal now
+        assert case in {"ready", "cancelled", "incompatible", "timeout", "timeout-fallback"}
+        assert argv[0] in {str(python), str(launcher)} and argv[1] == "-c"
         assert argv[2].startswith("import FreeCAD, Part,")
         assert vendor_bridge.GITLAB_TOKEN_ENV not in os.environ
         env = kwargs["env"]
@@ -1203,32 +1227,34 @@ async def test_host_scorer_preflight_at_reset(
         assert kwargs["cwd"] == Path(env["HOME"])
         assert not list(kwargs["cwd"].iterdir())
         assert 0 < kwargs["timeout"] <= scorer_preflight._IMPORT_BUDGET_S
-        probe_calls.append(kwargs["cwd"])
-        if case == "timeout":
+        probe_calls.append((argv[0], kwargs["cwd"], kwargs["timeout"]))
+        if case == "timeout" or argv[0] == str(launcher):
+            now += kwargs["timeout"]
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
         return subprocess.CompletedProcess(argv, 1 if case == "incompatible" else 0)
 
     monkeypatch.setattr(scorer_preflight.subprocess, "run", run_probe)
 
-    class ScoreProbe(FakeProvider):
+    class GuestStub(FakeProvider):
         async def observe(self) -> Any:
             assert python_key not in os.environ and lib_key not in os.environ
             return await super().observe()
 
-        async def evaluate(self) -> Any:
-            assert os.environ[python_key] == str(python)
-            assert os.environ[lib_key] == str(library)
-            raise RuntimeError("synthetic score failure")
+    guest = GuestStub()
+    builds: list[aws.AwsProvider] = []
 
-    provider = ScoreProbe()
-    builds: list[FakeProvider] = []
-
-    def build_provider(_adapter: OSWorldV2Adapter) -> FakeProvider:
+    def build_provider(adapter: OSWorldV2Adapter) -> aws.AwsProvider:
         assert python_key not in os.environ and lib_key not in os.environ
+        provider = cast(aws.AwsProvider, adapter._build_aws_provider())
+        monkeypatch.setattr(provider, "allocate", guest.allocate)
+        monkeypatch.setattr(provider, "observe", guest.observe)
         builds.append(provider)
         return provider
 
+    # Keep production runtime handoff and evaluate(); stub only guest setup/I/O.
     monkeypatch.setattr(OSWorldV2Adapter, "_build_provider", build_provider)
+    monkeypatch.setattr(OSWorldV2Adapter, "_verify_inputs_root", lambda _adapter: None)
+    monkeypatch.setattr(aws, "build_clients", lambda *_: object())
     adapter = OSWorldV2Adapter(workspace_root=workspace)
     await adapter.prepare(
         PrepareParams(
@@ -1243,24 +1269,92 @@ async def test_host_scorer_preflight_at_reset(
         episode_id=episode_id,
         task_id=task_id,
         artifact_root=str(artifacts),
-        secrets=(ResolvedSecret(name=vendor_bridge.GITLAB_TOKEN_ENV, value="synthetic"),),
+        secrets=tuple(
+            ResolvedSecret(name=name, value="synthetic")
+            for name in (vendor_bridge.GITLAB_TOKEN_ENV, "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+        ),
     )
     if case in {"missing", "incompatible", "timeout", "unsafe", "drifted"}:
         with pytest.raises(ProvisioningError, match="Host FreeCAD Python"):
             await adapter.reset_start(reset)
-        assert not builds and not provider.allocated
+        assert not builds and not guest.allocated
         assert vendor_bridge.GITLAB_TOKEN_ENV not in os.environ
     else:
         await adapter.reset_start(reset)
-        assert builds == [provider] and provider.allocated
+        assert len(builds) == 1 and guest.allocated
         assert python_key not in os.environ and lib_key not in os.environ
-    assert bool(probe_calls) == (case in {"ready", "incompatible", "timeout"})
-    assert all(not path.exists() for path in probe_calls)
-    if case == "ready":
-        # The exact probed runtime is only present for evaluate(). Restore
-        # both a preexisting selector and an absent one even if evaluate fails.
-        monkeypatch.setenv(python_key, "previous-value")
+    attempted = [executable for executable, _, _ in probe_calls]
+    if case == "timeout-fallback":
+        assert attempted == [str(launcher), str(python)]
+        assert sum(timeout for _, _, timeout in probe_calls) <= scorer_preflight._IMPORT_BUDGET_S
+    elif case in {"ready", "cancelled", "incompatible", "timeout"}:
+        assert attempted == [str(python)]
+    else:
+        assert not attempted
+    assert all(not path.exists() for _, path, _ in probe_calls)
+    if case not in {"ready", "cancelled", "timeout-fallback"}:
+        return
+
+    score = ScoreParams(operation_id=f"score-{episode_id}", episode_id=episode_id)
+    monkeypatch.setenv(python_key, "previous-value")
+    if case == "cancelled":
+        await _cancel_score_while_evaluator_is_running(
+            adapter, builds[0], score, monkeypatch, (python_key, lib_key), (str(python), str(library))
+        )
+    else:
+
+        def evaluate() -> Any:
+            assert os.environ[python_key] == str(python)
+            assert os.environ[lib_key] == str(library)
+            raise RuntimeError("synthetic score failure")
+
+        builds[0]._env = SimpleNamespace(evaluate=evaluate)
         with pytest.raises(RuntimeError, match="synthetic score failure"):
-            await adapter.score(ScoreParams(operation_id=f"score-{episode_id}", episode_id=episode_id))
-        assert os.environ[python_key] == "previous-value"
-        assert lib_key not in os.environ
+            await adapter.score(score)
+    assert os.environ[python_key] == "previous-value"
+    assert lib_key not in os.environ
+
+
+async def _cancel_score_while_evaluator_is_running(
+    adapter: OSWorldV2Adapter,
+    provider: aws.AwsProvider,
+    score: ScoreParams,
+    monkeypatch: pytest.MonkeyPatch,
+    keys: tuple[str, str],
+    expected: tuple[str, str],
+) -> None:
+    loop = asyncio.get_running_loop()
+    entered, read_selectors = asyncio.Event(), Event()
+    worker: asyncio.Task[Any] | None = None
+    observed: tuple[str | None, str | None] | None = None
+    deadlock_guard_s = 30
+
+    async def retain_worker(callback: Callable[[], Any]) -> Any:
+        nonlocal worker
+        # Retain the real thread result so the test can join it after cancelling
+        # score(). Shield only this handle, not the provider or score await.
+        worker = asyncio.create_task(asyncio.to_thread(callback))
+        return await asyncio.shield(worker)
+
+    def evaluate() -> tuple[str | None, str | None]:
+        loop.call_soon_threadsafe(entered.set)
+        assert read_selectors.wait(deadlock_guard_s), "test never released evaluator"
+        return os.environ.get(keys[0]), os.environ.get(keys[1])
+
+    monkeypatch.setattr(aws, "asyncio", SimpleNamespace(to_thread=retain_worker))
+    provider._env = SimpleNamespace(evaluate=evaluate)
+    score_task = asyncio.create_task(adapter.score(score))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=deadlock_guard_s)
+        score_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await score_task
+    finally:
+        read_selectors.set()
+        if not score_task.done():
+            score_task.cancel()
+        await asyncio.gather(score_task, return_exceptions=True)
+        if worker is not None:
+            observed = await asyncio.wait_for(worker, timeout=deadlock_guard_s)
+    assert worker is not None
+    assert observed == expected
