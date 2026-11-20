@@ -62,10 +62,18 @@ __all__ = ["run_google"]
 GOOGLE_IMAGE_BASE_URL = "https://generativelanguage.googleapis.com"
 GOOGLE_INTERACTIONS_PATH = "/v1beta/interactions"
 
-#: The documented workhorse image model (the Nano Banana 2.1 family). A
-#: DEFAULT, never a pin: the caller's ``model`` overrides it and the guide
-#: names the family.
-GOOGLE_DEFAULT_IMAGE_MODEL = "gemini-nano-banana-2.1"
+#: The default image model. A DEFAULT, never a pin: the caller's ``model``
+#: overrides it and the guide names the family.
+#:
+#: Why this model (chosen 2026-11-19 from the Gemini API image-generation and
+#: deprecation pages): ``gemini-3-pro-image`` is Nano Banana Pro, GA, which
+#: Google positions as its "premium choice" — the frontier tier, strongest on
+#: faithful edits and legible text (it is the model that produced clean edits
+#: in the 2026-11-19 incident, through OpenRouter's preview alias). It
+#: replaced ``gemini-nano-banana-2.1``, the Flash-class workhorse: cheaper and
+#: faster, but the mid tier. NB2.1 stays a one-word pin for cost/speed work.
+#: Generate and edit (up to 14 references) both run on it.
+GOOGLE_DEFAULT_IMAGE_MODEL = "gemini-3-pro-image"
 
 #: One synchronous request's bound (the OpenAI precedent: generation is a
 #: single call, seconds-to-tens-of-seconds).

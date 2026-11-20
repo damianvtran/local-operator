@@ -755,10 +755,11 @@ async def test_an_edit_end_to_end_reaches_a_real_rungs_wire(
 
     assert outcome.route == ImageRoute.FAL
     submit = seen[0]
-    assert submit.url.path == "/fal-ai/flux/dev/image-to-image"
+    assert submit.url.path == "/openai/gpt-image-2.6/sunburst/edit"
     body = json.loads(submit.content)
-    assert body["image_url"] == "data:image/png;base64,AAAA"
-    assert "image_size" not in body
+    assert body["image_urls"] == ["data:image/png;base64,AAAA"]
+    # The GPT Image editor reads image_size, so the tool's size rides.
+    assert body["image_size"] == "square_hd"
     assert outcome.assets[0].data == PNG_1X1
 
 
