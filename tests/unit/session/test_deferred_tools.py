@@ -149,6 +149,31 @@ def test_every_deferred_name_is_a_real_tool_with_a_purpose() -> None:
     assert not ({"project", "sessions", "send", "agent", "secret", "network"} & DEFERRED_TOOLS)
 
 
+def test_zero_use_schemas_are_deferred_with_a_direct_call_phrase() -> None:
+    """Wave 2 (2026-11-19): ten tools the 7-day ledger saw called 0-19 times
+    ride on demand. A valid direct call needs no ``tool://`` read, so the line
+    must say what each does; ``no_reply`` must say it takes no arguments (the
+    ledger showed ~2.2 schema reads per using session for an empty schema)."""
+    wave2 = {
+        "generate_image",
+        "generate_video",
+        "video_status",
+        "generate_voiceover",
+        "generate_sound_effect",
+        "generate_music",
+        "modify_music",
+        "music_status",
+        "tags",
+        "harness_import",
+    }
+    assert wave2 <= DEFERRED_TOOLS
+    assert "no arguments so call it directly" in DEFERRED_TOOL_PURPOSES["no_reply"]
+    # The inventory line joins entries with ", ": a comma inside a phrase
+    # reads as a second tool name (to a model and to the inventory parser in
+    # test_late_capability_tools).
+    assert not [n for n in wave2 | {"no_reply"} if "," in DEFERRED_TOOL_PURPOSES[n]]
+
+
 def test_a_pin_keeps_a_named_tool_published() -> None:
     assert "team" in deferred_tool_names()
     assert "team" not in deferred_tool_names(pinned=("team", "read"))
