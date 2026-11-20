@@ -681,6 +681,19 @@ def _open_store(config_dir: Path | None) -> tuple[Any, Path]:
     return AuthStore(config_dir=root), root
 
 
+def _validate_reasoning_effort(
+    provider: str, model: str, effort: str, ladder: Sequence[str]
+) -> None:
+    # The ordinary runtime can clamp or drop unsupported levels. An explicit
+    # run override must instead be refused before allocating a benchmark guest.
+    if effort not in ladder:
+        raise ValueError(
+            f"{provider}/{model} does not accept reasoning effort "
+            f"{effort!r}; its ladder is "
+            f"{', '.join(ladder) if ladder else '(none: this model has no effort ladder)'}"
+        )
+
+
 def _model_client(
     *,
     auth_store: Any,
@@ -702,21 +715,7 @@ def _model_client(
 
     model_spec = build_model_spec(provider, model)
     if reasoning_effort is not None:
-        # Validated against the model's OWN ladder rather than a fixed list of
-        # level names: the ladder differs per model, and the client silently
-        # DROPS an effort the spec does not list (providers/clients.py
-        # ``_reasoning_effort``). Dropping it is right mid-episode, where the
-        # alternative is losing the turn — but here it would mean a paid run
-        # quietly executing at the default effort while the operator believed
-        # otherwise, and comparing that against published maximum-effort
-        # numbers. Fail before anything is allocated instead.
-        ladder = model_spec.reasoning_efforts
-        if reasoning_effort not in ladder:
-            raise ValueError(
-                f"{provider}/{model} does not accept reasoning effort "
-                f"{reasoning_effort!r}; its ladder is "
-                f"{', '.join(ladder) if ladder else '(none: this model has no effort ladder)'}"
-            )
+        _validate_reasoning_effort(provider, model, reasoning_effort, model_spec.reasoning_efforts)
         # ModelSpec is mutable at runtime by design — this is the same field
         # ``/effort`` writes — so setting it here is the supported path.
         model_spec.reasoning_effort = reasoning_effort
@@ -1302,6 +1301,7 @@ async def _run_session_arm(
     session_spec = SessionSpec(
         hosting=session_provider,
         model=session_model,
+        birth_effort=getattr(args, "reasoning_effort", None),
         # The world boundary + the pinned surface: validate_episode_session_spec
         # refuses anything else, and the declaration is the approval for
         # exactly the tools it names (see session_arm.EPISODE_TOOL_SURFACE for
@@ -1922,6 +1922,22 @@ async def run(
             print(refusal, file=sys.stderr)
             return EXIT_PREFLIGHT
     if args.engagement == "session":
+        # Validate the effective Session route before starting either the
+        # managed owner or its adapter. The manifest route may differ.
+        reasoning_effort = getattr(args, "reasoning_effort", None)
+        if reasoning_effort is not None:
+            from local_operator.model.configure import build_model_spec
+
+            session_provider, session_model = args.session_route or args.route
+            try:
+                ladder = build_model_spec(session_provider, session_model).reasoning_efforts
+                _validate_reasoning_effort(
+                    session_provider, session_model, reasoning_effort, ladder
+                )
+            except ValueError as error:
+                print(str(error), file=sys.stderr)
+                return EXIT_PREFLIGHT
+
         from local_operator.evaluation.source_pin import (
             SourcePinError,
             verify_core_source,
@@ -2087,13 +2103,9 @@ async def run(
             # unconditionally for the same lost-stamp reason.
             "progress_guards": bool(getattr(args, "progress_guards", False))
             or args.engagement != "session",
-            # The effort the decisions were made at, beside the route they were
-            # made on. A score is not comparable across effort levels, and the
-            # published numbers this run is read against are at maximum effort,
-            # so the bundle has to carry the level rather than leave it to the
-            # operator's memory of which flags were passed. Absent when not
-            # overridden: the effective value is then the model table's
-            # documented default for the route already stamped above.
+            # The requested effort override, not an observation of any wire
+            # request. A score is not comparable across effort levels, so the
+            # bundle carries the flag when supplied without guessing defaults.
             **(
                 {"reasoning_effort": args.reasoning_effort}
                 if args.reasoning_effort is not None

@@ -472,8 +472,9 @@ class SessionSpec:
     #: the stamp itself is written by ``session_factory._prepare``, the same
     #: place exec's stamp is written, so the SDK cannot drift from it.
     workstream: bool = False
-    #: Construction-time reasoning level (``spawn_owned_session``'s documented
-    #: extra; clamped by the factory rather than refused).
+    #: Explicit startup reasoning level, clamped by the factory rather than
+    #: refused. When set, the SDK uses that choice instead of the optional
+    #: automatic effort classifier. None leaves settings resolution unchanged.
     birth_effort: str | None = None
     #: Conversation-scoped Saver choice; None follows global/profile resolution.
     radient_saver: bool | None = None

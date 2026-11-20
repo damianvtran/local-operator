@@ -675,9 +675,16 @@ async def _build_session(
     # ``attach_agent_profile``, ``set_tool_inventory``) are concrete-Session
     # members the protocol deliberately omits — ``exec_session.apply_startup``
     # takes the same view for the same reason.
+    factory_args = spec.to_namespace()
+    if spec.birth_effort is not None:
+        # The pinned exec adapter has no birth fields. Carry the SDK's explicit
+        # selection separately so the factory can honor it without changing
+        # omitted settings or other surfaces' auto-effort precedence.
+        factory_args.birth_effort = spec.birth_effort
+        factory_args.prefer_birth_effort = True
     try:
         session: Any = await create_session(
-            spec.to_namespace(),
+            factory_args,
             config_manager,
             agent_registry,
             has_ui=(mode == "attach"),

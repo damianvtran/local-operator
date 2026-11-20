@@ -13,8 +13,14 @@ believed otherwise.
 
 from __future__ import annotations
 
+import json
+import os
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from local_operator.model.configure import build_model_spec
@@ -26,8 +32,6 @@ _PROVIDER, _MODEL = "anthropic", "claude-opus-5"
 
 
 def _client_kwargs(**overrides: Any) -> dict[str, Any]:
-    from pathlib import Path
-
     base: dict[str, Any] = {
         "auth_store": object(),
         "settings": {},
@@ -125,6 +129,145 @@ def test_omitting_the_flag_leaves_the_spec_default_untouched(
 
     expected = build_model_spec(_PROVIDER, _MODEL).reasoning_effort
     assert captured["model_spec"].reasoning_effort == expected
+
+
+@pytest.mark.asyncio
+async def test_session_arm_refuses_invalid_effort_before_source_or_resource_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The effective Session route can differ from the reply/manifest route.
+    # This route has no such level, even though the manifest route accepts it.
+    async def unexpected(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("invalid effort started the managed owner")
+
+    monkeypatch.setattr(run_episode, "_run_managed_frontend", unexpected)
+    args = run_episode.build_parser().parse_args(
+        [
+            "--selector",
+            str(tmp_path / "does-not-exist.json"),
+            "--task-id",
+            "t",
+            "--route",
+            f"{_PROVIDER}/{_MODEL}",
+            "--run-root",
+            "r",
+            "--engagement",
+            "session",
+            "--session-route",
+            "test/mock",
+            "--reasoning-effort",
+            "max",
+        ]
+    )
+    assert await run_episode.run(args) == run_episode.EXIT_PREFLIGHT
+    assert "test/mock does not accept reasoning effort 'max'" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested", "auto", "expected"),
+    [("high", True, "high"), ("max", True, "max"), (None, True, "low"), (None, False, "medium")],
+)
+async def test_first_session_turn_serializes_effective_effort(
+    requested: str | None,
+    auto: bool,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import sdk
+    from local_operator.config import ConfigManager
+    from local_operator.evaluation import session_arm, source_pin
+    from local_operator.harness.types import ChatRequest
+    from local_operator.providers import failover
+    from local_operator.providers.clients import AnthropicClient
+    from local_operator.session.spec import SessionRoots
+
+    home = tmp_path / "home"
+    config_dir = home / ".local-operator"
+    config_dir.mkdir(parents=True)
+    for key in [key for key in os.environ if key.startswith(("CMUX_", "LOP_"))]:
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(home / "local-operator-home"))
+    monkeypatch.setenv("LOP_RUN_SCRATCH_ROOT", str(tmp_path))
+    config = ConfigManager(config_dir=config_dir)
+    config.set_config_value("model_effort", "medium")
+    config.set_config_value("effort", {"auto": auto})
+    monkeypatch.setattr(source_pin, "verify_core_source", lambda _: None)
+    monkeypatch.setattr(SessionRoots, "assert_durable", lambda self: None)
+
+    turn_efforts: list[str] = []
+    events = (
+        {"type": "message_start", "message": {"id": "fixture", "usage": {"input_tokens": 1}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "OK"}},
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 1},
+        },
+        {"type": "message_stop"},
+    )
+    response = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+
+    async def open_and_prompt(*, session_spec: Any, roots: SessionRoots, **_kwargs: Any) -> Any:
+        # Replace the adapter/guest, but open and prompt the same typed Session.
+        async with sdk.open_session(session_spec, roots=roots, mode="own") as session:
+            # A known low auto-effort prompt; explicit levels must beat it.
+            await session.prompt("show status")
+        return session_arm.SessionArmOutcome("completed", "effort-wire", record_root=None)
+
+    monkeypatch.setattr(session_arm, "run_session_episode", open_and_prompt)
+
+    def bind_wire(turn: bool) -> httpx.MockTransport:
+        def receive(request: httpx.Request) -> httpx.Response:
+            if turn:
+                # Never retain prompts, tool schemas, headers or cache keys.
+                turn_efforts.append(json.loads(request.content)["output_config"]["effort"])
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=response
+            )
+
+        return httpx.MockTransport(receive)
+
+    async def synthetic_failover(
+        request: ChatRequest, *_args: Any, **_kwargs: Any
+    ) -> AsyncIterator[Any]:
+        # Replace credential selection with a dummy key and an in-process HTTP
+        # transport. The Anthropic request builder and serializer are real.
+        async with httpx.AsyncClient(transport=bind_wire(request.purpose == "turn")) as http:
+            async for event in AnthropicClient(http_client=http).stream(request, "fixture-key"):
+                yield event
+
+    monkeypatch.setattr(failover, "stream_with_failover", synthetic_failover)
+    argv = [
+        "--selector",
+        "s.json",
+        "--task-id",
+        "t",
+        "--route",
+        f"{_PROVIDER}/{_MODEL}",
+        "--run-root",
+        str(tmp_path),
+        "--engagement",
+        "session",
+    ]
+    if requested is not None:
+        argv.extend(["--reasoning-effort", requested])
+    result = await run_episode._run_session_arm(
+        args=run_episode.build_parser().parse_args(argv),
+        spec=SimpleNamespace(secret_refs=(), episode_id="effort-wire"),
+        config=None,
+        selector=SimpleNamespace(core_source=object()),
+        resolver=SimpleNamespace(resolve=lambda _: ()),
+        route=(_PROVIDER, _MODEL),
+    )
+
+    assert result == run_episode.EXIT_OK
+    assert turn_efforts and turn_efforts[0] == expected
 
 
 def test_the_parser_defaults_the_flag_to_none() -> None:
