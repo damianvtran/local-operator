@@ -94,6 +94,8 @@ from local_operator.text_bounds import clip_head_tail
 
 __all__ = [
     "DEFAULT_REPLAY_BOUND_CHARS",
+    "DEFAULT_REPLAY_RESULT_BOUND_CHARS",
+    "READ_REPLAY_BOUND_CHARS",
     "REPLAY_ARGUMENT_MARKER",
     "REPLAY_RESULT_MARKER",
     "bound_replay_payloads",
@@ -106,6 +108,31 @@ __all__ = [
 #: only enforces the intent the tool layer already had. See the module docstring
 #: for what tighter values buy and what they cost.
 DEFAULT_REPLAY_BOUND_CHARS = 8 * 1024
+
+#: Room a tool RESULT gets above the tools layer's 8 KiB cap, for the recovery
+#: footer the tool itself appends AFTER capping its body (``spill_truncate``'s
+#: spill footer, 112-384 chars measured; ``_clamp_file_body``'s "[truncated at
+#: ... Continue with read(path=..., range=...)]", which embeds the path). A
+#: bound equal to the cap clipped the MIDDLE of every capped result a second
+#: time: the model got a body cut twice and two markers that contradict each
+#: other ("expand the spill handle" vs "re-run the tool"). 1 KiB matches the
+#: reservation ``tools/skill_tool.py`` already makes for its own footers and
+#: covers a footer whose path runs to ~850 characters.
+REPLAY_RESULT_HEADROOM_CHARS = 1024
+
+#: Production bound for a tool result: the tools-layer cap plus its footer.
+DEFAULT_REPLAY_RESULT_BOUND_CHARS = DEFAULT_REPLAY_BOUND_CHARS + REPLAY_RESULT_HEADROOM_CHARS
+
+#: Production bound for a ``read`` result. Internal documents (``guide://``,
+#: ``skill://``, ``tool://`` ...) are deliberately delivered WHOLE up to
+#: ``tools.builtin.INTERNAL_READ_LIMIT_CHARS`` (16 KiB: a guide the prompt
+#: says the model MUST read is worth one complete read, not an outline it has
+#: to expand twice). Bounding them at 8 KiB undid that on the very first view
+#: — this bound applies to the current turn's results too — so a 13 KB guide
+#: arrived with ~5 KB of its middle elided and had to be re-read. Kept as a
+#: literal (``harness`` must not import the tools module); a unit test pins it
+#: to ``INTERNAL_READ_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS``.
+READ_REPLAY_BOUND_CHARS = 16 * 1024 + REPLAY_RESULT_HEADROOM_CHARS
 
 #: Written into a tool result where its middle was elided on replay. Distinct
 #: from ``text_bounds.OUTPUT_TRUNCATION_MARKER`` on purpose: that one means "the
@@ -129,7 +156,7 @@ _ELIDED_ID_SUFFIX = ELIDED_ID_SUFFIX
 def bound_replay_payloads(
     messages: list[Message],
     *,
-    bound_chars: int = DEFAULT_REPLAY_BOUND_CHARS,
+    bound_chars: int | None = None,
 ) -> list[Message]:
     """The same messages, with oversized replay payloads elided in copies.
 
@@ -143,20 +170,40 @@ def bound_replay_payloads(
     ``bound_chars`` smaller than the marker sentence yields the marker plus one
     character from each end: the marker is the part that may not be elided, so
     such a bound is served by the smallest result that still states the loss.
+
+    ``bound_chars=None`` (the production default) bounds tool-call arguments at
+    :data:`DEFAULT_REPLAY_BOUND_CHARS` and tool RESULTS at the tools layer's own
+    caps plus footer room (:data:`DEFAULT_REPLAY_RESULT_BOUND_CHARS`,
+    :data:`READ_REPLAY_BOUND_CHARS` for ``read``), so a result a tool already
+    capped is never elided a second time. An explicit ``bound_chars`` is one
+    uniform bound for every payload, the historical meaning. Either way the
+    bound is a pure function of the message, so a row's wire bytes are the same
+    on every turn of a process and the prefix cache holds.
     """
-    if bound_chars <= 0:
+    if bound_chars is not None and bound_chars <= 0:
         return list(messages)
 
     out: list[Message] = []
     for message in messages:
         if message.role == "tool":
-            bounded = _bound_result(message, bound_chars)
+            bounded = _bound_result(message, _result_bound(message, bound_chars))
         elif message.role == "assistant" and message.tool_calls:
-            bounded = _bound_calls(message, bound_chars)
+            bounded = _bound_calls(
+                message, DEFAULT_REPLAY_BOUND_CHARS if bound_chars is None else bound_chars
+            )
         else:
             bounded = message
         out.append(bounded)
     return out
+
+
+def _result_bound(message: Message, bound_chars: int | None) -> int:
+    """The bound for one tool result (see :func:`bound_replay_payloads`)."""
+    if bound_chars is not None:
+        return bound_chars
+    if message.tool_name == "read":
+        return READ_REPLAY_BOUND_CHARS
+    return DEFAULT_REPLAY_RESULT_BOUND_CHARS
 
 
 def _bound_result(message: Message, bound_chars: int) -> Message:
