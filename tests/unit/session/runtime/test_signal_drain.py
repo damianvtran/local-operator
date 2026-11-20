@@ -1202,3 +1202,156 @@ async def test_a_quiet_turn_held_open_by_a_step_is_spared_and_says_so(
 
     assert stop.is_set()
     assert handle.retires, "the boundary exit is a retirement"
+
+
+# ---------------------------------------------------------------------------
+# Incident 2026-11-20 (session e6883d17d1a3): an unattended SIGTERM sweep arrived
+# mid-turn; the turn ended, a subagent kept the drain open, and the operator's
+# prompt sat in the successor spool for ~7 minutes with nothing bounding it.
+# ---------------------------------------------------------------------------
+
+
+class _SubagentHoldHandle(_WorkHandle):
+    """A handle whose live turn and background work are separate switches.
+
+    ``busy`` (``is_busy``) stays True while the subagent runs; ``turn_live``
+    (``is_conversationally_active``) is the turn alone — the split the production
+    handle draws, and the one the yield keys on.
+    """
+
+    def __init__(self, directory: Any, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.turn_live = True
+        self.directory = directory
+        self.end_drains = 0
+
+    def is_conversationally_active(self) -> bool:
+        return self.turn_live
+
+    def _session_directory(self) -> Any:
+        return self.directory
+
+    def end_drain(self) -> bool:
+        if not self._draining:
+            return False
+        self.end_drains += 1
+        self._draining = False
+        self.events.append("end-drain")
+        return True
+
+
+def _spool_owner_prompt(directory: Any, text: str) -> None:
+    import time
+
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    assert append_inbox(
+        directory,
+        InboxLine(
+            text=text,
+            sender={"kind": "owner"},
+            written_at=time.time(),
+            wake=True,
+            source=SOURCE_USER,
+            command_id=f"cmd-{text}",
+        ),
+    )
+
+
+async def _run_subagent_hold(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, *, yield_to_owner: bool
+) -> tuple[_SubagentHoldHandle, list[str], asyncio.Event, "asyncio.Future[None]"]:
+    # A bound far beyond the test so only the yield (or its absence) decides.
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 600.0)
+    readmitted: list[str] = []
+
+    async def fake_drain_inbox_into(handle: object) -> None:
+        from local_operator.session.runtime.inbox import peek_inbox
+
+        readmitted.extend(line.text for line in peek_inbox(tmp_path))
+
+    monkeypatch.setattr(process, "_drain_inbox_into", fake_drain_inbox_into)
+    stop = asyncio.Event()
+    handle = _SubagentHoldHandle(tmp_path, busy=True)
+    task = asyncio.ensure_future(
+        _drain_for_signal(
+            handle, _RecordingRuntime(), stop, sig_name="SIGTERM", yield_to_owner=yield_to_owner
+        )
+    )
+    await asyncio.sleep(process.REAP_CHECK_S * 2 + 0.05)
+    assert handle._draining, "the signal latched the drain while the turn ran"
+    # 1. the turn ends, 2. the subagent is still running (busy stays True),
+    handle.turn_live = False
+    await asyncio.sleep(process.REAP_CHECK_S * 2 + 0.05)
+    assert not readmitted and handle.end_drains == 0, "no prompt yet, nothing to yield to"
+    # 3. the operator's prompt arrives and is spooled for the successor.
+    _spool_owner_prompt(tmp_path, "are you there?")
+    await asyncio.sleep(process.REAP_CHECK_S * 3 + 0.05)
+    return handle, readmitted, stop, task
+
+
+@pytest.mark.asyncio
+async def test_an_unattended_signal_drain_held_by_a_subagent_runs_the_waiting_prompt(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact incident sequence: the prompt runs here, the departure stays committed."""
+    handle, readmitted, stop, task = await _run_subagent_hold(
+        tmp_path, monkeypatch, yield_to_owner=True
+    )
+    try:
+        assert handle.end_drains == 1, "the admission latch was released for the prompt"
+        assert readmitted == ["are you there?"], "the spooled prompt was run on this runtime"
+        assert not stop.is_set(), "the subagent was not cut to make room for the prompt"
+        assert not task.done(), "the departure is still pending, not abandoned"
+        # Once per drain: a second prompt is admitted directly, never re-yielded.
+        _spool_owner_prompt(tmp_path, "Continue")
+        await asyncio.sleep(process.REAP_CHECK_S * 3 + 0.05)
+        assert handle.end_drains == 1
+        # The subagent finishes: the signal is honoured at the first idle instant.
+        handle.busy = False
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        if not task.done():
+            task.cancel()
+    assert stop.is_set(), "the signalled runtime still leaves"
+    assert handle.retires, "and leaves through the boundary latch, as before"
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_signal_drain_keeps_refusing_while_a_subagent_holds(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop the operator asked for keeps today's hold: the prompt waits for a successor."""
+    handle, readmitted, stop, task = await _run_subagent_hold(
+        tmp_path, monkeypatch, yield_to_owner=False
+    )
+    try:
+        assert handle.end_drains == 0 and readmitted == []
+        assert handle._draining, "the latch still refuses new admissions"
+        handle.busy = False
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        if not task.done():
+            task.cancel()
+    assert stop.is_set()
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ({"stop_marker": {"deliberate": False, "mechanism": "wake-sweep"}}, True),
+        ({"stop_marker": {"deliberate": True, "mechanism": "socket"}}, False),
+        ({"stop_marker": None}, False),
+        ({}, False),
+    ],
+)
+def test_only_an_unattended_marked_stop_yields_to_the_owner(
+    entry: dict[str, Any], expected: bool
+) -> None:
+    arrival = process._Arrival(entry=entry, run_key={})
+    assert process._signal_yields_to_owner(arrival) is expected
+    assert process._signal_yields_to_owner(None) is False

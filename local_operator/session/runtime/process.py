@@ -4593,7 +4593,13 @@ def _route_signal(
         return
     if state.draining is None:
         state.draining = asyncio.ensure_future(
-            _drain_for_signal(handle, runtime, state.stop, sig_name=sig.name)
+            _drain_for_signal(
+                handle,
+                runtime,
+                state.stop,
+                sig_name=sig.name,
+                yield_to_owner=_signal_yields_to_owner(arrival),
+            )
         )
         return
     logger.info(
@@ -4637,8 +4643,147 @@ def _note_signal_spare(sig_name: str, bound: "_SignalDrainBound", at: float) -> 
     )
 
 
+def _signal_yields_to_owner(arrival: "_Arrival | None") -> bool:
+    """May this signal's drain give way to a prompt the operator sends meanwhile?
+
+    Only for a stop NOBODY TYPED: the arrival is paired with a stop marker that
+    says ``deliberate: false`` (the wake supervisor's sweep writes exactly that —
+    ``owned_runtimes.sweep`` stages one per candidate). A deliberate stop (``lop
+    stop``, an operator's kill with a marker) keeps today's refusal: the operator
+    asked for this session to end, and a later prompt is theirs to re-send. An
+    arrival with no marker or no observation also keeps today's behaviour — the
+    yield is an exception to the drain, so it needs positive evidence.
+    """
+    entry = getattr(arrival, "entry", None)
+    marker = entry.get("stop_marker") if isinstance(entry, dict) else None
+    return isinstance(marker, dict) and marker.get("deliberate") is False
+
+
+def _owner_waits_on_background_hold(handle: object) -> bool:
+    """An owner prompt is spooled AND only background work holds the drain open.
+
+    "Background only" is :meth:`ServingSessionHandle.is_conversationally_active`
+    answering False: no live turn, no queued prompt, no parked gate — what remains
+    of ``is_busy`` is subagents, background jobs and retained tasks. A handle
+    without that probe (a reduced host, an older double) answers False, so the
+    yield never fires on a guess. The spool read is the same ``peek_inbox`` the
+    successor's boot drain consumes, filtered to ``SOURCE_USER`` rows: a peer's
+    note or a diverted wake is not someone waiting on the composer.
+    """
+    active = getattr(handle, "is_conversationally_active", None)
+    directory_of = getattr(handle, "_session_directory", None)
+    if not callable(active) or not callable(directory_of):
+        return False
+    try:
+        if active():
+            return False
+        directory = directory_of()
+        if not isinstance(directory, Path):
+            return False
+        from local_operator.session.runtime.inbox import (
+            SOURCE_USER,
+            inbox_path,
+            peek_inbox,
+        )
+
+        if not inbox_path(directory).exists():
+            return False
+        return any(line.source == SOURCE_USER for line in peek_inbox(directory))
+    except Exception:  # noqa: BLE001 — an unreadable probe keeps the drain as it was
+        logger.debug("could not read whether an owner prompt is waiting", exc_info=True)
+        return False
+
+
+def _background_holders(handle: object) -> str:
+    """What the operator was waiting behind, e.g. "1 subagent, 2 background jobs"."""
+    session = getattr(handle, "_session", None)
+    parts: list[str] = []
+    try:
+        subagents = int(session.running_subagents())  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — a count for a log line only
+        subagents = 0
+    try:
+        manager = getattr(session, "jobs", None)
+        jobs = sum(
+            1
+            for job in (manager.list() if manager is not None else [])
+            if getattr(job, "status", None) == "running" and getattr(job, "type", None) != "task"
+        )
+    except Exception:  # noqa: BLE001
+        jobs = 0
+    if subagents:
+        parts.append(f"{subagents} subagent{'s' if subagents != 1 else ''}")
+    if jobs:
+        parts.append(f"{jobs} background job{'s' if jobs != 1 else ''}")
+    return ", ".join(parts) or "background work"
+
+
+async def _yield_signal_drain_to_owner(handle: object, sig_name: str) -> bool:
+    """Let the operator's waiting prompt run HERE instead of behind a subagent.
+
+    THE INCIDENT (2026-11-20, session e6883d17d1a3). An upgrade's supervisor
+    restart swept its runtimes with SIGTERM (fixed at the source in
+    ``wakes/supervisor._stop_is_build_restart``). This runtime was mid-turn, so it
+    drained; the turn ended at 14:31:17, but a subagent kept ``is_busy`` true and
+    kept reporting progress, so ``_SignalDrainBound`` never reaped. The operator's
+    prompt (14:32:51) and "Continue" (14:38:18) were spooled for a successor that
+    could not boot until this process exited (14:39:33) — the app showed only
+    "waiting for the agent" for ~7 minutes, and nothing bounded the wait: a
+    subagent that keeps stepping holds a signal drain for as long as it runs.
+
+    WHY RELEASE THE ADMISSION LATCH, and not the two alternatives:
+
+    * cutting the drain short (``stop.set()``) disposes the subagent mid-flight —
+      in-process work the drain exists to protect — to serve a prompt that could
+      simply run alongside it;
+    * leaving the hold and only publishing a better status still makes the
+      operator wait an unbounded time for a stop nobody asked for.
+
+    So this does what ``_abandon_move`` does for a build handover that cannot reach
+    idle: ``end_drain`` lifts the refusal (and restores wake/job delivery), and
+    ``_drain_inbox_into`` runs the spooled owner prompt on THIS runtime. The
+    DEPARTURE IS NOT REVOKED, which is the property ``_drain_for``'s comment
+    guards ("a silent revocation of a termination signal"): the drain object and
+    the ``leaving`` phrase stay, ``_drain_for`` still commits ``begin_retire`` at
+    the first idle instant, and ``_SignalDrainBound`` still reaps a hold that goes
+    silent. The signal is honoured late, never ignored.
+
+    ONCE PER DRAIN (the caller's ``yielded``): ``begin_drain`` is not re-taken,
+    for the reason ``_abandon_move`` records — a second retire re-diverts wakes
+    the first one already reserved. Messages that arrive after the release are
+    admitted directly, so the operator's next prompt never spools either.
+
+    Returns whether the latch was released; a handle without ``end_drain`` (a
+    reduced host) keeps today's hold.
+    """
+    end_drain = getattr(handle, "end_drain", None)
+    if not callable(end_drain):
+        return False
+    try:
+        released = bool(end_drain())
+    except Exception:  # noqa: BLE001 — a failed release keeps the hold, never crashes the drain
+        logger.warning("session runtime: could not release the %s drain latch", sig_name)
+        return False
+    if not released:
+        return False
+    logger.warning(
+        "session runtime: %s drain was held only by %s while an owner prompt waited; "
+        "running the prompt here and leaving at the first idle instant (unattended "
+        "stop, departure still committed)",
+        sig_name,
+        _background_holders(handle),
+    )
+    await _drain_inbox_into(handle)
+    return True
+
+
 async def _drain_for_signal(
-    handle: object, runtime: object, stop: asyncio.Event, *, sig_name: str
+    handle: object,
+    runtime: object,
+    stop: asyncio.Event,
+    *,
+    sig_name: str,
+    yield_to_owner: bool = False,
 ) -> None:
     """Leave after a termination signal — at the next boundary, or when it goes silent.
 
@@ -4828,11 +4973,16 @@ async def _drain_for_signal(
             _warn_signal_reap(sig_name, bound)
         stop.set()
         return
+    yielded = False
     while True:
         if await _drain_for(drain, handle, runtime, stop):
             return
         if stop.is_set():
             return
+        # See :func:`_yield_signal_drain_to_owner`: once per drain, only for an
+        # unattended sweep, and only while nothing but background work holds it.
+        if yield_to_owner and not yielded and _owner_waits_on_background_hold(handle):
+            yielded = await _yield_signal_drain_to_owner(handle, sig_name)
         at = time.monotonic()
         verdict = bound.sample(handle, at)
         if verdict == _SignalDrainBound.REAP:
