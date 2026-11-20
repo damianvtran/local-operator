@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.session_status",
-  "history_sha256": "c40af70d513a4f23adcf61b8cd96b147c065377b9e0d430f3f14973f5ad31eef",
+  "history_sha256": "bfff080167bcbc303d4336d2081cc648c93127067cca7e70ca5de8187338e923",
   "entries": [
     {
       "locale": "es",
@@ -142,6 +142,42 @@
       "note": "Round 1 independent audit of the live session-status labels (wire.session_status). Auditor 320153d86770 (openai/gpt-6.1-sol, no fallback) verdict CLEAN-WITH-FINDINGS: 0 blocker, 0 major, 1 minor, 0 nit ['ES-1']. Scope: full namespace (31 keys incl. 14 new live-status keys) at worktree head 514d51243ce3. ES-1 (minor) deferred: 'many' arm '{# de …}' follows the es style guide and the shipped tui.status.jobs form; programme-wide wording question, not changed here. Record: i18n/audits/evidence/es/wire.session_status/ls1/record.json. Native-speaker review and rendered-frame certification not claimed.",
       "evidence": "i18n/audits/evidence/es/wire.session_status/ls1/record.json",
       "round": "ls1"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.session_status",
+      "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+      "context_sha256": "4f9cf2dabc89f7e711c3cf2d74b2a6e75c274954152daa14a1dad31ac9cf12f2",
+      "target_sha256": "75a66cc6585aa45f0a43d66fa805bffbb386bcef7766f678666a6d742e7dee35",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "d6d7243588ea",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent audit of the duration-unit slice of wire.session_status (4 new keys duration_seconds/minutes/hours_minutes/days_hours plus the wedged_heartbeat {duration} integration and its edited context note), source commit 74b05c6a2aee; unchanged entries verified against the prior passed rows. Auditor d6d7243588ea (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. context_sha256 recorded by the auditor. Record: i18n/audits/evidence/es/wire.session_status/ld1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.session_status/ld1/record.json",
+      "round": "ld1"
     }
   ]
 }
