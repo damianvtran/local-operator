@@ -476,9 +476,19 @@ def test_owner_notice_is_one_keyed_item(tmp_path) -> None:
 
 _OWNER_ACTION_FIX_PHRASES = {
     "sign_in_required": "sign in again as the account owner",
-    "consent_required": "accept the consent",
-    "owner_ineligible": "ask an administrator of your Radient organization",
+    "consent_required": "give your consent again",
+    "owner_ineligible": "check that Agent messages is on for this machine",
 }
+
+#: Each reason's English title leads with its action (design D1 / QA Q1, PR #4317).
+_OWNER_ACTION_TITLES = {
+    "sign_in_required": "Sign in again to get agent messages",
+    "consent_required": "Give consent again for agent messages",
+    "owner_ineligible": "Check that Agent messages is on",
+}
+
+#: The inbox list's title column at 140 columns (design D1, measured on PR #4317).
+_TITLE_COLUMN_CELLS = 40
 
 
 def test_owner_action_notice_is_one_item_per_endpoint_and_reason(tmp_path) -> None:
@@ -511,10 +521,61 @@ def test_owner_action_notice_is_one_item_per_endpoint_and_reason(tmp_path) -> No
     for code, phrase in _OWNER_ACTION_FIX_PHRASES.items():
         item = by_key[f"team-bridge-owner-action:end_1:{code}"]
         assert item["priority"] == "high"
-        assert item["title"] == "Agent messages are held until you act"
+        assert item["title"] == _OWNER_ACTION_TITLES[code]
         assert phrase in item["body_md"], (code, item["body_md"])
         # The fix, never a release: these holds have no Deliver.
         assert "deliver" not in item["body_md"].lower()
+
+
+def test_owner_action_copy_names_every_cause_of_its_reason() -> None:
+    """Copy C1/C4 + code R3/N1 (PR #4317): each arm covers every trigger of its cause.
+
+    ``owner_ineligible`` is raised for the organization AND for this machine's
+    endpoint being absent or inactive (``scheduler.py``), and ``sign_in_required``
+    for an expired sign-in AND a different signed-in account; an arm naming only
+    one of them sends the owner to the wrong fix.
+    """
+    from local_operator.i18n.keys import cli_team_bridge as k
+    from local_operator.i18n.messages import render
+
+    def body(code: str) -> str:
+        msg = k.notify_owner_action_hold_body(reason=code)
+        return render(msg.code, msg.params, locale="en")
+
+    ineligible = body("owner_ineligible")
+    assert "your organization" in ineligible and "this machine" in ineligible
+    assert "ask an administrator of your Radient organization" in ineligible
+    sign_in = body("sign_in_required")
+    assert "expired" in sign_in and "not the account owner's" in sign_in
+    for code in ("sign_in_required", "consent_required", "owner_ineligible"):
+        # No re-screening promise (copy C8): not shown to follow the fix.
+        assert "automatically" not in body(code)
+
+
+def test_owner_action_titles_lead_with_the_action_in_every_locale() -> None:
+    """D1/Q1 (PR #4317): per-reason titles that stay distinct inside the 40-cell column.
+
+    Read straight from each catalogue (not through locale eligibility, which
+    tracks the audit ledger), so a translation that runs past the column or
+    collapses two reasons into one title fails here, in every locale.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.i18n import catalogues, runtime
+    from local_operator.i18n.keys import cli_team_bridge as k
+
+    code = k.notify_owner_action_hold_title(reason="other").code
+    for locale in catalogues.locales():
+        source = catalogues.load_catalogue(locale, "cli.team_bridge")[code]
+        titles = {
+            reason: runtime.render_message(source, {"reason": reason}, locale)
+            for reason in (*_OWNER_ACTION_TITLES, "other", "<b>x</b>")
+        }
+        specific = [titles[r] for r in _OWNER_ACTION_TITLES]
+        assert len(set(specific)) == 3, (locale, titles)
+        assert titles["<b>x</b>"] == titles["other"], locale  # closed: no echo
+        for reason, title in titles.items():
+            assert cell_len(title) <= _TITLE_COLUMN_CELLS, (locale, reason, title)
 
 
 def test_owner_action_notice_codes_are_pinned_and_never_releasable() -> None:

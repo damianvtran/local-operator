@@ -767,7 +767,7 @@
   "wire.settings.team_bridge_session.help": "वह सत्र जिसे नए संदेशों के लिए जगाया जा सकता है; खाली = सिर्फ़ बैज।",
   "wire.settings.team_bridge_session.label": "CoS सत्र",
   "wire.settings.team_bridge_hold_release.label": "काम के अनुरोध समीक्षा के लिए रोकें",
-  "wire.settings.team_bridge_hold_release.help": "जब कोई दूसरा एजेंट आपसे नया काम शुरू करने या उस पर फ़ैसला करने को कहता है, तो संदेश अस्वीकार होने के बजाय आपके इनबॉक्स में रोका जाता है, ताकि आप उसे पहुँचाएँ या ख़ारिज करें। आपके चुनने तक आपके एजेंट तक कुछ नहीं पहुँचता। बंद होने पर ये अनुरोध अस्वीकार कर दिए जाते हैं।",
+  "wire.settings.team_bridge_hold_release.help": "नए काम के कुछ अनुरोध रोके जाते हैं, ताकि आप उन्हें पहुँचाएँ या खारिज करें। आपके पहुँचाए बिना आपके एजेंट तक कुछ नहीं पहुँचता। बंद होने पर वे अस्वीकार होते हैं।",
   "wire.settings.tool_approval_mode.choice.ask.description": "लिखने/चलाने वाले टूल से पहले पूछें",
   "wire.settings.tool_approval_mode.choice.ask.label": "पूछें",
   "wire.settings.tool_approval_mode.choice.auto.description": "बिना पूछे चलाएँ",

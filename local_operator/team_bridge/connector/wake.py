@@ -1003,10 +1003,14 @@ async def notify_screening_infra_hold(
             title = t(_k.notify_screening_model_unavailable_title())
             body = t(_k.notify_screening_model_unavailable_body())
         else:
-            # A closed ICU select over the code itself: the reason is one of
+            # Closed ICU selects over the code itself: the reason is one of
             # three literals checked above, never sender- or message-derived.
-            title = t(_k.notify_owner_action_hold_title())
-            body = t(_k.notify_owner_action_hold_body(reason=str(hold_code)))
+            # The TITLE selects too (design D1 / QA Q1 on PR #4317): three
+            # owner-action notices can sit side by side in the inbox list, so
+            # each title leads with its own action inside the 40-cell column.
+            reason = str(hold_code)
+            title = t(_k.notify_owner_action_hold_title(reason=reason))
+            body = t(_k.notify_owner_action_hold_body(reason=reason))
         NotificationStore(config_dir).notify(
             session_id,
             title=title,
@@ -1018,7 +1022,7 @@ async def notify_screening_infra_hold(
     try:
         await asyncio.to_thread(_notify)
     except Exception:  # noqa: BLE001 — a notification is chrome, the hold stands
-        logger.info("bridge: screening-model notification unrecorded code=notify_failed")
+        logger.info("bridge: hold notification unrecorded code=notify_failed")
 
 
 def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:

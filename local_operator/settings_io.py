@@ -6383,7 +6383,7 @@ SETTINGS: tuple[Setting, ...] = (
     # session-format state as a knob. ``hold_alert_after_minutes`` and
     # ``screening_hold_review_after_minutes`` are read keys with no row (their
     # constants, and why, are in ``team_bridge/settings.py``); ``hold_release``
-    # gained its row once its copy was translated into every locale.
+    # has a row (below) whose copy ships through the per-locale audit ledger.
     # The allowlist's default state and cues are server truth (§9), surfaced as
     # data by
     # ``team_bridge.client.allowlist_view`` — never restated here, where an edit
@@ -6452,8 +6452,11 @@ SETTINGS: tuple[Setting, ...] = (
     # B4b owner release (``team_bridge/settings.py`` DEFAULT_HOLD_RELEASE):
     # ON turns a valid new-work request the receiver would have bounced into a
     # per-message hold the person Delivers or Discards; OFF restores the reject.
-    # A BOOL on purpose: only a real ``false`` disables it (absent or garbled
-    # reads ON, because the outcome it opens is a HOLD, never an admit), and the
+    # A BOOL on purpose: ``read_setting``'s ``strict_bool`` is ALSO the
+    # receiver's reader (``team_bridge.settings._hold_release``, S-1 on PR
+    # #4317), so a hand-edited ``"false"``/``off``/``0`` is off on both sides;
+    # absent or unparseable reads ON (the outcome it opens is a HOLD, never an
+    # admit). The
     # narrowing that decides WHICH answers convert lives in ``hold_release``,
     # not here. The help deliberately avoids the word "screen": this row is not
     # the admission gate and ``test_no_setting_can_disable_the_admission_gate``

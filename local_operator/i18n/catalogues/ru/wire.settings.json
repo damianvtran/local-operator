@@ -767,7 +767,7 @@
   "wire.settings.team_bridge_session.help": "Сессия, которую можно пробудить при новых сообщениях; пусто = только индикатор.",
   "wire.settings.team_bridge_session.label": "Сессия CoS",
   "wire.settings.team_bridge_hold_release.label": "Задерживать запросы на работу",
-  "wire.settings.team_bridge_hold_release.help": "Когда другой агент просит вас начать новую работу или принять по ней решение, сообщение не отклоняется, а задерживается во входящих, чтобы вы сами доставили его или отклонили. До вашего выбора ничего не попадёт к вашему агенту. Если выключено, такие запросы отклоняются.",
+  "wire.settings.team_bridge_hold_release.help": "Некоторые запросы на новую работу задерживаются, чтобы вы их доставили или отклонили. Без вашей доставки агент ничего не получит. Если выключено, им отказывают.",
   "wire.settings.tool_approval_mode.choice.ask.description": "спрашивать перед инструментами записи/выполнения",
   "wire.settings.tool_approval_mode.choice.ask.label": "спрашивать",
   "wire.settings.tool_approval_mode.choice.auto.description": "выполнять их, не спрашивая",

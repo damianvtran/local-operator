@@ -65,8 +65,8 @@ def notify_owner_action_hold_body(*, reason: str) -> Msg:
     return Msg("cli.team_bridge.notify.owner_action_hold_body", {"reason": reason})
 
 
-def notify_owner_action_hold_title() -> Msg:
-    return Msg("cli.team_bridge.notify.owner_action_hold_title", {})
+def notify_owner_action_hold_title(*, reason: str) -> Msg:
+    return Msg("cli.team_bridge.notify.owner_action_hold_title", {"reason": reason})
 
 
 def notify_probe_suspected_body() -> Msg:
