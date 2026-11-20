@@ -125,9 +125,18 @@ def test_counterfactual_two_posters_go_to_the_designated_session_with_candidates
 
 
 @pytest.mark.parametrize("kind", ["group", "channel", None])
-def test_only_a_dm_ever_routes(tmp_path: Path, kind: str | None) -> None:
+@pytest.mark.parametrize("thread_root", [None, "bcmsg_ask00001"])
+def test_only_a_dm_ever_routes(tmp_path: Path, kind: str | None, thread_root: str | None) -> None:
+    """The kind gate outranks a thread hit, even one naming our own post.
+
+    PR #4177 threads a channel/group answer under the message it answers BY
+    DEFAULT, so the next inbound message there now carries a ``thread_root_id``
+    that is one of our own posts — exactly the fact that routes a DM. A group or
+    channel must still never route: its members have no "the asker" to reach.
+    """
+
     _post(tmp_path, BILL, NOW - 10, message_id="bcmsg_ask00001")
-    decision = _route(tmp_path, kind=kind)
+    decision = _route(tmp_path, kind=kind, thread_root=thread_root)
     assert decision.target is None and decision.reason == DESIGNATED_NOT_DM
 
 
