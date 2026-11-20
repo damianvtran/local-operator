@@ -678,7 +678,7 @@ def test_status_line_renders_holders_and_ignores_stale_records(tmp_path: Path) -
         line = heavy_lease.status_line(directory, 1, now=time.time() + 12 * 60 + 5)
     finally:
         lease.release()
-    assert line == f"heavy jobs: 1/1 slots held: abc123/{os.getpid()} tsc -b (12m)"
+    assert line == f"heavy jobs: 1/1 slots held: abc123/{os.getpid()} tsc (12m)"  # label (#4264 Q3)
     assert not (directory / "slot-0.json").exists()  # release removes our record
 
 
@@ -864,7 +864,7 @@ def test_status_counts_holders_above_the_current_slot_count(tmp_path: Path) -> N
         first.release()
         second.release()
     assert shrunk.startswith("heavy jobs: 2 held (1 slot now): s0/")
-    assert "s1/" in shrunk and "tsc -b" in shrunk
+    assert "s1/" in shrunk and " tsc (" in shrunk
     assert same.startswith("heavy jobs: 2/2 slots held: ")
 
 

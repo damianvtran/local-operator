@@ -6800,6 +6800,11 @@ def _reachability_rows(
             "attempted": attempt.detail != relay_mod.DETAIL_NOT_ATTEMPTED,
             "last_seen_at": member.last_seen_at,
         }
+        if attempt.dial_silent and not attempt.connected:
+            # The producer's attempt evidence (U3): set only for an issued
+            # connect that drew nothing. ``outcome`` cannot say it — a local
+            # OSError and an unstarted worker both classify as ``no_answer``.
+            observed["dial_silent"] = True
         if winner:
             observed["winner"] = winner
             observed["winner_verified"] = bool(winner_claim_ok)
@@ -7468,6 +7473,20 @@ NO_IDENTITY_LINE = (
 NOTHING_TO_CHECK_LINE = "nothing to check: no networks, or no other members yet"
 
 
+def uplink_lines(check: Mapping[str, Any], state: str) -> list[str]:
+    """An ``uplink`` row (``network.uplink``) and its remedies, for ready AND doctor.
+
+    The detail is already composed, localized prose, so it is printed as written
+    and never through ``doctor_detail_words`` (whose colon parsing is for dial
+    codes). The device row has no label; a per-peer row names the peer.
+    """
+    label = str(check.get("device_name") or check.get("device_id") or "")
+    head = f"{state} uplink" + (f" {label}" if label else "")
+    lines = [f"{head}: {check.get('detail', '')}".rstrip()]
+    lines.extend(f"    - {remedy}" for remedy in check.get("remedies") or ())
+    return lines
+
+
 def render_check_lines(checks: Iterable[Mapping[str, Any]]) -> list[str]:
     """The ``ready`` rows, one loop for BOTH surfaces (CLI register + digest).
 
@@ -7504,6 +7523,10 @@ def render_check_lines(checks: Iterable[Mapping[str, Any]]) -> list[str]:
             if clause:
                 line += f" — {clause}"
             lines.append(line)
+        elif kind == "uplink":
+            # Remedies included: this branch owns the row's whole reading.
+            lines.extend(uplink_lines(check, state))
+            continue
         elif kind == "reachability":
             lines.append(
                 f"{state} {kind} {label} {check.get('endpoint', '')}: "

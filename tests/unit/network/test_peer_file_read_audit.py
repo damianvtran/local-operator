@@ -78,6 +78,510 @@ def _fixture_source(owner: Any, payload: bytes, attachment: bool) -> str:
 
 
 @pytest.mark.parametrize("attachment", [False, True])
+@pytest.mark.parametrize("phase", ["stat", "verify"])
+@pytest.mark.parametrize("fail_audit", [False, True])
+def test_hash_phase_requires_durable_owner_read_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attachment: bool,
+    phase: str,
+    fail_audit: bool,
+) -> None:
+    """Hashing consumes owner bytes even when no FILE payload is returned.
+
+    Keep this direct-handler discriminator socket-free: the paired-relay controls
+    separately establish authenticated dispatch. Observe the old behavior before
+    asserting, so a baseline failure reports real target reads and the digest or
+    match response, rather than failing merely because a new helper is absent.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network.types import MeshRefusal
+
+    root = tmp_path / "owner"
+    (root / "sessions" / SESSION / "scratchpad").mkdir(parents=True)
+    owner: Any = SimpleNamespace(root=root, audit=audit.AuditLog(root), _own_label=lambda: "owner")
+    payload = b"synthetic hash admission payload"
+    reference = _fixture_source(owner, payload, attachment)
+    target = (
+        root / "attachments" / f"{reference.removeprefix('attachment:')}.bin"
+        if attachment
+        else _pad(owner) / "audit.bin"
+    )
+    size, mtime = target.stat().st_size, target.stat().st_mtime_ns
+    prefix = 7
+    expected = size if phase == "stat" else prefix
+    frame: dict[str, Any] = {
+        "session_id": SESSION,
+        "phase": phase,
+        "expect_bytes": size,
+        "expect_mtime_ns": mtime,
+        "prefix_bytes": prefix,
+        "prefix_digest": "sha256:" + hashlib.sha256(payload[:prefix]).hexdigest(),
+        # These untrusted fields must not override the real serving operation.
+        "expected_file_phase": "fetch",
+        "audit_detail": {"phase": "fetch"},
+        ("attachment" if attachment else "path"): (
+            reference.removeprefix("attachment:") if attachment else reference
+        ),
+    }
+    link: Any = SimpleNamespace(
+        device_id="synthetic-requester", network_id="synthetic-network", epoch=1
+    )
+    real_required, real_pread, real_fsync = owner.audit.record_required, os.pread, os.fsync
+    attempts: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    reads: list[tuple[int, int]] = []
+    durable: set[int] = set()
+    directory_durable: set[int] = set()
+    reads_admitted: list[bool] = []
+
+    def required(event: audit.AuditEvent, **context: Any) -> bool:
+        # The trusted expected operation is separate from mutable event detail;
+        # a phaseless hash row must not silently pass as a historical fetch row.
+        attempts.append((event.detail.copy(), context.copy()))
+        return False if fail_audit else real_required(event, **context)
+
+    def synced(fd: int) -> None:
+        real_fsync(fd)
+        if _fd_matches(fd, store.audit_path(root)):
+            durable.update(row["seq"] for row in _admissions(root))
+        if _fd_matches(fd, store.audit_path(root).parent):
+            directory_durable.update(
+                row["seq"] for row in _admissions(root) if row["seq"] in durable
+            )
+
+    def pread(fd: int, count: int, offset: int) -> bytes:
+        if _fd_matches(fd, target):
+            reads.append((offset, count))
+            rows = _admissions(root)
+            reads_admitted.append(bool(rows and rows[-1]["seq"] in directory_durable))
+        return real_pread(fd, count, offset)
+
+    monkeypatch.setattr(owner.audit, "record_required", required)
+    monkeypatch.setattr(os, "fsync", synced)
+    monkeypatch.setattr(os, "pread", pread)
+    reply = None
+    refusal = None
+    try:
+        try:
+            reply = files.make_handler(owner)(link, frame)
+        except MeshRefusal as error:
+            refusal = error.code
+        observed = {"attempts": attempts, "reads": reads, "reply": reply, "refusal": refusal}
+        if fail_audit:
+            assert refusal == "audit_unavailable" and not reads and reply is None, observed
+        else:
+            assert attempts == [
+                (
+                    {
+                        "reference": reference,
+                        "admitted_bytes": expected,
+                        "offset": 0,
+                        "decision": "allow",
+                        "phase": phase,
+                    },
+                    {"expected_file_phase": phase},
+                )
+            ], observed
+            assert reads == [(0, expected)] and reads_admitted == [True], observed
+            assert reply is not None and refusal is None, observed
+            if phase == "stat":
+                assert reply["sha256"] == "sha256:" + hashlib.sha256(payload).hexdigest()
+            else:
+                assert reply == {"match": True}
+    finally:
+        owner.audit.close()
+
+
+@pytest.mark.parametrize("phase", ["fetch", "stat", "verify"])
+def test_closed_file_read_variants_preserve_legacy_fetch(tmp_path: Path, phase: str) -> None:
+    log = audit.AuditLog(tmp_path)
+    event = _event()
+    if phase != "fetch":
+        event.detail["phase"] = phase
+    try:
+        assert log.record_required(event, expected_file_phase=phase)
+        rows = log.tail()
+        assert rows[-1]["detail"] == event.detail
+        assert set(rows[-1]["detail"]) == {"reference", "offset", "admitted_bytes", "decision"} | (
+            {"phase"} if phase != "fetch" else set()
+        )
+        # This historical/future-fetch selector must not count present null as
+        # fetch. The rows are planned work, never delivery/completion receipts.
+        candidates = rows + [{"detail": {"phase": None}}, {"detail": {"phase": "unknown"}}]
+        fetch = [row for row in candidates if "phase" not in row["detail"]]
+        assert len(fetch) == (1 if phase == "fetch" else 0)
+    finally:
+        log.close()
+
+
+@pytest.mark.parametrize("expected_phase", ["unknown", "", None, True, "verify"])
+def test_hash_context_cannot_accept_legacy_fetch_shape(
+    tmp_path: Path,
+    expected_phase: Any,
+) -> None:
+    log = audit.AuditLog(tmp_path)
+    try:
+        assert not log.record_required(_event(), expected_file_phase=expected_phase)
+        assert log.recorded_through == 0 and not _admissions(tmp_path)
+    finally:
+        log.close()
+
+
+def _damage_read_detail(detail: dict[str, Any], damage: str) -> None:
+    if damage == "missing_phase":
+        if "phase" in detail:
+            del detail["phase"]
+        else:
+            detail["phase"] = None
+    elif damage.startswith("phase_"):
+        detail["phase"] = {
+            "phase_null": None,
+            "phase_unknown": "unknown",
+            "phase_empty": "",
+            "phase_bool": True,
+            "phase_fetch": "fetch",
+        }[damage]
+    elif damage == "extra":
+        detail["extra"] = "untrusted"
+    elif damage == "truncated":
+        detail["truncated"] = True
+    elif damage == "missing_offset":
+        del detail["offset"]
+    elif damage == "count_bool":
+        detail["admitted_bytes"] = True
+    elif damage == "count_float":
+        detail["admitted_bytes"] = 1.0
+    elif damage == "offset_bool":
+        detail["offset"] = False
+    elif damage == "offset_float":
+        detail["offset"] = 0.0
+    elif damage == "count_negative":
+        detail["admitted_bytes"] = -1
+    elif damage == "offset_negative":
+        detail["offset"] = -1
+    elif damage == "reference_bool":
+        detail["reference"] = True
+    elif damage == "decision_bool":
+        detail["decision"] = True
+    elif damage == "reference_control":
+        detail["reference"] = "scratchpad://a\nfile"
+    else:
+        raise AssertionError(damage)
+
+
+@pytest.mark.parametrize("phase", ["fetch", "stat", "verify"])
+@pytest.mark.parametrize("stage", ["raw", "rendered", "mutating_renderer", "durable"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_phase",
+        "phase_null",
+        "phase_unknown",
+        "phase_empty",
+        "phase_bool",
+        "phase_fetch",
+        "extra",
+        "truncated",
+        "missing_offset",
+        "count_bool",
+        "count_float",
+        "offset_bool",
+        "offset_float",
+        "count_negative",
+        "offset_negative",
+        "reference_bool",
+        "decision_bool",
+        "reference_control",
+    ],
+)
+def test_file_read_rejects_invalid_candidate_without_sequence_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    stage: str,
+    damage: str,
+) -> None:
+    log = audit.AuditLog(tmp_path)
+    event = _event()
+    event.detail["admitted_bytes"] = 1
+    if phase != "fetch":
+        event.detail["phase"] = phase
+    real_render, real_sync = log._render, log.sync
+
+    def rendered(item: audit.AuditEvent) -> str:
+        if stage == "mutating_renderer":
+            # Mutation must not redefine the independently captured expectation.
+            _damage_read_detail(item.detail, damage)
+            return real_render(item)
+        row = json.loads(real_render(item))
+        _damage_read_detail(row["detail"], damage)
+        return json.dumps(row) + "\n"
+
+    def synced() -> None:
+        real_sync()
+        row = json.loads(log._required_line or "{}")
+        _damage_read_detail(row["detail"], damage)
+        log._required_line = json.dumps(row) + "\n"
+
+    try:
+        with monkeypatch.context() as patch:
+            if stage == "raw":
+                _damage_read_detail(event.detail, damage)
+            elif stage == "durable":
+                patch.setattr(log, "sync", synced)
+            else:
+                patch.setattr(log, "_render", rendered)
+            assert not log.record_required(event, expected_file_phase=phase)
+        if stage != "durable":
+            assert not _admissions(tmp_path), "invalid rendered hash became an apparent fetch row"
+            assert log.recorded_through == 0 and log.records_written == 0
+        else:
+            # The persisted original row is valid; corrupting its acknowledgement
+            # must still refuse the target read. Do not pretend append was undone.
+            assert len(_admissions(tmp_path)) == 1
+        next_event = _event()
+        assert log.record_required(next_event)
+        seqs = [row["seq"] for row in _admissions(tmp_path)]
+        assert seqs == ([1] if stage != "durable" else [1, 2])
+    finally:
+        log.close()
+
+
+@pytest.mark.parametrize("phase", ["stat", "verify"])
+@pytest.mark.parametrize("damage", ["missing_phase", "truncated", "count_float"])
+def test_sanitizer_cannot_redefine_expected_hash_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    damage: str,
+) -> None:
+    log = audit.AuditLog(tmp_path)
+    event = _event()
+    event.detail.update(phase=phase, admitted_bytes=1)
+    original = audit._sanitize_detail
+
+    def sanitize(name: str, detail: dict[str, Any]) -> dict[str, Any]:
+        _damage_read_detail(detail, damage)
+        return original(name, detail)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(audit, "_sanitize_detail", sanitize)
+            assert not log.record_required(event, expected_file_phase=phase)
+        assert not _admissions(tmp_path) and log.recorded_through == 0
+        assert log.record_required(_event())
+        assert _admissions(tmp_path)[-1]["seq"] == 1
+    finally:
+        log.close()
+
+
+@pytest.mark.parametrize("phase", ["stat", "verify"])
+def test_hash_reference_budgets_final_phase_without_target_content(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    # Find the deterministic serialized-budget boundary, not a guessed length.
+    references = ["scratchpad://" + "😀" * n for n in range(1, 200)]
+    reference = next(
+        ref
+        for ref in references
+        if audit.file_read_reference(ref, 0, 1) == ref
+        and audit.file_read_reference(ref, 0, 1, phase=phase) != ref
+    )
+    real_hash = hashlib.sha256
+    hashed: list[bytes] = []
+
+    def sha256(value: bytes = b"") -> Any:
+        hashed.append(value)
+        return real_hash(value)
+
+    monkeypatch.setattr(audit.hashlib, "sha256", sha256)
+    fallback = audit.file_read_reference(reference, 0, 1, phase=phase)
+    assert hashed == [reference.encode("utf-8")]
+    assert fallback == "reference:sha256:" + real_hash(reference.encode()).hexdigest()
+    detail = {
+        "reference": fallback,
+        "offset": 0,
+        "admitted_bytes": 1,
+        "decision": "allow",
+        "phase": phase,
+    }
+    assert audit._sanitize_detail("session_file_read_admitted", detail) == detail
+    with pytest.raises(ValueError):
+        audit.file_read_reference(reference, False, 1, phase=phase)
+    with pytest.raises(ValueError):
+        audit.file_read_reference(reference, 0, 1, phase="unknown")
+
+
+@pytest.mark.parametrize(
+    "phase,payload,prefix,expected",
+    [
+        ("stat", b"", 0, "empty_file"),
+        ("verify", b"abc", 0, False),
+        ("verify", b"abc", -1, False),
+        ("verify", b"abc", 4, False),
+        ("verify", b"abc", "invalid", "bad_request"),
+    ],
+)
+def test_hash_no_read_branches_need_no_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    payload: bytes,
+    prefix: Any,
+    expected: Any,
+) -> None:
+    from local_operator.network.types import MeshRefusal
+
+    pad = tmp_path / "sessions" / SESSION / "scratchpad"
+    pad.mkdir(parents=True)
+    target = pad / "empty.bin"
+    target.write_bytes(payload)
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("no-read branch attempted a hash or audit")
+
+    monkeypatch.setattr(files, "_hash_fd", unexpected)
+    frame = {
+        "phase": phase,
+        "path": "scratchpad://empty.bin",
+        "prefix_bytes": prefix,
+        "expect_bytes": len(payload),
+        "expect_mtime_ns": target.stat().st_mtime_ns,
+    }
+    if type(expected) is str:
+        with pytest.raises(MeshRefusal) as error:
+            files.serve_file(tmp_path, SESSION, frame, admit=unexpected)
+        assert error.value.code == expected
+    else:
+        assert files.serve_file(tmp_path, SESSION, frame, admit=unexpected) == {"match": False}
+
+
+@pytest.mark.parametrize("attachment", [False, True])
+@pytest.mark.parametrize("phase", ["stat", "verify"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "disabled",
+        "degraded",
+        "append",
+        "fsync",
+        "directory",
+        "readback",
+        "renderer",
+        "sanitizer",
+    ],
+)
+def test_hash_durable_faults_prevent_target_read_and_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attachment: bool,
+    phase: str,
+    failure: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.network.types import MeshRefusal
+
+    root = tmp_path / "owner"
+    (root / "sessions" / SESSION / "scratchpad").mkdir(parents=True)
+    owner: Any = SimpleNamespace(root=root, audit=audit.AuditLog(root), _own_label=lambda: "owner")
+    reference = _fixture_source(owner, b"synthetic failure payload", attachment)
+    target = (
+        root / "attachments" / f"{reference.removeprefix('attachment:')}.bin"
+        if attachment
+        else _pad(owner) / "audit.bin"
+    )
+    frame = {
+        "phase": phase,
+        "session_id": SESSION,
+        "prefix_bytes": 7,
+        "expect_bytes": target.stat().st_size,
+        "expect_mtime_ns": target.stat().st_mtime_ns,
+        ("attachment" if attachment else "path"): (
+            reference.removeprefix("attachment:") if attachment else reference
+        ),
+    }
+    link: Any = SimpleNamespace(device_id="synthetic-requester", network_id="synthetic", epoch=1)
+    real_open, real_fsync, real_sync = Path.open, os.fsync, owner.audit.sync
+    real_pread, real_render = os.pread, owner.audit._render
+    real_sanitize, real_required = audit._sanitize_detail, owner.audit.record_required
+    reads: list[int] = []
+    injected: list[str] = []
+    admitting = False
+
+    def opened(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if failure == "append" and path == store.audit_path(root) and "a" in mode:
+            injected.append(failure)
+            raise OSError("injected hash admission append failure")
+        return real_open(path, mode, *args, **kwargs)
+
+    def fsync(fd: int) -> None:
+        if (failure == "fsync" and _fd_matches(fd, store.audit_path(root))) or (
+            failure == "directory" and _fd_matches(fd, store.audit_path(root).parent)
+        ):
+            injected.append(failure)
+            raise OSError("injected hash admission fsync failure")
+        real_fsync(fd)
+
+    def sync() -> None:
+        real_sync()
+        if failure == "readback":
+            injected.append(failure)
+            row = json.loads(owner.audit._required_line)
+            del row["detail"]["phase"]
+            owner.audit._required_line = json.dumps(row)
+
+    def render(event: audit.AuditEvent) -> str:
+        row = json.loads(real_render(event))
+        if failure == "renderer":
+            injected.append(failure)
+            del row["detail"]["phase"]
+        return json.dumps(row) + "\n"
+
+    def required(event: audit.AuditEvent, **context: Any) -> bool:
+        nonlocal admitting
+        admitting = True
+        try:
+            return real_required(event, **context)
+        finally:
+            admitting = False
+
+    def sanitize(name: str, detail: dict[str, Any]) -> dict[str, Any]:
+        if failure == "sanitizer" and admitting and name == "session_file_read_admitted":
+            injected.append(failure)
+            detail = {key: value for key, value in detail.items() if key != "phase"}
+        return real_sanitize(name, detail)
+
+    def pread(fd: int, count: int, offset: int) -> bytes:
+        if _fd_matches(fd, target):
+            reads.append(count)
+        return real_pread(fd, count, offset)
+
+    monkeypatch.setattr(owner.audit, "record_required", required)
+    monkeypatch.setattr(owner.audit, "_render", render)
+    monkeypatch.setattr(audit, "_sanitize_detail", sanitize)
+    monkeypatch.setattr(Path, "open", opened)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(owner.audit, "sync", sync)
+    monkeypatch.setattr(os, "pread", pread)
+    if failure == "disabled":
+        owner.audit._enabled = False
+    if failure == "degraded":
+        owner.audit.degraded = True
+    try:
+        with pytest.raises(MeshRefusal) as error:
+            files.make_handler(owner)(link, frame)
+        assert error.value.code == "audit_unavailable"
+        assert reads == []
+        if failure in {"append", "fsync", "directory", "readback", "renderer", "sanitizer"}:
+            assert injected == [failure], "fault missed the new hash admission"
+    finally:
+        owner.audit.close()
+
+
+@pytest.mark.parametrize("attachment", [False, True])
 def test_owner_commits_before_source_read_and_first_received_content(
     mesh: Devices,
     monkeypatch: pytest.MonkeyPatch,
@@ -155,7 +659,8 @@ def test_owner_commits_before_source_read_and_first_received_content(
     rc, receipt = _pull(capsys, source)
     assert rc == 0, receipt
     assert received == payload
-    rows = _admissions(owner.root)
+    # Presence, not truthiness: null/unknown phase is never a fetch row.
+    rows = [row for row in _admissions(owner.root) if "phase" not in row["detail"]]
     assert len(rows) == 2
     assert sum(row["detail"]["admitted_bytes"] for row in rows) == len(payload)
     assert not _admissions(requester.root), "the required receipt belongs to the owner"
@@ -184,7 +689,7 @@ def test_failed_durable_audit_refuses_with_zero_content_bytes(
     fault_rows: list[int] = []
     entry_health: list[bool] = []
 
-    def required(event: audit.AuditEvent) -> bool:
+    def required(event: audit.AuditEvent, **context: Any) -> bool:
         nonlocal active, expected_seq
         # Arm AFTER fresh-link lifecycle writes. A previously degraded writer
         # refusing is not evidence that THIS admission's append/fsync failed.
@@ -193,7 +698,7 @@ def test_failed_durable_audit_refuses_with_zero_content_bytes(
             expected_seq = owner.audit.recorded_through + 1
             active = True
             try:
-                return real_required(event)
+                return real_required(event, **context)
             finally:
                 active = False
 
@@ -316,30 +821,33 @@ def test_fallback_reference_never_reads_fetch_content_before_admission(
     expected_reference = "reference:sha256:" + hashlib.sha256(reference.encode()).hexdigest()
     real_required, real_pread = owner.audit.record_required, os.pread
     real_ask = files._Asker.ask
-    active_fetch = False
+    active_read = False
     admitted = False
     fetch_reads: list[int] = []
     received: list[bytes] = []
 
-    def required(event: audit.AuditEvent) -> bool:
+    def required(event: audit.AuditEvent, **context: Any) -> bool:
         nonlocal admitted
         if fail_audit:
             return False
-        admitted = real_required(event)
+        admitted = real_required(event, **context)
         if admitted:
             row = _admissions(owner.root)[-1]
-            assert row["detail"] == {
+            expected_detail = {
                 "reference": expected_reference,
                 "offset": 0,
                 "admitted_bytes": len(payload),
                 "decision": "allow",
-            }, "usable EXACT audit fields must precede every fetch content read"
+            }
+            if context["expected_file_phase"] != "fetch":
+                expected_detail["phase"] = context["expected_file_phase"]
+            assert row["detail"] == expected_detail, "EXACT fields must precede every target read"
             assert row["actor"] == mesh[1].identity.device_id
             assert row["session_id"] == SESSION
         return admitted
 
     def pread(fd: int, count: int, offset: int) -> bytes:
-        if active_fetch and _fd_matches(fd, target):
+        if active_read and _fd_matches(fd, target):
             fetch_reads.append(count)
             assert admitted, "fallback hashed source content BEFORE admission"
         return real_pread(fd, count, offset)
@@ -347,16 +855,17 @@ def test_fallback_reference_never_reads_fetch_content_before_admission(
     real_handler = owner._handlers["net_file_get"]  # noqa: SLF001
 
     def handler(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
-        nonlocal active_fetch
-        # Stat/verify already hash content for metadata/integrity. Only fetch
-        # content is in scope: do not misreport those pre-existing reads.
-        active_fetch = frame.get("phase") == "fetch"
+        nonlocal active_read, admitted
+        # #4228 covered fetch only. A intentionally extends the same observation
+        # to hash phases; an earlier operation's receipt cannot admit this one.
+        active_read = frame.get("phase") in {"stat", "verify", "fetch"}
+        admitted = False
         try:
             result = real_handler(link, frame)
             assert isinstance(result, dict)
             return result
         finally:
-            active_fetch = False
+            active_read = False
 
     def ask(self: Any, **fields: Any) -> dict[str, Any]:
         reply = real_ask(self, **fields)
@@ -670,7 +1179,7 @@ def test_archive_failure_preserves_prior_copy_and_refuses_content(
     source_reads: list[int] = []
     received: list[bytes] = []
 
-    def required(event: audit.AuditEvent) -> bool:
+    def required(event: audit.AuditEvent, **context: Any) -> bool:
         nonlocal active, expected_seq, original_identity, expected_admission
         with owner.audit._write_lock:  # noqa: SLF001
             assert not owner.audit.degraded, "fault armed on a previously degraded writer"
@@ -688,7 +1197,7 @@ def test_archive_failure_preserves_prior_copy_and_refuses_content(
             owner.audit._max_bytes = original.st_size + 1  # noqa: SLF001
             active = True
             try:
-                result = real_required(event)
+                result = real_required(event, **context)
                 assert result is False, "faulted admission unexpectedly acknowledged"
                 # Capture BEFORE releasing the existing lock: later lifecycle
                 # writes may legitimately rotate this inode after refusal.

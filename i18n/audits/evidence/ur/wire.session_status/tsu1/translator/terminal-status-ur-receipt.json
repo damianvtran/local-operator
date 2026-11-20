@@ -1,0 +1,40 @@
+{
+  "locale": "ur",
+  "namespace": "wire.session_status",
+  "status": "translated",
+  "key_count": 17,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b97856c53df",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state model declaration",
+    "fallback_used": false
+  },
+  "created_at": "2026-11-19T21:01:10.858194+00:00",
+  "mechanical_check_command": "PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/check-terminal-status-ur.py\"",
+  "mechanical_check_exit_code": 0,
+  "independent_audits_required": 2,
+  "independent_audits_completed": 0,
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur.json",
+      "sha256": "4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur-provenance.json",
+      "sha256": "223f36eb1c4bcddf20a5e54dfd25ea6961a3472d693a3f546095afa22cd1f69c"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur-checks.json",
+      "sha256": "cb6d3eb288117ed04cd42931099484dbd5b378577e2beb37e890228ec9b12c01"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur-checks.log",
+      "sha256": "94d021414a63fa8a63b7ab1cf4f3d3bc029bd0e4f773c4616e4bdbb5a9b9e6d3"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/check-terminal-status-ur.py",
+      "sha256": "c91e5168a07582cc02f3e96f272760ab459167b149b7c1e713881886dfcbef0a"
+    }
+  ]
+}

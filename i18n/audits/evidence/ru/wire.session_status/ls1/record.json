@@ -1,0 +1,901 @@
+{
+  "locale": "ru",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/ru/wire.session_status.json",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "target_sha256": "b79bf8a9eedd572e7e7ee2add5400072fe1aa47820e37bcc0b77bbd947e595ea",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Task brief; translator identity not independently inspected"
+  },
+  "auditor": {
+    "agent": "translation-auditor / live-status-audit-ru",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "d07b98d676f1",
+    "session": "d07b98d676f1",
+    "date": "2026-11-20",
+    "fallback_used": false,
+    "actual_model_source": "Host model declaration",
+    "independent_from_translator": true,
+    "result": "clean",
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "result": "clean",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "keys_audited": 31,
+  "new_keys_audited": 14,
+  "existing_keys_byte_unchanged": 17,
+  "evidence": {
+    "head": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+    "plural_categories": [
+      "few",
+      "many",
+      "one",
+      "other"
+    ],
+    "plural_occurrences": [
+      {
+        "key": "wire.session_status.dormant",
+        "argument": "count",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "argument": "jobs",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "argument": "jobs",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "argument": "subagents",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "argument": "count",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "argument": "count",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "argument": "count",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "argument": "count",
+        "arms": [
+          "one",
+          "few",
+          "many",
+          "other"
+        ]
+      }
+    ],
+    "argument_parity_keys": 31,
+    "render_cases": [
+      {
+        "key": "wire.session_status.approval_needed",
+        "count": 0,
+        "en": "Approval needed",
+        "ru": "Нужно одобрение",
+        "en_cells": 15,
+        "ru_cells": 15
+      },
+      {
+        "key": "wire.session_status.approval_needed",
+        "count": 1,
+        "en": "Approval needed",
+        "ru": "Нужно одобрение",
+        "en_cells": 15,
+        "ru_cells": 15
+      },
+      {
+        "key": "wire.session_status.approval_needed",
+        "count": 2,
+        "en": "Approval needed",
+        "ru": "Нужно одобрение",
+        "en_cells": 15,
+        "ru_cells": 15
+      },
+      {
+        "key": "wire.session_status.approval_needed",
+        "count": 5,
+        "en": "Approval needed",
+        "ru": "Нужно одобрение",
+        "en_cells": 15,
+        "ru_cells": 15
+      },
+      {
+        "key": "wire.session_status.approval_needed",
+        "count": 21,
+        "en": "Approval needed",
+        "ru": "Нужно одобрение",
+        "en_cells": 15,
+        "ru_cells": 15
+      },
+      {
+        "key": "wire.session_status.approval_needed",
+        "count": 1000000,
+        "en": "Approval needed",
+        "ru": "Нужно одобрение",
+        "en_cells": 15,
+        "ru_cells": 15
+      },
+      {
+        "key": "wire.session_status.answer_needed",
+        "count": 0,
+        "en": "Answer needed",
+        "ru": "Нужен ответ",
+        "en_cells": 13,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.answer_needed",
+        "count": 1,
+        "en": "Answer needed",
+        "ru": "Нужен ответ",
+        "en_cells": 13,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.answer_needed",
+        "count": 2,
+        "en": "Answer needed",
+        "ru": "Нужен ответ",
+        "en_cells": 13,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.answer_needed",
+        "count": 5,
+        "en": "Answer needed",
+        "ru": "Нужен ответ",
+        "en_cells": 13,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.answer_needed",
+        "count": 21,
+        "en": "Answer needed",
+        "ru": "Нужен ответ",
+        "en_cells": 13,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.answer_needed",
+        "count": 1000000,
+        "en": "Answer needed",
+        "ru": "Нужен ответ",
+        "en_cells": 13,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.wedged",
+        "count": 0,
+        "en": "Not answering · process alive",
+        "ru": "Не отвечает · процесс жив",
+        "en_cells": 29,
+        "ru_cells": 25
+      },
+      {
+        "key": "wire.session_status.wedged",
+        "count": 1,
+        "en": "Not answering · process alive",
+        "ru": "Не отвечает · процесс жив",
+        "en_cells": 29,
+        "ru_cells": 25
+      },
+      {
+        "key": "wire.session_status.wedged",
+        "count": 2,
+        "en": "Not answering · process alive",
+        "ru": "Не отвечает · процесс жив",
+        "en_cells": 29,
+        "ru_cells": 25
+      },
+      {
+        "key": "wire.session_status.wedged",
+        "count": 5,
+        "en": "Not answering · process alive",
+        "ru": "Не отвечает · процесс жив",
+        "en_cells": 29,
+        "ru_cells": 25
+      },
+      {
+        "key": "wire.session_status.wedged",
+        "count": 21,
+        "en": "Not answering · process alive",
+        "ru": "Не отвечает · процесс жив",
+        "en_cells": 29,
+        "ru_cells": 25
+      },
+      {
+        "key": "wire.session_status.wedged",
+        "count": 1000000,
+        "en": "Not answering · process alive",
+        "ru": "Не отвечает · процесс жив",
+        "en_cells": 29,
+        "ru_cells": 25
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "count": 0,
+        "en": "Not answering · process alive (last heartbeat 4m ago)",
+        "ru": "Не отвечает · процесс жив (последний пульс 4m назад)",
+        "en_cells": 53,
+        "ru_cells": 52
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "count": 1,
+        "en": "Not answering · process alive (last heartbeat 4m ago)",
+        "ru": "Не отвечает · процесс жив (последний пульс 4m назад)",
+        "en_cells": 53,
+        "ru_cells": 52
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "count": 2,
+        "en": "Not answering · process alive (last heartbeat 4m ago)",
+        "ru": "Не отвечает · процесс жив (последний пульс 4m назад)",
+        "en_cells": 53,
+        "ru_cells": 52
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "count": 5,
+        "en": "Not answering · process alive (last heartbeat 4m ago)",
+        "ru": "Не отвечает · процесс жив (последний пульс 4m назад)",
+        "en_cells": 53,
+        "ru_cells": 52
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "count": 21,
+        "en": "Not answering · process alive (last heartbeat 4m ago)",
+        "ru": "Не отвечает · процесс жив (последний пульс 4m назад)",
+        "en_cells": 53,
+        "ru_cells": 52
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "count": 1000000,
+        "en": "Not answering · process alive (last heartbeat 4m ago)",
+        "ru": "Не отвечает · процесс жив (последний пульс 4m назад)",
+        "en_cells": 53,
+        "ru_cells": 52
+      },
+      {
+        "key": "wire.session_status.working",
+        "count": 0,
+        "en": "Working",
+        "ru": "Работает",
+        "en_cells": 7,
+        "ru_cells": 8
+      },
+      {
+        "key": "wire.session_status.working",
+        "count": 1,
+        "en": "Working",
+        "ru": "Работает",
+        "en_cells": 7,
+        "ru_cells": 8
+      },
+      {
+        "key": "wire.session_status.working",
+        "count": 2,
+        "en": "Working",
+        "ru": "Работает",
+        "en_cells": 7,
+        "ru_cells": 8
+      },
+      {
+        "key": "wire.session_status.working",
+        "count": 5,
+        "en": "Working",
+        "ru": "Работает",
+        "en_cells": 7,
+        "ru_cells": 8
+      },
+      {
+        "key": "wire.session_status.working",
+        "count": 21,
+        "en": "Working",
+        "ru": "Работает",
+        "en_cells": 7,
+        "ru_cells": 8
+      },
+      {
+        "key": "wire.session_status.working",
+        "count": 1000000,
+        "en": "Working",
+        "ru": "Работает",
+        "en_cells": 7,
+        "ru_cells": 8
+      },
+      {
+        "key": "wire.session_status.attached",
+        "count": 0,
+        "en": "Open",
+        "ru": "Открыта",
+        "en_cells": 4,
+        "ru_cells": 7
+      },
+      {
+        "key": "wire.session_status.attached",
+        "count": 1,
+        "en": "Open",
+        "ru": "Открыта",
+        "en_cells": 4,
+        "ru_cells": 7
+      },
+      {
+        "key": "wire.session_status.attached",
+        "count": 2,
+        "en": "Open",
+        "ru": "Открыта",
+        "en_cells": 4,
+        "ru_cells": 7
+      },
+      {
+        "key": "wire.session_status.attached",
+        "count": 5,
+        "en": "Open",
+        "ru": "Открыта",
+        "en_cells": 4,
+        "ru_cells": 7
+      },
+      {
+        "key": "wire.session_status.attached",
+        "count": 21,
+        "en": "Open",
+        "ru": "Открыта",
+        "en_cells": 4,
+        "ru_cells": 7
+      },
+      {
+        "key": "wire.session_status.attached",
+        "count": 1000000,
+        "en": "Open",
+        "ru": "Открыта",
+        "en_cells": 4,
+        "ru_cells": 7
+      },
+      {
+        "key": "wire.session_status.ready",
+        "count": 0,
+        "en": "Ready",
+        "ru": "Готова",
+        "en_cells": 5,
+        "ru_cells": 6
+      },
+      {
+        "key": "wire.session_status.ready",
+        "count": 1,
+        "en": "Ready",
+        "ru": "Готова",
+        "en_cells": 5,
+        "ru_cells": 6
+      },
+      {
+        "key": "wire.session_status.ready",
+        "count": 2,
+        "en": "Ready",
+        "ru": "Готова",
+        "en_cells": 5,
+        "ru_cells": 6
+      },
+      {
+        "key": "wire.session_status.ready",
+        "count": 5,
+        "en": "Ready",
+        "ru": "Готова",
+        "en_cells": 5,
+        "ru_cells": 6
+      },
+      {
+        "key": "wire.session_status.ready",
+        "count": 21,
+        "en": "Ready",
+        "ru": "Готова",
+        "en_cells": 5,
+        "ru_cells": 6
+      },
+      {
+        "key": "wire.session_status.ready",
+        "count": 1000000,
+        "en": "Ready",
+        "ru": "Готова",
+        "en_cells": 5,
+        "ru_cells": 6
+      },
+      {
+        "key": "wire.session_status.exec_headless",
+        "count": 0,
+        "en": "Running headless (exec)",
+        "ru": "Работает без интерфейса (exec)",
+        "en_cells": 23,
+        "ru_cells": 30
+      },
+      {
+        "key": "wire.session_status.exec_headless",
+        "count": 1,
+        "en": "Running headless (exec)",
+        "ru": "Работает без интерфейса (exec)",
+        "en_cells": 23,
+        "ru_cells": 30
+      },
+      {
+        "key": "wire.session_status.exec_headless",
+        "count": 2,
+        "en": "Running headless (exec)",
+        "ru": "Работает без интерфейса (exec)",
+        "en_cells": 23,
+        "ru_cells": 30
+      },
+      {
+        "key": "wire.session_status.exec_headless",
+        "count": 5,
+        "en": "Running headless (exec)",
+        "ru": "Работает без интерфейса (exec)",
+        "en_cells": 23,
+        "ru_cells": 30
+      },
+      {
+        "key": "wire.session_status.exec_headless",
+        "count": 21,
+        "en": "Running headless (exec)",
+        "ru": "Работает без интерфейса (exec)",
+        "en_cells": 23,
+        "ru_cells": 30
+      },
+      {
+        "key": "wire.session_status.exec_headless",
+        "count": 1000000,
+        "en": "Running headless (exec)",
+        "ru": "Работает без интерфейса (exec)",
+        "en_cells": 23,
+        "ru_cells": 30
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "count": 0,
+        "en": "Waiting on 0 jobs",
+        "ru": "Ждёт 0 заданий",
+        "en_cells": 17,
+        "ru_cells": 14
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "count": 1,
+        "en": "Waiting on 1 job",
+        "ru": "Ждёт 1 задание",
+        "en_cells": 16,
+        "ru_cells": 14
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "count": 2,
+        "en": "Waiting on 2 jobs",
+        "ru": "Ждёт 2 задания",
+        "en_cells": 17,
+        "ru_cells": 14
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "count": 5,
+        "en": "Waiting on 5 jobs",
+        "ru": "Ждёт 5 заданий",
+        "en_cells": 17,
+        "ru_cells": 14
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "count": 21,
+        "en": "Waiting on 21 jobs",
+        "ru": "Ждёт 21 задание",
+        "en_cells": 18,
+        "ru_cells": 15
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "count": 1000000,
+        "en": "Waiting on 1,000,000 jobs",
+        "ru": "Ждёт 1 000 000 заданий",
+        "en_cells": 25,
+        "ru_cells": 22
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "count": 0,
+        "en": "Waiting on 0 jobs · 0 subagents running",
+        "ru": "Ждёт 0 заданий · 0 субагентов работают",
+        "en_cells": 39,
+        "ru_cells": 38
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "count": 1,
+        "en": "Waiting on 1 job · 1 subagent running",
+        "ru": "Ждёт 1 задание · 1 субагент работает",
+        "en_cells": 37,
+        "ru_cells": 36
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "count": 2,
+        "en": "Waiting on 2 jobs · 2 subagents running",
+        "ru": "Ждёт 2 задания · 2 субагента работают",
+        "en_cells": 39,
+        "ru_cells": 37
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "count": 5,
+        "en": "Waiting on 5 jobs · 5 subagents running",
+        "ru": "Ждёт 5 заданий · 5 субагентов работают",
+        "en_cells": 39,
+        "ru_cells": 38
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "count": 21,
+        "en": "Waiting on 21 jobs · 21 subagents running",
+        "ru": "Ждёт 21 задание · 21 субагент работает",
+        "en_cells": 41,
+        "ru_cells": 38
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "count": 1000000,
+        "en": "Waiting on 1,000,000 jobs · 1,000,000 subagents running",
+        "ru": "Ждёт 1 000 000 заданий · 1 000 000 субагентов работают",
+        "en_cells": 55,
+        "ru_cells": 54
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "count": 0,
+        "en": "0 jobs running",
+        "ru": "0 заданий выполняется",
+        "en_cells": 14,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "count": 1,
+        "en": "1 job running",
+        "ru": "1 задание выполняется",
+        "en_cells": 13,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "count": 2,
+        "en": "2 jobs running",
+        "ru": "2 задания выполняются",
+        "en_cells": 14,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "count": 5,
+        "en": "5 jobs running",
+        "ru": "5 заданий выполняется",
+        "en_cells": 14,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "count": 21,
+        "en": "21 jobs running",
+        "ru": "21 задание выполняется",
+        "en_cells": 15,
+        "ru_cells": 22
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "count": 1000000,
+        "en": "1,000,000 jobs running",
+        "ru": "1 000 000 заданий выполняется",
+        "en_cells": 22,
+        "ru_cells": 29
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "count": 0,
+        "en": "0 subagents running",
+        "ru": "0 субагентов работают",
+        "en_cells": 19,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "count": 1,
+        "en": "1 subagent running",
+        "ru": "1 субагент работает",
+        "en_cells": 18,
+        "ru_cells": 19
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "count": 2,
+        "en": "2 subagents running",
+        "ru": "2 субагента работают",
+        "en_cells": 19,
+        "ru_cells": 20
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "count": 5,
+        "en": "5 subagents running",
+        "ru": "5 субагентов работают",
+        "en_cells": 19,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "count": 21,
+        "en": "21 subagents running",
+        "ru": "21 субагент работает",
+        "en_cells": 20,
+        "ru_cells": 20
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "count": 1000000,
+        "en": "1,000,000 subagents running",
+        "ru": "1 000 000 субагентов работают",
+        "en_cells": 27,
+        "ru_cells": 29
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "count": 0,
+        "en": "0 subagents queued",
+        "ru": "0 субагентов в очереди",
+        "en_cells": 18,
+        "ru_cells": 22
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "count": 1,
+        "en": "1 subagent queued",
+        "ru": "1 субагент в очереди",
+        "en_cells": 17,
+        "ru_cells": 20
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "count": 2,
+        "en": "2 subagents queued",
+        "ru": "2 субагента в очереди",
+        "en_cells": 18,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "count": 5,
+        "en": "5 subagents queued",
+        "ru": "5 субагентов в очереди",
+        "en_cells": 18,
+        "ru_cells": 22
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "count": 21,
+        "en": "21 subagents queued",
+        "ru": "21 субагент в очереди",
+        "en_cells": 19,
+        "ru_cells": 21
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "count": 1000000,
+        "en": "1,000,000 subagents queued",
+        "ru": "1 000 000 субагентов в очереди",
+        "en_cells": 26,
+        "ru_cells": 30
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "count": 0,
+        "en": "0 queued",
+        "ru": "0 в очереди",
+        "en_cells": 8,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "count": 1,
+        "en": "1 queued",
+        "ru": "1 в очереди",
+        "en_cells": 8,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "count": 2,
+        "en": "2 queued",
+        "ru": "2 в очереди",
+        "en_cells": 8,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "count": 5,
+        "en": "5 queued",
+        "ru": "5 в очереди",
+        "en_cells": 8,
+        "ru_cells": 11
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "count": 21,
+        "en": "21 queued",
+        "ru": "21 в очереди",
+        "en_cells": 9,
+        "ru_cells": 12
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "count": 1000000,
+        "en": "1,000,000 queued",
+        "ru": "1 000 000 в очереди",
+        "en_cells": 16,
+        "ru_cells": 19
+      }
+    ],
+    "joiner_and_exec_preserved": true,
+    "glossary_citations": [
+      "tui.small.info_panel.last_heartbeat_ago: последний пульс {age} назад",
+      "tui.status.jobs: задание / задания / заданий",
+      "wire.settings.subagents_max_running.label: Макс. фоновых заданий",
+      "wire.settings.subagents_models_hi.label: Модель субагента: hi",
+      "wire.settings.tool_approval_mode.label: Режим одобрения инструментов"
+    ],
+    "width_note": "Measured new-key widths are in render_cases. exec_headless: (23, 30) English/Russian cells. Optional shorter wording: Без интерфейса (exec). Attached adds 3 cells, working adds 1. No fixed cap in context sidecar; no rendered overflow certification claimed.",
+    "native_human_review": false,
+    "additional_plural_renders": [
+      {
+        "key": "wire.session_status.dormant",
+        "count": 0,
+        "ru": "Остановлено (0 пробуждений приостановлено)"
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "count": 1,
+        "ru": "Остановлено (1 пробуждение приостановлено)"
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "count": 2,
+        "ru": "Остановлено (2 пробуждения приостановлены)"
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "count": 5,
+        "ru": "Остановлено (5 пробуждений приостановлено)"
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "count": 21,
+        "ru": "Остановлено (21 пробуждение приостановлено)"
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "count": 1000000,
+        "ru": "Остановлено (1 000 000 пробуждений приостановлено)"
+      },
+      {
+        "key": "wire.session_status.dormant",
+        "count": 1.5,
+        "ru": "Остановлено (1,5 пробуждения приостановлено)"
+      },
+      {
+        "key": "wire.session_status.waiting",
+        "count": 1.5,
+        "ru": "Ждёт 1,5 задания"
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "count": 1.5,
+        "ru": "Ждёт 1,5 задания · 1,5 субагента работают"
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "count": 1.5,
+        "ru": "1,5 задания выполняется"
+      },
+      {
+        "key": "wire.session_status.delegating_running",
+        "count": 1.5,
+        "ru": "1,5 субагента работают"
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "count": 1.5,
+        "ru": "1,5 субагента в очереди"
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "count": 1.5,
+        "ru": "1,5 в очереди"
+      }
+    ],
+    "width_advisories": [
+      {
+        "key": "wire.session_status.exec_headless",
+        "en_cells": 23,
+        "ru_cells": 30,
+        "optional_shorter": "Без интерфейса (exec)",
+        "disposition": "Optional rendered narrow-row check, not evidence of truncation; sidecar has no fixed cap."
+      },
+      {
+        "key": "wire.session_status.delegating_jobs",
+        "example": "2 задания выполняются",
+        "en_cells": 14,
+        "ru_cells": 21,
+        "optional_shorter": "2 задания в работе",
+        "disposition": "Optional rendered narrow-row check, not evidence of truncation; preserve all count arms if shortened."
+      }
+    ]
+  },
+  "note": "All 31 namespace entries read against English; 14 new keys checked with context. All 17 existing raw JSON member lines identical to HEAD except required separator comma on former final entry. plural_categories is exposed as runtime.fmt.plural_categories (implemented in format.py), not a direct runtime export. No repository or ledger edits."
+}

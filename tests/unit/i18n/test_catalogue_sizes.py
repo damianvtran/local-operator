@@ -57,7 +57,11 @@ DEFERRED_MAX_BYTES = 160 * 1024
 #: The 72 KiB ceiling leaves 6,054 B for ordinary copy edits while bringing the
 #: split-or-defer conversation back before structural growth accumulates.
 #: It stays a growth guard, not a packing target or a compressed-byte budget.
-EAGER_TOTAL_MAX_BYTES = 72 * 1024
+#:
+#: Raised 72 -> 76 KiB (77,824 B) when wire.voice was translated: wire.voice
+#: (37 keys, ~7 KB in hi) is eager and cannot be deferred (envelope-identity
+#: ratchet); hi is the largest locale by UTF-8 bytes and measured 77,139 B.
+EAGER_TOTAL_MAX_BYTES = 76 * 1024
 
 
 def _eager_namespaces(locale: str) -> tuple[str, ...]:
@@ -110,6 +114,8 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.sessions",
         "wire.operator_setup",
         "wire.github",
+        "wire.errors.bedrock",
+        "wire.login.bedrock",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "
         "namespace. Adding one requires updating this assertion, recording its "

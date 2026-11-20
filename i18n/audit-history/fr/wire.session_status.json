@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.session_status",
-  "history_sha256": "d159e2c2fe93f1a63e10cdb9252005bbf7b33abc4708a3dfc40c87e2006320dc",
+  "history_sha256": "0efce2c96960fc3880835f41bede38517f02309e278ac1280069decd9569b9b1",
   "entries": [
     {
       "locale": "fr",
@@ -85,6 +85,190 @@
       "evidence": "i18n/audits/evidence/fr/wire.session_status/ns1/record.json",
       "round": "ns1",
       "keys_audited": 1
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.session_status",
+      "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+      "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+      "target_sha256": "1b48011bda6364f5091c78e236020980018fa15934ff9424feca4280f5a9429d",
+      "translator": {
+        "agent": "i18n-translator / terminal-status-fr",
+        "model": "openai/gpt-6.1-sol",
+        "session": "a14cc322d1da",
+        "provenance_source": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/translator-receipt.fr.json"
+      },
+      "auditor": {
+        "agent": "i18n-auditor / terminal-status-fr-audit / first independent pass",
+        "session": "4730cb4c2fb8",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "session system Model declaration",
+        "fallback_used": false,
+        "independent_from_translator_session": "a14cc322d1da",
+        "independent_from_translator": true,
+        "date": "2026-11-19",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "finding_ids": []
+      },
+      "status": "passed",
+      "round": "first-independent",
+      "keys_audited": 17,
+      "note": "First independent fr safety-copy audit: 17 keys, 0 findings. Record: i18n/audits/evidence/fr/wire.session_status/ts-fr1/record.json. Scratch candidate; pending tracked retention and second independent pass."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.session_status",
+      "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+      "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+      "target_sha256": "1b48011bda6364f5091c78e236020980018fa15934ff9424feca4280f5a9429d",
+      "translator": {
+        "agent": "i18n-translator / terminal-status-fr",
+        "model": "openai/gpt-6.1-sol",
+        "session": "a14cc322d1da",
+        "provenance_source": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/translator-receipt.fr.json"
+      },
+      "auditor": {
+        "agent": "i18n-auditor / terminal-status-fr-zh-second-audit",
+        "session": "3d32baae3ed6",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Host session Model declaration: openai/gpt-6.1-sol",
+        "fallback_used": false,
+        "date": "2026-11-19",
+        "independent_from_translator_session": "a14cc322d1da",
+        "independent_from_translator": true,
+        "independent_from_first_auditor_session": "4730cb4c2fb8",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "finding_ids": []
+      },
+      "status": "passed",
+      "round": "second-independent",
+      "keys_audited": 17,
+      "note": "Metadata-only correction; semantic pass unchanged. Record: i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/record.json. Original record SHA256: 8666f7529c15bb22004830f1f374249c3ee1b74d0b9e668ec9e0d5cb3b9fbcd2",
+      "metadata_only_retention_correction": {
+        "kind": "metadata-only retention destination correction",
+        "semantic_reaudit": false,
+        "round_reset": false,
+        "original_record_sha256": "8666f7529c15bb22004830f1f374249c3ee1b74d0b9e668ec9e0d5cb3b9fbcd2",
+        "original_receipt_sha256": "c1f4a1a2823266264b564cbd24bd54289078ca5ddcb39e7c7798bb6442cef2af",
+        "corrected_canonical_root": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2",
+        "unchanged_input_hashes_verified": true,
+        "lineage": [
+          {
+            "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/report.json",
+            "original_sha256": "f1304237a0238ee3e437bba9e65f7d89ded160c1ebfb42f246ae7ac9a7901d90",
+            "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/report.json",
+            "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+          },
+          {
+            "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/audit.log",
+            "original_sha256": "8d6dd37fae73d4459f335f5462014cc445c33ead65f3447d099468a295cb3674",
+            "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/audit.log",
+            "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+          },
+          {
+            "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/probe.py",
+            "original_sha256": "469e1a27b3561929ac3d314eaaee0d6e48da557eb8a64d7cc45084c4410f8565",
+            "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/probe.py",
+            "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+          },
+          {
+            "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/record.json",
+            "original_sha256": "8666f7529c15bb22004830f1f374249c3ee1b74d0b9e668ec9e0d5cb3b9fbcd2",
+            "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/original-record.json",
+            "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+          },
+          {
+            "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/receipt.json",
+            "original_sha256": "c1f4a1a2823266264b564cbd24bd54289078ca5ddcb39e7c7798bb6442cef2af",
+            "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/original-receipt.json",
+            "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+          },
+          {
+            "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/ledger-dryrun.log",
+            "original_sha256": "461c8c6b4417bdcd30c570bd67c35256e5809886a98a58a46263aff0e340d4f3",
+            "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/original-ledger-dryrun.log",
+            "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+          }
+        ],
+        "provenance": "Authored by same independent auditor session 3d32baae3ed6, actual model openai/gpt-6.1-sol, no fallback. No linguistic/formatter samples rerun. Source, context and target hashes rechecked unchanged."
+      }
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.session_status",
+      "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+      "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+      "target_sha256": "8e28af9d575f293f463bb7cbf6e9d72b6ca1e09842b61458da2a6f1c6eeaa943",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "c077690d8eb5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "fail",
+        "findings": 2,
+        "unresolved_blocker_major": 1,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 1,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "F1",
+          "F2"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "failed",
+      "note": "Round 1 independent audit of the live session-status labels (wire.session_status). Auditor c077690d8eb5 (openai/gpt-6.1-sol, no fallback) verdict FAIL: 0 blocker, 1 major, 1 minor, 0 nit ['F1', 'F2']. Scope: full namespace (31 keys incl. 14 new live-status keys) at worktree head 514d51243ce3. Superseded by round 2 (ls2) at corrected bytes. Record: i18n/audits/evidence/fr/wire.session_status/ls1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/wire.session_status/ls1/record.json",
+      "round": "ls1"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.session_status",
+      "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+      "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+      "target_sha256": "531f93976a9d9badebbee9bb02e38fe49ff637fbf02164615c80935d2b955b64",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), remediation pass",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "dddc1ae29ef5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Round 2 independent audit of the live session-status labels (wire.session_status). Auditor dddc1ae29ef5 (openai/gpt-6.1-sol, no fallback) verdict CLEAN: 0 blocker, 0 major, 0 minor, 0 nit. Scope: round-2 remediation re-audit of the round-1 finding keys plus consistency neighbours, at worktree head 514d51243ce3; the remaining keys carry the round-1 full-namespace audit (ls1) at unchanged values. r1 F1 (major, 'heartbeat' wording in wedged_heartbeat) fixed in these bytes ('signal de vie'); F2 (minor, delegating_queued_addend width) rejected by the implementer and the rejection accepted by the r2 auditor: 'en file d’attente' distinguishes capacity-queued subagents from 'En attente' background jobs; context sets no fixed cell cap. Record: i18n/audits/evidence/fr/wire.session_status/ls2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/wire.session_status/ls2/record.json",
+      "round": "ls2"
     }
   ]
 }

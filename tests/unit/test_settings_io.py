@@ -135,6 +135,10 @@ def _consumer_defaults() -> dict[str, object]:
     # (``SyncSettings.from_config`` falls back to exactly these).
     from local_operator.network.sync import SYNC_DEBOUNCE_S, SYNC_TICK_S
     from local_operator.notifications import sound as notification_sound
+    from local_operator.providers.bedrock.connection import (
+        DEFAULT_BEDROCK_AUTH_SETTING,
+        DEFAULT_BEDROCK_REGION_SETTING,
+    )
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -382,6 +386,9 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.anthropic.subagent_cache_ttl_1h_min_context_tokens": (
             ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
         ),
+        # Bedrock's two inherit keys: the connection module's own defaults.
+        "providers.bedrock.region": DEFAULT_BEDROCK_REGION_SETTING,
+        "providers.bedrock.auth": DEFAULT_BEDROCK_AUTH_SETTING,
         # The openrouter routing rows are guarded against the shipped config
         # block itself: their consumer is the single-shot resolver
         # ``model.configure._openrouter_provider_preferences`` (no independent
@@ -573,7 +580,26 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.stt import cleanup as cleanup_policy
 
     consumers["speech.transcription.cleanup"] = cleanup_policy.DEFAULT_CLEANUP
+    # Voice mode's cap: the registry literal against ``/voice/text``'s own
+    # fallback (``voice.speakable``), imported here for the same reason.
+    from local_operator.voice import speakable as voice_speakable
+
+    consumers["voice.max_spoken_chars"] = voice_speakable.DEFAULT_MAX_SPOKEN_CHARS
+    # The chosen speech provider: the reader's own "nothing valid chosen" answer
+    # (``voice.provider``), asked of an empty directory.
+    from local_operator.voice import provider as voice_provider
+
+    consumers["speech.provider"] = voice_provider.configured_provider(Path("/nonexistent"))
     return consumers
+
+
+def test_the_voice_cap_bounds_match_the_reader_clamp() -> None:
+    """Every value the settings page accepts is applied as stored, no more and no less."""
+    from local_operator.voice import speakable
+
+    setting = settings_io.BY_KEY["voice.max_spoken_chars"]
+    assert setting.minimum == speakable.MIN_MAX_SPOKEN_CHARS
+    assert setting.maximum == speakable.MAX_MAX_SPOKEN_CHARS
 
 
 def _classification_consumer_defaults() -> dict[str, object]:
@@ -680,12 +706,16 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
     follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
     state (no row), the allowlist's defaults are server truth surfaced as data
     by ``team_bridge.client.allowlist_view``, not config, and
-    ``hold_alert_after_minutes``/``hold_release`` are read keys with no row.
+    ``hold_alert_after_minutes`` is a read key with no row. ``hold_release``
+    is registered (BOOL, default ON) and its DEFAULT is pinned below to
+    DEFAULT_HOLD_RELEASE; agreement on PRESENT hand-edited values is a
+    separate claim, pinned by ``test_hold_release_page_and_every_consumer_read_one_value``.
     The four ``team_bridge.screening.*`` ceilings are here because a page that
     showed a ceiling the receiver does not read would be exactly this drift.
     """
 
     from local_operator.team_bridge.settings import (
+        DEFAULT_HOLD_RELEASE,
         DEFAULT_TEAM_BRIDGE_ENABLED,
         DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
@@ -697,6 +727,7 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
 
     return {
         "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.hold_release": DEFAULT_HOLD_RELEASE,
         "team_bridge.screening.ambient_budget_per_hour": (
             DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
         ),
@@ -1043,6 +1074,131 @@ def test_the_turn_answer_rail_flag_defaults_off_and_round_trips(
 
     settings_io.write_setting(manager, setting, False)
     assert settings_get("display.turn_answer_rail") is False
+
+
+def test_hold_release_row_round_trips_through_the_consumer(manager: ConfigManager) -> None:
+    """``team_bridge.hold_release``: listed, read, written, reset — and the receiver agrees.
+
+    The row is NESTED (``values.team_bridge.hold_release``), the only path
+    ``TeamBridgeSettings`` reads, so every state is asserted on the consumer,
+    not just on the file: an absent key reads ON (the shipped default), a
+    written ``false`` is the one value that turns release off, and reset
+    returns to ON by removing the key rather than writing a literal.
+    """
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    setting = settings_io.BY_KEY["team_bridge.hold_release"]
+    assert setting in settings_io.SETTINGS
+    assert setting.section == "team_bridge" and setting.kind is settings_io.Kind.BOOL
+    assert setting.path == ("team_bridge", "hold_release") and setting.default is True
+    assert setting.label and setting.help and "screen" not in setting.help.lower()
+
+    assert settings_io.read_setting(manager, setting) is True
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+    settings_io.write_setting(manager, setting, False)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["team_bridge"]["hold_release"] is False
+    assert settings_io.read_setting(manager, setting) is False
+    assert TeamBridgeSettings.from_config(manager).hold_release is False
+
+    settings_io.write_setting(manager, setting, True)
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+    settings_io.write_setting(manager, setting, False)
+    settings_io.reset_setting(manager, setting)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text()) or {}
+    assert "hold_release" not in ((stored.get("values") or {}).get("team_bridge") or {})
+    assert settings_io.read_setting(manager, setting) is True
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+
+def test_hold_release_copy_fits_the_settings_row_in_every_locale() -> None:
+    """Copy C3 + design D2 / QA Q2 (PR #4317), measured on rendered frames.
+
+    The label column is 30 cells (29 plus a gutter), so a longer label is cut
+    with an ellipsis, as fr/es/vi/ur were. Bridge rows paint help in a two-row
+    WRAP band 74 cells wide at 80 columns and 94 at 100; English stays under
+    140 cells so the hedged claims survive at 100 columns in translation, and
+    every space-delimited translation must take the two-row rung at 94.
+    zh-CN has no spaces for ``_wrap_cells`` to break on, so it can never take
+    that rung (pre-existing for every bridge row); it is held to the band's
+    total instead.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.i18n import catalogues
+    from local_operator.tui.widgets.settings_view import _wrap_cells
+
+    label_key = "wire.settings.team_bridge_hold_release.label"
+    help_key = "wire.settings.team_bridge_hold_release.help"
+    english = catalogues.load_catalogue("en", "wire.settings")
+    assert cell_len(english[help_key]) <= 140
+    assert _wrap_cells(english[help_key], 74, max_lines=2) is not None
+    for locale in catalogues.locales():
+        messages = catalogues.load_catalogue(locale, "wire.settings")
+        assert cell_len(messages[label_key]) <= 29, (locale, messages[label_key])
+        help_text = messages[help_key]
+        if locale == "zh-CN":
+            assert cell_len(help_text) <= 2 * 94, help_text
+        else:
+            assert _wrap_cells(help_text, 94, max_lines=2) is not None, (locale, help_text)
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (_ABSENT, True),
+        (True, True),
+        (False, False),
+        ("false", False),
+        ("off", False),
+        ("no", False),
+        ("0", False),
+        (0, False),
+        (1, True),
+        ("", True),
+        ("garbage", True),
+        (None, True),
+        ([], True),
+    ],
+)
+def test_hold_release_page_and_every_consumer_read_one_value(
+    tmp_path: Path, raw: object, expected: bool
+) -> None:
+    """S-1 (security round 1, PR #4317): a hand-edited value reads ONE way.
+
+    Before the fix the row (``strict_bool``) painted ``"false"``/``0`` as off
+    while the receiver (``is not False``) still converted new-work bounces and
+    opened the #4308 fallback-review entry. Every consumer of the flag is
+    asserted here against the page: the settings object, the release gate,
+    the per-code gate for a work-scope hold, and the fallback-review entry
+    (which needs this flag AND ``review_held``).
+    """
+    from local_operator.team_bridge import hold_release
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    section: dict[str, object] = {"enabled": True}
+    if raw is not _ABSENT:
+        section["hold_release"] = raw
+    (tmp_path / "config.yml").write_text(
+        yaml.safe_dump({"values": {"team_bridge": section}}), encoding="utf-8"
+    )
+    manager = ConfigManager(tmp_path)
+    setting = settings_io.BY_KEY["team_bridge.hold_release"]
+
+    page = settings_io.read_setting(manager, setting)
+    assert page is expected
+    assert TeamBridgeSettings.from_config(manager).hold_release is page
+    assert hold_release.enabled(tmp_path) is page
+    assert hold_release.enabled_for(tmp_path, hold_release.WORK_SCOPE_HOLD) is page
+    # The #4308 fallback-review entry: review_held is absent (ON), so the
+    # entry is open exactly when the page says release is on.
+    settings = TeamBridgeSettings.from_config(manager)
+    assert (settings.hold_release and settings.review_held) is page
 
 
 def test_the_narration_key_is_flat_dotted() -> None:

@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "Google Cloud प्रोजेक्ट ID",
+  "providers.vertex_prompts.field.service_account": "सेवा खाते का JSON या JSON फ़ाइल का पाथ",
+  "providers.vertex_prompts.hint.required": "भेजने के लिए Enter दबाएँ; खाली छोड़कर Enter या Esc दबाने से लॉगिन रद्द हो जाएगा।",
+  "providers.vertex_prompts.prompt.field": "{field} दर्ज करें (रद्द करने के लिए खाली छोड़ें): "
+}

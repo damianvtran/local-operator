@@ -1,0 +1,19 @@
+{
+  "wire.session_status.retired_label": "{base} — اپ ڈیٹ کے لیے ریٹائر کیا گیا",
+  "wire.session_status.interrupted": "درمیان میں رکا",
+  "wire.session_status.unseen_interruption": "درمیان میں رکا — کیفیت ابھی نہیں پڑھی گئی",
+  "wire.session_status.retired": "درمیان میں رکا — رن ٹائم اپ ڈیٹ کے لیے بند ہوا",
+  "wire.session_status.unseen_retirement": "درمیان میں رکا — رن ٹائم اپ ڈیٹ کے لیے بند ہوا؛ کیفیت ابھی نہیں پڑھی گئی",
+  "wire.session_status.signal_stop": "درمیان میں رکا — سگنل سے روکا گیا{command, select, none {} other {؛ کمانڈ: {command}}}",
+  "wire.session_status.unseen_signal_stop": "درمیان میں رکا — سگنل سے روکا گیا؛ کیفیت ابھی نہیں پڑھی گئی{command, select, none {} other {؛ کمانڈ: {command}}}",
+  "wire.session_status.forced_kill": "درمیان میں رکا — زبردستی بند کیا گیا{command, select, none {} other {؛ کمانڈ: {command}}}",
+  "wire.session_status.unseen_forced_kill": "درمیان میں رکا — زبردستی بند کیا گیا؛ کیفیت ابھی نہیں پڑھی گئی{command, select, none {} other {؛ کمانڈ: {command}}}",
+  "wire.session_status.complete": "مکمل",
+  "wire.session_status.unseen_completion": "مکمل — کیفیت ابھی نہیں پڑھی گئی",
+  "wire.session_status.recent": "حالیہ",
+  "wire.session_status.dormant": "رکا ہوا ({count, plural, one {# بیداری غیر فعال} other {# بیداریاں غیر فعال}})",
+  "wire.session_status.error": "خرابی",
+  "wire.session_status.unseen_error": "خرابی — کیفیت ابھی نہیں پڑھی گئی",
+  "wire.session_status.error_cause": "{cause, select, user_stop {خرابی — صارف نے روکا} runtime_stall_bound {خرابی — پیش رفت رکے رہنے کی حد کے بعد رن ٹائم خود بند ہوا} continuation_limit {خرابی — جاری رکھنے کی حد پوری؛ زیرِ انتظار پیغام چھوڑ دیا گیا} output_limit {خرابی — ماڈل کے آؤٹ پٹ کی حد پوری؛ جاری نہ رہ سکا} runtime_retired {خرابی — رن ٹائم اپ ڈیٹ کے لیے بند ہوا} runtime_shutdown {خرابی — باری کے دوران رن ٹائم بند ہو گیا} runtime_overdue {خرابی — پیش رفت کی حد کے بعد رن ٹائم اپ ڈیٹ کے لیے بند ہوا} runtime_update_failed {خرابی — اپ ڈیٹ مکمل نہیں ہوئی؛ رن ٹائم نے پہلے سے لوڈ شدہ بلڈ برقرار رکھی} runtime_killed {خرابی — رن ٹائم باقاعدہ بند ہوئے بغیر غائب ہو گیا؛ روکنے کی درخواست نہیں کی گئی تھی} install_mid_update {خرابی — باری کے دوران تنصیب بدل دی گئی} owner_lost {خرابی — باری کے دوران رن ٹائم نے جواب دینا بند کر دیا} disposed {خرابی — باری کے دوران سیشن ختم کر دیا گیا} other {خرابی}}",
+  "wire.session_status.unseen_error_cause": "{cause, select, user_stop {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ صارف نے روکا} runtime_stall_bound {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ پیش رفت رکے رہنے کی حد کے بعد رن ٹائم خود بند ہوا} continuation_limit {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ جاری رکھنے کی حد پوری؛ زیرِ انتظار پیغام چھوڑ دیا گیا} output_limit {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ ماڈل کے آؤٹ پٹ کی حد پوری؛ جاری نہ رہ سکا} runtime_retired {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ رن ٹائم اپ ڈیٹ کے لیے بند ہوا} runtime_shutdown {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران رن ٹائم بند ہو گیا} runtime_overdue {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ پیش رفت کی حد کے بعد رن ٹائم اپ ڈیٹ کے لیے بند ہوا} runtime_update_failed {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ اپ ڈیٹ مکمل نہیں ہوئی؛ رن ٹائم نے پہلے سے لوڈ شدہ بلڈ برقرار رکھی} runtime_killed {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ رن ٹائم باقاعدہ بند ہوئے بغیر غائب ہو گیا؛ روکنے کی درخواست نہیں کی گئی تھی} install_mid_update {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران تنصیب بدل دی گئی} owner_lost {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران رن ٹائم نے جواب دینا بند کر دیا} disposed {خرابی — کیفیت ابھی نہیں پڑھی گئی؛ باری کے دوران سیشن ختم کر دیا گیا} other {خرابی — کیفیت ابھی نہیں پڑھی گئی}}"
+}

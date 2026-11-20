@@ -1,0 +1,7 @@
+# i18n audit pass B — ru — mechanical log
+auditor session c739715f0519 model anthropic/claude-opus-5-5 date 2026-11-18
+tree: bd219f20b928f570b0230bac1197173267f04a74 + held patch sha256 fcf8ed47f7d7fa28a4ab4ab4e728ac4efdc0da489d71911ed82ccdb68762a7c5
+ok   tui.community: key set and order == en (148 keys)
+ok   wire.community: key set and order == en (5 keys)
+mechanical errors: 0
+plural categories (glossary: fr one/many/other, es one/many/other, zh-CN/vi other, ru one/few/many/other, ur/hi one/other): {"tui.community.browse_count": ["few", "many", "one", "other"], "tui.community.images": ["few", "many", "one", "other"], "tui.community.post_card_more": ["few", "many", "one", "other"], "tui.community.replies": ["few", "many", "one", "other"]}

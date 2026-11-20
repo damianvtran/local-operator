@@ -39,7 +39,10 @@ from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
     _elide_inline,
     _spill_footer,
+    result_inline_limit,
     spill_truncate,
+    spills_readable,
+    unrouted_truncate,
     validation_error_result,
 )
 from local_operator.tools.confinement import confinement_of
@@ -298,7 +301,7 @@ def _lead_lines(lines: list[str], budget: int) -> tuple[int, str]:
 
 
 def _query_preview(
-    header: str, query: str, handle: str, limit: int
+    header: str, query: str, handle: str, limit: int, *, routed: bool = True
 ) -> tuple[str, dict[str, Any]] | None:
     """A passage preview of the spilled entry ``handle`` for ``query``.
 
@@ -310,6 +313,12 @@ def _query_preview(
     space the model can address. The whole preview, header and footer
     included, stays within ``limit`` so asking for passages never costs more
     context than not asking.
+
+    ``routed=False`` is a session without ``read``: the SAME passages, with the
+    spill footer and the ``read(path=…?q=…)`` "more matches" hint left out,
+    because neither names a call that session can make. The ranking itself
+    still pages the stored copy, which is why ``spill_truncate`` keeps storing
+    for those sessions (agent review round 1, R2).
     """
     store = get_store()
     meta = store.stat(handle)
@@ -322,7 +331,7 @@ def _query_preview(
         # labels to point into, so a passage preview could not be addressed.
         return None
     lead_end, lead_text = _lead_lines(lines, _QUERY_LEAD_CHARS)
-    footer = _spill_footer(meta, ("lines", lead_end + 1, total))
+    footer = _spill_footer(meta, ("lines", lead_end + 1, total)) if routed else ""
     framing = f"{header}\n\n[lines 1-{lead_end} of {total}]\n{lead_text}\n"
     # Reserve the more-matches hint line (~170 chars with a long regex) and a
     # label + separator per passage (~60 each, six at most) out of the budget.
@@ -342,7 +351,7 @@ def _query_preview(
         if passage.heading and not first_line.startswith("#"):
             label += f" · § {passage.heading[:60]}"
         parts.append(f"\n{label}]\n{passage.text}\n")
-    if selection.more:
+    if selection.more and routed:
         noun = "passage matches" if selection.more == 1 else "passages match"
         parts.append(
             f'\n[{selection.more} more {noun} — read(path="{handle}?q={selection.search_hint}")]'
@@ -394,15 +403,26 @@ def _shape_from_content(
     skipped rather than pointing at nothing).
     """
     header = _header_line(result_like)
-    body, spill_details = spill_truncate(content, tool_name, context)
-    preview = f"{header}\n\n{body}" if body else header
-    details = dict(result_like)
+    # Without ``read`` the spill handle is unreachable to the MODEL, so the page
+    # is inlined up to the larger bound (``result_inline_limit``) with no route
+    # named. The page is still stored, so a ``query`` below ranks passages from
+    # it in every session; only the footer and the ``read`` hint are withheld.
     wants_passages = (
         bool(query and query.strip()) and result_like.get("render_method") in _RANKABLE_METHODS
     )
+    # Ranking is harness-side, so read reachability must not change when it
+    # starts. Keep the larger no-read inline allowance only for plain fetches.
+    inline_limit = TOOL_OUTPUT_LIMIT_CHARS if wants_passages else result_inline_limit(context)
+    body, spill_details = spill_truncate(content, tool_name, context, inline_limit)
+    preview = f"{header}\n\n{body}" if body else header
+    details = dict(result_like)
     if wants_passages and spill_details is not None:
         shaped = _query_preview(
-            header, str(query), spill_details["spill"]["handle"], TOOL_OUTPUT_LIMIT_CHARS
+            header,
+            str(query),
+            spill_details["spill"]["handle"],
+            TOOL_OUTPUT_LIMIT_CHARS,
+            routed=spills_readable(context),
         )
         if shaped is not None:
             preview, query_details = shaped
@@ -417,41 +437,49 @@ def _shape_from_content(
             # is sized to. Re-elide the content under limit - header - notice;
             # the no-query path above is untouched (byte-identical by pin).
             notice = "[No passage matched the query; showing the start and end.]"
-            meta = get_store().stat(spill_details["spill"]["handle"])
-            # Two passes, mirroring _elide_inline: the footer's suggested range
-            # depends on where the body was clipped, which depends on the
-            # footer's length. Pass one learns the real footer size, pass two
-            # sizes the body against it, so the assembled preview fits the cap
-            # by construction rather than by a guard that cuts the footer off.
-            budget = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(notice) - 1
-            fallback_body, span = _elide_inline(content, max(0, budget))
-            footer = _spill_footer(meta, span) if meta is not None else ""
-            fallback_body, span = _elide_inline(content, max(0, budget - len(footer)))
-            footer = _spill_footer(meta, span) if meta is not None else ""
-            preview = f"{header}\n\n{notice}\n{fallback_body}{footer}"
-            if len(preview) > TOOL_OUTPUT_LIMIT_CHARS:
-                # The notice is framing the no-query shape does not have, and
-                # the header can itself be enormous (a multi-kilobyte URL),
-                # which no framing can fix. Try in order of preference: the
-                # notice + re-elided body, notice + the page's own head/tail
-                # body, then the head/tail body alone. All three carry the
-                # spill footer, i.e. the handle; only if none fits (the header
-                # alone is already over the cap) is a content slice used, and
-                # that slice still ends with the footer. A preview without the
-                # handle cannot be expanded at all, which is worse than
-                # exceeding the cap by the length of the header.
-                candidates = (
-                    f"{header}\n\n{notice}\n{body}",
-                    f"{header}\n\n{body}",
-                )
-                preview = next(
-                    (text for text in candidates if len(text) <= TOOL_OUTPUT_LIMIT_CHARS),
-                    "",
-                )
-                if not preview:
-                    footer_text = _spill_footer(meta) if meta is not None else ""
-                    keep = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(footer_text)
-                    preview = f"{header}\n\n{content[: max(0, keep)]}{footer_text}"
+            if not spills_readable(context):
+                # No route to page, so no footer and nothing for the passes
+                # below to fit around: the notice plus the head/tail at this
+                # session's own inline bound, the no-query shape it would have
+                # had (``result_inline_limit``) with the notice making room.
+                budget = result_inline_limit(context) - len(header) - 2 - len(notice) - 1
+                preview = f"{header}\n\n{notice}\n{unrouted_truncate(content, max(0, budget))}"
+            else:
+                meta = get_store().stat(spill_details["spill"]["handle"])
+                # Two passes, mirroring _elide_inline: the footer's suggested range
+                # depends on where the body was clipped, which depends on the
+                # footer's length. Pass one learns the real footer size, pass two
+                # sizes the body against it, so the assembled preview fits the cap
+                # by construction rather than by a guard that cuts the footer off.
+                budget = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(notice) - 1
+                fallback_body, span = _elide_inline(content, max(0, budget))
+                footer = _spill_footer(meta, span) if meta is not None else ""
+                fallback_body, span = _elide_inline(content, max(0, budget - len(footer)))
+                footer = _spill_footer(meta, span) if meta is not None else ""
+                preview = f"{header}\n\n{notice}\n{fallback_body}{footer}"
+                if len(preview) > TOOL_OUTPUT_LIMIT_CHARS:
+                    # The notice is framing the no-query shape does not have, and
+                    # the header can itself be enormous (a multi-kilobyte URL),
+                    # which no framing can fix. Try in order of preference: the
+                    # notice + re-elided body, notice + the page's own head/tail
+                    # body, then the head/tail body alone. All three carry the
+                    # spill footer, i.e. the handle; only if none fits (the header
+                    # alone is already over the cap) is a content slice used, and
+                    # that slice still ends with the footer. A preview without the
+                    # handle cannot be expanded at all, which is worse than
+                    # exceeding the cap by the length of the header.
+                    candidates = (
+                        f"{header}\n\n{notice}\n{body}",
+                        f"{header}\n\n{body}",
+                    )
+                    preview = next(
+                        (text for text in candidates if len(text) <= TOOL_OUTPUT_LIMIT_CHARS),
+                        "",
+                    )
+                    if not preview:
+                        footer_text = _spill_footer(meta) if meta is not None else ""
+                        keep = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(footer_text)
+                        preview = f"{header}\n\n{content[: max(0, keep)]}{footer_text}"
             details["query_passages"] = []
     # A re-fetch of the same URL in the same rendition supersedes this result:
     # both describe the live state of one resource. Scoped by ``cache_variant``

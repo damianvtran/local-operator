@@ -1,0 +1,18 @@
+=== NORMAL REPOSITORY CATALOGUE ADMISSION (scoped scratch root) ===
+check.py: catalogue checks: 0 problem(s)
+PASS normal candidate: 17 keys
+ru/wire.session_status: wire.session_status.signal_stop: arguments (('cmd', 'select'),) != en's (('command', 'select'),): argument 1 is 'cmd', en's is 'command' (renamed or reordered)
+check.py: catalogue checks: 1 problem(s)
+PASS rejected negative: renamed placeholder exit 1
+ru/wire.session_status: missing key 'wire.session_status.complete'
+check.py: catalogue checks: 1 problem(s)
+PASS rejected negative: missing key exit 1
+ru/wire.session_status: unknown key 'wire.session_status.extra'
+check.py: catalogue checks: 1 problem(s)
+PASS rejected negative: added key exit 1
+check.py: catalogue checks: 0 problem(s)
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/audit.py", line 37, in <module>
+    data=copy.deepcopy(ru);mutate(data);result=admit(data);assert result!=0,label;print('PASS rejected negative:',label,'exit',result)
+                                                                  ^^^^^^^^^
+AssertionError: invalid ICU

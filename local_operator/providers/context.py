@@ -199,6 +199,8 @@ def bind_native_context(
     scope: str | None,
     slope: float,
     extra_native_tokens: int = 0,
+    *,
+    selected_native: list[Any] | None = None,
 ) -> ChatRequest:
     """Finalize native admission after credentials and replay validity are known.
 
@@ -228,8 +230,21 @@ def bind_native_context(
     validity = []
     reasoning = extra_native_tokens
     for index, message in enumerate(request.messages):
-        native = replay_items(message, request.model, endpoint, protocol, scope)
+        # Converse signatures bind the entire preceding rendered conversation.
+        # The serializer supplies its exact selection so admission cannot revive
+        # a block rejected by that stricter prefix proof.
+        native = (
+            selected_native[index]
+            if selected_native is not None
+            else replay_items(message, request.model, endpoint, protocol, scope)
+        )
         validity.append(native is not None)
+        if protocol == "bedrock-converse" and native is not None:
+            reasoning += sum(
+                max(1, len(json.dumps(item["reasoningContent"], ensure_ascii=False)) // 4)
+                for item in native
+                if "reasoningContent" in item
+            )
         if protocol == "openai-chat" and native is not None:
             # Compatible servers replay literal reasoning, including before the
             # latest user turn. Count those bytes rather than assuming the
@@ -281,7 +296,7 @@ def bind_native_context(
                 # reset calibration (or its provider-measured cache-TTL hint).
                 (
                     request.messages[last_user].id
-                    if last_user >= 0 and protocol != "anthropic-messages"
+                    if last_user >= 0 and protocol not in ("anthropic-messages", "bedrock-converse")
                     else None
                 ),
             ),

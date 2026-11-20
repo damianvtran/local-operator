@@ -1,0 +1,40 @@
+
+CASE candidate normal admission COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root
+check.py: catalogue checks: 0 problem(s)
+ACTUAL_EXIT 0 EXPECTED 0
+
+CASE negative renamed plural placeholder COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root
+zh-CN/wire.session_status: wire.session_status.dormant: arguments (('renamed', 'plural'),) != en's (('count', 'plural'),): argument 1 is 'renamed', en's is 'count' (renamed or reordered)
+check.py: catalogue checks: 1 problem(s)
+ACTUAL_EXIT 1 EXPECTED 1
+
+CASE negative missing key COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root
+zh-CN/wire.session_status: missing key 'wire.session_status.complete'
+check.py: catalogue checks: 1 problem(s)
+ACTUAL_EXIT 1 EXPECTED 1
+
+CASE negative extra key COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root
+zh-CN/wire.session_status: unknown key 'wire.session_status.extra'
+check.py: catalogue checks: 1 problem(s)
+ACTUAL_EXIT 1 EXPECTED 1
+
+CASE negative forbidden zh-CN one category COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root
+zh-CN/wire.session_status: wire.session_status.dormant: plural category 'one' not in ['other']
+check.py: catalogue checks: 1 problem(s)
+ACTUAL_EXIT 1 EXPECTED 1
+
+CASE negative malformed ICU COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root
+zh-CN/wire.session_status: wire.session_status.signal_stop: unmatched '}' (at offset 60 of '已中断——收到信号后停止{command, select, none {} other {（通过{command}）}}}')
+check.py: catalogue checks: 1 problem(s)
+ACTUAL_EXIT 1 EXPECTED 1
+
+CASE candidate restored normal admission COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root
+check.py: catalogue checks: 0 problem(s)
+ACTUAL_EXIT 0 EXPECTED 0
+
+INDEPENDENT key sets, strict JSON, argument names/types, select-arm parity, markup/code, single logical line: PASS all 17
+HISTORICAL retired_label unchanged; outside new formatter scope: PASS
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/audit_zh_status.py", line 77, in <module>
+    from wcwidth import wcswidth
+ModuleNotFoundError: No module named 'wcwidth'

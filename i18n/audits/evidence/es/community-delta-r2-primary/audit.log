@@ -1,0 +1,12 @@
+# i18n delta audit round 2 — es — mechanical log
+auditor session 837443aac8da model anthropic/claude-opus-5-5 date 2026-11-18
+tree: 37aa1d6ebb275c0928576366d48b52809d9ce02b + held patch sha256 9b00194c5f960523fc2e0c0092050f725b93b52b7e84755a320c36cd7093cd36
+en tui.community sha256 67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616; context d3030886a774ad2ed4cdb2f14e9969e8eb2c3afb2b9cd416c116d20cfa9abd88
+ok   tui.community: key set and order == en (150 keys)
+ok   tui.community.page_error: placeholders []==[] nfc=True cf=[] ascii_quote=False leading_ellipsis=True key_v=True cells en 31 → es 39
+ok   tui.community.post_allow_unread: placeholders []==[] nfc=True cf=[] ascii_quote=False leading_ellipsis=True key_v=True cells en 25 → es 36
+ok   tui.community.post_card_cut: placeholders []==[] nfc=True cf=[] ascii_quote=False leading_ellipsis=True key_v=True cells en 18 → es 26
+post_card_cut fit: cue 26 cells of the 53-cell row (en 18); approval.py:1226 gives the post tail the rest
+unchanged keys: locale file at 37aa1d6e == round-1 audited target (record community-primary input_hashes.target), byte-identical
+mechanical errors: 0
+pass A keys: 3

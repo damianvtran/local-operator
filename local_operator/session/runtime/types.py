@@ -153,6 +153,17 @@ VIEWED_MOVE_REFUSAL = (
     "try again, or queue the move to run at the next safe point."
 )
 
+#: The post-viewer residency window a claimed runtime keeps before it drains, in
+#: seconds. ``session/runtime/process.py`` owns the semantics (its comment above
+#: the re-export explains the window and why 0 disables it) and re-exports this
+#: name unchanged; it is DEFINED here, in the stdlib-only types module, because
+#: the mesh relay reads it too — ``network.mobility._arrival_active`` uses it as
+#: "a person was just using this conversation" — and the relay may not import
+#: ``session.runtime.process`` at all: that module owns sessions, and
+#: ``tests/unit/network/test_relay_e2e.py::test_the_relay_never_becomes_a_session_owner``
+#: pins that the relay never imports a session owner.
+DEFAULT_KEEP_ALIVE_SECONDS = 300
+
 #: Additive attach capability: this owner accepts ``event_mute``/``event_unmute``
 #: ops, which stop and resume DELTA-GRADE frames on an attach connection that
 #: already subscribed to the raw event relay (``"events": true``).

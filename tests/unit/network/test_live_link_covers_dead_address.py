@@ -10,7 +10,7 @@ the peer is reachable over its own link; it is information.
 
 THE RIG: two real relays on loopback, real pairing, a real inbound link (B
 dials A). The declared address is made SILENT deterministically: the probe's
-``socket.create_connection`` raises ``TimeoutError`` for that one endpoint and
+connect (``socket.socket.connect``) raises ``TimeoutError`` for that one endpoint and
 passes every other connect through, so the link, the relays and every other
 dial stay real. A kernel trick (a full ``listen(0)`` queue) only drops SYNs on
 Linux; macOS completes the connect (#4110 round 1, R1-1), so the silence is
@@ -55,17 +55,20 @@ DEAD = "127.0.0.1:2"
 @pytest.fixture
 def black_hole(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """A declared address whose connect TIMES OUT, on every platform."""
-    real = socket.create_connection
+    # At the connect syscall, not create_connection: the probe dials an IP
+    # literal on a socket it builds itself (U3b, PR #4260), and
+    # create_connection reaches this same method for hostnames.
+    real = socket.socket.connect
     host, _, port = DEAD.rpartition(":")
     hits: list[float] = []
 
-    def connect(address: Any, *args: Any, **kwargs: Any) -> socket.socket:
-        if tuple(address) == (host, int(port)):
+    def connect(sock: socket.socket, address: Any) -> None:
+        if tuple(address)[:2] == (host, int(port)):
             hits.append(1.0)
             raise TimeoutError("timed out")
-        return real(address, *args, **kwargs)
+        return real(sock, address)
 
-    monkeypatch.setattr(socket, "create_connection", connect)
+    monkeypatch.setattr(socket.socket, "connect", connect)
     yield DEAD
     # Rig check: the probe really asked this address (the row is about it).
     assert hits, "the silent address was never dialled"
