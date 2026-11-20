@@ -350,6 +350,12 @@ class MacLibprocLookup:
             ctypes.c_void_p,
             ctypes.c_int,
         ]
+        # ``os.getuid`` is POSIX-only. The factory only builds this lookup on
+        # darwin, but a direct construction elsewhere must fail the way a
+        # missing libproc does (AttributeError -> "unsupported" in the
+        # factory), and the xplat probe needs to see the guard as a statement.
+        if not hasattr(os, "getuid"):
+            raise AttributeError("os.getuid is unavailable on this platform")
         self._uid = os.getuid()
         # Pids that recently owned an admitted connection, most recent last.
         # Sound against pid reuse: a reused pid that now belongs to another uid
@@ -636,7 +642,13 @@ class PeerGate:
     def __init__(self, status: GateStatus, lookup: PeerLookup | None = None) -> None:
         self.status = status
         self.lookup = lookup
-        self._uid = os.getuid() if hasattr(os, "getuid") else -1
+        # -1 matches no real uid. A PeerGate on a non-POSIX platform is only
+        # ever built unenforced (the factory reports "unsupported"), so this
+        # value is never compared there; the guard is a statement rather than
+        # a ternary so the xplat static probe can see it.
+        self._uid = -1
+        if hasattr(os, "getuid"):
+            self._uid = os.getuid()
         # Two lanes (agent review round 1, R2): every foreign connection costs a
         # full NOT-FOUND scan, so if hinted same-user connections queued behind
         # those scans, a modest foreign connection rate would 503 the desktop.

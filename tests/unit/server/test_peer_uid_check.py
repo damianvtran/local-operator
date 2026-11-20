@@ -305,7 +305,10 @@ def test_hinted_same_user_is_admitted_fast_under_a_sustained_foreign_flood(
     # Counting walks keeps this exact on a loaded host, where the fake's 32 ms
     # sleep was measured at 150-190 ms (load average ~34).
     assert waited_walks <= 3, waited_walks
-    assert elapsed < pc.LOOKUP_TIMEOUT_S / 2, elapsed
+    # Wall time only separates the lanes coarsely (agent review R8): the old
+    # lane waits the full timeout, so anything under it is the hint lane; the
+    # walk count above is the exact check on a loaded host.
+    assert elapsed < pc.LOOKUP_TIMEOUT_S, elapsed
     assert me not in lookup.full_scans  # answered by the hint lane
     # Cost scales per pass: far fewer walks than foreign connections.
     assert lookup.walks < foreign / 4, (lookup.walks, foreign)
@@ -650,6 +653,19 @@ def test_unrecognised_value_falls_back_to_auto_inside_the_one_notice(
     assert gate.enforcing
     (notice,) = _notices(caplog)
     assert "ignored unrecognised" in notice.message
+
+
+def test_missing_getuid_resolves_to_unsupported_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows has no ``os.getuid``: the mac lookup must report "unsupported"
+    through the factory (the skipped-with-one-notice path) and an unenforced
+    gate must still construct, rather than either raising AttributeError."""
+    monkeypatch.delattr(os, "getuid", raising=False)
+    with pytest.raises(LookupError, match="unsupported"):
+        pc.default_lookup_factory("darwin")
+    gate = pc.PeerGate(pc.GateStatus("skipped", reason="unsupported: windows"))
+    assert not gate.enforcing
 
 
 def test_self_probe_rejects_a_mechanism_that_admits_everything() -> None:
