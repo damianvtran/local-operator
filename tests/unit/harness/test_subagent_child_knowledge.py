@@ -132,6 +132,13 @@ def _parent_session(tmp_path, block: str):
     return make_session(tmp_path, stream, system_blocks_provider=provider), stream
 
 
+async def _child_head(child) -> str:
+    blocks = child._system_blocks_provider()
+    if inspect.isawaitable(blocks):
+        blocks = await blocks
+    return blocks[0]
+
+
 async def _child_tail(child) -> str:
     blocks = child._system_blocks_provider()
     if inspect.isawaitable(blocks):
@@ -477,10 +484,10 @@ async def test_child_block_zero_follows_the_childs_live_tools(tmp_path, monkeypa
             todo_prose = "Keep the todo list honest"
             assert any(tool.name == "todo" for tool in child._tools)
             # Control: held at construction, so the prose renders.
-            assert todo_prose in child._system_blocks_provider()[0]
+            assert todo_prose in await _child_head(child)
             child.refresh_tools([tool for tool in child._tools if tool.name != "todo"])
             assert not any(tool.name == "todo" for tool in child._tools)
-            assert todo_prose not in child._system_blocks_provider()[0]
+            assert todo_prose not in await _child_head(child)
         finally:
             await child.dispose()
     finally:

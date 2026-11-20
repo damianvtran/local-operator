@@ -128,7 +128,16 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Mapping
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterable,
+    Literal,
+    Mapping,
+    cast,
+)
 
 from local_operator.agent_profiles import (
     READ_ONLY_NETWORK_TOOLS,
@@ -4777,7 +4786,9 @@ async def _construct_child_session(
         # (``TOOL_GATED_PROSE_FLAGS``) described tools the child did not hold.
         # Same probe the top-level factory provider got in #4318 (review R2).
         live_probe = getattr(system_blocks_provider, "live_tools", None)
-        current_tools = list(live_probe()) if callable(live_probe) else tools
+        current_tools: list[AgentTool] = (
+            list(cast("Iterable[AgentTool]", live_probe())) if callable(live_probe) else tools
+        )
         return build_system_blocks(
             current_tools,
             "\n\n".join(
