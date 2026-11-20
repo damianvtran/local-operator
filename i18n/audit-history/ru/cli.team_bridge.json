@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "cli.team_bridge",
-  "history_sha256": "58afc8e2d31795cb29787420e4dd88f60693af02c2f26fc429be33f63a72d094",
+  "history_sha256": "71b217ba5ba9d0c85f3d9f9ea0948dcd65af1dcf45f809990dad3a39f7d1612b",
   "entries": [
     {
       "locale": "ru",
@@ -103,6 +103,73 @@
       },
       "status": "passed",
       "note": "Merged-source audit, PR #4096 round 3 (convergence), head 908660b7aadb on main 72dd603f, scope cf62fdda6b1a..908660b7aadb; en source_sha256 bc305b44083685109f05166df42eec6cc2cd3eeaaf2b86848def36bad7dd544a = main's 20ff80eb text plus the PR's 25552503 status keys, no key changed on both sides. Audited keys: notify.screening_model_unavailable_body (main's 'Radient Console' value and its context note) and the PR's status.running, status.running_none, status.running_unrecorded, status.running_exited, status.running_detail, status.restart_needed, status.restart_needed_replaced, each read against its en context note. Other keys unchanged since their passed rows and not re-audited. Mechanical: key parity 66/66; placeholders identical to en in every audited key ({pid},{version},{started},{generation},{versions},{installed}); no plural/select in scope; NFC; no Cf/bidi controls. ru: вы register; 'приёмник' consistent with the namespace; 'в Radient Console' unarticled product name, Latin script; restart_needed_replaced says 'код, который был до последнего обновления' and does not claim a version difference; running_exited 'завершился' fits a process exit. No findings. Auditor edits: none. Unresolved blocker/major: 0. Audit performed by reading under a fleet load hold: no in-locale render through messages.render_record and no check.py --audit-base sweep were run this round. Single independent semantic audit; not a second high-visibility audit; native-speaker review not claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "790757e4698f96130cc3b2cbfe8b0b4c5bf1085cfc1812ddaf789a1956c8dd76",
+      "context_sha256": "908bbf7f35b2aee7aec6c46b5718ca0670af5082ec33a8d5ee652c4937f98cba",
+      "target_sha256": "c1e7f053f426a7b880df3a2ba904e4ba1a1344a15e3e46d3f0f3a505d8dd82b4",
+      "translator": {
+        "agent": "coder subagent (PR #4317 implementer), not an i18n-translator lane; session id not given in the manager brief",
+        "model": "anthropic/claude-opus-5-5 (as stated by the manager brief; not independently verified)",
+        "date": "2026-11-19",
+        "fallback": "unknown: not reported in the brief"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (team radientdev, task subagent) acting as independent i18n auditor, session 2f61873f3c63; did not author or edit any value it judged",
+        "session": "2f61873f3c63",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed (harness system prompt: Model: anthropic/claude-opus-5-5)",
+        "date": "2026-11-19",
+        "result": "changes_requested",
+        "findings": 3,
+        "unresolved_blocker_major": 1,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 1,
+          "minor": 2,
+          "nit": 0
+        }
+      },
+      "status": "changes_requested",
+      "note": "PR #4317 copy r1 delta audit at 25421df34c29: base fully passed, diff = 2 added keys. Findings: C1 (en owner_ineligible arm misstates cause; inherited by every locale); C4 (sign_in arm cause); C5 (consent arm wording). Native/rendered certification not claimed.",
+      "round": "pr4317-copy-r1",
+      "keys_audited": 2
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4f9a366e9d5d5543639911efef91ac838512f73d422d2d659df1fccc2258064c",
+      "context_sha256": "b66952aed55a5ff03c8a1b65d4be4141f4eeaabb97c69cc67a767396fa5d5814",
+      "target_sha256": "d4a4c619e790b9dd276d852c919eb7a42be9663ea8baef2178bbf0fd0c293af3",
+      "translator": {
+        "agent": "coder (radientdev team task subagent, PR #4317 remediation implementer; translated all 28 changed strings)",
+        "session": "4d8fffdeba64",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "fallback": "none: auditor read the session record (origin.json agent=coder, subagent; every transcript response model claude-opus-5-5)"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (radientdev team task subagent) acting as independent i18n auditor; did not author or edit any value it judged",
+        "session": "aa991fa2d698",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed (harness system prompt: Model: anthropic/claude-opus-5-5)",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4317 copy r2 delta audit at feac0a8c484c: keys audited cli.team_bridge.notify.owner_action_hold_title, cli.team_bridge.notify.owner_action_hold_body against the remediated en source; prior r1 C1-C3 MAJORs verified fixed (eligibility covers org+machine, sign-in covers expired+wrong account, consent 'given', help hedged 'Some', label <=29 cells, title arms <=40 cells, measured with rich.cells.cell_len). Every other key in this namespace is byte-identical to the base 736fd54f06f0, whose last receipt was passed; no other key re-audited. Open non-gating findings: C9. Native/rendered certification not claimed.",
+      "round": "pr4317-copy-r2",
+      "keys_audited": 2
     }
   ]
 }
