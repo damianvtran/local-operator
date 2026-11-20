@@ -1995,3 +1995,22 @@ async def test_fal_drops_a_seed_the_gpt_image_schema_cannot_carry() -> None:
                 client=client,
             )
         assert ("seed" in recorder.bodies[0]) is expect_seed, model
+
+
+@pytest.mark.parametrize(
+    ("pinned", "app", "ceiling"),
+    [
+        ("fal-ai/nano-banana-pro", "fal-ai/nano-banana-pro/edit", 14),
+        ("blackforestlabs/flux-3/text-to-image", "blackforestlabs/flux-3/edit-image", 10),
+    ],
+)
+def test_fal_frontier_alternatives_edit_on_their_real_edit_apps(
+    pinned: str, app: str, ceiling: int
+) -> None:
+    """The guide's frontier alternatives must not fall to the flux-class
+    ``/image-to-image`` append (review round 1, R1-2)."""
+    route = image_rungs._fal_edit_route(pinned, source_count=2)
+    assert route.app == app
+    assert route.field == "image_urls"
+    assert route.max_sources == ceiling
+    assert route.sends_size is False, "both size by aspect_ratio, not image_size"

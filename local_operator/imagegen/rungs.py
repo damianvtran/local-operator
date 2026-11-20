@@ -1048,6 +1048,19 @@ FAL_EDIT_MODELS: dict[str, FalEditRoute] = {
     "blackforestlabs/flux-3/edit-image": FalEditRoute(
         "blackforestlabs/flux-3/edit-image", "image_urls", 10
     ),
+    # Frontier alternatives the guide names, so a caller who pins their
+    # TEXT-TO-IMAGE id still edits on the real edit app instead of the
+    # flux-class ``/image-to-image`` append (an app that does not exist for
+    # either). Schemas read 2026-11-19: FLUX 3's editor is the one above;
+    # Nano Banana Pro's ``/edit`` takes ``image_urls`` (the model family's 14
+    # references) and ``num_images`` 1..4, and sizes by ``aspect_ratio`` /
+    # ``resolution`` — it has no ``image_size``, so none is sent.
+    "blackforestlabs/flux-3/text-to-image": FalEditRoute(
+        "blackforestlabs/flux-3/edit-image", "image_urls", 10
+    ),
+    "fal-ai/nano-banana-pro": FalEditRoute(
+        "fal-ai/nano-banana-pro/edit", "image_urls", 14, sends_count=True
+    ),
 }
 
 #: The registered multi-reference editor an unpinned multi-source edit runs
@@ -1434,7 +1447,7 @@ def _openai_edit_usage_cost(model_id: str, usage: Any) -> tuple[float | None, st
         + (image_out or 0) * image_out_rate
     ) / 1_000_000
     provenance = (
-        "OpenAI docs pricing (fetched 2026-10-10): "
+        "OpenAI docs pricing (fetched 2026-10-10; gpt-image-2.6 row 2026-11-19): "
         f"${image_in_rate:g}/M image input + ${text_in_rate:g}/M text input + "
         f"${image_out_rate:g}/M image output, applied to the edits response "
         "usage tokens — an estimate, not an invoice"

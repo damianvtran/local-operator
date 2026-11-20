@@ -21,7 +21,7 @@ result's `details.attempts` records what each said.
 | Order | Provider | What it needs |
 |---|---|---|
 | 1 | Radient | a signed-in account (`/login radient`) |
-| 2 | FAL | a stored key (`lop login fal`, or an exported `FAL_API_KEY`) |
+| 2 | FAL | a stored key (`lop login fal`, or an exported `FAL_API_KEY` or `FAL_KEY`) |
 | 3 | OpenAI | a platform API key (`lop login openai-key`, or an exported `OPENAI_API_KEY`) |
 | 4 | ChatGPT plan | the ChatGPT subscription sign-in (`lop login openai`) |
 | 5 | Google | an AI Studio key (`lop login google`, or an exported `GOOGLE_AI_STUDIO_API_KEY`) |
@@ -44,7 +44,7 @@ Provider-by-provider provenance, wire shapes and verified-at dates:
 
 - **Radient**: `/login radient` (or `lop login radient` from a shell).
 - **FAL**: `lop login fal` — paste a key from your FAL dashboard. An exported
-  `FAL_API_KEY` also works.
+  `FAL_API_KEY` (or FAL's own `FAL_KEY`) also works.
 - **OpenAI**: `lop login openai-key` — paste a platform API key. An exported
   `OPENAI_API_KEY` also works.
 - **ChatGPT plan**: `lop login openai` — the ChatGPT subscription sign-in the
@@ -116,7 +116,9 @@ does not change model character:
   resolves GPT Image 2.6 Sunburst for both generate and edit when unpinned.
 - **FAL**: an app path like `openai/gpt-image-2.6/sunburst/text-to-image`
   (the default; edits run on its `/edit` app). `fal-ai/nano-banana-pro` and
-  `blackforestlabs/flux-3/text-to-image` are frontier alternatives.
+  `blackforestlabs/flux-3/text-to-image` are frontier alternatives (edits
+  route to their own edit apps; both size by aspect ratio, so `image_size`
+  is not applied on them).
 - **OpenAI**: `gpt-image-2.6-sunburst` (default) or another `gpt-image` id.
 - **ChatGPT plan**: the current Codex host model runs by default; override
   only if you know the catalogue.
@@ -130,7 +132,9 @@ does not change model character:
 
 `image_size` accepts `square_hd`, `square`, `portrait_4_3`, `portrait_16_9`,
 `landscape_4_3`, `landscape_16_9` and is mapped per provider. `seed` runs only
-where the provider supports it: Radient, FAL and OpenRouter (per model);
+where the provider and model support it: Radient, FAL and OpenRouter, per
+model — the GPT Image defaults on FAL and OpenRouter take no seed (pin a
+flux-class model for reproducible runs);
 OpenAI, Google and the ChatGPT-plan route cannot honour it — do not promise
 reproducibility there.
 
