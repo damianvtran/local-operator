@@ -1410,7 +1410,8 @@ class ServingSessionHandle(SessionHandle):
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         #: Set by :meth:`refuse_gates_for_exit` once a SIGNAL has committed this
         #: runtime to leaving: every gate opened afterwards answers at once with
-        #: the deny/escape answer instead of parking. See that method for why.
+        #: the deny/escape answer instead of parking. See that method for why;
+        #: :meth:`reopen_gates_after_yield` is its single reversal.
         self._gates_closed_for_exit = False
         # request_id -> (monotonic instant, settled value) for gates that LANDED
         # recently. The desktop answer path retries ONCE under the same id when an
@@ -3787,11 +3788,27 @@ class ServingSessionHandle(SessionHandle):
         model's next step after a denial is often another gated call, and a
         fresh card would hold the drain open exactly as the first one did.
         One-way for the life of the process — it is only called on an exit
-        that has already been committed to. Returns how many parked gates were
+        that has already been committed to — with ONE exception,
+        :meth:`reopen_gates_after_yield`. Returns how many parked gates were
         settled, for the log.
         """
         self._gates_closed_for_exit = True
         return self._deny_pending_gates()
+
+    def reopen_gates_after_yield(self) -> None:
+        """Let gates park again: an unattended signal drain admitted the owner's prompt.
+
+        ``process._yield_signal_drain_to_owner`` lifts the admission latch so an
+        operator's prompt runs here instead of waiting behind a subagent for a
+        successor. That operator is present and can answer a card, so the reason
+        :meth:`refuse_gates_for_exit` gives (nobody can answer before the exit)
+        no longer holds; left closed, every approval in their turn was silently
+        denied and every ask read as "escaped" (agent review round 1 on #4355,
+        R1). A card parked afterwards reads as a step in flight, which the
+        signal bound spares rather than reaps — acceptable with the operator at
+        the composer. Settled gates stay settled; this only affects new ones.
+        """
+        self._gates_closed_for_exit = False
 
     def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.

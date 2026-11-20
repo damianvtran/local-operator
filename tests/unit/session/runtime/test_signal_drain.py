@@ -1355,3 +1355,118 @@ def test_only_an_unattended_marked_stop_yields_to_the_owner(
     arrival = process._Arrival(entry=entry, run_key={})
     assert process._signal_yields_to_owner(arrival) is expected
     assert process._signal_yields_to_owner(None) is False
+
+
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        # R3 on #4355: the other two writers of ``deliberate: false`` keep the hold.
+        ("local_operator.session.runtime.reclaim", "RECLAIM_MECHANISM"),
+        ("local_operator.update", "MECHANISM_GENERATION_PRUNE"),
+        ("local_operator.update", "MECHANISM_IN_PLACE_INSTALL"),
+    ],
+)
+def test_reclaim_and_update_stops_do_not_yield(module: str, name: str) -> None:
+    import importlib
+
+    marker = {"deliberate": False, "mechanism": getattr(importlib.import_module(module), name)}
+    arrival = process._Arrival(entry={"stop_marker": marker}, run_key={})
+    assert process._signal_yields_to_owner(arrival) is False
+
+
+def test_the_yielding_mechanism_is_the_sweeps_own_token() -> None:
+    from local_operator.wakes.owned_runtimes import SWEEP_MECHANISM
+
+    assert process._YIELDING_STOP_MECHANISM == SWEEP_MECHANISM
+
+
+class _GatedSubagentHoldHandle(_SubagentHoldHandle):
+    """The hold handle plus the production gate flag's close/reopen pair."""
+
+    def __init__(self, directory: Any, **kwargs: Any) -> None:
+        super().__init__(directory, **kwargs)
+        self.gates_closed = False
+
+    def refuse_gates_for_exit(self) -> int:
+        self.gates_closed = True
+        return 0
+
+    def reopen_gates_after_yield(self) -> None:
+        self.gates_closed = False
+
+
+@pytest.mark.asyncio
+async def test_the_yield_reopens_the_gates_the_drain_closed(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 on #4355: the operator's yielded turn must not run with every gate refused."""
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 600.0)
+    closed_at_yield: list[bool] = []
+
+    async def fake_drain_inbox_into(handle: Any) -> None:
+        closed_at_yield.append(handle.gates_closed)
+
+    monkeypatch.setattr(process, "_drain_inbox_into", fake_drain_inbox_into)
+    stop = asyncio.Event()
+    handle = _GatedSubagentHoldHandle(tmp_path, busy=True)
+    task = asyncio.ensure_future(
+        _drain_for_signal(
+            handle, _RecordingRuntime(), stop, sig_name="SIGTERM", yield_to_owner=True
+        )
+    )
+    try:
+        await asyncio.sleep(process.REAP_CHECK_S * 2 + 0.05)
+        assert handle.gates_closed, "the latched signal drain closed the gates"
+        handle.turn_live = False
+        _spool_owner_prompt(tmp_path, "approve something")
+        await asyncio.sleep(process.REAP_CHECK_S * 3 + 0.05)
+        assert handle.end_drains == 1
+        assert closed_at_yield == [False], "gates reopen BEFORE the owner's prompt runs"
+    finally:
+        handle.busy = False
+        await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_the_silence_bound_never_cuts_the_yielded_owner_turn(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 on #4355: a REAP verdict while the yielded turn runs is held until it ends."""
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 600.0)
+
+    async def fake_drain_inbox_into(handle: Any) -> None:
+        handle.turn_live = True  # the owner's prompt is now a live turn
+
+    monkeypatch.setattr(process, "_drain_inbox_into", fake_drain_inbox_into)
+    reap_now = {"on": False}
+    real_sample = process._SignalDrainBound.sample
+
+    def sample(self: Any, handle: Any, at: float) -> str:
+        real = real_sample(self, handle, at)
+        return process._SignalDrainBound.REAP if reap_now["on"] else real
+
+    monkeypatch.setattr(process._SignalDrainBound, "sample", sample)
+    stop = asyncio.Event()
+    handle = _SubagentHoldHandle(tmp_path, busy=True)
+    task = asyncio.ensure_future(
+        _drain_for_signal(
+            handle, _RecordingRuntime(), stop, sig_name="SIGTERM", yield_to_owner=True
+        )
+    )
+    try:
+        await asyncio.sleep(process.REAP_CHECK_S * 2 + 0.05)
+        handle.turn_live = False
+        _spool_owner_prompt(tmp_path, "think hard")
+        await asyncio.sleep(process.REAP_CHECK_S * 3 + 0.05)
+        assert handle.end_drains == 1 and handle.turn_live
+        # The bound now says "silent too long" on every sample (a long parent call).
+        reap_now["on"] = True
+        await asyncio.sleep(process.REAP_CHECK_S * 3 + 0.05)
+        assert not stop.is_set(), "the operator's own turn was not cut"
+        # Once that turn ends, the bound's verdict applies again.
+        handle.turn_live = False
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        if not task.done():
+            task.cancel()
+    assert stop.is_set()

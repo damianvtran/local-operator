@@ -4044,7 +4044,11 @@ async def _drain_for(
         # (``_SignalDrainBound``, judged in ``_drain_for_signal``), so all
         # this function may do for it is keep waiting and re-check the idle
         # gate — the failed-update row and the released latch it would
-        # otherwise write must never appear on a signal.
+        # otherwise write must never appear on a signal. The ONE release a
+        # signal drain makes is ``_yield_signal_drain_to_owner``, and it is not
+        # this revocation: it is taken in ``_drain_for_signal``, only for an
+        # unattended wake-sweep stop with an owner prompt waiting, and this
+        # function still commits ``begin_retire`` at the next idle instant.
         if drain.cause == SIGNAL_DRAIN_CAUSE:
             return False
         if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
@@ -4646,17 +4650,38 @@ def _note_signal_spare(sig_name: str, bound: "_SignalDrainBound", at: float) -> 
 def _signal_yields_to_owner(arrival: "_Arrival | None") -> bool:
     """May this signal's drain give way to a prompt the operator sends meanwhile?
 
-    Only for a stop NOBODY TYPED: the arrival is paired with a stop marker that
-    says ``deliberate: false`` (the wake supervisor's sweep writes exactly that —
-    ``owned_runtimes.sweep`` stages one per candidate). A deliberate stop (``lop
-    stop``, an operator's kill with a marker) keeps today's refusal: the operator
-    asked for this session to end, and a later prompt is theirs to re-send. An
-    arrival with no marker or no observation also keeps today's behaviour — the
-    yield is an exception to the drain, so it needs positive evidence.
+    Only for the WAKE SUPERVISOR'S SWEEP: the arrival is paired with a stop
+    marker saying ``deliberate: false`` AND ``mechanism: "wake-sweep"``
+    (``owned_runtimes.SWEEP_MECHANISM``, staged per candidate by
+    ``owned_runtimes._attest_before_signal``). ``control.note_involuntary_stop``
+    has two other writers, and both keep today's refusal on purpose (agent
+    review round 1 on #4355, R3):
+
+    * ``update._attests`` — a generation prune or an in-place install is about
+      to REMOVE OR REPLACE the code tree this process imported from; a fresh
+      turn here would lazily import modules that may no longer exist;
+    * ``reclaim._attest`` (``RECLAIM_MECHANISM``) — the residency sweep chose
+      this runtime to FREE MEMORY; staying resident to serve a prompt defeats
+      the act, and the successor serves it once the memory is back.
+
+    A deliberate stop (``lop stop``, an operator's kill with a marker) keeps
+    today's refusal too: the operator asked for this session to end, and a later
+    prompt is theirs to re-send. An arrival with no marker or no observation also
+    keeps today's behaviour — the yield is an exception to the drain, so it needs
+    positive evidence. The mechanism is matched as a literal (pinned equal to
+    ``SWEEP_MECHANISM`` by a test) so this hot signal path imports nothing.
     """
     entry = getattr(arrival, "entry", None)
     marker = entry.get("stop_marker") if isinstance(entry, dict) else None
-    return isinstance(marker, dict) and marker.get("deliberate") is False
+    return (
+        isinstance(marker, dict)
+        and marker.get("deliberate") is False
+        and marker.get("mechanism") == _YIELDING_STOP_MECHANISM
+    )
+
+
+#: ``owned_runtimes.SWEEP_MECHANISM``; see :func:`_signal_yields_to_owner`.
+_YIELDING_STOP_MECHANISM = "wake-sweep"
 
 
 def _owner_waits_on_background_hold(handle: object) -> bool:
@@ -4691,6 +4716,17 @@ def _owner_waits_on_background_hold(handle: object) -> bool:
         return any(line.source == SOURCE_USER for line in peek_inbox(directory))
     except Exception:  # noqa: BLE001 — an unreadable probe keeps the drain as it was
         logger.debug("could not read whether an owner prompt is waiting", exc_info=True)
+        return False
+
+
+def _owner_turn_live(handle: object) -> bool:
+    """Is a conversational turn running? A probe that cannot answer says no."""
+    active = getattr(handle, "is_conversationally_active", None)
+    if not callable(active):
+        return False
+    try:
+        return bool(active())
+    except Exception:  # noqa: BLE001 — unknown keeps the bound's own verdict
         return False
 
 
@@ -4746,7 +4782,9 @@ async def _yield_signal_drain_to_owner(handle: object, sig_name: str) -> bool:
     guards ("a silent revocation of a termination signal"): the drain object and
     the ``leaving`` phrase stay, ``_drain_for`` still commits ``begin_retire`` at
     the first idle instant, and ``_SignalDrainBound`` still reaps a hold that goes
-    silent. The signal is honoured late, never ignored.
+    silent once the owner's turn has ended (never mid-turn: see the caller). The
+    gates ``_refuse_gates`` closed are reopened, because the operator is now
+    there to answer them. The signal is honoured late, never ignored.
 
     ONCE PER DRAIN (the caller's ``yielded``): ``begin_drain`` is not re-taken,
     for the reason ``_abandon_move`` records — a second retire re-diverts wakes
@@ -4766,6 +4804,17 @@ async def _yield_signal_drain_to_owner(handle: object, sig_name: str) -> bool:
         return False
     if not released:
         return False
+    # The drain closed every gate when it latched (``_refuse_gates``), so the
+    # operator's turn would otherwise run with each approval silently denied and
+    # each ask answered "escaped" — worse than the wait this removes (agent
+    # review round 1 on #4355, R1). The operator is present now, so a card can be
+    # answered; a parked card reads as a step in flight, which the bound SPAREs.
+    reopen = getattr(handle, "reopen_gates_after_yield", None)
+    if callable(reopen):
+        try:
+            reopen()
+        except Exception:  # noqa: BLE001 — the prompt still runs; its gates just stay refused
+            logger.warning("session runtime: could not reopen gates after the %s yield", sig_name)
     logger.warning(
         "session runtime: %s drain was held only by %s while an owner prompt waited; "
         "running the prompt here and leaving at the first idle instant (unattended "
@@ -4985,6 +5034,14 @@ async def _drain_for_signal(
             yielded = await _yield_signal_drain_to_owner(handle, sig_name)
         at = time.monotonic()
         verdict = bound.sample(handle, at)
+        if verdict == _SignalDrainBound.REAP and yielded and _owner_turn_live(handle):
+            # The operator's own turn, admitted by the yield, is never cut by the
+            # silence bound: a long parent-only provider request moves neither
+            # progress signal (the bound's documented blind spot), and before the
+            # yield this prompt would have run uncut on the successor (agent
+            # review round 1 on #4355, R2). Mirrors ``_abandon_move`` keeping
+            # serving; the bound applies again once the turn ends.
+            verdict = _SignalDrainBound.WAIT
         if verdict == _SignalDrainBound.REAP:
             break
         if verdict == _SignalDrainBound.SPARE:
