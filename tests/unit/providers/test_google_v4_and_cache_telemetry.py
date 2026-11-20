@@ -391,3 +391,63 @@ async def test_end_diagnosis_does_not_replace_anthropic_start(tmp_path, monkeypa
         store.close()
     assert len(recorded) == 1
     assert (recorded[0].cache_miss_type, recorded[0].cache_missed_tokens) == ("tools_changed", 123)
+
+
+@pytest.mark.parametrize("model_id", ["gemini-4-neon", "gemini-3-flash"])
+def test_long_tool_argument_elision_keeps_a_signature(model_id: str) -> None:
+    """The live gemini-4-neon 400 ("Function call is missing a thought_signature").
+
+    A tool argument over ``DEFAULT_REPLAY_BOUND_CHARS`` (an 8,615-char ``task``
+    prompt in the incident) is elided by ``bound_replay_payloads`` into a COPY.
+    The copy no longer matches the native replay's visible fingerprint, so the
+    Google wire falls back to the normalized path, which must still stamp the
+    documented validator-skip marker on Gemini 3 AND later; before the
+    generation gate it did so only for ``gemini-3*``, so every Gemini 4 turn
+    after a long tool argument was refused.
+    """
+    from local_operator.harness.replay_bound import (
+        DEFAULT_REPLAY_BOUND_CHARS,
+        bound_replay_payloads,
+    )
+    from local_operator.harness.types import ToolCall
+    from local_operator.providers.replay import credential_scope, native_payload
+
+    spec = ModelSpec(provider="google", model_id=model_id)
+    scope = credential_scope("synthetic-key", None)
+    prompt = "p" * 8_615
+    assert len(prompt) > DEFAULT_REPLAY_BOUND_CHARS
+    args = {"agent": "coder", "prompt": prompt}
+    native_part = {
+        "functionCall": {"name": "task", "args": args},
+        "thoughtSignature": "synthetic-real-signature",
+    }
+    assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="fc_0_task", name="task", arguments=args)],
+        provider_payload=native_payload(
+            spec,
+            clients.GOOGLE_API_URL,
+            "google-content",
+            [native_part],
+            "",
+            [{"id": "fc_0_task", "name": "task", "args": args}],
+            scope,
+        ),
+    )
+    history = [
+        Message.user("delegate"),
+        assistant,
+        Message(role="tool", tool_name="task", tool_call_id="fc_0_task", content=[]),
+    ]
+    client = GoogleClient()
+
+    # Negative control: unbounded, the native part (real signature) replays.
+    native = client._build_body(ChatRequest(model=spec, messages=history), scope=scope)
+    assert native["contents"][1]["parts"] == [native_part]
+
+    bounded = bound_replay_payloads(history)
+    assert bounded[1] is not assistant, "the long argument must be elided into a copy"
+    body = client._build_body(ChatRequest(model=spec, messages=bounded), scope=scope)
+    call_part = body["contents"][1]["parts"][0]
+    assert "functionCall" in call_part
+    assert call_part.get("thoughtSignature") == "skip_thought_signature_validator"
