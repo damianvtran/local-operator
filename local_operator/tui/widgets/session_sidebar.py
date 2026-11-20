@@ -348,6 +348,25 @@ def _strip_dangling_separator(title: str) -> str:
 _SECTION_NAMES = {-1: "temporary", 0: "pinned", 1: "active", 2: "previous", 4: "subagent"}
 
 
+def _footer_cells(painted: str, span: tuple[int, int]) -> tuple[int, int]:
+    """Convert a footer span from string indices to terminal-cell columns.
+
+    WHY two coordinate systems: `_footer_line`, `_asks_span_in` and
+    `_hub_span_in` return Python string indices because `render` SLICES the
+    footer with them to underline the hovered control — slicing needs
+    characters. A pointer column, though, is a terminal CELL. The two agree
+    only while every glyph before and inside the span is one cell wide, which
+    held for the ASCII footer but not once the notes are translated: zh-CN's
+    `待答：4` is double-width (each CJK glyph and the full-width colon take
+    two cells) and Hindi carries zero-width combining marks, so a raw index
+    compare drifted the target off its text and, in zh-CN, onto the
+    NEIGHBOURING control (PR #4346 R1/Q1). Every hit test converts here, at
+    the comparison, and nowhere else, so paint keeps its character slices.
+    """
+    start, end = span
+    return cell_len(painted[:start]), cell_len(painted[:end])
+
+
 class SessionSidebar(Widget, can_focus=True):
     #: A pointer press on this list moves the keyboard to it — a row, the pin
     #: cell and the panel's dead space alike — and the list wears the shipped
@@ -2210,11 +2229,12 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if y != self.size.height - 1:
             return False
-        _text, span = self._footer_line(max(1, self.size.width))
+        text, span = self._footer_line(max(1, self.size.width))
         if span is None:
             return False
+        start, end = _footer_cells(text, span)
         column = x - self.styles.padding.left
-        return span[0] <= column < span[1]
+        return start <= column < end
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         entry = self._entry_at(event.y)
@@ -3337,9 +3357,9 @@ class SessionSidebar(Widget, can_focus=True):
         # The chip is the ladder's SUFFIX whenever it is painted — every
         # chip-carrying candidate ends with ` · ⌥N` — so its span is the last
         # `len(chip)` characters of the truncated line; `None` otherwise.
-        # `len` is the cell count for every glyph this ladder can emit (`⌥`,
-        # `·`, digits, ASCII) — the single-cell property the width comments
-        # above already rest on.
+        # These are STRING indices (render slices with them); the lead and
+        # notes before the chip are translated and may be wide, so hit tests
+        # convert through `_footer_cells` rather than read them as columns.
         span: tuple[int, int] | None = None
         if chip and painted.endswith(chip):
             span = (len(painted) - len(chip), len(painted))
@@ -3373,16 +3393,18 @@ class SessionSidebar(Widget, can_focus=True):
         span = self._asks_span_in(painted)
         if span is None:
             return False
+        start, end = _footer_cells(painted, span)
         column = x - self.styles.padding.left
-        return span[0] <= column < span[1]
+        return start <= column < end
 
     def _asks_span_in(self, painted: str) -> tuple[int, int] | None:
-        """The note's painted cell span, or ``None`` when it is not on the line.
+        """The note's painted string-index span, or ``None`` when it is not on the line.
 
         ONE resolution shared by the press target, the hover affordance and the
         paint itself, so the three can never disagree about where the door is.
         Only a note the ladder actually PAINTED counts: a truncated line that
-        happens to contain the words is not a target.
+        happens to contain the words is not a target. Indices, not cells:
+        callers comparing with a pointer column go through `_footer_cells`.
         """
         note = self._asks_note()
         if not note:
@@ -3420,11 +3442,12 @@ class SessionSidebar(Widget, can_focus=True):
         span = self._hub_span_in(painted)
         if span is None:
             return False
+        start, end = _footer_cells(painted, span)
         column = x - self.styles.padding.left
-        return span[0] <= column < span[1]
+        return start <= column < end
 
     def _hub_span_in(self, painted: str) -> tuple[int, int] | None:
-        """The hub door's painted cell span, or ``None`` when it is not on the line.
+        """The hub door's painted string-index span, or ``None`` when absent.
 
         One resolution shared by the press target, the hover affordance and the
         paint, so the three cannot disagree — the ask note's rule.

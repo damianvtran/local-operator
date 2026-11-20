@@ -263,3 +263,69 @@ async def test_shipped_fr_catalogue_paints_the_sidebar(shipped_fr) -> None:
         # `lop stop` is a command the operator types, so it must stay literal
         # inside the translated clause rather than being translated with it.
         assert got["wedged"] == f"{wedged_status()} · lop stop si le silence persiste"
+
+
+def _drawn_cells(strip, note: str) -> range:
+    """The terminal cells ``note`` occupies in the painted footer ``strip``.
+
+    Located by cropping the rendered Strip in CELLS (Textual's own cell
+    arithmetic, the one that puts glyphs on screen), never through the span
+    helpers under test, so a bug in their index arithmetic cannot agree with
+    itself here.
+    """
+    from rich.cells import cell_len
+
+    width = cell_len(note)
+    for start in range(strip.cell_length - width + 1):
+        if strip.crop(start, start + width).text == note:
+            return range(start, start + width)
+    raise AssertionError(f"{note!r} not drawn in {strip.text!r}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["en", "zh-CN", "hi"])
+async def test_footer_counter_presses_land_on_their_own_drawn_cells(shipped_fr, locale) -> None:
+    """PR #4346 R1/Q1: every footer column presses its own counter or nothing.
+
+    Translating the asks/hub notes put double-width (zh-CN `待答：4`) and
+    zero-width combining (hi) glyphs on the line, and the hit tests compared
+    the span helpers' STRING indices with pointer CELLS: in zh-CN the `4` of
+    the asks note opened Hub links and no cell of `链接：2` answered. The sweep
+    goes through the real press resolution QA used — ``App.mouse_position`` →
+    ``focus_on_click`` — at every column of the footer row, and English is the
+    control that the conversion leaves untouched.
+    """
+    from textual.geometry import Offset
+
+    assert locale in resolve.shipped_locales()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(140, 34)) as pilot:
+        await pilot.pause()
+        text.set_active_locale(locale)
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1)
+        sidebar.set_asks_total(4)
+        sidebar.set_hub_total(2)
+        await pilot.pause()
+        y = sidebar.size.height - 1
+        strip = sidebar.render_line(y)
+        pad = int(sidebar.styles.padding.left)
+        expected = {"asks": _drawn_cells(strip, sidebar._asks_note())}
+        expected["hub"] = _drawn_cells(strip, sidebar._hub_note())
+        expected["chip"] = _drawn_cells(strip, "⌥1")
+        got: dict[str, list[int]] = {"asks": [], "hub": [], "chip": []}
+        for column in range(-pad, sidebar.size.width + pad):
+            app.mouse_position = Offset(sidebar.region.x + pad + column, sidebar.region.y + y)
+            sidebar.focus_on_click()
+            hits = [
+                name
+                for name, flag in (
+                    ("asks", sidebar._press_asks_hit),
+                    ("hub", sidebar._press_hub_hit),
+                    ("chip", sidebar._press_chip_hit),
+                )
+                if flag
+            ]
+            assert len(hits) <= 1, (column, hits)
+            for name in hits:
+                got[name].append(column)
+        assert got == {name: list(cells) for name, cells in expected.items()}, strip.text
