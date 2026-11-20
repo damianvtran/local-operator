@@ -1,0 +1,21 @@
+{
+  "tui.bridge_card.frame.untrusted": "بیرونی پیغام · غیر قابلِ اعتماد مواد",
+  "tui.bridge_card.body.loading": "پیغام لوڈ ہو رہا ہے…",
+  "tui.bridge_card.body.pending": "آپ کے ایجنٹ تک پہنچائے جانے کا منتظر",
+  "tui.bridge_card.body.held": "ماڈریشن نے روک رکھا ہے",
+  "tui.bridge_card.body.held_transient": "اسکریننگ کا انتظار ہے — ابھی آپ کے ایجنٹ کو نہیں دکھایا گیا",
+  "tui.bridge_card.body.refused": "ماڈریشن نے مسترد کیا",
+  "tui.bridge_card.body.not_admitted": "آپ کے ایجنٹ تک نہیں پہنچایا گیا",
+  "tui.bridge_card.body.unavailable": "پیغام کا متن دستیاب نہیں",
+  "tui.bridge_card.body.signed_out": "یہ پیغام دیکھنے کے لیے Radient میں سائن اِن کریں",
+  "tui.bridge_card.body.other_account": "کسی دوسرے Radient اکاؤنٹ پر موصول ہوا",
+  "tui.bridge_card.body.not_member": "اب آپ اس گفتگو میں شامل نہیں ہیں",
+  "tui.bridge_card.body.offline": "Radient سے رابطہ نہیں ہوا — دوبارہ کوشش کے لیے بند کر کے کھولیں",
+  "tui.bridge_card.body.deleted": "یہ پیغام حذف کر دیا گیا",
+  "tui.bridge_card.body.show_more": "پورا پیغام دکھائیں · {total, plural, one {# سطر} other {# سطریں}}",
+  "tui.bridge_card.body.show_less": "کم دکھائیں",
+  "tui.bridge_card.body.more_messages": "{count, plural, one {اس کارڈ میں # مزید پیغام} other {اس کارڈ میں # مزید پیغامات}}",
+  "tui.bridge_card.header.held_transient": "اسکریننگ کا انتظار",
+  "tui.bridge_card.header.open_to_load": "پیغام لوڈ کرنے کے لیے کھولیں",
+  "tui.bridge_card.header.offline": "Radient سے رابطہ نہیں ہوا — دوبارہ کوشش کے لیے کھولیں"
+}

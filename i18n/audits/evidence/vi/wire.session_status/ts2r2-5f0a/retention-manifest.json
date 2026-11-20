@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; integration-only retention mapping, not an audit or eligibility promotion. Original VI first PASS and second CHANGES_REQUESTED retained unchanged.",
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "round": "second_audits-R2",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "91fdc2a9fb34b9bd23efce8daabd33a74a7511ad67a9b269e711dd90c96b277e",
+  "original_receipt": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/receipt.json",
+  "original_receipt_sha256": "739c6cad423894280af7fe506214d9fd3ecf75b076ce91b2a3e428a83d761aee",
+  "original_record": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/record.json",
+  "original_record_sha256": "4ef6b6e2b4fbd0315cd6367259b55dd3a3a086d6cbcafab7bc303507918057f1",
+  "original_status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "terminal-status-vi",
+    "session": "56c3029571f6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model header",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_translator": true
+  },
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/record.json",
+      "sha256": "4ef6b6e2b4fbd0315cd6367259b55dd3a3a086d6cbcafab7bc303507918057f1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/receipt.json",
+      "sha256": "739c6cad423894280af7fe506214d9fd3ecf75b076ce91b2a3e428a83d761aee"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/report.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/report.json",
+      "sha256": "3b3908e934bd19f72adefbcfeca9c4799fccc2f567a83106133bf1edee31f52a"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/compatibility.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/compatibility.json",
+      "sha256": "659e6eb4d98051192cde583aae768ea9e26c3cfb13f06794bfba42d61a9ba2e6"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/audit.log",
+      "sha256": "f4a50f02c4042a78d625bf679f6a9d251da397d0920b6ea450ba40f7ff29b5ae"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/manifest.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/manifest.json",
+      "sha256": "6e510b2f7628f4c96ed010be4b6b540c1bcbf4ce788262070eca6a5d68432d27"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/admission.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/admission.json",
+      "sha256": "2b060682d7025ef810b7a3b18cf927a9611cca5d004581974da92e9246e117e2"
+    }
+  ]
+}

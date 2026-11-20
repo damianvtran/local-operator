@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
@@ -82,6 +82,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
+    is_preserved_replay,
     is_resume_card,
 )
 from local_operator.compaction.marker import (
@@ -1448,6 +1449,19 @@ class _PeerArrival:
         self._event.set()
 
 
+class _DenseTailArgs(TypedDict, total=False):
+    """The dense-tail keywords of :meth:`Session._produce_summary`.
+
+    ``total=False`` because each is passed only when set (see
+    :meth:`Session._dense_tail_kwargs`): a duck-typed ``_produce_summary``
+    that predates them keeps its signature.
+    """
+
+    dense_tail: int
+    dense_previous_chars: int
+    dense_closed: bool
+
+
 @dataclass(frozen=True, slots=True)
 class _CompactionPlan:
     """One compaction pass, decided but not yet committed.
@@ -1487,6 +1501,27 @@ class _CompactionPlan:
     #: commit: ``_run_compaction`` never reads it, so a hint can never reach the
     #: summarizer or permanent history.
     advisor_hint: Any | None = None
+    #: Index into ``llm_history`` where the LIVE TASK carried on the archive's
+    #: tail edge starts, or ``None`` when no span changed carrier. When set,
+    #: ``llm_history[dense_tail_from:cut]`` is the span the task floor would
+    #: have kept raw; the commit hands its length to ``compact_to_archive`` so
+    #: it is replayed as plain text rather than paged (see
+    #: :meth:`Session._dense_tail_cut` for why and for the measurements).
+    #: Carried as an INDEX, not a count, because the byte-aware step may move
+    #: ``cut`` later after the plan decided this, and the span must follow it.
+    dense_tail_from: int | None = None
+    #: Trailing characters of the PREVIOUS archive's text that are the same
+    #: live task, still running (``Archive.live_tail_chars``). Non-zero only
+    #: when this pass continues a task whose opening request an earlier dense
+    #: pass archived, so ``task_boundary_floor`` had nothing to measure from;
+    #: ``dense_tail_from`` is then ``0`` (the whole summarized span continues
+    #: it). See :meth:`Session._dense_tail_cut`.
+    dense_tail_previous_chars: int = 0
+    #: The task floor was CLAMPED at its cap when it chose this pass's span:
+    #: the task is already wider than its protection. The span is carried on
+    #: this pass and not recorded as continuable, which is the horizon the raw
+    #: floor has (its anchor is cut away on exactly this pass).
+    dense_tail_closed: bool = False
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
     memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
@@ -3915,6 +3950,7 @@ class Session:
         # messages. Completed consumers verify disk, not this runtime object.
         self._file_provenance_state = None
         self._init_bridge_taint(inherited_bridge_taint)
+        self._init_community_taint()
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
         # its own). Anything raising here kills the runtime process before it
@@ -4612,6 +4648,19 @@ class Session:
                 "notify_available",
                 lambda: any(tool.name == "notify" for tool in self._tools),
             )
+        if getattr(system_blocks_provider, "session_tool_membership", False):
+            # The factory provider closes over the PRE-narrowing tool list, but
+            # block zero's tool-gated prose (browser/console usage, library,
+            # todo, ask mechanics ...) must describe the tools this session
+            # actually holds: an SDK ``ApprovalPolicy.declared([...])`` run
+            # narrowed to three tools used to ship the browser playbook in block
+            # 0 while block 1 said "This session was not given the browser
+            # tool". ``self._tools`` is the live, already-narrowed set (every
+            # rebinding goes through ``refresh_tools``), deferred tools included.
+            # The provider keys its cache on these names, so a change before the
+            # first turn reaches the frozen prefix and a later one is an ordinary
+            # head change handled by ``_prepare_system_blocks``.
+            setattr(system_blocks_provider, "live_tools", lambda: list(self._tools))
         if getattr(system_blocks_provider, "session_cos_identity", False):
             # Her configured name for the prompt (``_cos_display_name``). The
             # factory cannot answer it: it must not import her package (R17),
@@ -4712,6 +4761,36 @@ class Session:
         #: runtime rather than a trusted one — an unattended compliance worker
         #: that must reach its screening tools and nothing else.
         self._declared_tools: frozenset[str] | None = None
+        #: Whether the bounded wait for declared/preloaded MCP servers has
+        #: SUCCEEDED (``session/declared_mcp_ready.py``). Once per session: the
+        #: wait exists for the cold-start race, and a server that drops later is
+        #: the reconnect path's job, not a per-turn stall. Set only after the gate
+        #: settles, never before it runs: an SDK caller retrying ``prompt()``
+        #: after the gate raised (or after an abort cut it short) must meet the
+        #: gate again, not a silent send without its declared tools (agent
+        #: review round 1, R3).
+        self._named_mcp_ready_checked = False
+        #: Whether this session's MCP reach is INHERITED: a delegated child whose
+        #: MCP tools are fixed by its parent's ``_child_mcp_wiring`` surface (on
+        #: the parent's BORROWED manager) and whose declaration is the parent's
+        #: bound carried down. Stamped by ``harness.subagent`` before it applies
+        #: that declaration. Two things key on it, both so a child keeps exactly
+        #: the tool set its parent's surface built for it:
+        #:
+        #: * ``materialize_declared_tools`` grants nothing. An inherited
+        #:   declaration NARROWS (``subagent``: "the two intersect rather than
+        #:   either winning"); treating it as a caller's enumeration and granting
+        #:   from the raw shared manager bypasses ``selected``, which withholds
+        #:   every ``ownTurnOnly`` server's tools from children. That is how the
+        #:   OSWorld parent's episode action tool reached a child's request
+        #:   (merge-gate run 44707733427).
+        #: * the first-turn MCP readiness gate does not run. The parent's own
+        #:   gate already settled the declared servers on the manager the child
+        #:   borrows, and nothing a wait could deliver enters a child's fixed
+        #:   surface (only an explicit ``mcp://`` activation does), so a wait
+        #:   would be pure latency and a raise would refuse a child turn over a
+        #:   tool it was never going to hold.
+        self._mcp_reach_inherited = False
         #: The OPS a declared tool may reach, for the few tools whose reach is not
         #: its name. ``None`` means "every op this build's tool accepts", which is
         #: the state every declaration without an op scope is in — see
@@ -5075,6 +5154,11 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        #: Team Bridge card excerpt decisions, frozen at each card's first render
+        #: in this process (``card_projection.attach_history_excerpts``): keeps
+        #: already-cached card bytes stable. Cleared whenever standing fails and
+        #: at every compaction commit (``_finish_compaction``).
+        self._bridge_excerpt_memo: dict[str, Any] = {}
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
         self._body_answered_turn: Any | None = None
@@ -5322,6 +5406,13 @@ class Session:
         self._seed_cache_diagnostics(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
+        #: The generation of the last ``agent_start`` this session EMITTED, kept
+        #: after the turn ends (unlike ``_logical_generation``). It is what the
+        #: frontend snapshot publishes, so snapshots, updates and turn events
+        #: share one counter; the raw ``_generation`` also counts continuation
+        #: runs and runs that never announce a start. The next announced start
+        #: is always above it, because ``_run_turn`` bumps the raw counter first.
+        self._turn_generation = 0
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
         # Todo-continuation latch: the full todo fingerprint captured at the
         # last guardrail nudge in THIS user turn, so a model that yields twice
@@ -5924,6 +6015,10 @@ class Session:
         # session's own context exists. This pass cannot cover a capability that
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
+        # Observe authority before the initial merge so a grant arriving before
+        # the first prompt remains a transition. Inventory replacement is not an
+        # authority change: unchanged authority must preserve refresh_tools exactly.
+        self._notify_authority_available = self._notify_tool_callable() is not None
         self._merge_capability_tools()
         # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
         # below must see the whole inventory it narrows.
@@ -15792,7 +15887,11 @@ class Session:
         """
         declared = self._declared_tools
         manager = getattr(self, "mcp_manager", None)
-        if declared is None or manager is None:
+        # An inherited declaration is a bound, never a grant: see
+        # ``_mcp_reach_inherited``. Before the first-turn gate called this on a
+        # child, the only child call (``set_tool_inventory`` in ``subagent``)
+        # ran before the borrowed manager was attached, which hid the leak.
+        if declared is None or manager is None or self._mcp_reach_inherited:
             return ()
         try:
             available = manager.get_tools()
@@ -16657,6 +16756,11 @@ class Session:
         """
         if self._yolo:
             return None
+        from local_operator.harness.bridge_egress import (
+            ApprovalGrant,
+            session_grant_covers,
+        )
+
         base = self._request_approval
         declared = self._declared_tools
         if base is None or declared is None or not self._declared_tools_unattended:
@@ -16670,7 +16774,13 @@ class Session:
             taint_raised: bool = False,
             bridge_latched: bool = False,
         ) -> bool:
-            if tool_name in declared:
+            if tool_name in declared and session_grant_covers(
+                ApprovalGrant(auto=True), title=tool_name
+            ):
+                # A person-only gate is never answered by declaration: its title
+                # holds a space no tool name can, so this is belt and braces for
+                # a future gate whose title could be declared (review R1-2).
+                #
                 # A declared unattended inventory approves by declaration even
                 # in a Team-Bridge-latched session: the S-51 carve-out, left
                 # as is (accepted risk outside ask mode).
@@ -19160,8 +19270,30 @@ class Session:
             return None
         return self._notify_inbox
 
+    def _reconcile_notify_tool(self) -> None:
+        """Apply external authority changes at the next turn's inventory boundary.
+
+        The CLI writes a sidecar, not this owner's in-memory tool list. Only an
+        observed authority transition may change inventory: unchanged authority
+        must not undo a caller's exact refresh_tools replacement. Rescue only
+        notify through declaration filtering; cached invocations independently
+        recheck revocation, so this observation is never a permission cache.
+        """
+        available = self._notify_tool_callable() is not None
+        if available == self._notify_authority_available:
+            return
+        self._notify_authority_available = available
+        present = any(tool.name == "notify" for tool in self._tools)
+        if available:
+            if not present:
+                self._merge_capability_tools(("notify",))
+        elif present:
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name != "notify"], republish=False
+            )
+
     def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
-        """The door the ``notify`` TOOL is built on: the inbox door, minus agent-spawned sessions.
+        """The deliberate-notify door: inbox reachability plus reporting authority.
 
         WHY A SEPARATE DOOR (review round 1, R1-2 / QA Q1): the agent-spawned
         exclusion first sat in :meth:`_notify_inbox_callable`, which
@@ -19174,10 +19306,18 @@ class Session:
         door = self._notify_inbox_callable()
         if door is None or self._session_was_agent_spawned():
             return None
-        return door
+        return self._notify_authorized_item
+
+    async def _notify_authorized_item(self, **kwargs: Any) -> str:
+        # Tool contexts can outlive an operator revocation. Recheck the same
+        # authority at invocation, not just when constructing the inventory.
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return "Notification authority is unavailable; report to your delegating agent."
+        return await door(**kwargs)
 
     def _session_was_agent_spawned(self) -> bool:
-        """Whether ANOTHER AGENT started this session, so it reports to that agent.
+        """Whether this session still reports to the agent that started it.
 
         OPERATOR RULE (2026-11-13): "child/reviewer/QA sessions never notify the
         operator directly." A delegated child (``_job_id``) and a hidden run
@@ -19187,7 +19327,9 @@ class Session:
         * a ``sessions spawn`` workstream (``origin.json`` =
           ``resume.ORIGIN_AGENT_WORKSTREAM``, the spawn tool's default) — listed
           so the operator can watch it, but its findings go back to the agent
-          that spawned it, which decides whether the operator needs an item;
+          that spawned it, which decides whether the operator needs an item.
+          An explicit local standalone-notification grant can change this
+          reporting policy without changing the spawn provenance;
         * a session placed here at another device's request (a ``peer``
           placement) whose stamp does NOT positively say the operator started
           it (``remote_attention.origin_is_operator_started``): an AGENT's
@@ -19216,7 +19358,10 @@ class Session:
             from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp
 
             if session_origin(Path(directory)) == ORIGIN_AGENT_WORKSTREAM:
-                return True
+                from local_operator.notifications.authority import granted
+
+                if not granted(Path(directory)):
+                    return True
             stamp_file = Path(directory) / MESH_STAMP_NAME
             if not stamp_file.is_file():
                 return False
@@ -19972,6 +20117,42 @@ class Session:
                     "needs_user": needs_user,
                 },
             )
+            # A notify-requested delivery owes a durable inbox entry as well as
+            # the completion signal. The normal-priority item deliberately does
+            # NOT banner: this run's already-finalized completion owns the OS
+            # route. High explicit notify items retain their own delivery ladder.
+            # Use the tool's authority gate, not the broader gate-item door, so
+            # delegated agents cannot turn a wake into operator attention.
+            if (
+                kind == "complete"
+                and notify
+                and self._run_notify_requested
+                and not self._run_notified
+                and messages
+                and isinstance(messages[-1], Message)
+            ):
+                door = self._notify_tool_callable()
+                if door is not None:
+                    try:
+                        from local_operator.tui.notify import scrub_banner_text
+
+                        text = scrub_banner_text(
+                            self._redact_tool_result_text(messages[-1].text)
+                        ).strip()
+                        if text:
+                            await door(
+                                title=text.splitlines()[0],
+                                body=text,
+                                priority="normal",
+                                key=f"completion:{token}",
+                                links=[],
+                                anchor_id=anchor,
+                                raise_banner=False,
+                            )
+                    except Exception:  # noqa: BLE001 — preserve completion on an inbox outage
+                        logger.warning(
+                            "notify: could not persist delivery completion", exc_info=True
+                        )
             try:
                 # BOUNDED WAIT, NOT A BOUNDED THREAD: ``wait_for`` cancels our
                 # await, but a running worker thread cannot be killed. The
@@ -21253,6 +21434,36 @@ class Session:
         # idle+supervisor decision before this admission may proceed.
         from local_operator.session.runtime import restart_fence
 
+        # FIRST, before anything about this run is published or journalled: a
+        # declared MCP server that is still connecting must be awaited before
+        # the request is built, and one that never arrives raises here, where
+        # nothing durable has happened yet (the same shape as ``TurnInFlight``).
+        # Never for a delegated child (``_mcp_reach_inherited``): its parent's
+        # gate settled the borrowed manager, and the gate's grant step would
+        # widen the child's surface past what its parent allowed.
+        if not self._named_mcp_ready_checked and not self._mcp_reach_inherited:
+            from local_operator.session.declared_mcp_ready import (
+                await_named_mcp_servers,
+            )
+
+            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
+            # the TUI/desktop subscribed to this runtime) merges a late
+            # ``preload_tools`` server mid-session, the contract documented on
+            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
+            # a headless host (exec, SDK, scheduler) holds the turn for one.
+            # The same "no UI, no attach subscriber" test the turn-end
+            # checkpoint uses to tell a headless store apart (review R4).
+            store = getattr(self, "_frontend_state_store", None)
+            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
+            self._named_mcp_ready_checked = await await_named_mcp_servers(
+                self.mcp_manager,
+                declared=self._declared_tools,
+                reachable=lambda: self.tool_inventory,
+                materialize=self.materialize_declared_tools,
+                wait_for_preload=not front_end,
+                # Esc lands here as the sticky flag (no turn signal exists yet).
+                cancelled=lambda: self._abort_requested,
+            )
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:
             publish_admission = getattr(self, "_publish_turn_admitted", None)
@@ -21828,6 +22039,92 @@ class Session:
         self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
         return stranded
 
+    def _bridge_history_transform(self, messages: list[Any]) -> list[Any]:
+        """Attach bounded replay excerpts to recent Team Bridge journal cards.
+
+        WHY here: the excerpt is a STANDING decision (live owner, consent,
+        designation) and only the session holds the runtime that can prove it.
+        Re-evaluated on every physical provider call, so a revoked owner loses
+        excerpts at the next request (design §5, property C). It never mutates
+        the context: cards get request-local copies (``card_projection``).
+        Any failure is "no excerpts", which is today's ids-only marker.
+        STANDING is re-proved per call; each card's excerpt DECISION is frozen at
+        its first render (``_bridge_excerpt_memo``) so cached card bytes do not
+        move. NOT covered: the stranded-card reorder
+        (``_fallback_card_wake_initial``) still moves a card to the tail, which
+        re-writes the cache from its old position; the memo leaves it alone.
+        """
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None or not any(
+            getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE
+            for message in messages
+        ):
+            return messages
+        try:
+            from local_operator.team_bridge.authority import authority_fence
+            from local_operator.team_bridge.card_projection import (
+                attach_history_excerpts,
+            )
+            from local_operator.team_bridge.display_bodies import (
+                DisplayBodyStore,
+                purge_if_bridge_off,
+                radient_signed_in,
+            )
+            from local_operator.team_bridge.store import _owner_key
+
+            # Frozen decisions hold body text; they ride only while standing
+            # does, so every refusal below drops them with the excerpts.
+            memo = getattr(self, "_bridge_excerpt_memo", None)
+            refusal = authority_fence(runtime)
+            if refusal is not None:
+                if memo is not None:
+                    memo.clear()
+                code = refusal.get("code")
+                if code == "feature_off":
+                    # A torn config read also answers ``feature_off``; only a
+                    # definite OFF is an opt-out worth a purge.
+                    purge_if_bridge_off(Path(runtime.config_dir))
+                elif code == "consent_revoked":
+                    # The consent-revoke path as THIS process sees
+                    # it: the retained bodies lost their standing, so they go
+                    # now rather than at the next card view (review R3 / QA
+                    # Q1). ``owner_changed`` is deliberately not here: the new
+                    # owner's rows are not this session's to delete, and an
+                    # account switch already purges at enrollment commit.
+                    DisplayBodyStore(Path(runtime.config_dir)).purge()
+                return messages
+            if not radient_signed_in(
+                runtime.config_dir, getattr(runtime.owner, "credential_id", None)
+            ):
+                # Enrollment and consent outlive ``lop logout radient``; the
+                # sign-in itself is part of the standing (QA Q1). The logout
+                # hook purged the rows already; this withholds excerpts even
+                # if a row survived (fail closed: the ids-only marker).
+                if memo is not None:
+                    memo.clear()
+                return messages
+            return attach_history_excerpts(
+                messages,
+                config_dir=runtime.config_dir,
+                owner_key=_owner_key(runtime.owner),
+                memo=memo,
+            )
+        except Exception:  # noqa: BLE001 — excerpts are optional; never fail a request
+            logger.debug("bridge: history excerpts skipped", exc_info=False)
+            return messages
+
+    def _compose_transform_context(self) -> Any:
+        """The loop's one ``transform_context``: excerpts first, then the live frame."""
+        frame = self._pending_body_turn
+        if getattr(self, "bridge_runtime", None) is None:
+            return frame.transform if frame is not None else None
+
+        def transform(messages: list[Any]) -> list[Any]:
+            shaped = self._bridge_history_transform(messages)
+            return frame.transform(shaped) if frame is not None else shaped
+
+        return transform
+
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
@@ -22261,6 +22558,9 @@ class Session:
             # turn, so the schema the model sees is consistent for the whole
             # turn (see ``_reconcile_web_tools`` for why not on the tick).
             self._reconcile_web_tools()
+            # Local CLI grants/revocations are external to this live owner;
+            # apply them before either prompt inventory or wire tools freeze.
+            self._reconcile_notify_tool()
             # This turn has published nothing yet, so the first provider call
             # below captures the inventory as it stands NOW — with the web-tool
             # reconcile above already applied — and every later call in the turn
@@ -22394,11 +22694,10 @@ class Session:
                 # calls this once per PHYSICAL request, so a turn that makes
                 # several calls gets the same cached bytes every time (the
                 # per-call invariant lives in ``PendingTurn.for_call``).
-                transform_context=(
-                    self._pending_body_turn.transform
-                    if self._pending_body_turn is not None
-                    else None
-                ),
+                # Replay excerpts for past bridge cards ride the same hook
+                # (``_compose_transform_context``); without a bridge runtime it
+                # is exactly the frame's transform (or None), as before.
+                transform_context=self._compose_transform_context(),
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
@@ -22538,6 +22837,7 @@ class Session:
                         # the UI sees, and its generation stamps the eventual
                         # end. Continuation runs re-enter here and are silent.
                         self._logical_generation = event.generation
+                        self._turn_generation = event.generation
                         await self._emit(event)
                     else:
                         # A continuation's provider receipt is newer than the
@@ -23727,6 +24027,66 @@ class Session:
                 "bridge taint latch row write failed; latch held in memory", exc_info=True
             )
 
+    # -- Community read taint (RFC v2.4 §5.9; community/taint.py) ---------------
+
+    def _init_community_taint(self) -> None:
+        """Own the session's "read community content" flag, fed from durable commits.
+
+        The bridge latch's wiring, one source narrower: every transcript commit
+        is observed so a ``community_read`` result is seen whatever path
+        appended it, and the backstop scan reads the journal from row 0 — which
+        a resume, a fork (it copies ``transcript.jsonl``) and a ``/move``
+        replica all load. Compaction appends a marker and never rewrites rows,
+        so it cannot lift the flag; only ``/new`` or a fresh session starts
+        clean.
+        """
+        from local_operator.community.taint import CommunityTaint
+
+        transcript = self._transcript
+
+        def journal() -> list[tuple[str, dict[str, Any]]]:
+            return [(entry.type, entry.payload) for entry in transcript.entries()]
+
+        self._community_taint = CommunityTaint(entries=journal)
+        self._community_taint_row_task: asyncio.Task[None] | None = None
+        subscribe = getattr(transcript, "subscribe_commits", None)
+        if subscribe is not None:
+            subscribe(self._on_community_taint_commit)
+
+    @property
+    def community_tainted(self) -> bool:
+        """Whether this session has read community content. Fail-closed."""
+        return self._community_taint.tainted
+
+    def _on_community_taint_commit(self, entries: Any, _source: Any = None) -> None:
+        taint = self._community_taint
+        taint.observe_entries((entry.type, entry.payload) for entry in entries)
+        if taint.tainted and not taint.row_present:
+            task = self._community_taint_row_task
+            if task is not None and not task.done():
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("community taint row not written: no running loop")
+                return
+            self._community_taint_row_task = loop.create_task(self._write_community_taint_row())
+
+    async def _write_community_taint_row(self) -> None:
+        from local_operator.community.taint import COMMUNITY_TAINT_ROW_TYPE
+
+        taint = self._community_taint
+        if taint.row_present:
+            return
+        if self._transcript.latest_custom_entry(COMMUNITY_TAINT_ROW_TYPE) is not None:
+            taint.row_present = True
+            return
+        try:
+            # The commit observer sees this row too and sets ``row_present``.
+            await self._transcript.append_custom(COMMUNITY_TAINT_ROW_TYPE, taint.row_details())
+        except Exception:  # noqa: BLE001 - the in-memory flag stays set; warned
+            logger.warning("community taint row write failed; flag held in memory", exc_info=True)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -23776,6 +24136,7 @@ class Session:
             ancestor_session_ids=self._ancestor_session_ids(),
             bridge_taint=self._bridge_taint,
             inherited_bridge_taint=self._bridge_taint.inherited,
+            community_taint=self._community_taint,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             # On a CHILD this resolves to the parent's title (see
@@ -23814,6 +24175,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The BASE gate, kept under --yolo, for person-only cards a tool
+            # raises itself (a community post): yolo skips the tool gate, not
+            # the person (the profile save's route, ``_request_approval``).
+            person_approval=self._request_approval,
             # The host's consent seam for tool-issued ACCOUNT writes. Held on
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
@@ -23890,6 +24255,8 @@ class Session:
             # ``agent_shell.MAY_DELEGATE_ENV`` for the commands it runs; see
             # ``agent_shell.py`` for what reads it and why it is asymmetric.
             may_delegate=any(tool.name == "task" for tool in self._tools),
+            # Same derivation, for the spill footer (see the field's comment).
+            spill_readable=any(tool.name == "read" for tool in self._tools),
             jobs=self.jobs,
             peer_arrival=self._peer_arrival,
             subagent_comms=self.subagent_comms,
@@ -24106,6 +24473,7 @@ class Session:
         from local_operator.harness.subagent import ChildSurface, run_subagent
         from local_operator.harness.verifier import (
             CANCEL_JOIN_S,
+            COMMAND_BUDGET_REFUSAL,
             REQUEST_BUDGET_REFUSAL,
             VERIFIER_ROLE,
             VerdictStatus,
@@ -24120,6 +24488,8 @@ class Session:
             verifier_profile,
         )
         from local_operator.harness.verifier_evidence import (
+            TYPED_COMMAND_BUDGET_REFUSAL,
+            TYPED_REQUEST_BUDGET_REFUSAL,
             VerifierEvidence,
             assess_completion,
         )
@@ -24132,6 +24502,11 @@ class Session:
             )
         limits = limits or VerifierLimits()
         started = time.monotonic()
+        # The budget cue is the last thing a capped child reads before it
+        # answers, so it must ask for the format ``decode`` below reads.
+        typed = typed_evidence is not None
+        command_cue = TYPED_COMMAND_BUDGET_REFUSAL if typed else COMMAND_BUDGET_REFUSAL
+        request_cue = TYPED_REQUEST_BUDGET_REFUSAL if typed else REQUEST_BUDGET_REFUSAL
 
         def decode(text: str | None) -> tuple[VerdictStatus, str]:
             return (
@@ -24232,7 +24607,7 @@ class Session:
             # the time they run) -- host or the child's own -- are refused
             # with the cue to answer, so the one request past the cap is spent
             # on the verdict.
-            return REQUEST_BUDGET_REFUSAL if state["requests"] >= cap_requests else None
+            return request_cue if state["requests"] >= cap_requests else None
 
         try:
             unsubscribe = self.subscribe_requests(observe)
@@ -24247,6 +24622,7 @@ class Session:
             on_exhausted=lambda: hit("commands"),
             refuse_when=request_budget_spent,
             on_result=typed_evidence.record_result if typed_evidence is not None else None,
+            command_refusal=command_cue,
         )
         # ``readonly_shell`` confines this launch's ``bash`` by the launch
         # itself, never by the ``verifier`` name (an operator's registry role
@@ -29087,6 +29463,8 @@ class Session:
         # This changes the CUT, not the TRIGGER: it runs for every pass,
         # advisory or not, and introduces no second gate.
         keep_recent = settings.keep_recent_tokens
+        task_anchor_missing = False
+        task_floor_clamped = False
         boundary_floor: Any = getattr(compaction_api, "task_boundary_floor", None)
         if parked_hint is not None:
             # IDLE PASS. The task floor measures "since the last genuine user
@@ -29109,12 +29487,15 @@ class Session:
                 for message in self._context.messages
                 if isinstance(message, Message) and message.role == "user"
             }
-            floor_value: Any = boundary_floor(
-                llm_history,
-                genuine_user_ids,
-                cap=self._advisor_floor_cap(settings),
-            )
+            floor_cap = self._advisor_floor_cap(settings)
+            floor_value: Any = boundary_floor(llm_history, genuine_user_ids, cap=floor_cap)
             keep_recent = max(keep_recent, int(floor_value))
+            # ``0`` is the floor saying there is NO operator turn left in this
+            # history to measure a task from (a positive cap never clamps a
+            # real span to zero); AT the cap, the task is wider than the floor
+            # protects. Both are read again at (2b').
+            task_anchor_missing = int(floor_value) == 0
+            task_floor_clamped = floor_cap > 0 and int(floor_value) >= floor_cap
         if advisor_hint is not None:
             # Clamped with the SAME cap the local floor uses. Uncapped, a wide
             # but perfectly legal hint turns "keep more" into "never compact":
@@ -29213,6 +29594,50 @@ class Session:
                 tokens_after=local_estimate,
             )
 
+        # (2b') Dense carry of the live task. Only the automatic task floor
+        # moves the CUT: an advisory (live or parked) is a semantic "this
+        # must survive as it is" and keeps its raw window exactly as before, so
+        # the advisor's widen-only guarantee and its reclaim bookkeeping mean
+        # what they meant. Snapcompact only: context-full has no verbatim tail,
+        # and handing the task to an LLM summary would paraphrase it.
+        dense_tail_from: int | None = None
+        dense_tail_previous_chars = 0
+        dense_tail_closed = False
+        if strategy == "snapcompact" and parked_hint is None:
+            if advisor_hint is None and keep_recent > settings.keep_recent_tokens:
+                dense_cut = await self._dense_tail_cut(
+                    compaction_api, llm_history, cut, settings.keep_recent_tokens
+                )
+                if dense_cut is not None:
+                    dense_tail_from, cut = cut, dense_cut
+                    dense_tail_closed = task_floor_clamped
+            elif task_anchor_missing:
+                # THE SAME TASK, ONE PASS LATER. A dense pass archives the
+                # task's opening request with the task, so here the floor has
+                # no operator turn to measure from and the cut is already
+                # plain recency. If the previous archive recorded a protected
+                # live tail, everything this pass summarizes continues it:
+                # keep both on the new tail (bounded by ``_dense_tail_cap``)
+                # instead of letting the earlier steps fall into the paged
+                # middle after a single pass (agent review round 1, F1). A new
+                # operator turn gives the floor an anchor again, takes the
+                # branch above, and releases the earlier task. The record is
+                # absent once the task has outgrown the bound (see
+                # ``Archive.live_tail_chars``), and this pass is then the
+                # plain recency pass it is today.
+                #
+                # An ADVISED pass takes this branch too. The hint decides the
+                # raw window and that is untouched (the cut is not moved
+                # here); what the pass archives is still the same task, and
+                # being advised is no reason to drop its earlier steps into
+                # the paged middle (agent review round 2, N2). An idle pass
+                # (``parked_hint``) does not: its advisor re-anchored on the
+                # still-open work of a parked session, and the floor is not
+                # computed for it.
+                dense_tail_previous_chars = self._previous_live_tail_chars()
+                if dense_tail_previous_chars > 0:
+                    dense_tail_from = 0
+
         # (2c) Byte-aware cut. The cut above is ruled in TOKENS; a screenshot
         # history is over the BYTE trigger long before it is over any token
         # line, so a byte-fired pass would land beside the trigger and re-fire
@@ -29247,6 +29672,9 @@ class Session:
             strategy=strategy,
             llm_history=llm_history,
             cut=cut,
+            dense_tail_from=dense_tail_from,
+            dense_tail_previous_chars=dense_tail_previous_chars,
+            dense_tail_closed=dense_tail_closed,
             context_tokens=context_tokens,
             tokens_before=local_estimate,
             # ATTRIBUTION, not influence. The hint above may have widened the
@@ -29289,6 +29717,117 @@ class Session:
                     else None
                 )
             ),
+        )
+
+    async def _dense_tail_cut(
+        self,
+        compaction_api: Any,
+        llm_history: list[Message],
+        wide_cut: int,
+        keep_recent_tokens: int,
+    ) -> int | None:
+        """The plain-recency cut to use INSTEAD of the task floor's, or ``None``.
+
+        WHY. The task floor keeps the whole live task raw (up to its cap)
+        because a recency-shaped cut used to land inside the task the agent
+        was still executing. That protection is right and the carrier was
+        expensive. Replaying 25 real compaction points through
+        :meth:`compact_now` (``docs/design/compaction-dense-tail.md``),
+        the passes the floor widened landed at 82k / 108k / 134k local tokens
+        (task spans of 20-50k / 50-100k / over the 100k cap) against 57k where
+        it did not bind -- and a local token is roughly 1.4-1.7 provider tokens
+        on an Anthropic model, so those are the passes that leave a 400k
+        context above 250k.
+
+        Narrowing the raw window is not the fix, and that was measured on the
+        same points rather than assumed. Cutting back to plain recency kept
+        49% of the live task's steps and 55% of its result heads in the
+        rebuilt context; capping the floor at 50k kept 77% of each. The
+        archive's fixed-size middle cannot absorb the history a narrower
+        window hands it.
+
+        WHAT. Keep the protection, change the carrier. The pass cuts at plain
+        recency and the span the floor would have kept raw --
+        ``llm_history[wide_cut:returned]`` -- rides the archive's verbatim
+        tail edge as serialized text (``compact_to_archive``'s
+        ``protected_tail_messages``). On those 25 points the passes land at
+        54k / 69k / 87k for the same three groups (median 99k -> 64k overall,
+        worst case 155k -> 108k, none larger), with 1343 of the task's 1345
+        steps, every assistant message, 99% of its result first lines and 97%
+        of its long-result ends still present, at the same CPU cost per pass.
+
+        ACROSS PASSES. This cut archives the task's opening request with the
+        task, so the NEXT pass's floor has nothing to measure from. The
+        archive records what is still live (``Archive.live_tail_chars``) and
+        ``_plan_compaction`` continues it while no operator turn arrives,
+        bounded by :meth:`_dense_tail_cap`, on the horizon the raw floor has
+        (see ``compact_to_archive``). Without that the protection lasted one
+        pass: 127 of 415 steps after a second pass of two real tasks, against
+        279 with it and 284 for today's raw floor.
+
+        WHAT IS GIVEN UP, stated because it is the whole trade: inside the
+        moved span the serializer keeps the first 1,500 and up to the last
+        500 characters of a tool result longer than ``TOOL_RESULT_MAX_CHARS``
+        and cuts the middle, cuts a tool call's arguments past
+        ``TOOL_ARGS_MAX_CHARS``, drops results flagged useless with their
+        calls, turns image and document blocks into placeholders (the raw
+        window kept them as images), and carries no provider reasoning
+        blocks. So the model still sees every step, every assistant message
+        and both ends of every output, but not the middle of a long output,
+        the body of a long write, or a screenshot older than the recent
+        window: it re-reads the file, re-runs the command or looks again if
+        it needs those. The operator's own
+        turns are unaffected (preserved verbatim outside the archive), and
+        the newest ``keep_recent_tokens`` stay raw as they always have.
+
+        ``None`` -- keep the floor's raw window, exactly the pre-existing
+        behaviour -- whenever the change would not be a clean win:
+
+        * recency finds no cut, or none later than the floor's (nothing to
+          move);
+        * the recency cut's first kept message is not a transcript entry: the
+          floor's cut may be replayable where this one is not, and a pass must
+          never be refused as ``cut_not_replayable`` because of an
+          optimisation;
+        * the span is not smaller serialized than raw
+          (``snapcompact.dense_tail_saves``) -- the invariant that makes this
+          change unable to enlarge a pass.
+
+        Runs only once a pass is already going to happen, so the second
+        ``find_cut_point`` and one tokenization of the span are paid per PASS,
+        never per turn; both go off the event loop for the reason
+        :meth:`_offloaded` gives.
+        """
+        narrow = await self._offloaded(
+            compaction_api, "find_cut_point", llm_history, keep_recent_tokens
+        )
+        if narrow is None or narrow <= wide_cut:
+            return None
+        if not self._transcript.has_entry(llm_history[narrow].id):
+            return None
+        span = [m for m in llm_history[wide_cut:narrow] if _is_summarizable(m)]
+        try:
+            from local_operator.compaction import snapcompact
+
+            saves = await asyncio.to_thread(snapcompact.dense_tail_saves, span)
+        except Exception:  # noqa: BLE001 - an optimisation must never fail a pass
+            logger.debug("dense tail check failed; keeping the raw task window", exc_info=True)
+            return None
+        return narrow if saves else None
+
+    @staticmethod
+    def _dense_tail_count(plan: _CompactionPlan) -> int:
+        """How many trailing ``to_summarize`` messages are the dense-carried task.
+
+        Counted with the same filter that builds ``to_summarize``
+        (:func:`_is_summarizable`) over the plan's own slice, so the number is
+        exactly "the last N messages handed to the archive" whatever the
+        byte-aware step did to ``cut`` after the plan chose its span.
+        """
+        if plan.dense_tail_from is None:
+            return 0
+        return sum(
+            1 for m in plan.llm_history[plan.dense_tail_from : plan.cut] if _is_summarizable(m)
         )
 
     def _settle_advisor(self, plan: _CompactionPlan, outcome: CompactionOutcome) -> None:
@@ -29582,7 +30121,27 @@ class Session:
             [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
             settings=plan.settings,
+            **self._dense_tail_kwargs(plan),
         )
+
+    @classmethod
+    def _dense_tail_kwargs(cls, plan: _CompactionPlan) -> _DenseTailArgs:
+        """The dense-tail arguments for :meth:`_produce_summary`, or nothing.
+
+        Passed only when set, so a duck-typed ``_produce_summary`` that
+        predates the parameters (the suite has several) keeps its signature.
+        ``dense_previous_chars`` rides alone when a continuing pass has no new
+        message to archive: the earlier tail is still the live task.
+        """
+        kwargs: _DenseTailArgs = {}
+        count = cls._dense_tail_count(plan)
+        if count:
+            kwargs["dense_tail"] = count
+        if plan.dense_tail_previous_chars > 0:
+            kwargs["dense_previous_chars"] = plan.dense_tail_previous_chars
+        if plan.dense_tail_closed:
+            kwargs["dense_closed"] = True
+        return kwargs
 
     def _carried_tier_live_state(
         self,
@@ -29683,7 +30242,11 @@ class Session:
                 summarized
                 if summarized is not None
                 else await self._produce_summary(
-                    compaction_api, to_summarize, plan.strategy, settings=plan.settings
+                    compaction_api,
+                    to_summarize,
+                    plan.strategy,
+                    settings=plan.settings,
+                    **self._dense_tail_kwargs(plan),
                 )
             )
             # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
@@ -29764,6 +30327,15 @@ class Session:
                     carried_genuine, carried_shed = int(carried[0]), int(carried[1])
                     preserved_turns_dropped = max(preserved_turns_dropped, carried_genuine)
                     preserved_turns_shed = max(preserved_turns_shed, carried_shed)
+            # A resumed subagent's launch brief is re-stamped on every resume
+            # and each copy is a genuine user turn; carry it once so the cap
+            # below budgets distinct content (``collapse_relaunch_briefs``
+            # has the measurements). Resolved by name like its neighbours, so
+            # a partial double degrades to the uncollapsed block.
+            collapse: Any = getattr(compaction_api, "collapse_relaunch_briefs", None)
+            if callable(collapse):
+                collapsed: Any = collapse(preserved_user_turns)
+                preserved_user_turns = list(collapsed)
             if callable(cap):
                 preserved_turns_cap = self._preserved_turns_cap(plan.settings)
                 capped: Any = cap(
@@ -29972,6 +30544,17 @@ class Session:
             # ...]`` already. The preserved turns carry no tool_call pairing, so
             # none of the orphan invariants can be affected.
             self._context.messages = [marker, *preserved_messages, *kept]
+            # The Team Bridge excerpt memo exists only to keep ALREADY-CACHED
+            # card bytes stable. This swap puts a new marker ahead of every kept
+            # card, so the cache is cold from here regardless, and a frozen
+            # "sent ids-only" decision now protects nothing. Compaction keeps the
+            # kept cards' message ids, so without this a long-lived bridge
+            # session (which rarely restarts) never regained an excerpt for a
+            # card a body turn delivered (agent review R1). ``getattr`` matches
+            # the transform's own read: partial hosts may never have built one.
+            excerpt_memo = getattr(self, "_bridge_excerpt_memo", None)
+            if excerpt_memo is not None:
+                excerpt_memo.clear()
             history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )
@@ -30554,8 +31137,26 @@ class Session:
         strategy: str,
         *,
         settings: Any = None,
+        dense_tail: int = 0,
+        dense_previous_chars: int = 0,
+        dense_closed: bool = False,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
+
+        ``dense_previous_chars`` is the previous archive's still-live tail
+        (:attr:`_CompactionPlan.dense_tail_previous_chars`), kept on the new
+        tail together with this pass's span while the same task runs.
+        ``dense_closed`` says the task had already outgrown the floor when
+        this span was chosen (:attr:`_CompactionPlan.dense_tail_closed`), so
+        the archive carries it without recording it as continuable.
+
+        ``dense_tail`` is how many TRAILING ``to_summarize`` messages are the
+        live task the plan moved out of the raw window
+        (:meth:`_dense_tail_cut`); snapcompact carries them verbatim on the
+        archive's tail edge. Ignored by the context-full fallback below, which
+        has no such edge: the plan only sets it for snapcompact, and if that
+        branch fails the task is summarized with the rest, as any pre-cut
+        history is.
 
         Snapcompact stores ``{"snapcompact": <archive dump>}`` (JSON-safe:
         base64 frames) and renders the frames back into context through the
@@ -30609,6 +31210,20 @@ class Session:
                 # the snapcompact half of the lift-XOR-keep rule used below for
                 # context-full, and by compaction.pass_ for both strategies.
                 _, archive_span = compaction_api.split_leading_marker(to_summarize)
+                if dense_previous_chars > 0:
+                    # CONTINUING a task (see ``_plan_compaction`` 2b'): the
+                    # whole span is protected, and its head is the previous
+                    # pass's preserved operator turns re-rendered from the
+                    # marker, the task's own request among them. They are
+                    # replayed verbatim outside the archive on every request,
+                    # so carrying them here as well put one more copy of each
+                    # on the tail per pass, and on a session with a wide
+                    # preserved block the tail bound then trimmed real task
+                    # steps to make room for the copies (agent review round
+                    # 2, N1). Left out, the span is the task's own new steps
+                    # and sits directly after the previous tail.
+                    archive_span = [m for m in archive_span if not is_preserved_replay(m)]
+                    dense_tail = len(archive_span)
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
                     archive_span,
@@ -30620,6 +31235,12 @@ class Session:
                     threshold_tokens=self._snapcompact_threshold_tokens(
                         compaction_api, effective.context_window, settings
                     ),
+                    # Clamped to the span actually archived: lifting the
+                    # leading marker above can only shorten it from the FRONT.
+                    protected_tail_messages=min(max(0, dense_tail), len(archive_span)),
+                    protected_tail_previous_chars=max(0, dense_previous_chars),
+                    protected_tail_max_tokens=self._dense_tail_cap(settings),
+                    protected_tail_closed=bool(dense_closed),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id
@@ -30666,6 +31287,50 @@ class Session:
         if isinstance(snap, dict) and snap.get("text"):
             return str(snap["text"])
         return entry.payload.get("summary")
+
+    def _previous_live_tail_chars(self) -> int:
+        """``Archive.live_tail_chars`` of the latest pass, or ``0``.
+
+        How many trailing characters of :meth:`_previous_archive_text` the last
+        pass protected as the live task. ``0`` for no prior archive, a
+        context-full prior pass, an archive written before the field existed,
+        or a value that is not a usable count -- each of which means "nothing
+        is still protected", the behaviour before the field existed.
+        """
+        entry = self._transcript.latest_entry("compaction")
+        if entry is None:
+            return 0
+        preserve = entry.payload.get("preserve_data") or {}
+        snap = preserve.get("snapcompact")
+        value = snap.get("live_tail_chars") if isinstance(snap, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+    def _dense_tail_cap(self, settings: Any) -> int:
+        """Token bound on the archive's protected live-task tail.
+
+        Three quarters of the task floor's own cap (:meth:`_advisor_floor_cap`):
+        75,000 on the shipped 1M-window default. Derived from the floor cap
+        because it bounds the same thing in its new carrier (the floor kept at
+        most that many RAW tokens of the live task; the tail holds serialized
+        text, which is denser). The fraction was sized on TWO real pairs of
+        consecutive passes, the only ones in the 14 replayed where today's raw
+        floor still protected the task at the second pass
+        (``docs/design/compaction-dense-tail.md``), so treat it as a starting
+        point with thin support, not a settled constant:
+
+        - at 1.0 the pass lands where today's does (130k against 135k-139k
+          local), which defeats the change;
+        - at 0.75 it keeps about what today's raw floor keeps as text (140
+          of 202 and 139 of 213 steps, against 143 and 141) at 106k-108k,
+          about a fifth smaller;
+        - at 0.6 and 0.5 it keeps clearly fewer (131/122 and 116/111).
+
+        One pass on its own never reaches it on the 25 replayed points (the
+        widest protected span serialized to 73k tokens), so it binds only on a
+        task that runs across passes, where it is also what ends the
+        continuation (see ``Archive.live_tail_chars``).
+        """
+        return self._advisor_floor_cap(settings or self._compaction_settings) * 3 // 4
 
     def _previous_archive_carry(self) -> str | None:
         """The latest archive's carry digest, so a pass MERGES into the retained
@@ -30845,8 +31510,12 @@ class Session:
         propagate: the guardrail turns every failure into a block.
         """
         spec = self._lowest_effort(self.effective_model)
+        # Cache the STATIC judge prompt only (``guardrails/judge.py``, ~1.3k
+        # tokens, re-sent at a 68 s median gap — inside the 5m TTL). The
+        # default marker sat on the unique user turn after it, so the 7-day
+        # ledger showed a 0% hit rate on writes paid for every check.
         request = self._errand_request(spec, system, prompt).model_copy(
-            update={"purpose": "guardrail"}
+            update={"purpose": "guardrail", "cache_markers": "system"}
         )
         return await self._drain_errand(request)
 

@@ -19,6 +19,21 @@ measured:
   DELETE to ``https://api.github.com`` finish inside the NEXT cell
   (``test_two_relays_refresh_delivers_widen_narrow_and_no_op``).
 
+PACKAGE-WIDE BACKSTOP (2026-11-19). Opt-in by import left every OTHER arming
+module unguarded: ``borrowed_git_env`` is reached from at least a dozen modules
+across ``tests/unit`` (network, code_requests, guardrails, monitors, session,
+tui). Full-suite run 44408211857 (attempt 2, shard 4) failed
+``test_cli_remote.py``'s teardown tripwire with ``DELETE
+https://api.github.com/installation/token`` from a 600 s belt that the unguarded
+``test_github_helper_diagnostic.py`` armed on the same xdist worker (its
+``[thread-leak]`` line names that cell and a ``Thread-N`` timer). So
+``tests/unit/conftest.py`` now runs :func:`stop_every_borrower_revoke` at every
+unit cell's teardown. It does NOT replace ``github_mod.threading``: it uses the
+product's own joinable handles (``cancel_pending_self_revokes(join_timeout_s=)``
+and ``pending_self_revoke_threads``), so the constraint below still holds for
+the rest of the package. The by-import fixture stays for what it adds on top:
+a per-cell dedupe set and a record of every timer the cell built.
+
 HOW TO USE. Import :func:`no_self_revoke_outlives_its_cell` into the test module
 (``# noqa: F401`` — an autouse fixture is active in every module whose namespace
 holds it, the same "fixtures by import" convention these modules already use).
@@ -101,6 +116,28 @@ def stop_recorded_timers(
     assert not alive, (
         f"self-revoke timer(s) still alive {join_timeout_s:g}s after cancel+join, "
         f"and would fire into the next cell: {alive}"
+    )
+
+
+def stop_every_borrower_revoke(*, join_timeout_s: float = JOIN_TIMEOUT_S) -> None:
+    """Cancel and join every borrower-side revoke this process has in flight.
+
+    The package-wide teardown behind ``tests/unit/conftest.py``: pending belt
+    timers are cancelled, then joined (a fire already running finishes inside the
+    cell that armed it), and :func:`github_mod.revoke_now` threads are joined. Any
+    thread still alive after the bound fails the cell by name, for the same
+    reason :func:`stop_recorded_timers` does: a silent expiry is the leak again.
+    """
+    github_mod.cancel_pending_self_revokes(join_timeout_s=join_timeout_s)
+    for thread in github_mod.pending_self_revoke_threads():
+        thread.join(timeout=join_timeout_s)
+    alive = [
+        _describe(t) if isinstance(t, threading.Timer) else t.name
+        for t in github_mod.pending_self_revoke_threads()
+    ]
+    assert not alive, (
+        f"borrower revoke thread(s) still alive {join_timeout_s:g}s after cancel+join, "
+        f"and would DELETE inside the next cell: {alive}"
     )
 
 

@@ -24,6 +24,7 @@ import pytest
 
 from local_operator.harness.types import (
     AbortSignal,
+    AgentTool,
     ChatRequest,
     CustomMessage,
     ModelSpec,
@@ -95,6 +96,16 @@ def _state_provider(state: dict[str, Any], tools: list[Any]):
     setattr(provider, "host_has_browser", False)
     setattr(provider, "host_has_console", False)
     return provider
+
+
+def _class_tools() -> list[Any]:
+    """`read` and `bash`: the capability classes the knowledge tail and the
+    block-1 absence notes ride (``CAPABILITY_CLASS_FLAGS``). Never executed."""
+
+    async def _never(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("not called")
+
+    return [AgentTool(name=n, description=f"{n} tool", execute=_never) for n in ("read", "bash")]
 
 
 def _initial_state() -> dict[str, Any]:
@@ -186,7 +197,7 @@ async def test_a_late_recommendation_ships_only_the_recommendation(tmp_path) -> 
     re-sent the whole guides/skills listing beside it. The recommendation block
     is its own section now, so only it moves."""
     state = _initial_state()
-    tools: list[Any] = []
+    tools: list[Any] = _class_tools()
     stream = RecordingStream()
     session = _make_session(tmp_path / "sess", stream, state, tools)
     await session.prompt("freeze the prefix")
@@ -206,7 +217,7 @@ async def test_a_late_recommendation_ships_only_the_recommendation(tmp_path) -> 
 @pytest.mark.asyncio
 async def test_an_inventory_change_does_not_reship_the_capability_notes(tmp_path) -> None:
     state = _initial_state()
-    tools: list[Any] = []
+    tools: list[Any] = _class_tools()
     stream = RecordingStream()
     session = _make_session(tmp_path / "sess", stream, state, tools)
     await session.prompt("before the front end wires itself up")

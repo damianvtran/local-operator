@@ -5,10 +5,13 @@ Immutable BASE 786b95b7ae5eaaecb2db5bd34e64e4dc893d00f1; output copy remains out
 
 import argparse
 import ast
+import copy
 import hashlib
 import inspect
 import json
 from pathlib import Path
+
+import pytest
 
 from local_operator.i18n import catalogues
 from local_operator.i18n.keys import cli_global_help as _gh
@@ -49,6 +52,16 @@ ADDED_AFTER_BASE = {
     ),
 }
 ADDED_KEYS = {key for _, key in ADDED_AFTER_BASE}
+#: `--hosting` choices registered AFTER the immutable BASE. A new provider adds
+#: one string constant to the existing `choices=[...]` list; that changes no
+#: help copy or parser protocol, but it does change the root-call AST hash. The
+#: BASE fixture stays frozen: exactly these constants are subtracted from the
+#: `--hosting` choices before the BASE comparison, and each must actually be
+#: present (so a stale entry, or an undeclared new choice, still fails).
+ADDED_HOSTING_CHOICES_AFTER_BASE = (
+    # Google Vertex AI provider (`lop --hosting google-vertex`).
+    "google-vertex",
+)
 
 
 def _fixture():
@@ -460,8 +473,76 @@ def _root_calls(module):
             # its call keeps the frozen BASE hash comparable.
             if any(kw.arg == "help" and ast.dump(kw.value) in added_shapes for kw in node.keywords):
                 continue
+            if _is_hosting_call(node):
+                node = _without_post_base_hosting_choices(node)
             result.append(node)
     return sorted(result, key=lambda node: (node.lineno, node.col_offset))
+
+
+def _is_hosting_call(node):
+    return bool(node.args) and ast.dump(node.args[0]) == ast.dump(ast.Constant("--hosting"))
+
+
+def _without_post_base_hosting_choices(node):
+    # Work on a copy so the restored module (and any later assertion over it)
+    # still sees the real choices list.
+    node = copy.deepcopy(node)
+    (choices,) = [kw.value for kw in node.keywords if kw.arg == "choices"]
+    assert isinstance(choices, ast.List)
+    present = [elt.value for elt in choices.elts if isinstance(elt, ast.Constant)]
+    missing = [choice for choice in ADDED_HOSTING_CHOICES_AFTER_BASE if choice not in present]
+    assert missing == [], f"declared post-BASE --hosting choices absent from cli.py: {missing}"
+    choices.elts = [
+        elt
+        for elt in choices.elts
+        if not (isinstance(elt, ast.Constant) and elt.value in ADDED_HOSTING_CHOICES_AFTER_BASE)
+    ]
+    return node
+
+
+def _hosting_choices(module) -> ast.List:
+    (call,) = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+        and _is_hosting_call(node)
+    ]
+    choices = next(kw.value for kw in call.keywords if kw.arg == "choices")
+    # Callers mutate the returned node in place (dropping or appending choices), so
+    # the declared ast.List return type is load-bearing: narrowing here keeps those
+    # `.elts` accesses resolvable for static checks instead of an opaque ast.expr.
+    assert isinstance(choices, ast.List)
+    return choices
+
+
+def test_post_base_hosting_normalization_preserves_the_original_tree():
+    restored = _restore_global_copy()
+    before = _canonical_ast(restored)
+    assert _canonical_ast(_root_calls(restored)) == _canonical_ast(_root_calls(restored))
+    assert _canonical_ast(restored) == before
+
+
+def test_missing_declared_post_base_hosting_choice_is_rejected():
+    restored = _restore_global_copy()
+    choices = _hosting_choices(restored)
+    choices.elts = [
+        elt
+        for elt in choices.elts
+        if not (isinstance(elt, ast.Constant) and elt.value == "google-vertex")
+    ]
+    with pytest.raises(AssertionError, match="post-BASE --hosting choices absent"):
+        _root_calls(restored)
+
+
+def test_undeclared_post_base_hosting_choice_still_changes_base_hash():
+    restored = _restore_global_copy()
+    _hosting_choices(restored).elts.append(ast.Constant("undeclared-provider"))
+    assert (
+        hashlib.sha256(_canonical_ast(_root_calls(restored)).encode()).hexdigest()
+        != _fixture()["root_calls_ast_sha256"]
+    )
 
 
 def test_restored_root_and_propagation_protocol_match_original_base():

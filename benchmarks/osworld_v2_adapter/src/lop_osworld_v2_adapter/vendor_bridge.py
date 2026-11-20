@@ -136,6 +136,38 @@ def inject_infra_environment(infra_values: tuple[ScopedInfraValue, ...]) -> None
     os.environ["AWS_AUTO_CREATE_SCHEDULER_ROLE"] = "false"
 
 
+def inject_evaluator_tool_path(directories: tuple[str, ...] | None) -> None:
+    """Give the worker a PATH: the default search path, then the declared dirs.
+
+    ``None`` (the value was not supplied) writes NOTHING, so an undeclared run
+    keeps today's environment byte for byte -- no PATH key at all. Otherwise
+    the default directories come FIRST and in their own order: a declared
+    directory can add a tool, never shadow a system one. ``os.defpath`` is
+    used because it is what ``exec`` already falls back to when PATH is
+    absent, so for an evaluator that spawns a program DIRECTLY (an argv list,
+    ``shell=False``) setting this value only ever adds directories to what
+    it could resolve before.
+
+    That is NOT true of a ``shell=True`` evaluator. With no PATH at all, the
+    shell substitutes its OWN built-in default, which is wider than
+    ``os.defpath`` (measured on the macOS campaign host: ``env -i /bin/sh -c
+    'echo $PATH'`` gives ``/usr/gnu/bin:/usr/local/bin:/bin:/usr/bin:.`` where
+    ``os.defpath`` is ``/bin:/usr/bin``). Once PATH is set the shell uses it
+    as given, so setting this value REMOVES the shell-only defaults --
+    ``/usr/local/bin`` and the trailing ``.`` (the working directory, which is
+    the episode scratch) -- for shell-spawned tools. An operator whose
+    evaluators relied on one of those must declare it explicitly; the
+    declared list is disclosed, so the run's record then says so.
+
+    Takes already-validated directories (``provisioning
+    .resolve_evaluator_tool_path``); this writes, it does not judge.
+    """
+
+    if directories is None:
+        return
+    os.environ["PATH"] = os.pathsep.join((*os.defpath.split(os.pathsep), *directories))
+
+
 def install_secret_environment(values: dict[str, str]) -> None:
     """The documented exception: hand OSWorld the env-only secrets.
 

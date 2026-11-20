@@ -35,6 +35,7 @@ from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.command_picker import PickerMode
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _band, _factory
 from tests.unit.tui.test_effort import EffortSession
 
@@ -58,10 +59,24 @@ def _gate(session: GatedSession):
 
 
 async def _boot(pilot, app: OperatorApp) -> None:
-    for _ in range(40):
-        await pilot.pause()
-        if app._session is not None:
-            return
+    """Block until the boot worker has ADOPTED the session (and so installed its gate).
+
+    WHY NOT A PAUSE COUNT. This used to spin 40 ``pilot.pause()`` turns and then
+    return SILENTLY whether or not the session had been adopted. The approval
+    handler is installed synchronously inside ``_adopt_session`` right after
+    ``_bind_viewer`` sets ``app._session``, but adoption waits behind the boot
+    worker's ``_warm_session_imports`` THREAD hop, which a pause does not wait
+    for. On a loaded CI runner the thread outlasted the 40 turns, the helper
+    fell through, and the next ``_gate(session)`` read ``None``: "the app
+    installed no approval handler" (run 44504891712, job 135512815365,
+    ``test_a_pre_latch_allow_all_keeps_covering_and_the_latched_card_has_no_escape``).
+    ``LOP_TEST_SLOW_BOOT_WARM_S=5`` reproduces it on any machine. Waiting on the
+    worker has no turn budget to lose, and it asserts adoption instead of
+    assuming it; the trailing pause keeps the settle the old loop's first turn
+    gave callers that were already booted.
+    """
+    await await_session_boot(app)
+    await pilot.pause()
 
 
 # Idle ticks a prompt wait may spend before it gives up. A deadlock guard, not a

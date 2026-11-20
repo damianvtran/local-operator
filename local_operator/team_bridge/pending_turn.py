@@ -18,10 +18,16 @@ THE INVARIANT (seam design, Revision 5) is enforced here, in one place:
     :data:`SUCCESS_STOP_REASONS`). Everything else releases the row so another
     turn can serve it — never a silent drop and never a false completion.
 
-NOTHING HERE PERSISTS BODY BYTES. The fetched body and the frame text live in
-this object's memory for the life of one turn; the only durable writes are the
-reservation's own state transitions, which carry ids, digests and closed codes
+NOTHING HERE PERSISTS BODY BYTES INTO THE STATE STORE OR THE TRANSCRIPT. The
+fetched body and the frame text live in this object's memory for the life of one
+turn; the reservation's state transitions carry ids, digests and closed codes
 (the store validates every one of them).
+
+THE ONE EXCEPTION, stated precisely: on a ``completed`` settlement — and only
+then — the hash-verified body this turn was given is written to the DISPLAY
+store (``display_bodies``, a separate 0600 database) so the operator can read
+what their agent read. That row is never an admission proof and never re-enters
+a request except through ``card_projection``'s bounded excerpt gate.
 """
 
 from __future__ import annotations
@@ -86,9 +92,11 @@ class FetchedBody:
     """The hub's answer for one reserved message.
 
     ``body`` is third-party content and never leaves this process except into
-    the request being assembled. The labels are the hub's own display strings;
-    an older backend that omits them yields empty strings, which the frame
-    renders as unknown provenance rather than as a person's name.
+    the request being assembled — and, after a ``completed`` settlement, into
+    the display-only store (see the module docstring's one exception). The
+    labels are the hub's own display strings; an older backend that omits them
+    yields empty strings, which the frame renders as unknown provenance rather
+    than as a person's name.
     """
 
     body: str
@@ -138,6 +146,9 @@ class PendingTurn:
         self._drift_reason = "admission_drift"
         self._injected: InjectedBody | None = None
         self._presentation_ref: Any = None
+        #: Held only so a COMPLETED settlement can hand the verified bytes to
+        #: the display store; cleared with the claim either way.
+        self._fetched: FetchedBody | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -237,6 +248,7 @@ class PendingTurn:
             # The hub served bytes other than the ones screened and reserved.
             self._release("binding_drift")
             return False
+        self._fetched = fetched
 
         from .types import ConversationFeedRef
 
@@ -482,7 +494,35 @@ class PendingTurn:
             )
         except StoreRefused:
             return "claim_lost"
-        return "completed" if completed else "claim_lost"
+        if not completed:
+            return "claim_lost"
+        self._record_display_body()
+        return "completed"
+
+    def _record_display_body(self) -> None:
+        """The SINGLE turn-side writer of the display store.
+
+        Runs only after the claim-guarded completion matched, so the row means
+        exactly "this agent was given these bytes". Best effort: a failed write
+        leaves the card showing the hub backfill (or today's copy), never a
+        changed settlement.
+        """
+
+        fetched = self._fetched
+        self._fetched = None
+        if fetched is None or not self._conversation_id or not self._message_id:
+            return
+        from .display_bodies import DisplayBodyStore
+
+        DisplayBodyStore(self._store.config_dir).record(
+            _owner_key(self._owner),
+            message_id=self._message_id,
+            conversation_id=self._conversation_id,
+            body=fetched.body,
+            body_sha256=fetched.body_sha256,
+            sender_kind=_closed_sender_kind(fetched.sender_kind),
+            source="turn",
+        )
 
     # -- internals ----------------------------------------------------------
 
@@ -519,6 +559,8 @@ class PendingTurn:
             logger.warning("bridge: body release refused code=%s", failure.code)
         self._claim_token = None
         self._turn_token = None
+        # A released row was not completed: nothing may reach the display store.
+        self._fetched = None
 
 
 def _closed_sender_kind(value: Any) -> str:

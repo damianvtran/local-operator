@@ -1,0 +1,182 @@
+{
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "round": 2,
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/hi/wire.session_status.json",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "target_sha256": "79ca2fc7df157f28027f510092c21157a5049479c2aa266851bff9339525c5a5",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Delegator reports remediation translator; not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "debc6546fb46",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "independent_from_translator": true,
+    "fallback_used": false
+  },
+  "findings_by_severity": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "clean",
+  "status": "passed",
+  "keys_read": 2,
+  "scope": [
+    "wire.session_status.waiting",
+    "wire.session_status.waiting_subagents"
+  ],
+  "resolved_findings": [
+    "HI-1",
+    "HI-2"
+  ],
+  "checks": {
+    "hi_plural_categories": [
+      "one",
+      "other"
+    ],
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000000
+    ],
+    "results": [
+      {
+        "key": "wire.session_status.waiting",
+        "arguments": [
+          [
+            "jobs",
+            "plural"
+          ]
+        ],
+        "plural_selectors": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "renders": [
+          {
+            "params": {
+              "jobs": 0
+            },
+            "output": "0 जॉब की प्रतीक्षा में"
+          },
+          {
+            "params": {
+              "jobs": 1
+            },
+            "output": "1 जॉब की प्रतीक्षा में"
+          },
+          {
+            "params": {
+              "jobs": 2
+            },
+            "output": "2 जॉबों की प्रतीक्षा में"
+          },
+          {
+            "params": {
+              "jobs": 5
+            },
+            "output": "5 जॉबों की प्रतीक्षा में"
+          },
+          {
+            "params": {
+              "jobs": 21
+            },
+            "output": "21 जॉबों की प्रतीक्षा में"
+          },
+          {
+            "params": {
+              "jobs": 1000000
+            },
+            "output": "10,00,000 जॉबों की प्रतीक्षा में"
+          }
+        ]
+      },
+      {
+        "key": "wire.session_status.waiting_subagents",
+        "arguments": [
+          [
+            "jobs",
+            "plural"
+          ],
+          [
+            "subagents",
+            "plural"
+          ]
+        ],
+        "plural_selectors": [
+          [
+            "one",
+            "other"
+          ],
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "renders": [
+          {
+            "params": {
+              "jobs": 0,
+              "subagents": 0
+            },
+            "output": "0 जॉब की प्रतीक्षा में · 0 उप-एजेंट चल रहा"
+          },
+          {
+            "params": {
+              "jobs": 1,
+              "subagents": 1
+            },
+            "output": "1 जॉब की प्रतीक्षा में · 1 उप-एजेंट चल रहा"
+          },
+          {
+            "params": {
+              "jobs": 2,
+              "subagents": 2
+            },
+            "output": "2 जॉबों की प्रतीक्षा में · 2 उप-एजेंट चल रहे"
+          },
+          {
+            "params": {
+              "jobs": 5,
+              "subagents": 5
+            },
+            "output": "5 जॉबों की प्रतीक्षा में · 5 उप-एजेंट चल रहे"
+          },
+          {
+            "params": {
+              "jobs": 21,
+              "subagents": 21
+            },
+            "output": "21 जॉबों की प्रतीक्षा में · 21 उप-एजेंट चल रहे"
+          },
+          {
+            "params": {
+              "jobs": 1000000,
+              "subagents": 1000000
+            },
+            "output": "10,00,000 जॉबों की प्रतीक्षा में · 10,00,000 उप-एजेंट चल रहे"
+          }
+        ]
+      }
+    ],
+    "mixed_plural_combinations": 36
+  },
+  "note": "Round-2 delta only: HI-1/HI-2 oblique plural jobs other arm verified as # जॉबों before की प्रतीक्षा में; singular # जॉब remains unchanged as requested. जॉब agrees with Hindi glossary; inflection is grammatical, not term drift. English bytes match commit 514d51243ce3. No unchanged keys re-audited; no rendered UI/width certification. Sidecar specifies one logical line, no fixed cell cap. Zero is a robustness probe; context requires counts >=1. Whole-file hashes identify catalogue snapshot, not full-namespace round-2 coverage."
+}

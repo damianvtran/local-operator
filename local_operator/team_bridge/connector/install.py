@@ -1212,6 +1212,13 @@ def sync_connector_service(config_dir: Path) -> ServiceOutcome:
     """
 
     try:
+        # Every explicit ``team_bridge.enabled`` write (CLI, settings route,
+        # TUI) reaches this entry point, so an explicit OFF drops the retained
+        # display bodies here (review R3 / QA Q1). Never raises, and a no-op
+        # while the switch reads on (or cannot be read).
+        from local_operator.team_bridge.display_bodies import purge_if_bridge_off
+
+        purge_if_bridge_off(Path(config_dir))
         outcome = _reconcile(Path(config_dir), force_off=False)
         code = getattr(outcome, "code", None)
         if code == CODE_CURRENT:

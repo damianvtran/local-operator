@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "audit_id": "mw1",
+  "audit_round": 3,
+  "audit_kind": "independent full-namespace audit across three same-history rounds (4076391bc, 347e70114/2125f497b, ca98f3789)",
+  "locale": "ur",
+  "audit_date": "2026-11-18",
+  "audited_head": "ca98f378922f65363815ab2d4c27e93e73b66f1e",
+  "auditor": {
+    "agent": "i18n auditor (lopdev task 482db48afe47)",
+    "session": "482db48afe47",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator": true,
+    "same_model_as_translator": true,
+    "fallback_used": false
+  },
+  "translator": {
+    "agent": "coder",
+    "model": "anthropic/claude-opus-5-5",
+    "sessions": [
+      "dc12534ff2ca",
+      "8966047148fb",
+      "ddcac83c68a5"
+    ],
+    "source": "lopdev manager brief 2026-11-18"
+  },
+  "input_hashes": {
+    "cli.sessions_move_workset": {
+      "en": "36523ab68a809138158b8530cf502be76b67de6c5b557835b25dd66e7c928df3",
+      "context": "3319039021cfb5d67440dee390a42986af6a6f7c8be57d4de6e3d3dc56f21bce",
+      "target": "380ff268d17f5f73b9f30eed7ac977841eeed0a6a0609b102f2db9f3372b674d"
+    },
+    "tui.session_move_workset": {
+      "en": "3642654e8391378afe0454ceaa2b31fb416302ebad3c43463fd4d49d2c2e59a8",
+      "context": "4110dcee6c6db14e948c2f9e58cd34303263501ae151275ef102939ffb3628ef",
+      "target": "63d6b9d47ac2f6a76c19495f6e79c6bb4de3662b6e5c1dfcc6768995eaf43644"
+    },
+    "tui.session_move": {
+      "en": "6ae6b80caee5646d17edfec168e25857e56a596ef8cbeb0f4f043401fc16ac5d",
+      "context": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573",
+      "target": "3f34c29bb2a870a2f35a8194a65c419a3ee9cef27dc35932c6b13dd7b2940b89"
+    }
+  },
+  "current_report_verdict": {
+    "cli.sessions_move_workset": {
+      "status": "changes_requested",
+      "major": 1,
+      "unresolved_blocker_major_count": 1,
+      "recorded": false
+    },
+    "tui.session_move_workset": {
+      "status": "passed",
+      "major": 0
+    },
+    "tui.session_move": {
+      "status": "passed",
+      "major": 0
+    }
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "318bf0eccb7d9e0381aa7c44722ba61df414fd9c7b9a416828cd607bfeec548d"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "dca225b29f51ee3d74fda00dfd94bce3ed34bc4f9cd7b8b867a69a42c8fbc3ca"
+    }
+  ]
+}

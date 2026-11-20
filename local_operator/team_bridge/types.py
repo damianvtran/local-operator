@@ -197,11 +197,14 @@ RECIPIENT_NAME_SHAPE = '{"name": "<display name>"}'
 #: reach for (``scripts/bench_context_budget.py``).
 SEND_RECIPIENT_DESCRIPTION = (
     f"Who receives it: {RECIPIENT_ACCOUNT_SHAPE} or {RECIPIENT_ENDPOINT_SHAPE}, "
+    # Trimmed in PR #4239 to pay for the emoji shortcode hint under the context
+    # budget: "WHOLE name" (the shape just before already says display name) and
+    # "directory op" (this text only ever renders inside the bridge tool).
     f"the bare account id, or {RECIPIENT_NAME_SHAPE} — trimmed, case-insensitive, "
-    f"WHOLE display name (no handle, email or substring). A name resolves "
+    f"WHOLE name (no handle, email or substring). A name resolves "
     f"in its op's scope: channel_post in the room's active members, "
     f"send/reply in your send allowlist. One match delivers; none or several "
-    f"refuse. Ids: the bridge directory. dm takes ids only, in to OR "
+    f"refuse. Ids: directory op. dm takes ids only, in to OR "
     f"top-level endpoint_id/account_id."
 )
 

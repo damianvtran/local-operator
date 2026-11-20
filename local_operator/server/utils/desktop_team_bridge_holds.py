@@ -155,6 +155,13 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 or (str(decision.get("conversation_id") or "") if decision else ""),
                 "seq": row["seq"],
                 "held_at": _iso(held_at),
+                # When the message was FIRST held (the hold row's own time).
+                # ``held_at`` is the decision time — the Deliver window's start —
+                # and a review decision can be written days after the hold
+                # (measured 2026-11-18: 17.9 d vs 8.1 d), so "how long has this
+                # sat here" needs this one. Additive; ``lop team-bridge holds``
+                # reads it for its age column.
+                "first_held_at": _iso(row["created_at"]),
                 "kind": _kind(code, eligible),
                 # Closed codes only (``HOLD_CODES`` or ``unknown_hold``), like the read slice.
                 "hold_code": code if code in HOLD_CODES else "unknown_hold",

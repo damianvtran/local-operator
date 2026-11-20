@@ -1,0 +1,24 @@
+# Second independent safety audit — zh-CN — cli.sessions_move_workset + tui.session_move_workset
+# auditor session 1946542ef662 (anthropic/claude-opus-5-5); worktree HEAD c5bc5896186cad939fa813d321c525f78ad4e8cf
+
+## HOWTO gates (each run alone)
+# HEAD c5bc5896186cad939fa813d321c525f78ad4e8cf origin/main 9cb0702b1d8d2b1ebe738c00c91946d6b692c2a7 — before second-audit receipts
+$ .venv/bin/python scripts/i18n/generate.py --check
+generate.py --check: 179 artifact(s) byte-identical
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --audit-base origin/main
+check.py: ok — 234 file(s) scanned, 2712 literal(s) at or below the baseline, catalogues consistent; 106 advisory finding(s) (report-only until activated)
+exit=0
+
+## Independent mechanical pass (auditor script; not a semantic proof)
+cli.sessions_move_workset: keys 65/65 same order=True; placeholder-set/flag/NFC/bidi-control mismatches: none
+tui.session_move_workset: keys 11/11 same order=True; placeholder-set/flag/NFC/bidi-control mismatches: none
+render n=0: 0个worktree · 0个未推送的commit · 0个未提交的文件 · 3.2 MB | 工作文件未被传输：0个worktree留在mbp上。
+render n=1: 1个worktree · 1个未推送的commit · 1个未提交的文件 · 3.2 MB | 工作文件未被传输：1个worktree留在mbp上。
+render n=2: 2个worktree · 2个未推送的commit · 2个未提交的文件 · 3.2 MB | 工作文件未被传输：2个worktree留在mbp上。
+render n=5: 5个worktree · 5个未推送的commit · 5个未提交的文件 · 3.2 MB | 工作文件未被传输：5个worktree留在mbp上。
+render n=21: 21个worktree · 21个未推送的commit · 21个未提交的文件 · 3.2 MB | 工作文件未被传输：21个worktree留在mbp上。
+render n=1000000: 1,000,000个worktree · 1,000,000个未推送的commit · 1,000,000个未提交的文件 · 3.2 MB | 工作文件未被传输：1,000,000个worktree留在mbp上。

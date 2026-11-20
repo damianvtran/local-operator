@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.session_move_workset",
+  "history_sha256": "4a10e94e663f7d0712e5df74e0316edddbaafefb1b7d0f3d671725d713fd9be5",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.session_move_workset",
+      "source_sha256": "3642654e8391378afe0454ceaa2b31fb416302ebad3c43463fd4d49d2c2e59a8",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "fr `tui.session_move_workset` full audit at ca98f3789: PASS, 0 BLOCKER/0 MAJOR unresolved, 3 minor/1 nit deferred (group-wide). Earlier rounds' MAJORs fixed and re-verified (see report). Auditor shares the translator's model (different agent). No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/fr/cli.sessions_move_workset/mw1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw1/record.json",
+          "sha256": "22087783f14ba3780a06a47ffdd9b8b4a676702c0527dffa27bec24f49073916"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw1/report.md",
+          "sha256": "d9399d36e47897bcc07e9d3f4ef3d8203d52b6f8f5bfcd42ac99521b81f17eb7"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw1/audit.log",
+          "sha256": "dca225b29f51ee3d74fda00dfd94bce3ed34bc4f9cd7b8b867a69a42c8fbc3ca"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.session_move_workset",
+      "source_sha256": "966bc7111580843e30b5f6e845a7bc46f7f7fb6cfc52c51c130b56ea92bc933a",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5; deepseek/deepseek-flash (round-2 delta, provider fallback)",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "fr `tui.session_move_workset` round-2 delta audit at 56609fdb9 (delta ca98f3789..56609fdb9): PASS, 0 BLOCKER/0 MAJOR; 1 minor (en context sidecar lacks notes for the new keys). Round-2 delta translated by coder d84367798211 on deepseek/deepseek-flash (provider fallback). No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/fr/cli.sessions_move_workset/mw2/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw2/record.json",
+          "sha256": "2ab5a846d7e31c3dfaf5d43b8b41d568aa17de355e6f3989b65906f078c85622"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw2/report.md",
+          "sha256": "9d3cb7fc69bb4cd6ee864d565f58e1bcaa7f3e79754785285634b6ca3ffaea12"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw2/audit.log",
+          "sha256": "9280dfc40718826d9851c1c49fef2b6bf74e7e75743d81ffb0610a94b7d6a26c"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.session_move_workset",
+      "source_sha256": "966bc7111580843e30b5f6e845a7bc46f7f7fb6cfc52c51c130b56ea92bc933a",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5; deepseek/deepseek-flash (round-2 delta, provider fallback)",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "task (lopdev lane move-working-set) / SECOND independent safety i18n-auditor 1946542ef662 [fr]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit of fr `tui.session_move_workset` (all 11 keys) at c5bc58961: PASS, 0 BLOCKER/0 MAJOR; 1 non-gating finding(s) [S-ALL-1] proposed for deferral, no wording changed. First audit: 482db48afe47 (mw1/mw2). Agent-independent only: auditor shares anthropic/claude-opus-5-5 with the first auditor and translators. No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/fr/cli.sessions_move_workset/mw-secondary/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw-secondary/record.json",
+          "sha256": "1cab6b9392a0e43c1905ad7e0f311e912ddc5f0c0af6ad0f8780bbbe754d63f2"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw-secondary/report.md",
+          "sha256": "1707d3b417338ca8e5b56761c4e01c7c3d1c5153bab46e727cd3661bb608b6ba"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mw-secondary/audit.log",
+          "sha256": "4defece806c820003b897c05e50c05d0f8b0d7292b4ab006e1a5afb22a7eb8c0"
+        }
+      ]
+    }
+  ]
+}

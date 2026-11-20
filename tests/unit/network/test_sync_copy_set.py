@@ -62,6 +62,7 @@ def _entry_owners() -> dict[str, str]:
     from local_operator.fork import FORK_BOUNDARY_NAME
     from local_operator.memory import SESSION_EXPORT_NAME
     from local_operator.monitors.arm import MONITOR_LOCK_NAME
+    from local_operator.notifications.authority import GRANT_NAME
     from local_operator.profile_scope import PROFILE_BACKUPS_DIRNAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
@@ -100,6 +101,7 @@ def _entry_owners() -> dict[str, str]:
 
     return {
         PROFILE_BACKUPS_DIRNAME: "profile_scope",
+        GRANT_NAME: "notifications.authority",
         TRANSCRIPT_FILENAME: "session.transcript",
         SESSION_EXPORT_NAME: "memory",
         TITLE_SIDECAR_NAME: "resume",
@@ -417,6 +419,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "own audio on this computer, selected by a machine-wide setting, and a moved or "
         "forked session neither owns nor needs them.",
     ),
+    "local_operator/heavy_audit.py": (
+        1,
+        "``AUDIT_FILENAME`` ('heavy-lease.jsonl') is the heavy-job lease audit trail in "
+        "the per-MACHINE <config>/run/heavy-jobs/ directory (``heavy_lease.lease_dir()``), "
+        "beside the slot locks it records, never an entry of a session directory. It is "
+        "this machine's serialization evidence: a copy on another device would describe "
+        "slots that device never held.",
+    ),
     "local_operator/notifications/sound.py": (
         2,
         "``THROTTLE_FILE`` ('notification-sound.last') and ``RECEIPT_FILE`` "
@@ -522,6 +532,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "is deliberately a sibling of ``sessions/`` rather than an entry inside one — "
         "no session copy may carry it, and a session travelling to another device "
         "neither needs nor may inherit it",
+    ),
+    "local_operator/voice/slot.py": (
+        3,
+        "``VOICE_DIRNAME`` ('voice'), ``ACTIVE_NAME`` ('active.json') and "
+        "``LOCK_NAME`` ('slot.lock'): the machine-wide voice slot — ONE file under "
+        "``<config>/voice/`` naming the single session this device's microphone "
+        "belongs to, plus the lock its writers share. Outside ``sessions/``, and a "
+        "receiving device must mint its own slot rather than inherit which "
+        "conversation the sender was speaking to, so none of the three is an entry "
+        "of a session directory",
     ),
     "local_operator/paths.py": (
         5,
@@ -920,6 +940,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "REF_PREFIX is an encrypted provider-secret SQL namespace, not a session "
         "directory entry; neither sealed keys nor account references travel with sessions",
     ),
+    "local_operator/providers/bedrock/auth.py": (
+        1,
+        "SIGNING_NAME is the AWS SigV4 service name ('bedrock'), a request-signing "
+        "scope, never a file or session directory entry",
+    ),
+    "local_operator/providers/bedrock/connection.py": (
+        1,
+        "REF_PREFIX is the encrypted provider-secret namespace for Bedrock credentials, "
+        "not a session directory entry; sealed keys never travel with sessions",
+    ),
     "local_operator/mobile/auth.py": (1, "the mobile session COOKIE's name"),
     "local_operator/mobile/seen.py": (1, "the mobile seen-store under the store root"),
     "local_operator/mobile/push_devices.py": (
@@ -1050,6 +1080,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "peer's signature is checked against a local process, so a copied socket path would "
         "point a receiving node at a listener that does not exist there.",
     ),
+    "local_operator/network/pairing_attest.py": (
+        1,
+        "``LISTENER_NAME`` ('mesh-pairing'): the pairing-approval listener under the same "
+        "DEVICE-LEVEL attestation namespace (<config>/run/attest/mesh-pairing.sock), one per "
+        "``lop serve`` and never an entry of a session directory. It is the signed desktop "
+        "app's dial contract with THIS machine's runtime, so it must not travel with a "
+        "session: a copied name would point a receiving node at a listener it never bound. "
+        "``SCOPE`` shares the value but names an attestation-table key, not a path, and the "
+        "guard does not count it.",
+    ),
     "local_operator/session/attachments.py": (
         1,
         "``attachments``: the content-addressed store at the config root. A copy set "
@@ -1170,7 +1210,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "device-local store files beside ``sessions/``, never session entries",
     ),
     "local_operator/network/credentials/github.py": (
-        5,
+        7,
+        "``SELF_REVOKE_BELT_THREAD_NAME`` and ``REVOKE_NOW_THREAD_NAME``: thread names, "
+        "not sync paths — the names the revoke belt and revoke-now worker threads run "
+        "under so an overrun teardown names them; identifiers, never a file anywhere. "
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
@@ -1387,6 +1430,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the subscriber loop answers it with a resync snapshot. It names a message on "
         "the socket, never a file, so it is no entry of a session directory",
     ),
+    "local_operator/server/routes/transcription.py": (
+        1,
+        "``_FALLBACK_SUFFIX`` ('.tmp'): the extension given to an uploaded audio file "
+        "with no usable one, inside a per-request ``tempfile.mkdtemp`` directory the "
+        "route ``rmtree``s when the call returns — a system temp file, never an entry of a "
+        "session directory",
+    ),
     "local_operator/server/utils/desktop_feed.py": (
         4,
         "the agent and team directories the desktop app reads (the profile store), plus "
@@ -1400,6 +1450,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "root — install-level state, never an entry of a session directory",
     ),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),
+    "local_operator/tui/community_backend.py": (
+        1,
+        "``SELECTION_FILE`` ('org_selection.json'): the /community page's last-viewed org, "
+        "at <config>/community/ — install-level UI state, never an entry of a session "
+        "directory, so no session copy carries or excludes it",
+    ),
+    "local_operator/community/taint.py": (
+        1,
+        "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, matched "
+        "against a journal row's ``tool_name`` to derive community taint (the same shape "
+        "as harness/bridge_egress.py) -- not a file or directory name; the taint is "
+        "re-derived from the session's own journal, which already travels",
+    ),
     "local_operator/tui/resume_click.py": (1, "the desktop app's bundle/binary name"),
     "local_operator/tui/input_decode.py": (
         1,
@@ -2166,6 +2229,28 @@ def test_a_copy_does_not_carry_the_store_of_an_unreferenced_blob(tmp_path: Path)
     assert (dest / "attachments" / f"{used}.bin").is_file()
     assert (dest / "attachments" / f"{used}.json").is_file()
     assert not (dest / "attachments" / f"{unused}.bin").exists()
+
+
+def test_notification_authority_is_not_transferred_to_a_same_id_replica(tmp_path: Path) -> None:
+    from local_operator.notifications.authority import GRANT_NAME, granted, set_grant
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+
+    source = tmp_path / "owner"
+    session_id = "c0ffee123456"
+    directory = source / "sessions" / session_id
+    mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    set_grant(directory, allow=True, reason="synthetic operator request")
+    assert granted(directory)
+    # Session-id binding alone cannot protect a same-id peer replica. Exercise
+    # the real transport, not merely membership in the exclusion dictionary.
+    sync.assert_complete(directory)
+    destination = tmp_path / "holder" / session_id
+    sync.sync_from(source, session_id, ask=_ask(source), into=destination)
+    assert (destination / "origin.json").is_file()
+    assert not (destination / GRANT_NAME).exists()
+    assert not granted(destination)
+    assert granted(directory)
 
 
 def test_copy_instance_versions_stay_in_the_device_local_ledger(tmp_path: Path) -> None:
