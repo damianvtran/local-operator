@@ -110,14 +110,11 @@ class Violation:
 def _arguments(call: ast.Call) -> list[ast.expr]:
     """Every argument expression of ``call``, positional then keyword.
 
-    KNOWN BLIND SPOT, stated rather than implied: only an expression whose
-    own shape is prose-like counts, so copy ASSIGNED or RETURNED before it
-    reaches a sink is not seen — ``s = "a " + name`` followed by
-    ``out.append(s)`` counts nothing, and neither does a value selected by
-    ``dict.get(platform)``. ``_literal_worthy`` folds ``+`` and the ternary
-    IN argument position (added in the scanner-coverage change that followed
-    the tui slice series); widening further needs a data-flow analysis, not
-    another syntactic fold, and is deliberately out of scope.
+    What this argument-position view cannot see on its own — copy bound to a
+    NAME first (a local ``label = "..."`` or a module ``REMEDY = "..."``) and,
+    in enforced files, copy selected out of a dict literal — is recovered by
+    the in-function resolver at ``_Resolver``. What stays invisible is stated
+    there, not implied here.
     """
     return [*call.args, *(kw.value for kw in call.keywords)]
 
@@ -181,8 +178,28 @@ def _keyword(call: ast.Call, name: str) -> ast.expr | None:
 _COPY_KWARGS = ("label", "help", "warning", "description")
 
 
+#: Cell-fitting helpers whose FIRST argument is display text: their result is
+#: what gets painted (``result.append(truncate_cells("Sessions", w).ljust(w))``),
+#: so the literal inside never sat in a sink's own argument position and the
+#: scanner read such widgets as clean. Only text-in/text-out helpers belong
+#: here — ``images.fit_cells`` sizes pixels and is deliberately absent. Every
+#: name is distinctive enough that a same-named machine-text helper elsewhere
+#: is unlikely; a literal-worthy first argument still has to be prose-like.
+_CELL_FIT_HELPERS = ("truncate_cells", "truncate_name", "truncate_row")
+
+
 def _call_violations(call: ast.Call) -> list[tuple[str, ast.expr]]:
     """Sink matches for one call: ``(kind, literal node)`` pairs, deduplicated.
+
+    The prose-shaped subset of ``_sink_expressions`` — the argument-position
+    view. Names and dict selections in the remaining expressions are the
+    resolver's job (``scan_source``).
+    """
+    return [(kind, node) for kind, node in _sink_expressions(call) if _literal_worthy(node)]
+
+
+def _sink_expressions(call: ast.Call) -> list[tuple[str, ast.expr]]:
+    """Every expression in a sink position of ``call``, prose-like or not.
 
     Deduplication matters because one literal can satisfy two rules (a
     `Setting(help=...)` is both the generic `help=` rule and the registry-copy
@@ -198,9 +215,11 @@ def _call_violations(call: ast.Call) -> list[tuple[str, ast.expr]]:
     matched: dict[int, tuple[str, ast.expr]] = {}
 
     def take(kind: str, node: ast.expr | None) -> None:
-        if node is not None and _literal_worthy(node):
+        if node is not None:
             matched.setdefault(id(node), (kind, node))
 
+    if name in _CELL_FIT_HELPERS and call.args:
+        take(f"cell-fit {name}", call.args[0])
     if name == "print":
         # `print(...)` and `console.print(...)` both resolve here: `_call_name`
         # returns the attribute name for attribute calls.
@@ -252,7 +271,240 @@ def _call_violations(call: ast.Call) -> list[tuple[str, ast.expr]]:
     return list(matched.values())
 
 
-def scan_source(path: str, source: str) -> list[Violation]:
+#: ``(first line, last line)`` of a node, inclusive — a pragma search window.
+_Span = tuple[int, int]
+
+
+def _span(node: ast.AST) -> _Span:
+    line = getattr(node, "lineno", 1)
+    return line, getattr(node, "end_lineno", line) or line
+
+
+def _own_scope(node: ast.AST) -> list[ast.AST]:
+    """Every node inside ``node``'s own scope — nested defs/classes/lambdas excluded.
+
+    A nested function's assignments are ITS locals, not the enclosing
+    function's; walking straight through would let an inner ``label = "x"``
+    bind an outer ``print(label)`` that never sees it.
+    """
+    out: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        child = stack.pop()
+        out.append(child)
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(child))
+    return out
+
+
+class _Scope:
+    """One function's (or the module's) name bindings, for the resolver.
+
+    ``values`` maps a name to every ``(value, statement)`` a PLAIN binding
+    gives it (``x = v``, ``x: T = v``, ``(x := v)``); ``local`` holds every
+    name the scope stores to at all — parameters, loop/with/except targets,
+    tuple unpacking, imports — so a local that merely SHADOWS a module
+    constant hides it rather than inheriting its copy. Flow-insensitive on
+    purpose: every plain binding counts wherever it sits, because the question
+    is "can this copy reach the sink", not "does it on this path".
+    """
+
+    def __init__(self, node: ast.AST) -> None:
+        self.values: dict[str, list[tuple[ast.expr, ast.stmt | ast.expr]]] = {}
+        self.local: set[str] = set()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = node.args
+            for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+                self.local.add(arg.arg)
+            for arg in (args.vararg, args.kwarg):
+                if arg is not None:
+                    self.local.add(arg.arg)
+        for child in _own_scope(node):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                self.local.add(child.id)
+            elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                for alias in child.names:
+                    self.local.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.local.add(child.name)
+            if isinstance(child, ast.Assign):
+                for target in child.targets:
+                    if isinstance(target, ast.Name):
+                        self.values.setdefault(target.id, []).append((child.value, child))
+            elif isinstance(child, ast.AnnAssign) and child.value is not None:
+                if isinstance(child.target, ast.Name):
+                    self.values.setdefault(child.target.id, []).append((child.value, child))
+            elif isinstance(child, ast.NamedExpr):
+                self.values.setdefault(child.target.id, []).append((child.value, child))
+
+
+class _Resolver:
+    """Follow a sink expression back to the prose literals that can reach it.
+
+    WHY: the argument-position scanner only saw copy whose own shape was a
+    literal, so prose routed through a name — ``WEDGED_REMEDY = "lop stop if it
+    stays silent"`` at module level, ``label = "Active Sessions"`` in the
+    function — or picked out of a dict (``{"header:active": "Active
+    Sessions"}[kind]``) read as zero while it rendered English
+    (``tui/widgets/session_sidebar.py``, enforced at 0, was the measured case).
+
+    What it follows, from a sink expression:
+
+    * a NAME, to every plain binding in the innermost scope that stores it,
+      else to a module-level binding (enclosing functions are not consulted:
+      closures are rare in render code and the miss is stated, not hidden);
+    * through ``+``, the conditional expression and f-string ``{fields}``;
+    * in ENFORCED files only, a subscript or ``.get(...)`` on a dict literal
+      (inline, or bound to a name as above) — each prose-like VALUE counts,
+      and a ``.get`` default resolves like any other expression.
+
+    The dict rule is enforcement-scoped because it is the one with real false
+    positive exposure (machine maps share the shape); an enforced file has an
+    owner already keying its copy, and an advisory file's counts would only
+    grow a ceiling nobody acts on yet.
+
+    STILL INVISIBLE, deliberately: values returned from another function,
+    attributes (``self.title``), imported constants, closures over an
+    enclosing function's locals, and container literals iterated rather than
+    indexed. Each needs inter-procedural or type-aware analysis.
+
+    Each literal is reported ONCE per file however many sinks reach it — the
+    count is per literal, as in ``_call_violations`` — and the resolver never
+    re-enters a binding it is already following (``x = f"{x} more"``).
+    """
+
+    def __init__(self, module: ast.Module, *, dict_values: bool) -> None:
+        self.dict_values = dict_values
+        self.module_scope = _Scope(module)
+        self.scopes: dict[int, _Scope] = {}
+        #: call id -> innermost enclosing function node (absent = module level).
+        self.owner: dict[int, ast.AST] = {}
+        self._index(module, None)
+
+    def _index(self, node: ast.AST, fn: ast.AST | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Call) and fn is not None:
+                self.owner[id(child)] = fn
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                self._index(child, child)
+            else:
+                self._index(child, fn)
+
+    def _scope(self, fn: ast.AST | None) -> _Scope:
+        if fn is None:
+            return self.module_scope
+        scope = self.scopes.get(id(fn))
+        if scope is None:
+            scope = self.scopes[id(fn)] = _Scope(fn)
+        return scope
+
+    def _bindings(self, name: str, fn: ast.AST | None) -> list[tuple[ast.expr, ast.AST]]:
+        scope = self._scope(fn)
+        if fn is not None and name in scope.local:
+            return list(scope.values.get(name, []))
+        if fn is not None and name not in scope.local:
+            return list(self.module_scope.values.get(name, []))
+        return list(scope.values.get(name, []))
+
+    def resolve(self, call: ast.Call, expr: ast.expr) -> list[tuple[ast.expr, _Span | None]]:
+        """``(literal node, binding span or None)`` for every prose literal ``expr`` reaches.
+
+        The span is the binding statement a pragma may also sit on; ``None``
+        means the literal is inside the call itself (its span already covers it).
+        """
+        fn = self.owner.get(id(call))
+        out: list[tuple[ast.expr, _Span | None]] = []
+        self._walk(expr, fn, None, set(), out)
+        return out
+
+    def _walk(
+        self,
+        expr: ast.expr,
+        fn: ast.AST | None,
+        home: _Span | None,
+        following: set[str],
+        out: list[tuple[ast.expr, _Span | None]],
+    ) -> None:
+        if _literal_worthy(expr):
+            # `home` None: the literal sits inside the call (an f-string field,
+            # a `.get` default), whose span the caller's pragma rule covers.
+            out.append((expr, home))
+            return
+        if isinstance(expr, ast.Name):
+            if expr.id in following:
+                return
+            for value, stmt in self._bindings(expr.id, fn):
+                self._walk(value, fn, _span(stmt), following | {expr.id}, out)
+        elif isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+            self._walk(expr.left, fn, home, following, out)
+            self._walk(expr.right, fn, home, following, out)
+        elif isinstance(expr, ast.IfExp):
+            self._walk(expr.body, fn, home, following, out)
+            self._walk(expr.orelse, fn, home, following, out)
+        elif isinstance(expr, ast.JoinedStr):
+            for part in expr.values:
+                if isinstance(part, ast.FormattedValue):
+                    self._walk(part.value, fn, home, following, out)
+        elif self.dict_values and isinstance(expr, ast.Subscript):
+            self._dict_values(expr.value, fn, home, following, out)
+        elif (
+            self.dict_values
+            and isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Attribute)
+            and expr.func.attr == "get"
+        ):
+            self._dict_values(expr.func.value, fn, home, following, out)
+            for default in expr.args[1:2]:
+                self._walk(default, fn, home, following, out)
+        elif self.dict_values and isinstance(expr, ast.Dict):
+            # Reached only through `_dict_values`; a dict handed straight to a
+            # sink is a container, not copy.
+            return
+
+    def _dict_values(
+        self,
+        container: ast.expr,
+        fn: ast.AST | None,
+        home: _Span | None,
+        following: set[str],
+        out: list[tuple[ast.expr, _Span | None]],
+    ) -> None:
+        if isinstance(container, ast.Dict):
+            for value in container.values:
+                if _literal_worthy(value):
+                    # An inline dict (home None) sits in the call's own span,
+                    # but its VALUE lines are what a reader would annotate;
+                    # the value's own span is a valid pragma site either way.
+                    out.append((value, home or _span(value)))
+                else:
+                    self._walk(value, fn, home, following, out)
+        elif isinstance(container, ast.Name) and container.id not in following:
+            for value, stmt in self._bindings(container.id, fn):
+                self._dict_values(value, fn, _span(stmt), following | {container.id}, out)
+
+
+_ENFORCED_CACHE: dict[tuple[str, int], list[str]] = {}
+
+
+def _repo_enforced() -> list[str]:
+    """The ``enforced`` list of ``BASELINE`` as it is NOW.
+
+    Keyed by path and mtime, not cached once: tests repoint ``BASELINE`` at
+    fixture trees and ``_activate`` rewrites it mid-test, and a tree scan
+    would otherwise re-read the file once per scanned module.
+    """
+    try:
+        stamp = BASELINE.stat().st_mtime_ns
+    except OSError:
+        stamp = -1
+    key = (str(BASELINE), stamp)
+    if key not in _ENFORCED_CACHE:
+        _ENFORCED_CACHE[key] = load_baseline(BASELINE)["enforced"]
+    return _ENFORCED_CACHE[key]
+
+
+def scan_source(path: str, source: str, *, enforced: list[str] | None = None) -> list[Violation]:
     """The violations of one file's source, pragmas applied.
 
     A ``# i18n: ignore <reason>`` comment ANYWHERE between a call's first and
@@ -260,24 +512,50 @@ def scan_source(path: str, source: str) -> list[Violation]:
     literal's own line, which is what the allowlist docs used to claim
     (round-1 n2). Multi-line calls are the norm here, so the call span is the
     span that reads naturally; the allowlist's text now says exactly this.
+
+    A literal the resolver reached through a binding is ALSO exempted by a
+    pragma on that binding's statement (``REMEDY = "..."  # i18n: ignore
+    <reason>``) — the line a reader annotating the constant writes on. The
+    call-span rule keeps working for it, so an existing call pragma still
+    covers whatever that call now resolves.
+
+    ``enforced`` selects the enforced-only dict-value rule (``_Resolver``);
+    ``None`` means "the repository baseline's scope", which is what every
+    real-tree caller wants.
     """
     try:
         module = ast.parse(source, filename=path)
     except SyntaxError as exc:  # pragma: no cover - the repo gate parses first
         raise SystemExit(f"check.py: cannot parse {path}: {exc}") from exc
     lines = source.splitlines()
+    scope = _repo_enforced() if enforced is None else enforced
+    resolver = _Resolver(module, dict_values=in_enforced_scope(path, scope))
+
+    def pragma(first: int, last: int) -> bool:
+        return any(PRAGMA_RE.search(lines[i - 1]) for i in range(first, min(last, len(lines)) + 1))
+
     found: list[Violation] = []
+    seen: set[int] = set()
     for call in (node for node in ast.walk(module) if isinstance(node, ast.Call)):
-        for kind, node in _call_violations(call):
-            start = min(call.lineno, node.lineno)
-            end = max(
-                getattr(call, "end_lineno", call.lineno) or call.lineno,
-                node.end_lineno or node.lineno,
-            )
-            if any(PRAGMA_RE.search(lines[i - 1]) for i in range(start, min(end, len(lines)) + 1)):
-                continue
-            text = node.value if isinstance(node, ast.Constant) else "<f-string>"
-            found.append(Violation(kind=kind, line=node.lineno, text=str(text)[:80]))
+        call_span = _span(call)
+        for kind, expr in _sink_expressions(call):
+            if _literal_worthy(expr):
+                reached: list[tuple[ast.expr, _Span | None]] = [(expr, None)]
+            else:
+                reached = resolver.resolve(call, expr)
+            for node, home in reached:
+                if id(node) in seen:
+                    continue
+                if home is None:
+                    start = min(call.lineno, node.lineno)
+                    end = max(call_span[1], node.end_lineno or node.lineno)
+                    if pragma(start, end):
+                        continue
+                elif pragma(*call_span) or pragma(*home):
+                    continue
+                seen.add(id(node))
+                text = node.value if isinstance(node, ast.Constant) else "<f-string>"
+                found.append(Violation(kind=kind, line=node.lineno, text=str(text)[:80]))
     return found
 
 

@@ -270,12 +270,12 @@ OTHER_JUMP_KEY = "0"
 #: no node from this card up to the app resolves ``ctrl+e`` to anything, and
 #: :meth:`on_key` only swallows PRINTABLE single characters, which ``\x05`` is
 #: not — so the free-text row does not eat it either.
-REVEAL_HINT_KEY = "^e"
+REVEAL_HINT_KEY = "^e"  # i18n: ignore keycap notation, not a word
 
 #: The multi-select checkbox, including its trailing space. ``[x]``/``[ ]`` and
 #: not a filled glyph pair: this app already says "done/not done" that way in
 #: the todo panel, and a box reads as toggleable where ``◉`` reads as decoration.
-CHECK_ON = "[x] "
+CHECK_ON = "[x] "  # i18n: ignore checkbox glyph; the x is a mark, not a letter of copy
 CHECK_OFF = "[ ] "
 
 #: The scrollbar track and thumb, painted over the rightmost column of the

@@ -127,19 +127,145 @@ raise ValueError("developer only exception prose")
         found = i18n_check.scan_source("local_operator/assembled.py", source)
         assert [v.kind for v in found] == ["textual.append", "textual.append"]
 
-    def test_a_name_reference_stays_invisible(self, i18n_check) -> None:
-        """The REMAINING blind spot, pinned so it is a fact and not a hope.
+    def test_cell_fit_helpers_are_sinks(self, i18n_check) -> None:
+        """Copy handed to a cell-fitting helper is painted, so it is counted.
 
-        Copy assigned or returned before it reaches a sink is not counted; nor
-        is a value selected by `dict.get`. Widening to those needs data-flow
-        analysis rather than another syntactic fold. This test is the honest
-        statement of the limit: if a later change starts seeing them, this
-        test fails and whoever widened it updates the docstring too.
+        `result.append(truncate_cells("Sessions", w).ljust(w))` used to read
+        clean: the literal sat inside a call inside the sink, never in the
+        sink's own argument position. Only the TEXT argument counts — the
+        width does not, and `fit_cells` (pixels) is not a text helper.
         """
         source = (
-            'msg = "copied to clipboard" + suffix\n'
-            "out.append(msg)\n"
-            'out.append({"darwin": "cmd"}.get(plat, "super"))\n'
+            'result.append(truncate_cells("Sessions", width).ljust(width))\n'
+            'row = truncate_name("Untitled chat", 12)\n'
+            'line = projects.truncate_row(f"{n} projects listed", cap=40)\n'
+            "cols, rows = fit_cells(10, 10, 4, 4)\n"
+            "plain = truncate_cells(name, width)\n"
+        )
+        found = i18n_check.scan_source("local_operator/fit.py", source)
+        assert sorted((v.kind, v.text) for v in found) == [
+            ("cell-fit truncate_cells", "Sessions"),
+            ("cell-fit truncate_name", "Untitled chat"),
+            ("cell-fit truncate_row", "<f-string>"),
+        ]
+
+    def test_names_resolve_to_local_and_module_bindings(self, i18n_check) -> None:
+        """Copy bound to a name before the sink is followed back to its literal.
+
+        The measured miss was `tui/widgets/session_sidebar.py`: a module
+        `WEDGED_REMEDY = "..."` reached a sink through an f-string field and a
+        local `label = ...` reached `truncate_cells`, so an enforced file at
+        ceiling 0 rendered English. Each literal counts ONCE however many
+        sinks reach it, at the literal's own line.
+        """
+        source = (
+            'REMEDY = "lop stop if it stays silent"\n'
+            "def paint(out, status, width):\n"
+            '    label = "Active Sessions"\n'
+            "    out.append(truncate_cells(label, width))\n"
+            '    out.append(f"{status} · {REMEDY}")\n'
+            "    out.append(REMEDY)\n"
+            '    hint = "older rows hidden" if width < 20 else "scroll for more"\n'
+            "    out.append(hint)\n"
+            '    msg = "copied " + status\n'
+            "    out.append(msg)\n"
+        )
+        found = i18n_check.scan_source("local_operator/names.py", source)
+        assert sorted((v.line, v.text) for v in found) == [
+            (1, "lop stop if it stays silent"),
+            (3, "Active Sessions"),
+            (7, "<f-string>"),
+            (9, "<f-string>"),
+        ]
+
+    def test_a_local_shadow_hides_the_module_binding(self, i18n_check) -> None:
+        """Parameters, loop targets and nested-scope locals bind nothing here.
+
+        A parameter that shares a module constant's name is a different
+        value; an inner function's `label = "..."` is not the outer one's.
+        Following either would invent findings the reader cannot fix.
+        """
+        source = (
+            'title = "Module heading"\n'
+            "def a(out, title):\n"
+            "    out.append(title)\n"
+            "def b(out, rows):\n"
+            "    for title in rows:\n"
+            "        out.append(title)\n"
+            "def c(out):\n"
+            "    def inner():\n"
+            '        label = "Inner only"\n'
+            "        return label\n"
+            "    out.append(label)\n"
+        )
+        assert i18n_check.scan_source("local_operator/shadow.py", source) == []
+
+    def test_a_binding_pragma_exempts_what_it_binds(self, i18n_check) -> None:
+        """The pragma may sit on the binding line — where a reader annotates it."""
+        source = (
+            'KEY = "ctrl+g"  # i18n: ignore key binding token\n'
+            'SHOWN = "still copy"\n'
+            "def f(out):\n"
+            "    out.append(KEY)\n"
+            "    out.append(SHOWN)\n"
+            "    out.append(SHOWN)  # i18n: ignore call-span pragma still works\n"
+        )
+        found = i18n_check.scan_source("local_operator/pragma.py", source)
+        # SHOWN is reached twice; the second call's pragma exempts only THAT
+        # reach, and the first still counts the literal once.
+        assert [(v.line, v.text) for v in found] == [(2, "still copy")]
+
+    def test_dict_values_count_in_enforced_files_only(self, i18n_check) -> None:
+        """Copy selected out of a dict literal counts where the file is enforced.
+
+        `{"header:active": "Active Sessions"}[kind]` is the sidebar's header
+        shape. The rule is scoped to enforced files because machine maps share
+        the shape; advisory files are reported exactly as before.
+        """
+        source = (
+            '_NAMES = {"pinned": "Pinned", "active": "Active Sessions"}\n'
+            "def paint(out, kind, plat):\n"
+            '    label = {"header:previous": "Previous Sessions", "header:x": "─"}[kind]\n'
+            "    out.append(truncate_cells(label, 20))\n"
+            "    out.append(_NAMES[kind])\n"
+            '    out.append({"darwin": "cmd"}.get(plat, "the super key"))\n'
+            "    out.append({'a': 1})\n"
+        )
+        # The default scope is the live baseline's, where the sidebar — the
+        # file this rule was written for — is enforced; the literal-free stub
+        # source stands in for it, so no real copy is asserted on.
+        path = "local_operator/tui/widgets/session_sidebar.py"
+        live = i18n_check.load_baseline(i18n_check.BASELINE)["enforced"]
+        assert i18n_check.in_enforced_scope(path, live)
+        enforced = i18n_check.scan_source(path, source)
+        assert sorted((v.line, v.text) for v in enforced) == [
+            (1, "Active Sessions"),
+            (1, "Pinned"),
+            (3, "Previous Sessions"),
+            (6, "cmd"),
+            (6, "the super key"),
+        ]
+        assert i18n_check.scan_source(path, source, enforced=[]) == []
+
+    def test_what_stays_invisible(self, i18n_check) -> None:
+        """The REMAINING blind spot, pinned so it is a fact and not a hope.
+
+        Values returned from another function, attributes, imported constants
+        and closures over an enclosing function's locals need inter-procedural
+        or type-aware analysis. If a later change starts seeing them, this test
+        fails and whoever widened it updates `_Resolver`'s docstring too.
+        """
+        source = (
+            "from local_operator.copy import HEADING\n"
+            "def title():\n"
+            '    return "Returned copy"\n'
+            "def outer(out):\n"
+            '    label = "Closed over"\n'
+            "    def inner():\n"
+            "        out.append(label)\n"
+            "    out.append(title())\n"
+            "    out.append(self.caption)\n"
+            "    out.append(HEADING)\n"
         )
         assert i18n_check.scan_source("local_operator/refs.py", source) == []
 

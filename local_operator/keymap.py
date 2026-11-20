@@ -574,6 +574,7 @@ _DESKTOP_MODIFIER_ORDER = ("primary", "meta", "ctrl", "alt", "shift")
 #: the file: ``cmd``/``command``/``super`` are the literal meta key, ``option``
 #: is alt, ``control`` is ctrl.
 _DESKTOP_MODIFIER_ALIASES = {
+    # i18n: ignore canonical modifier identifiers (the file spelling), not copy
     "cmd": "meta",
     "command": "meta",
     "super": "meta",
@@ -1112,7 +1113,11 @@ def display_key(value: str, *, scope: str = "app", platform: str | None = None) 
                 else "ctrl"
             )
         elif token == "meta":
-            shown.append({"darwin": "cmd", "win32": "win"}.get(plat, "super"))
+            shown.append(
+                # i18n: ignore platform keycap display words; same vocabulary
+                # and ruling as the `primary` branch above (whole group or none).
+                {"darwin": "cmd", "win32": "win"}.get(plat, "super")
+            )
         else:
             shown.append(token)
     return "+".join(shown)

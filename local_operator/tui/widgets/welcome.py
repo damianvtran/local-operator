@@ -202,7 +202,7 @@ LOGO_MARK: tuple[str, ...] = (
 )
 
 #: The wordmark, in the product's own lowercase voice.
-WORDMARK = "local operator"
+WORDMARK = "local operator"  # i18n: ignore product wordmark, never translated
 
 #: Letterspaced wordmark for the wide lockup. ``" ".join`` over the characters
 #: turns the word gap into three cells, which is exactly the spacing a
