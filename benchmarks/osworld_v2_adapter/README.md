@@ -34,35 +34,38 @@ known to emit scrubbed `application/json` detail: a matching hash is not a
 redaction or authenticity check. Do not feed it agent-supplied outcomes or paths.
 
 For an operator-owned, post-exit campaign sealer, stage the helper next to the
-sealer **after the active wave**, then import it with
-`from retain_score_detail import retain_score_detail`. Both run on the ambient
-POSIX Python; no adapter or harness install is needed. After copying the existing
-outcome, events, and judge stamp and making those files read-only, but before
-renaming the private staging directory to its final location, add:
+sealer **after the active wave**. Both run on the ambient POSIX Python; no
+adapter or harness install is needed. Keep the existing skip for already-sealed
+bundles. Only after the normal outcome/events/judge directory rename **and**
+successful results-ledger append, add this optional step (`sys` is the standard
+library module):
 
 ```python
-receipt = retain_score_detail(outcome, run_dir, staging_dir)
-receipt_path = staging_dir / "score-detail-receipt.json"
-with receipt_path.open("x", encoding="utf-8") as stream:
-    stream.write(json.dumps(receipt, sort_keys=True) + "\n")
-receipt_path.chmod(0o444)
+try:
+    from retain_score_detail import publish_score_detail
+except ImportError:
+    print("   sealed: WARNING: optional score detail helper unavailable", file=sys.stderr)
+else:
+    publish_score_detail(outcome, run_dir, sealed_dir)
 ```
 
 Here `outcome` is the parsed copied `outcome.json` (or `None` if there is no
 outcome), and `run_dir` is the caller-owned run root, **not** the episode bundle
 under `run_dir/evidence/`. The run-level `run_dir/artifacts/` is the declared
-source; the helper does not search other locations. Keep the already-sealed
-skip and final rename unchanged. Do not apply the existing top-level `0444`
-file pass to the new `artifacts/` directory, which must remain searchable.
-No outcome, score, event, judge stamp, raw output, or results-ledger entry is
-rewritten, and existing seals are not backfilled by rerunning the sealer.
+source; the helper does not search other locations. Within the caller-owned
+`sealed_dir`, let only this helper create the `score-detail` child. It prepares
+the receipt and any verified bytes in private staging and renames them into
+place together. If that step raises an I/O error, it warns without logging
+paths or content, and leaves the primary seal and ledger alone. It does not
+replace an existing `score-detail` entry or backfill previously sealed bundles.
 
-The receipt records `retained`, `missing` (no reference or no referenced file),
-or `refused` (with a reason, but no diagnostic content). Retained bytes are under
-`artifacts/<sha256>` next to the saved outcome. Keep this private: the helper
-never enumerates or captures screenshots, process logs, guest outputs, or other
-artifacts. This is a selective diagnostic capsule, not a verified full evidence
-bundle, a new score, or a way to regrade stateful tasks after the guest is gone.
+`score-detail/score-detail-receipt.json` records `retained`, `missing` (no
+reference or no referenced file), or `refused` (with a reason, but no diagnostic
+content). Retained bytes are under `score-detail/artifacts/<sha256>`. Keep this
+private: the helper never enumerates or captures screenshots, process logs,
+guest outputs, or other artifacts. This is a selective diagnostic capsule, not
+full evidence verification, a new score, or a way to regrade stateful tasks
+after the guest is gone.
 
 Synthetic filesystem checks, from the repository root:
 

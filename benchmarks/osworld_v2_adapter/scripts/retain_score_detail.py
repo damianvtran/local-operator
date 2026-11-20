@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
+import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -107,7 +110,37 @@ def retain_score_detail(outcome: object, raw_root: Path, seal_staging: Path) -> 
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)
         except OSError:
-            # If cleanup itself fails, abort the seal rather than publish partial bytes.
+            # If cleanup itself fails, discard the private stage rather than publish partial bytes.
             os.unlink(digest, dir_fd=dest)
             return _refused("write_failed")
     return {"status": "retained"}
+
+
+def publish_score_detail(outcome: object, raw_root: Path, sealed_dir: Path) -> None:
+    """Publish a private diagnostic sidecar only after the primary seal and ledger append.
+
+    The caller owns the sealed directory; only this publisher creates the
+    ``score-detail`` child. Do not call this to backfill an existing seal.
+    """
+    sidecar = sealed_dir / "score-detail"
+    try:
+        try:
+            sidecar.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return  # Preserve any existing entry, even an empty directory or dangling link.
+
+        # Keep the receipt and verified bytes invisible at their final path until
+        # both are closed. Racing publishers cannot replace a nonempty sidecar.
+        with tempfile.TemporaryDirectory(prefix=".score-detail-", dir=sealed_dir) as temporary:
+            staging = Path(temporary)
+            receipt = retain_score_detail(outcome, raw_root, staging)
+            receipt_path = staging / "score-detail-receipt.json"
+            with receipt_path.open("x", encoding="utf-8") as stream:
+                stream.write(json.dumps(receipt, sort_keys=True) + "\n")
+            receipt_path.chmod(0o400)
+            staging.rename(sidecar)
+    except OSError:
+        # Don't log exception messages: they can expose private paths.
+        print("   sealed: WARNING: optional score detail sidecar I/O failed", file=sys.stderr)

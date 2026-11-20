@@ -4,9 +4,14 @@ import hashlib
 import json
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stderr
+from io import StringIO
 from pathlib import Path
+from typing import Literal, TextIO
+from unittest.mock import patch
 
-from retain_score_detail import MAX_DETAIL_BYTES, retain_score_detail
+from retain_score_detail import MAX_DETAIL_BYTES, publish_score_detail, retain_score_detail
 
 
 class RetainScoreDetailTest(unittest.TestCase):
@@ -53,6 +58,65 @@ class RetainScoreDetailTest(unittest.TestCase):
         self.assertEqual(json.dumps(outcome), before)
         self.assertEqual(self.raw_outcome.read_text(encoding="utf-8"), before)
         self.assertEqual(sealed_outcome.read_text(encoding="utf-8"), before)
+
+    def test_publishes_optional_detail_once(self) -> None:
+        self.source.write_bytes(self.data)
+        publish_score_detail(self.outcome, self.raw, self.seal)
+        sidecar = self.seal / "score-detail"
+        receipt = sidecar / "score-detail-receipt.json"
+        target = sidecar / "artifacts" / self.digest
+        self.assertEqual(list(self.seal.iterdir()), [sidecar])
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8")), {"status": "retained"})
+        self.assertEqual(target.read_bytes(), self.data)
+
+        # An existing sidecar must remain in place even if a repeat can't retain the source.
+        original_inode = sidecar.stat().st_ino
+        self.source.unlink()
+        publish_score_detail(self.outcome, self.raw, self.seal)
+        self.assertEqual(list(self.seal.iterdir()), [sidecar])
+        self.assertEqual(sidecar.stat().st_ino, original_inode)
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8")), {"status": "retained"})
+        self.assertEqual(target.read_bytes(), self.data)
+
+    def test_receipt_close_error_preserves_primary_seal_and_ledger(self) -> None:
+        self.source.write_bytes(self.data)
+        outcome_bytes = json.dumps(self.outcome).encode()
+        events_bytes = b"synthetic events"
+        (self.seal / "outcome.json").write_bytes(outcome_bytes)
+        (self.seal / "events.jsonl.gz").write_bytes(events_bytes)
+        sealed = self.seal.rename(self.seal.with_name("sealed"))
+        ledger = sealed.with_name("results.jsonl")
+        ledger_bytes = b'{"status":"scored","binary":0}\n'
+        with ledger.open("ab") as stream:
+            stream.write(ledger_bytes)
+
+        open_path = Path.open
+        receipt_paths: list[Path] = []
+
+        @contextmanager
+        def fail_receipt_close(path: Path, mode: Literal["x"], *, encoding: str) -> Iterator[TextIO]:
+            with open_path(path, mode, encoding=encoding) as stream:
+                yield stream
+            if path.name == "score-detail-receipt.json":
+                receipt_paths.append(path)
+                # Fail after actual close so suppressing the error but leaving
+                # staged data behind cannot pass.
+                raise OSError("synthetic receipt close failure")
+
+        warning = StringIO()
+        with patch.object(Path, "open", fail_receipt_close), redirect_stderr(warning):
+            publish_score_detail(self.outcome, self.raw, sealed)
+
+        self.assertEqual(len(receipt_paths), 1)
+        self.assertFalse(receipt_paths[0].parent.exists())
+        self.assertEqual(
+            warning.getvalue().strip(), "sealed: WARNING: optional score detail sidecar I/O failed"
+        )
+        self.assertEqual(sorted(p.name for p in sealed.iterdir()), ["events.jsonl.gz", "outcome.json"])
+        self.assertEqual((sealed / "outcome.json").read_bytes(), outcome_bytes)
+        self.assertEqual((sealed / "events.jsonl.gz").read_bytes(), events_bytes)
+        self.assertEqual(ledger.read_bytes(), ledger_bytes)
+        self.assertEqual(self.source.read_bytes(), self.data)
 
     def test_missing_referenced_file_is_not_missing_reference(self) -> None:
         self.assertEqual(self.retain(), {"status": "missing", "reason": "artifact_absent"})
