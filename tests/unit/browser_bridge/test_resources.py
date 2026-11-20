@@ -8,7 +8,8 @@ from typing import Any
 import pytest
 
 from local_operator.browser_bridge import resources
-from local_operator.browser_bridge.backend import BridgeUnreachable
+from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
+from local_operator.browser_bridge.protocol import ErrorCode
 from local_operator.browser_bridge.resources import (
     RESOURCE_NAME,
     BrowserResource,
@@ -33,11 +34,25 @@ class BridgeFixture:
         #: Raise the real transport error, whose message names the diagnosing
         #: command — the detail the operator is supposed to receive.
         self.unreachable = False
+        #: Override ``owner_recover``'s reply. The stranding defect is a host
+        #: answering ``allocating`` with NO tab while the record still holds a
+        #: live one (a tab paused behind a password-manager prompt did exactly
+        #: this in sessions 704fdeafe9e3 and d6d5022bd45e).
+        self.recover_reply: dict[str, Any] | None = None
+        #: Per-surface error a plain ``close`` raises; absent means it closes.
+        self.close_errors: dict[str, Exception] = {}
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((method, params))
         if method == "owner_recover":
+            if self.recover_reply is not None:
+                return {"ownership_version": 1, **self.recover_reply}
             return {"ownership_version": 1, "state": "owned", "tab": "bridge:100:private"}
+        if method == "close":
+            error = self.close_errors.get(str(params.get("tab")))
+            if error is not None:
+                raise error
+            return {}
         if method == "owner_retain":
             self.retained = True
             return {"state": "retained"}
@@ -472,3 +487,215 @@ async def test_pending_cleanup_names_the_command_not_the_class(
     assert result.state == "pending"
     assert "BridgeUnreachable" != result.detail
     assert "lop browser status" in result.detail
+
+
+# --- a tab the session still owns is never forgotten ---------------------------
+#
+# Reproduces the 2026-11-17 stranding: a session held `bridge:8`, the host's
+# `owner_recover` answered "allocating" with no tab (the tab was paused behind a
+# password-manager prompt, so the host could not attribute it), and the record's
+# ONLY handle slot was overwritten with "". The next `open` minted a new tab,
+# teardown closed only that one, and the first tab stayed open forever, eating
+# one of the host's eight slots per incident.
+
+
+async def _lose_the_handle_through_recover(
+    resource: BrowserResource, bridge: BridgeFixture
+) -> None:
+    resource.initialize()
+    resource.remember("bridge:8:first")
+    bridge.recover_reply = {"state": "allocating", "tab": ""}
+    resource.recovered = False
+    await resource.recover()
+
+
+@pytest.mark.asyncio
+async def test_recover_that_loses_the_tab_keeps_the_old_handle_owed(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    record = json.loads(resource.path.read_text())
+    assert record["surface_id"] == ""
+    assert [entry["surface"] for entry in record["stranded_surfaces"]] == ["bridge:8:first"]
+
+
+@pytest.mark.asyncio
+async def test_a_replacing_open_keeps_the_previous_live_handle_owed(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:8:first")
+    resource.remember("bridge:9:second")
+    assert resource.record["surface_id"] == "bridge:9:second"
+    assert [entry["surface"] for entry in resource.record["stranded_surfaces"]] == [
+        "bridge:8:first"
+    ]
+    # Re-remembering the SAME handle (every action does) is not a replacement,
+    # and a close (empty handle) is a settlement, not a loss.
+    resource.remember("bridge:9:second")
+    resource.remember("")
+    assert len(resource.record["stranded_surfaces"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_teardown_closes_every_still_owned_surface(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    bridge.recover_reply = None
+    resource.remember("bridge:9:second")
+    result = await resource.finish(resource.generation, "completed")
+    assert result.state == "closed"
+    closes = [params for method, params in bridge.calls if method == "close"]
+    assert [params["tab"] for params in closes] == ["bridge:8:first"]
+    # Closed under this scope's owner proof, so an owner-aware host can
+    # attribute it; the entry's allocation id is the one current when it was
+    # stranded (the host's close accepts any allocation of the scope).
+    assert closes[0]["owner_proof"] == resource.record["proof"]
+    assert "stranded_surfaces" not in json.loads(resource.path.read_text())
+
+
+@pytest.mark.asyncio
+async def test_a_stranded_tab_already_gone_is_settled(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    bridge.close_errors["bridge:8:first"] = BridgeError(ErrorCode.TAB_CLOSED, "tab is gone")
+    assert (await resource.finish(resource.generation, "completed")).state == "closed"
+    assert "stranded_surfaces" not in resource.record
+
+
+@pytest.mark.asyncio
+async def test_a_stranded_close_that_fails_stays_pending_and_cleanup_retries_it(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    # Own sessions root, so the inventory scan sees only this record.
+    sessions = tmp_path / "sessions"
+    directory = sessions / "synthetic"
+    resource = BrowserResource(directory, directory.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    bridge.close_errors["bridge:8:first"] = BridgeError(
+        ErrorCode.OWNER_REFUSED, "a password manager prompt in that tab is waiting"
+    )
+    result = await resource.finish(resource.generation, "completed")
+    assert result.state == "pending"
+    # The host's own words reach the caller instead of a generic sentence.
+    assert "password manager prompt" in result.detail
+    record = json.loads(resource.path.read_text())
+    assert record["state"] == "pending"
+    assert [entry["surface"] for entry in record["stranded_surfaces"]] == ["bridge:8:first"]
+    row = read_inventory(sessions)[0]
+    assert row["cleanup_candidate"] is True
+    assert row["stranded_tabs"] == 1
+    # Redacted: the count travels, the capability never does.
+    assert "first" not in json.dumps(read_inventory(sessions))
+
+    bridge.close_errors.clear()
+    cleaned = await cleanup_exact(directory, str(record["generation"]))
+    assert cleaned.state == "closed", cleaned.detail
+    assert "stranded_surfaces" not in json.loads(resource.path.read_text())
+
+
+def test_a_settled_record_still_owing_a_stranded_tab_is_a_cleanup_candidate() -> None:
+    eligible, reason = cleanup_disposition(
+        {
+            "terminal": "completed",
+            "state": "closed",
+            "stranded_surfaces": [{"surface": "ui:8:x", "allocation_id": "a"}],
+        }
+    )
+    assert eligible, reason
+
+
+def test_a_reissued_capability_for_the_same_tab_is_not_owed(tmp_path: Path) -> None:
+    """Owing `ui:100:old` after the host re-issued `ui:100:new` for the SAME tab
+    would make teardown close the tab the session is actively using."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:100:old")
+    resource.remember("bridge:100:new")
+    assert "stranded_surfaces" not in resource.record
+
+
+@pytest.mark.asyncio
+async def test_an_unproven_ledger_never_receives_a_stranded_close(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    bridge.recover_reply = {"state": "unresolved", "tab": ""}
+    resource.remember("bridge:9:second")
+    resource.recovered = False
+    result = await resource.finish(resource.generation, "completed")
+    assert result.state == "unresolved"
+    assert "close" not in [method for method, _ in bridge.calls]
+    assert [entry["surface"] for entry in resource.record["stranded_surfaces"]] == [
+        "bridge:8:first"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_reattributed_tab_is_not_owed_and_a_retained_scope_keeps_it(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Review R1 (PR #4189): the incident's own recovery path. A tab paused
+    behind a password-manager prompt loses attribution, the user dismisses the
+    prompt and the host attributes the SAME handle again. Left owed, `finish`
+    closed the live — here retained — tab before `owner_retain`."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    assert resource.record["stranded_surfaces"][0]["surface"] == "bridge:8:first"
+    bridge.recover_reply = {"state": "owned", "tab": "bridge:8:first"}
+    resource.recovered = False
+    await resource.recover()
+    assert resource.record["surface_id"] == "bridge:8:first"
+    assert "stranded_surfaces" not in json.loads(resource.path.read_text())
+    resource.record["retention"] = "pending site approval"
+    bridge.retained = True
+    result = await resource.finish(resource.generation, "completed")
+    assert result.state == "retained"
+    assert [p["tab"] for m, p in bridge.calls if m == "close"] == []
+
+
+@pytest.mark.asyncio
+async def test_remember_of_an_owed_handle_makes_it_live_not_owed(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """The tool's `finally: remember(state.surface_id)` can put the handle
+    recover just stranded back into the live slot."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    resource.remember("bridge:8:first")
+    assert "stranded_surfaces" not in resource.record
+
+
+@pytest.mark.asyncio
+async def test_close_stranded_never_closes_the_live_handle(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Belt-and-braces: a record written before entries were dropped on
+    re-adoption must not make the retry close the tab in use."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:8:first")
+    resource.record["stranded_surfaces"] = [
+        {"surface": "bridge:8:first", "allocation_id": "a"},
+        {"surface": "bridge:9:old", "allocation_id": "a"},
+    ]
+    assert await resource.close_stranded() == []
+    assert [p["tab"] for m, p in bridge.calls if m == "close"] == ["bridge:9:old"]
+    assert resource.record["surface_id"] == "bridge:8:first"
+
+
+def test_an_owed_handle_whose_tab_number_was_reused_stays_owed(tmp_path: Path) -> None:
+    """Exact handle only: a live tab reusing an owed tab's NUMBER is a
+    different tab, so the old capability stays owed (QA Q-e2's shape)."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.record["stranded_surfaces"] = [{"surface": "ui:8:A", "allocation_id": "a"}]
+    resource.remember("ui:8:B")
+    assert resource.record["stranded_surfaces"] == [{"surface": "ui:8:A", "allocation_id": "a"}]

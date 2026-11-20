@@ -48,6 +48,33 @@ MAX_REPLAY_GENERATIONS = 16
 _REPLAY_LANES = (HOST_UI, HOST_BRIDGE)
 
 
+#: Record key for tabs this session still OWNS but no longer points its live
+#: handle at. ``surface_id`` is a single slot, and two paths used to overwrite
+#: it while the tab it named was still open: ``recover`` adopting a host reply
+#: of ``allocating``/no tab (the host could not attribute a tab paused behind a
+#: password-manager prompt), and a fresh allocation replacing a handle whose
+#: ``close`` had failed. Every later close — the tool's, teardown's
+#: ``finish``, ``lop browser cleanup`` — then only knew the NEW tab, so the old
+#: one stayed open for the life of the app and took one of the host's eight
+#: agent slots with it (2026-11-17: five completed subagent sessions, e.g.
+#: 704fdeafe9e3, d6d5022bd45e). A list rather than a second slot because the
+#: loss can repeat within one session (704fdeafe9e3 lost two). Each entry keeps
+#: the ``allocation_id`` current when its handle was stranded — on the
+#: ``remember`` path that can already be the id ``allocate`` rotated to, which
+#: the desktop host accepts because its ``close`` checks the tab against any
+#: allocation of the scope (local-operator-ui ``ownership.ts``). An entry whose
+#: handle becomes the live ``surface_id`` again (the host re-attributes the
+#: paused tab) is dropped: it is in use, not owed.
+#: Private like ``surface_id``: ``read_inventory`` publishes only a count.
+STRANDED_FIELD = "stranded_surfaces"
+
+
+def _tab_key(surface_id: str) -> str:
+    """``<host>:<tab id>`` of a ``<host>:<tab id>:<nonce>`` handle, else the handle."""
+    head, _sep, _nonce = surface_id.rpartition(":")
+    return head or surface_id
+
+
 def surface_host(surface_id: str) -> str:
     """The host named by a surface token's prefix, or "" when it names none.
 
@@ -1242,7 +1269,14 @@ class BrowserResource:
             # A full browser restart destroys session-storage authority. Keep
             # the old capability only as private evidence, never adopt by tab ID.
             self.record["unresolved_surface_id"] = self.record["surface_id"]
+        else:
+            # The host's answer REPLACES the live slot. When it names no tab (or
+            # another one) while we still held one, the host has merely lost
+            # attribution — it does not prove the tab closed — so the old handle
+            # stays owed and every later close retries it (see STRANDED_FIELD).
+            self._strand(str(self.record.get("surface_id", "")), str(result.get("tab", "")))
         self.record["surface_id"] = str(result.get("tab", ""))
+        self._unstrand(self.record["surface_id"])
         self.record["state"] = (
             "cleanup_pending"
             if self.record.get("terminal")
@@ -1327,13 +1361,147 @@ class BrowserResource:
                 self.select_host(host)
         if self.host:
             self.record["host"] = self.host
+        if surface_id:
+            # Only a NON-EMPTY replacement strands: an empty handle is the tool
+            # reporting a close it saw settle (or a tab the host says is gone).
+            # A replacement can also follow a resumed tab the host reported
+            # `tab_closed`; keeping that dead handle costs one close that answers
+            # `tab_closed` at teardown, which `close_stranded` settles quietly —
+            # cheaper than ever guessing a live tab is dead.
+            self._strand(str(self.record.get("surface_id", "")), surface_id)
         self.record["surface_id"] = surface_id
+        self._unstrand(surface_id)
         self.record["state"] = (
             "cleanup_pending"
             if self.record.get("terminal")
             else state or ("owned" if surface_id else "closed")
         )
         self._save()
+
+    def _strand(self, previous: str, replacement: str) -> None:
+        """Keep ``previous`` owed when ``replacement`` is about to take its slot.
+
+        No-op for an empty or unchanged handle and for a handle no ownership
+        host can be asked about (a cmux surface carries no ``ui:``/``bridge:``
+        prefix and is closed by cmux, not by this lane). The caller saves.
+        """
+        if not previous or previous == replacement or not surface_host(previous):
+            return
+        if replacement and _tab_key(previous) == _tab_key(replacement):
+            # SAME tab (`<host>:<tab id>:`), new capability nonce: a host that
+            # re-issues the handle on resume. Owing the old capability would make
+            # teardown close the tab the session is actively using.
+            return
+        owed = [entry for entry in self.record.get(STRANDED_FIELD) or () if isinstance(entry, dict)]
+        if any(entry.get("surface") == previous for entry in owed):
+            return
+        owed.append(
+            {"surface": previous, "allocation_id": str(self.record.get("allocation_id", ""))}
+        )
+        self.record[STRANDED_FIELD] = owed
+
+    def _unstrand(self, live: str) -> None:
+        """Drop the owed entry for ``live`` once it is the live handle again.
+
+        The incident's own recovery path: a tab paused behind a password-manager
+        prompt loses attribution (``recover`` strands it), the user dismisses
+        the prompt, and the host attributes the SAME handle again. Left owed,
+        ``finish`` would close it before ``owner_retain`` — closing a tab the
+        scope is using or retaining. Exact handle only, never ``_tab_key``: an
+        owed handle whose tab NUMBER was reused by the live tab is a different
+        tab and stays owed (the host refuses its stale nonce as ``tab_closed``).
+        The caller saves.
+        """
+        if not live:
+            return
+        owed = [entry for entry in self.record.get(STRANDED_FIELD) or () if isinstance(entry, dict)]
+        kept = [entry for entry in owed if entry.get("surface") != live]
+        if len(kept) == len(owed):
+            return
+        if kept:
+            self.record[STRANDED_FIELD] = kept
+        else:
+            self.record.pop(STRANDED_FIELD, None)
+
+    async def close_stranded(self) -> list[str]:
+        """Retry closing every tab in ``STRANDED_FIELD``; return what still fails.
+
+        Each failure is the HOST'S OWN code and message (``owner_refused: a
+        password manager prompt …``), never a generic sentence: the reason a tab
+        will not close is what the operator needs to unstick it, and swallowing
+        it is half of how these tabs went unnoticed.
+
+        A tab the host reports ``tab_closed`` is settled (the user or the app
+        closed it). Everything else stays owed and is retried by the next
+        caller: the tool's ``close``, the next fresh ``open``, teardown's
+        ``finish``, or ``lop browser cleanup``.
+
+        Lock-free for the same reason as ``finish_degraded``: ``finish`` and the
+        tool's lane call it while already holding ``self.lock``. Never raises
+        for a per-tab transport fault — one unreachable host must not stop the
+        other entries, nor the main scope's settlement that follows.
+        """
+        owed = [entry for entry in self.record.get(STRANDED_FIELD) or () if isinstance(entry, dict)]
+        if not owed:
+            return []
+        if self.record.get("unresolved_surface_id") and not self.record.get("surface_id"):
+            # The host could not prove this session's ownership after a restart
+            # (see `recover`): the record's capabilities are evidence only and
+            # are never sent as a destructive verb to an unproven ledger. The
+            # entries stay owed; this is reported, not settled.
+            return ["browser ownership could not be proven after restart; not retried"]
+        failures: list[str] = []
+        remaining: list[dict[str, Any]] = []
+        live = str(self.record.get("surface_id", ""))
+        for entry in owed:
+            surface = str(entry.get("surface", ""))
+            host = surface_host(surface)
+            if not host:
+                continue
+            if surface == live:
+                # Belt-and-braces for `_unstrand`: a record written before that
+                # existed (or any future path that re-adopts a handle) must never
+                # make this retry close the tab in use. The live slot's own
+                # lifecycle (`close`, `owner_finish`/`owner_retain`) owns it now.
+                continue
+            params = {**self.params(), "tab": surface}
+            if entry.get("allocation_id"):
+                params["allocation_id"] = str(entry["allocation_id"])
+            try:
+                await ownership_host(host).client().call("close", params)
+            except BridgeError as exc:
+                if exc.code is ErrorCode.TAB_CLOSED:
+                    continue
+                remaining.append(entry)
+                failures.append(f"{exc.code.value}: {exc.message or exc}")
+            except Exception as exc:
+                remaining.append(entry)
+                failures.append(str(exc) or type(exc).__name__)
+        self.assert_current()
+        if remaining:
+            self.record[STRANDED_FIELD] = remaining
+        else:
+            self.record.pop(STRANDED_FIELD, None)
+        self._save()
+        return failures
+
+    def _settle_with_stranded(
+        self, result: BrowserCleanupResult, failures: list[str]
+    ) -> BrowserCleanupResult:
+        """Fold stranded-close failures into the scope's settlement.
+
+        A scope whose current tab closed but which still owes an older one is
+        NOT closed: it is persisted ``pending`` so ``cleanup_disposition`` and
+        ``lop browser cleanup`` pick it up. Retained and unresolved answers keep
+        their own state — the owed entries survive in the record either way.
+        """
+        if not failures or result.state != "closed":
+            return result
+        self.record["state"] = "pending"
+        self._save()
+        return BrowserCleanupResult(
+            "pending", f"{len(failures)} earlier tab(s) still open: " + "; ".join(failures)
+        )
 
     def allocate(self) -> None:
         self.assert_current()
@@ -1366,18 +1534,27 @@ class BrowserResource:
             async with self.lock:
                 self.assert_current()
                 await self.ensure_recovered()
+                # Older tabs this scope lost track of (STRANDED_FIELD) are closed
+                # BEFORE the settling verb, while the scope is still live on the
+                # host: after `owner_finish` an owner-aware host may refuse the
+                # scope's identity outright. After `ensure_recovered`, because
+                # that recover is itself one of the paths that can strand a
+                # handle, and after the unresolved refusal below, because an
+                # unproven ledger never receives a destructive verb.
                 # A link with no ownership lifecycle settles through the plain
                 # `close` verb instead. Without this the fallback that keeps the
                 # tool working would strand the very tab it opened: `owner_finish`
                 # does not exist on that peer, so the read would fail and the tab
                 # would live on with nobody able to close it.
                 if self.ownership_mode() is False:
-                    return await self.finish_degraded()
+                    stranded = await self.close_stranded()
+                    return self._settle_with_stranded(await self.finish_degraded(), stranded)
                 if self.record.get("unresolved_surface_id") and not self.record.get("surface_id"):
                     return BrowserCleanupResult(
                         "unresolved",
                         "browser ownership could not be proven after restart; no tab adopted",
                     )
+                stranded = await self.close_stranded()
                 if self.record.get("retention"):
                     await self.client().call(
                         "owner_retain", {**self.params(), "reason": self.record["retention"]}
@@ -1393,7 +1570,7 @@ class BrowserResource:
                     if self.record.get("unresolved_surface_id"):
                         state = self.record["state"] = "unresolved"
                 self._save()
-                return BrowserCleanupResult(state)
+                return self._settle_with_stranded(BrowserCleanupResult(state), stranded)
         except Exception as exc:
             # The bridge's own message names the command that diagnoses the
             # failure; the class name is the fallback for a type that carries
@@ -1525,6 +1702,12 @@ def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
             "no terminal intent recorded (owner did not finish) — "
             "resume it with 'lop --resume <session>' and let it close the tab"
         )
+    if value.get(STRANDED_FIELD):
+        # Terminal and unretained, but still owing a tab it lost track of. The
+        # live slot may read "closed" (the LATEST tab settled), which is exactly
+        # the shape every stranding incident ended in, so the state test below
+        # must not be the one that answers for it.
+        return True, ""
     if value.get("state") not in _RECOVERABLE_STATES:
         return False, f"state is '{value.get('state', 'unresolved')}'; nothing is stranded"
     return True, ""
@@ -1551,6 +1734,9 @@ def read_inventory(directory: Path) -> list[dict[str, Any]]:
                     # operator cannot ask the right question without the
                     # difference. Empty for every record that has not degraded.
                     "ownership": value.get("ownership", ""),
+                    # A COUNT, never the handles: they are capabilities. Lets
+                    # the operator see why a "closed" row is still cleanable.
+                    "stranded_tabs": len(value.get(STRANDED_FIELD) or ()),
                     "cleanup_candidate": eligible,
                     "blocked_reason": reason,
                 }
