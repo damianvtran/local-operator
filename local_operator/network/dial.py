@@ -31,6 +31,7 @@ own frame, never the connection.
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import time
 from dataclasses import dataclass, field
@@ -97,6 +98,12 @@ class FrameUnreadable(Exception):
 #: The same budget ``control.py`` uses for its identity check, because it is the
 #: same wait: an authenticated dial always receives a projection first.
 WELCOME_TIMEOUT_S = 10.0
+
+#: The ``req`` the relay's ``relay_attest`` carries, which is how its reply is
+#: recognised and consumed in :meth:`OwnerDial.recv` (never forwarded).
+ATTEST_REQ = "relay-attest"
+
+logger = logging.getLogger(__name__)
 
 
 class OwnerUnreachable(Exception):
@@ -209,6 +216,12 @@ class OwnerDial:
     #: that only sees ``None`` cannot tell "nothing yet" from "owner gone",
     #: and those are different events to a viewer.
     eof: bool = False
+    #: True while the reply to this dial's ``relay_attest`` is still unread
+    #: (``_relay_attest``). The attest is sent WITHOUT waiting for its answer, and
+    #: :meth:`recv` swallows that answer whenever it arrives, so the pump sees
+    #: exactly the frames, in exactly the order, it would have without the proof
+    #: and no viewer ever receives the attest's ack.
+    attest_pending: bool = False
 
     def _read(self) -> "LineReader":
         if self.reader is None:
@@ -219,9 +232,22 @@ class OwnerDial:
 
     def recv(self, timeout_s: float) -> dict[str, Any] | None:
         """The next frame, or ``None`` on timeout or a closed socket."""
-        frame = self._read().read_frame(timeout_s)
-        self.eof = self._read().eof
-        return frame
+        deadline = time.monotonic() + timeout_s
+        while True:
+            frame = self._read().read_frame(max(0.0, deadline - time.monotonic()))
+            self.eof = self._read().eof
+            if (
+                frame is None
+                or not self.attest_pending
+                or frame.get("req") != ATTEST_REQ
+                or frame.get("op") not in ("ack", "error")
+            ):
+                return frame
+            self.attest_pending = False
+            if frame.get("op") != "ack" or frame.get("verified") is not True:
+                logger.info("relay attest: not verified (reply op=%s)", frame.get("op"))
+            # Loop on: the swallowed reply was not the caller's frame. A spent
+            # budget still reads any frame already buffered (``read_frame(0)``).
 
     def send(self, frame: dict[str, Any]) -> None:
         self.sock.sendall(
@@ -382,6 +408,27 @@ def dial_owner(
         # the machine to act on (§4.4). Additive: a runtime that does not know the
         # field drops it and keeps its own generic sentence.
         auth_frame["peer"] = dict(peer)
+    # G6 (mesh-origin-stamp §3.1): a dial that carries a peer block offers a
+    # nonce, and proves the block to the runtime once the welcome hands back the
+    # runtime's salt. A LINKLESS dial (no ``peer``) offers nothing and its rows
+    # stamp unverified (M-6). Never taken from ``auth`` — ``AUTH_FIELDS`` does
+    # not name it — so a viewer cannot choose the nonce this proof binds.
+    attest_nonce = ""
+    attest_key: bytes | None = None
+    if peer:
+        from local_operator.network import origin
+
+        try:
+            # Derived PER DIAL (M-10): an identity rotation is picked up at once,
+            # and a runtime still holding the old key just fails the proof.
+            material = origin.relay_key_for(Path(config_dir))
+        except Exception:  # noqa: BLE001 — no proof is the fail-closed outcome
+            logger.debug("relay attest: no device key to prove with", exc_info=True)
+            material = None
+        if material is not None:
+            attest_key = material[0]
+            attest_nonce = origin.relay_nonce()
+            auth_frame["relay_nonce"] = attest_nonce
     for name in AUTH_FIELDS:
         if auth and name in auth and auth[name] is not None:
             auth_frame[name] = auth[name]
@@ -409,4 +456,58 @@ def dial_owner(
         raise OwnerUnreachable(
             f'the runtime on that port serves session "{served}", not "{session_id}"'
         )
+    _relay_attest(
+        dial, welcome, peer=peer, capabilities=capabilities, nonce=attest_nonce, key=attest_key
+    )
     return dial, welcome
+
+
+def _relay_attest(
+    dial: OwnerDial,
+    welcome: dict[str, Any],
+    *,
+    peer: dict[str, Any] | None,
+    capabilities: list[str] | None,
+    nonce: str,
+    key: bytes | None,
+) -> None:
+    """Prove this relay to the runtime: the FIRST post-welcome frame (G6, M-9).
+
+    Skipped (the dial still succeeds) when this dial offered no nonce or the
+    runtime answered no ``relay_salt`` — an older runtime (§3.4): its rows simply
+    stamp unverified. The salt is POPPED off the welcome before the caller sees
+    it, and the attest's reply is CONSUMED by ``recv``, so neither reaches a viewer the
+    welcome is later forwarded to (``relay._accept_stream``). A refused or
+    unanswered attest is logged as a fact and never fails the dial: the
+    connection then runs exactly as it did before G6, unverified.
+
+    SENT, NOT AWAITED. Waiting here for the runtime's answer put a second full
+    wait (up to ``WELCOME_TIMEOUT_S`` again) between the welcome and the owner
+    relay's ``net_stream`` ack. A half-dead runtime — welcome sent, nothing after
+    — then held that ack past the viewer's ``ACK_TIMEOUT_S``, so the pilot read
+    "the local relay did not answer" instead of "stopped answering after
+    connecting" (``test_pilot_remote_busy``'s half-dead cells, from #4060), and
+    even a healthy-but-slow welcome could push welcome+attest past the ack
+    window. Not awaiting loses nothing the stamp relies on: the runtime answers
+    ``relay_attest`` inline on the connection's READER loop
+    (``RuntimeServer._relay_attest_reply``) before it dispatches any later frame
+    from that socket, so every prompt this relay forwards afterwards is judged
+    after the proof, exactly as when the relay waited. The reply is swallowed by
+    :meth:`OwnerDial.recv` (``attest_pending``), so it still never reaches a viewer.
+    """
+    salt = welcome.pop("relay_salt", None)
+    if not nonce or key is None or not peer:
+        return
+    from local_operator.harness.approval import is_wire_hex
+    from local_operator.network import origin
+
+    if not is_wire_hex(salt):
+        return
+    block = origin.canonical_block(peer, capabilities or ())
+    proof = origin.relay_proof(key, relay_nonce=nonce, relay_salt=str(salt), block=block)
+    try:
+        dial.send({"op": origin.RELAY_ATTEST_OP, "req": ATTEST_REQ, "proof": proof})
+    except OSError:
+        logger.info("relay attest: the runtime's socket failed during the proof")
+        return
+    dial.attest_pending = True

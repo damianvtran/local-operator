@@ -50,6 +50,7 @@ from local_operator.model.configure import (
     _openrouter_retire_below_tps,
 )
 from local_operator.projects import stale_after_s
+from local_operator.providers.bedrock import connection as bedrock_connection
 from local_operator.providers.failover import RetrySettings
 from local_operator.saver.gate import configured_mode
 from local_operator.session.session import Session
@@ -282,6 +283,24 @@ def _screening_budget() -> Any:
     from local_operator.team_bridge.store import screening_budget_from_config
 
     return screening_budget_from_config(config_dir())
+
+
+def _hold_release_gate() -> bool:
+    """Whether the receiver's work-scope release path is open, read the way it is.
+
+    ``team_bridge.hold_release`` (PR #4317 added its ``/settings`` row) gates
+    the owner-release path: the receiver and the Deliver route ask
+    ``hold_release.enabled_for(paths.config_dir(), <hold code>)`` per decision,
+    which re-reads config.yml every call, so a write from another process
+    lands on the next hold with no restart — hence LIVE. The probe reads that
+    exact gate for the work-scope code (the one this key owns; review codes
+    follow ``review_held``), never ``TeamBridgeSettings`` alone: an allowlisted
+    key the gate ignored would pass a settings-object probe and still hold.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.team_bridge import hold_release
+
+    return hold_release.enabled_for(config_dir(), hold_release.WORK_SCOPE_HOLD)
 
 
 def _lapsed_choice(watcher: ConfigWatcher) -> str:
@@ -601,6 +620,20 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "providers.openai.api": (
         "chat_completions",
         lambda s, w: _openai_api_mode(s.routing_settings),
+    ),
+    # -- bedrock: re-read from config on every request / credential census ----
+    # Like ``session.scratchpad.max_bytes``, not a session attribute: the two
+    # readers resolve ``providers.bedrock.*`` through ``config_dir()`` at call
+    # time when handed no mapping, which is why the rows are LIVE. Observed
+    # through those exact readers. ``eu-west-1`` and ``ambient`` are the
+    # non-default values (both default to "" = inherit / no ambient chain).
+    "providers.bedrock.region": (
+        "eu-west-1",
+        lambda s, w: bedrock_connection.configured_region(),
+    ),
+    "providers.bedrock.auth": (
+        "ambient",
+        lambda s, w: bedrock_connection.configured_auth(),
     ),
     # -- openrouter: the routing object the NEXT client build will send -------
     # Same discipline as the two probes above: observed through the exact
@@ -959,6 +992,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # probe values are the shipped defaults nudged inside their nesting (each is
     # a valid set against its siblings, so the write path accepts it and the
     # clamp never has to correct it).
+    # The owner-release hold gate. Shipped default is ON (a person-controlled
+    # hold, never an admit), hence the probe value is False: the write must
+    # close the receiver's work-scope release gate, not just change the file.
+    "team_bridge.hold_release": (False, lambda s, w: _hold_release_gate()),
     "team_bridge.screening.budget_per_hour": (
         420,
         lambda s, w: _screening_budget().account,
@@ -1170,6 +1207,12 @@ HOST_OWNED_LIVE_SECTIONS = {
     # ``write_setting`` false → the next sign-in declines → true → it runs, in
     # one process with no reload).
     "phone_access",
+    # ``voice`` is host-owned in the ``static`` shape: ``voice.max_spoken_chars`` is
+    # read PER REQUEST off config.yml by ``POST /v1/desktop/voice/text``
+    # (``desktop_voice._max_spoken_chars``), and no ``Session`` holds it, so a probe
+    # here could watch nothing move. Proven in ``tests/unit/server/
+    # test_desktop_voice.py::test_text_honours_the_configured_cap_read_from_disk``.
+    "voice",
 }
 
 

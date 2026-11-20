@@ -1,0 +1,37 @@
+{
+  "provenance_record_reference": "record.json",
+  "auditor_session": "191daf68e868",
+  "model": "openai/gpt-6.1-sol",
+  "commands": [
+    {
+      "argv": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "/Users/damian/local-operator/.worktrees/i18n-terminal-status/scripts/i18n/ledger.py",
+        "history-sha",
+        "--locale",
+        "ru",
+        "--namespace",
+        "wire.session_status"
+      ],
+      "exit_code": 0,
+      "stdout": "5b709925ccf156f7113b2087b753b481e12e72dc3ecb04d845965d600f8dce43\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "/Users/damian/local-operator/.worktrees/i18n-terminal-status/scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/ru/receipt.json",
+        "--expected-history-sha",
+        "5b709925ccf156f7113b2087b753b481e12e72dc3ecb04d845965d600f8dce43",
+        "--dry-run"
+      ],
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/ru/wire.session_status.json\n",
+      "stderr": ""
+    }
+  ],
+  "history_applied": false
+}

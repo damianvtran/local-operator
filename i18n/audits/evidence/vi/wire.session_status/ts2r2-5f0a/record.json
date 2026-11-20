@@ -1,0 +1,52 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19T21:48:43.012312+00:00",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/56c3029571f6/scratchpad/wire.session_status.vi.r2.json",
+      "sha256": "91fdc2a9fb34b9bd23efce8daabd33a74a7511ad67a9b269e711dd90c96b277e"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/report.json",
+      "sha256": "3b3908e934bd19f72adefbcfeca9c4799fccc2f567a83106133bf1edee31f52a"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/audit.log",
+      "sha256": "f4a50f02c4042a78d625bf679f6a9d251da397d0920b6ea450ba40f7ff29b5ae"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/compatibility.json",
+      "sha256": "659e6eb4d98051192cde583aae768ea9e26c3cfb13f06794bfba42d61a9ba2e6"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "source_audit_revision": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "prior_record_sha256": "96cb1699dbdf90b84acf7024dc3f6ec355459544628cc6114f5079a8eb0faf73",
+  "retention": "STAGED ONLY; retain canonical bundle before applying receipt",
+  "audit_notes_not_execution_log": "report.json; audit.log records actual execution"
+}

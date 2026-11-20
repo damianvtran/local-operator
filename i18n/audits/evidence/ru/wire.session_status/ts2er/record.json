@@ -1,0 +1,85 @@
+{
+  "locale": "ru",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "audit_kind": "second_independent_safety_copy_pass",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "191daf68e868",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session runtime Model header",
+    "fallback": "none observed",
+    "independent_from_translator_session": "3f1cf5b56ba0",
+    "independent_from_first_auditor_session": "56bc997306a1",
+    "result": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "date": "2026-11-19"
+  },
+  "source_audit_revision": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/wire.session_status.json",
+      "sha256": "b15cc559652777694f2e252404862095bbdc902f90fe72fcee930a03b698f47c"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/wire.session_status/ts2er/validate.py.txt",
+      "sha256": "7b49d175520fadca91ed67f4feea092d7647b1841dffa2730e17f2d70a592c92"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.session_status/ts2er/report.md",
+      "sha256": "cd753934e4e287641d2a4ea407baf57658f746e9569a6acb73a94ddca7a10713"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.session_status/ts2er/independent-pre-receipt-review.json",
+      "sha256": "4f5dec431b0acc142926f712fe1c907e15baa3af9976ab55e0f6d59666c11514"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.session_status/ts2er/mechanical.json",
+      "sha256": "ed6633c0a37433181f4a366a6b82824687d1564199e7cc0cf45f8bd494e335b1"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.session_status/ts2er/audit.log",
+      "sha256": "acf422b43b62615159bfda5382fd169cf5d679132feeb8fc1969676dd00ac0d7"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "first_pass_binding": {
+    "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/receipt.json",
+    "sha256": "a0ac1fc7dee593ba2eaa3156b0e6fa1752c4d10d6f2749ae37cc8c5df0f06c81",
+    "record_path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/record.json",
+    "record_sha256": "cd65055ba5d941c6fe726232bf64286943be1f95e3a96166985aba26902c742f",
+    "target_binding_verified": true
+  },
+  "retention": {
+    "status": "scratch_handoff_pending_coordinator_promotion",
+    "intended_record_path": "i18n/audits/evidence/ru/wire.session_status/ts2er/record.json",
+    "tracked_on_main": false
+  },
+  "limitations": [
+    "Unknown external diagnostic legacy English remains unresolved. No visual/native/integrated-runtime/pseudo/activation/release clearance. No fixed cell cap in sidecar; downstream rendered fit not cleared.",
+    "Known repository missing-CLDR-arm acceptance; independent guard passed on actual target.",
+    "Synthetic Decimal(1.0) display/plural scale mismatch is pre-existing formatter behavior; integer wake-count path unaffected."
+  ],
+  "original_lost_evidence": {
+    "status": "not_applicable"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

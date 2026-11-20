@@ -1,0 +1,29 @@
+{
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "status": "translated",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "terminal-status-hi",
+    "session": "8c6e64f5562b",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model field",
+    "fallback_used": false
+  },
+  "date": "2026-11-19T21:01:52.057216+00:00",
+  "auditor": null,
+  "provenance": {
+    "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/provenance.json",
+    "sha256": "cd74f63b87a2b759794146fb0ef6487a95a8282313ac45e9e767d336ad75d4dd"
+  },
+  "mechanical_validation": {
+    "exit_code": 0,
+    "command": "PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/check_translation.py",
+    "log": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/checks.log",
+    "checks": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/checks.json"
+  },
+  "note": "Scratch translation only. Two independent safety audits still required. Not an audit-history append receipt."
+}

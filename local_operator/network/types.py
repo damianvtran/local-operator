@@ -2302,4 +2302,7 @@ class HandshakeResult:
     #: fingerprint. ``RelayServer._admit_link`` refuses a link where this is False,
     #: which is the one structural gate in front of every link consumer (mesh trust
     #: audit G1-G4). Defaults False so a result nobody verified is never trusted.
+    #: Carried onto ``PeerLink.peer_verified`` and MAC-bound into the relay→runtime
+    #: proof's block (``network/origin.py``), so a stamp can say "verified" only for a
+    #: link whose peer identity was actually proved (mesh-origin-stamp design §2 rule 3).
     peer_verified: bool = False

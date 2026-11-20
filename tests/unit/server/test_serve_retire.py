@@ -988,6 +988,11 @@ REQUEST_ID = "01234567-89ab-cdef-0123-456789abcdef"
 #: A well-formed ``aside_id`` (the route's own pattern), spelled once.
 ASIDE_ID = "abcdef01-2345-6789-abcd-ef0123456789"
 
+#: A well-SHAPED history-row ref (``r1.<row id>.<tag>``). Well shaped is all the
+#: door test needs: the latch refuses before the ref is verified, and the point
+#: of the row is that this route cannot reach a bridge on a retiring daemon.
+ROW_REF = "r1.cm93LTE.AAAAAAAAAAAAAAAAAAAAAA"
+
 
 @dataclass(frozen=True)
 class _DoorRoute:
@@ -1104,6 +1109,13 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
     ),
     _DoorRoute("snapshot", "GET", "/v1/desktop/sessions/{session_id}"),
     _DoorRoute("history", "GET", "/v1/desktop/sessions/{session_id}/history"),
+    # The clipped-row fetch: a READ under the door, beside the page whose
+    # ``truncated.ref`` names it (``docs/DESKTOP_API.md`` §"Clipped rows").
+    _DoorRoute(
+        "history_row",
+        "GET",
+        "/v1/desktop/sessions/{session_id}/history/rows/{ref}",
+    ),
     # The checkpoint rail's manifest: a READ beside ``history``. It no longer
     # takes a bridge (CORE-PROFILE L1: ``DesktopSessions.checkpoints`` answers
     # from the index without building the cold facade), so it is named in
@@ -1522,6 +1534,7 @@ def _fill(value: Any, session_id: str) -> Any:
 def _request_for(route: _DoorRoute, session_id: str) -> tuple[str, str, dict[str, Any] | None]:
     """A row as ``(method, url, payload)``, with the session id substituted."""
     url = route.template.replace("{session_id}", session_id).replace("{aside_id}", ASIDE_ID)
+    url = url.replace("{ref}", ROW_REF)
     url = url.replace("{key}", "counter")
     if route.session_in_query:
         url += f"?session_id={session_id}"

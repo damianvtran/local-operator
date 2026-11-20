@@ -132,6 +132,13 @@ def _parent_session(tmp_path, block: str):
     return make_session(tmp_path, stream, system_blocks_provider=provider), stream
 
 
+async def _child_head(child) -> str:
+    blocks = child._system_blocks_provider()
+    if inspect.isawaitable(blocks):
+        blocks = await blocks
+    return blocks[0]
+
+
 async def _child_tail(child) -> str:
     blocks = child._system_blocks_provider()
     if inspect.isawaitable(blocks):
@@ -450,6 +457,37 @@ async def test_child_inherits_the_parents_injected_guidance_record(tmp_path, mon
         )
         try:
             assert child._build_tool_context().injected_guidance == record
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_child_block_zero_follows_the_childs_live_tools(tmp_path, monkeypatch) -> None:
+    """REGRESSION (#4318 review R2): the child's block provider closed over the
+    CONSTRUCTION tool list, so a tool the child Session dropped afterwards kept
+    its usage prose in block 0. The provider must read the child's live tools,
+    the probe the top-level factory provider already has."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(subagent_mod, "_child_mcp_wiring", lambda *args, **kwargs: None)
+    parent, _stream = _parent_session(tmp_path, _parent_block())
+    try:
+        child = await subagent_mod._build_child_session(
+            label="general",
+            prompt="do the slice",
+            parent_session=parent,
+            model_spec=None,
+            job_id="child-live-tools-job",
+        )
+        try:
+            todo_prose = "Keep the todo list honest"
+            assert any(tool.name == "todo" for tool in child._tools)
+            # Control: held at construction, so the prose renders.
+            assert todo_prose in await _child_head(child)
+            child.refresh_tools([tool for tool in child._tools if tool.name != "todo"])
+            assert not any(tool.name == "todo" for tool in child._tools)
+            assert todo_prose not in await _child_head(child)
         finally:
             await child.dispose()
     finally:

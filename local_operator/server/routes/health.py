@@ -11,6 +11,7 @@ import time
 
 from fastapi import APIRouter, Request
 
+from local_operator.server import peer_check
 from local_operator.server.models.schemas import CRUDResponse, HealthCheckResponse
 
 router = APIRouter(tags=["Health"])
@@ -300,6 +301,7 @@ async def health_check(request: Request) -> CRUDResponse[HealthCheckResponse]:
         install_kind=kind,
         # Fresh serving-process capability, not copied from discovery metadata.
         rolling_reload_contract=rolling_contract(request.app),
+        peer_uid_check=peer_check.current_status(),
     )
 
     return CRUDResponse(status=200, message="ok", result=result)

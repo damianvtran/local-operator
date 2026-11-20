@@ -989,6 +989,19 @@ export function supplementRestart(
 	return sendCommand(sessionId, { op: "supplement_restart", anchor, job });
 }
 
+/** The admitted body (or held/refused/pending state) behind one inbound Team
+    Bridge card, keyed by the transcript row the phone already reads (design
+    §4; `lib/bridge-card-body.ts` parses it). Ask only when the relay advertises
+    `features.team_bridge_card_body`. The route answers `private, no-store` and
+    this client keeps no copy either: a revoked body must disappear on the
+    next read. */
+export function getBridgeCardBody(sessionId: string, entryId: string, signal?: AbortSignal): Promise<unknown> {
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/bridge-cards/${encodeURIComponent(entryId)}/body`,
+		{ signal, cache: "no-store" },
+	);
+}
+
 /** Older transcript entries for lazy loading. ``before`` is the id of the
     oldest entry the client already has; the daemon returns the page
     immediately older than it (chronological within the page) plus whether

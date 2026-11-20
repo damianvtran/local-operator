@@ -1,0 +1,62 @@
+import os,sys,json,hashlib,runpy,shutil,unicodedata
+from pathlib import Path
+repo=Path('/Users/damian/local-operator/.worktrees/i18n-terminal-status'); s=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD']); sys.path.insert(0,str(repo))
+from local_operator.i18n import catalogues,runtime
+from rich.cells import cell_len
+H=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+ns='wire.session_status'; en=repo/f'local_operator/i18n/catalogues/en/{ns}.json'; context=en.with_name(ns+'.context.json'); old=Path('/Users/damian/.local-operator/sessions/56c3029571f6/scratchpad/wire.session_status.vi.json'); new=old.with_name('wire.session_status.vi.r2.json')
+for p,expected in [(en,'52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326'),(context,'5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525'),(old,'963b8bf337981a328bb80b265cb49d033db10c7afb2838c4ec8d5f05df20c1d1'),(new,'91fdc2a9fb34b9bd23efce8daabd33a74a7511ad67a9b269e711dd90c96b277e')]:
+ assert H(p)==expected; print('HASH',p,H(p))
+old_phrase='runtime rời đi để cập nhật sau ngưỡng tiến triển'; new_phrase='runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển'
+before=old.read_bytes(); after=new.read_bytes(); assert after.count(new_phrase.encode())==2
+assert after.replace(new_phrase.encode(),old_phrase.encode())==before
+print('PASS REVERSE BYTE PROOF: reverting exactly two UTF-8 phrase substitutions restores entire original candidate bytes exactly')
+source=json.loads(en.read_text()); a=json.loads(before); b=json.loads(after)
+changed={k for k in a if a[k]!=b[k]}; assert changed=={ns+'.error_cause',ns+'.unseen_error_cause'}
+assert set(source)==set(a)==set(b) and len(b)==17
+for key in b:
+ assert runtime.message_arguments(source[key])==runtime.message_arguments(b[key])
+ assert unicodedata.normalize('NFC',b[key])==b[key]
+ def args(nodes):
+  for n in nodes:
+   if isinstance(n,runtime._Arg):
+    yield n
+    for _,body in n.parts or (): yield from args(body)
+ src_select=[n for n in args(runtime.parse_message(source[key])) if n.kind=='select']; dst_select=[n for n in args(runtime.parse_message(b[key])) if n.kind=='select']
+ assert len(src_select)==len(dst_select)
+ for x,y in zip(src_select,dst_select): assert x.name==y.name and {arm for arm,_ in x.parts}=={arm for arm,_ in y.parts}
+ if key in changed:
+  previous=dict(next(n for n in runtime.parse_message(a[key]) if isinstance(n,runtime._Arg)).parts); current=dict(next(n for n in runtime.parse_message(b[key]) if isinstance(n,runtime._Arg)).parts)
+  assert {arm for arm in previous if previous[arm]!=current[arm]}=={'runtime_overdue'}
+print('PASS all17 keys/placeholder names+types/NFC/select arms; only runtime_overdue AST bodies changed')
+assert runtime.plural_selectors(b[ns+'.dormant'])==( ('other',), )
+print('PASS vi CLDR other-only; unchanged count wording and previous count tests retained by byte proof')
+fixture=s/'vi-r2-fixture'
+for locale in ['en','vi']: (fixture/locale).mkdir(parents=True,exist_ok=True)
+shutil.copyfile(en,fixture/'en'/en.name); shutil.copyfile(context,fixture/'en'/context.name); vp=fixture/'vi'/en.name
+catalogues._CATALOGUES=fixture; check=runpy.run_path(str(repo/'scripts/i18n/check.py'),run_name='vi_r2_scoped_validator')['check_catalogues']
+def validate(d):
+ vp.write_text(json.dumps(d,ensure_ascii=False)); return check()
+assert validate(b)==[]; print('PASS scoped repo check_catalogues() normal admission []')
+for kind,mutation in [('missing-key',lambda d:d.pop(ns+'.recent')),('renamed-cause',lambda d:d.update({ns+'.error_cause':d[ns+'.error_cause'].replace('{cause,','{reason,')})),('invalid-vi-plural',lambda d:d.update({ns+'.dormant':'{count, plural, one {#} other {#}}'}))]:
+ d=dict(b); mutation(d); errors=validate(d); assert errors; print('NEGATIVE REJECTED',kind,json.dumps(errors,ensure_ascii=False))
+assert validate(b)==[]; print('PASS restored normal admission []')
+rows=[]
+for key in [ns+'.error_cause',ns+'.unseen_error_cause']:
+ for cause in ['runtime_overdue','runtime_stall_bound','runtime_retired','runtime_shutdown','runtime_update_failed','runtime_killed','user_stop','other','synthetic_unknown_cause']:
+  text=runtime.render_message(b[key],{'cause':cause},'vi'); previous=runtime.render_message(a[key],{'cause':cause},'vi')
+  assert (text!=previous)==(cause=='runtime_overdue')
+  rows.append({'key':key,'params':{'cause':cause},'text':text,'cells':cell_len(text),'unchanged_from_first':text==previous})
+for suffix in ['signal_stop','unseen_signal_stop','forced_kill','unseen_forced_kill']:
+ key=ns+'.'+suffix
+ for command in ['none','/stop --all synthetic-opaque-123']:
+  text=runtime.render_message(b[key],{'command':command},'vi'); assert text==runtime.render_message(a[key],{'command':command},'vi')
+  assert ('none' not in text) if command=='none' else text.endswith(command)
+  rows.append({'key':key,'params':{'command':command},'text':text,'cells':cell_len(text),'unchanged_from_first':True})
+for row in rows: print('ICU_CASE',json.dumps(row,ensure_ascii=False))
+(s/'vi-r2-first-cases.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2)+'\n')
+print('PASS',len(rows),'delta/direct-neighbor ICU text cases; no integrated runtime/visual/shaping proof')
+# Original completed evidence must survive unchanged.
+assert H(s/'vi-first-record.json')=='418310e2350db1302c5eb44870b4d1a735ede118ede43d8dd02332bfb89cd66e'
+assert H(s/'vi-first-receipt.json')=='cc450c1a6ffb9c456e77c4a74d81a11b7ff5b08d7147146a0e17759d5e52bbc8'
+print('PASS original first record/receipt preserved; old candidate untouched; all other key/branch audits retained, not rerun')

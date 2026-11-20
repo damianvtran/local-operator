@@ -137,7 +137,7 @@ SIDEBAR_MAX_WIDTH = 44
 
 #: The remedy clause a wedged row's tooltip carries, after the backend's own
 #: state sentence. The STATE WORDS are not the client's to change —
-#: ``session/catalog.py`` owns them (``WEDGED_STATUS``, and with it the heartbeat
+#: ``session/catalog.py`` owns them (``wedged_status()``, and with it the heartbeat
 #: age), and a second spelling here would be the drift the surface map forbids.
 #: The remedy is different in kind: it names an affordance, and each client has
 #: its own. This surface's user is at a terminal, where ``lop stop`` is the rung

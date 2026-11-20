@@ -1179,6 +1179,7 @@ class Handshake:
             # Listener: set by ``verify_auth`` (sig + MAC against the stored key).
             # Dialer: set by ``verify_welcome`` (the listener's proof against the
             # stored key, and peer == expected). ``_admit_link`` refuses False.
+            # Reported, never re-derived, so this field cannot disagree with it.
             peer_verified=self.auth_verified,
         )
 

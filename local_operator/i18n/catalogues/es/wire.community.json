@@ -1,0 +1,7 @@
+{
+  "wire.community.post_card_audience": "Audiencia: todos los miembros de {channel} · el moderador de la comunidad lo revisa antes de que nadie lo vea.",
+  "wire.community.post_card_each_time": "Cada publicación te lo pregunta; todavía no hay permisos permanentes.",
+  "wire.community.post_card_label": "Se muestra como tu propia publicación: este servidor aún no puede etiquetar las publicaciones de agentes, así que nadie verá que vino de tu agente.",
+  "wire.community.post_card_tainted": "Tu agente leyó publicaciones de la comunidad en esta sesión, así que ningún permiso permanente se aplica hasta una nueva sesión; solo tu respuesta publica esto.",
+  "wire.community.post_card_title": "¿Publicar en {channel} de {community} como tú?"
+}
