@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -67,26 +68,91 @@ def _reap(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]
     proc.wait(timeout=10)
 
 
-def _wait_for(condition, timeout: float = 20.0) -> None:  # type: ignore[no-untyped-def]
+def _wait_for(  # type: ignore[no-untyped-def]
+    condition, timeout: float = 20.0, message: str = "condition never became true"
+) -> None:
     deadline = time.monotonic() + timeout
     while not condition():
-        assert time.monotonic() < deadline, "condition never became true"
+        assert time.monotonic() < deadline, message
         time.sleep(0.02)
+
+
+#: How long the first run keeps the slot AFTER the second run has reported it
+#: is queued. It is a floor on the second run's wait, not a race: the second
+#: run cannot take the slot until the sentinel exists, and the sentinel is
+#: only created HOLD seconds after the queued note was read.
+HOLD_S = 0.3
+
+#: Every wait in the serialization test is bounded by this, so a starved runner
+#: fails with a named message instead of hanging the shard.
+DEADLINE_S = 30.0
+
+
+def _hold_until(sentinel: Path) -> list[str]:
+    """``sh`` that holds its slot until ``sentinel`` exists (gives up after ~60 s)."""
+    script = (
+        'i=0; while [ ! -e "$1" ]; do i=$((i+1)); ' "[ $i -gt 1200 ] && exit 9; sleep 0.05; done"
+    )
+    return ["sh", "-c", script, "sh", str(sentinel)]
+
+
+def _wait_for_line(proc: subprocess.Popen[str], needle: str, what: str) -> None:
+    """Read ``proc``'s stderr until a line contains ``needle``; fail named at the deadline.
+
+    A daemon thread does the blocking reads (and keeps draining afterwards so
+    the child never blocks on a full pipe); this side only waits on an Event.
+    """
+    seen = threading.Event()
+    assert proc.stderr is not None
+    stream = proc.stderr
+
+    def _read() -> None:
+        for line in stream:
+            if needle in line:
+                seen.set()
+
+    threading.Thread(target=_read, daemon=True).start()
+    assert seen.wait(DEADLINE_S), f"{what} within {DEADLINE_S:.0f}s"
+
+
+def _wait_exit(proc: subprocess.Popen[str], what: str) -> int:
+    try:
+        return proc.wait(timeout=DEADLINE_S)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"{what} did not exit within {DEADLINE_S:.0f}s")
 
 
 # -- serialization -------------------------------------------------------------
 
 
-def test_two_real_runs_log_non_overlapping_intervals(env: dict[str, str]) -> None:
+# Why a sentinel and not ``sleep 1.5``: the old shape raced the first run's
+# sleep against the SECOND ``lop`` process's interpreter startup. On a
+# CPU-starved CI shard (gate run 44693614557, 3.12-3) the second process only
+# reached the lease after the first had released, and ``waited_s`` was 0.0.
+# Now the first run holds the slot until a sentinel file exists, and the test
+# creates it only after the second run has printed the product's own
+# "queued behind …" note — so the second run is provably waiting on the first
+# — plus HOLD_S. HOLD_S is therefore the MINIMUM the second run can have
+# waited, however slow the runner; no timing is raced.
+def test_two_real_runs_log_non_overlapping_intervals(env: dict[str, str], tmp_path: Path) -> None:
     """take→release→take: the second run waited, and its interval starts after the first ends."""
     directory = heavy_lease.lease_dir()
-    first = _lop_run(env, "sh", "-c", "sleep 1.5")
+    sentinel = tmp_path / "release-first"
+    first = _lop_run(env, *_hold_until(sentinel))
     try:
-        _wait_for(lambda: heavy_lease.read_holders(directory))
+        _wait_for(
+            lambda: heavy_lease.read_holders(directory),
+            timeout=DEADLINE_S,
+            message=f"first run never took the slot within {DEADLINE_S:.0f}s",
+        )
         second = _lop_run(env, "sh", "-c", "exit 3")
         try:
-            assert first.wait(timeout=30) == 0
-            assert second.wait(timeout=30) == 3
+            _wait_for_line(second, "queued behind", "second run never reported it was queued")
+            time.sleep(HOLD_S)
+            released_at = time.time()
+            sentinel.touch()
+            assert _wait_exit(first, "first run") == 0
+            assert _wait_exit(second, "second run") == 3
         finally:
             _reap(second)
     finally:
@@ -98,11 +164,12 @@ def test_two_real_runs_log_non_overlapping_intervals(env: dict[str, str]) -> Non
     assert take2["pid"] == rel2["pid"] == second.pid
     assert {e["slot"] for e in events} == {0}
     assert take1["label"] == "sh" and rel1["exit"] == 0 and rel2["exit"] == 3
-    assert take2["waited_s"] > 0.5, take2
+    assert take2["waited_s"] >= HOLD_S - 0.05, take2
     # Interval proof: first held [take1.ts, rel1.ts - small], second took after it.
     first_end = rel1["ts"]
     second_start = take2["ts"]
-    assert rel1["held_s"] >= 1.4
+    # The first run held at least until the sentinel appeared.
+    assert rel1["held_s"] >= released_at - take1["ts"] - 0.05, (rel1, released_at)
     # The release line is written just after the unlock, so the next take can
     # precede it by a hair; the held interval itself never overlaps.
     first_unlocked = take1["ts"] + rel1["held_s"]
