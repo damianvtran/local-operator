@@ -640,3 +640,147 @@ def test_fallback_adds_no_time_beyond_the_remaining_budget() -> None:
     assert connector.timeouts[0] == 1.0  # baseline dial unchanged
     assert elapsed < 1.0 + 0.2, elapsed  # fallback ended at the remaining ~0.3 s
     assert connector.dialled == [GLOBAL_V4]
+
+
+# --- IP-literal probes (#4260's hand-built socket) reach NAT64 via ``fallback`` --
+#
+# ``probe_candidates`` connects an IP literal on its own socket so it can stamp
+# when the dial was issued (U3b); the convergence of this PR with #4260 routes
+# that branch's LOCAL connect errors through ``nat64.fallback`` — an IPv4 literal
+# on an IPv6-only host is the case the fallback exists for — while a timeout
+# never tries it (a quiet peer on a dual-stack host, not a missing route).
+
+LITERAL = f"{GLOBAL_V4}:{PORT}"
+SYNTH = "64:ff9b::808:404"  # 8.8.4.4 under the RFC 6052 well-known prefix
+
+
+class _ScriptedDialSocket:
+    """``relay._new_dial_socket`` stand-in: no packet leaves; ``connect`` is scripted."""
+
+    def __init__(self, connect: Any) -> None:
+        self._connect = connect
+        self.timeout: float | None = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def connect(self, _address: Any) -> None:
+        self._connect(self)
+
+    def close(self) -> None:
+        pass
+
+
+class _FallbackSocket:
+    """What the fake NAT64 connector hands back: a closable stand-in socket."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _literal_connect(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    def connect(_sock: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(relay, "_new_dial_socket", lambda _family: _ScriptedDialSocket(connect))
+
+
+def _real_fallback_with_fake_prefix(
+    monkeypatch: pytest.MonkeyPatch, *, delay: float = 0.0, v6_ok: bool = True
+) -> list[dict[str, Any]]:
+    """Wrap the REAL ``nat64.fallback`` with injected fakes (prefix via ipv4only.arpa,
+    no IPv4 route, a v6 connector); returns the calls it saw."""
+    real = nat64.fallback
+    calls: list[dict[str, Any]] = []
+
+    def connector(address: tuple[str, int], timeout: float | None = None) -> Any:
+        time.sleep(delay)
+        if not v6_ok:
+            raise OSError(errno.ECONNREFUSED, "refused")
+        return _FallbackSocket(address[0])
+
+    def wrapped(host: str, port: int, original: OSError, **kwargs: Any) -> Any:
+        calls.append({"host": host, "port": port, "original": original, **kwargs})
+        return real(
+            host,
+            port,
+            original,
+            resolver=FakeResolver({("ipv4only.arpa", socket.AF_INET6): ["64:ff9b::c000:aa"]}),
+            route_check=lambda _address: False,
+            key_reader=lambda: "2001:db8:aaaa::/64",
+            connector=connector,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(nat64, "fallback", wrapped)
+    return calls
+
+
+def test_ipv4_literal_no_route_uses_the_nat64_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    unreachable = OSError(errno.ENETUNREACH, "Network is unreachable")
+    _literal_connect(monkeypatch, unreachable)
+    calls = _real_fallback_with_fake_prefix(monkeypatch)
+    started = time.monotonic()
+    probe = relay.probe_candidates([LITERAL], deadline=started + 5.0, connect_cap=2.0)
+    assert probe.winner == LITERAL
+    assert isinstance(probe.sock, _FallbackSocket) and probe.sock.host == SYNTH
+    assert [(row.connected, row.detail) for row in probe.attempts] == [(True, "ok")]
+    # One call, with the ORIGINAL error and the connect's own deadline: no new budget.
+    assert len(calls) == 1 and calls[0]["original"] is unreachable
+    assert calls[0]["deadline"] is not None
+    assert started < calls[0]["deadline"] <= started + 2.0 + 0.5
+    assert 0.0 < calls[0]["timeout"] <= 2.0
+
+
+def test_ipv4_literal_timeout_never_tries_nat64(monkeypatch: pytest.MonkeyPatch) -> None:
+    _literal_connect(monkeypatch, TimeoutError("timed out"))
+    calls = _real_fallback_with_fake_prefix(monkeypatch)
+    probe = relay.probe_candidates(
+        [LITERAL], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert calls == []
+    assert probe.sock is None
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+
+
+def test_failed_nat64_fallback_reports_the_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # EHOSTUNREACH: if the fallback's own ECONNREFUSED leaked out, the detail
+    # would read ConnectionRefusedError; the ORIGINAL error is what propagates.
+    _literal_connect(monkeypatch, OSError(errno.EHOSTUNREACH, "No route to host"))
+    calls = _real_fallback_with_fake_prefix(monkeypatch, v6_ok=False)
+    probe = relay.probe_candidates(
+        [LITERAL], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert len(calls) == 1
+    assert probe.sock is None
+    assert [row.detail for row in probe.attempts] == ["connect_failed:OSError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_ipv6_literal_errors_never_try_nat64(monkeypatch: pytest.MonkeyPatch) -> None:
+    _literal_connect(monkeypatch, OSError(errno.ENETUNREACH, "Network is unreachable"))
+    calls = _real_fallback_with_fake_prefix(monkeypatch)
+    probe = relay.probe_candidates(
+        ["[2001:db8::1]:4097"], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert calls == []
+    assert [row.detail for row in probe.attempts] == ["connect_failed:OSError"]
+
+
+def test_literal_probe_timing_covers_the_nat64_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The connector sleeps 0.2 s: the recorded dial must include that time, so
+    # the latency (and the silence gate's ``waited``) see the whole attempt.
+    _literal_connect(monkeypatch, OSError(errno.ENETUNREACH, "Network is unreachable"))
+    _real_fallback_with_fake_prefix(monkeypatch, delay=0.2)
+    probe = relay.probe_candidates([LITERAL], deadline=time.monotonic() + 5.0, connect_cap=2.0)
+    assert probe.winner == LITERAL
+    latency = probe.attempts[0].latency_ms
+    assert latency is not None and latency >= 200.0, latency
