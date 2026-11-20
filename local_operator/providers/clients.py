@@ -26,9 +26,11 @@ import functools
 import json
 import logging
 import math
+import os
 import re
 import time
 import unicodedata
+import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
@@ -1123,6 +1125,26 @@ def _retry_delay_from_payload(payload: Any) -> int | None:
     return None
 
 
+#: Event ``type`` a non-first-party Messages transport synthesises to hand the
+#: shared event loop a usage receipt it read from its own framing (see
+#: ``AnthropicClient._stream_once``). Anthropic never sends it.
+USAGE_FILL_EVENT = "lop.usage_fill"
+
+
+def _encode_json_body(body: Any) -> bytes:
+    """JSON bytes exactly as ``httpx`` 0.28 encodes ``json=`` (its ``encode_json``).
+
+    Kept identical so moving the Anthropic client from ``json=`` to explicit
+    ``content=`` bytes (needed for request signing) changed nothing on the wire.
+    The byte-for-byte claim holds for httpx 0.28 only: 0.27's ``encode_json``
+    used plain ``json.dumps`` (spaces, ``ensure_ascii=True``), so under the
+    ``httpx>=0.27`` floor the JSON is equivalent but the bytes may differ.
+    """
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
+
+
 def raise_for_status(response: httpx.Response) -> None:
     """Map HTTP errors onto ProviderError with failover-relevant flags.
 
@@ -2095,7 +2117,10 @@ def audio_format_refusal(model: ModelSpec, mime: str) -> str | None:
     accepts audio, but not this capture" without re-deriving the capability
     sentence.
     """
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_anthropic_messages_wire,
+    )
 
     definition = get_provider_definition(model.provider)
     wire = definition.wire if definition is not None else ""
@@ -2107,7 +2132,7 @@ def audio_format_refusal(model: ModelSpec, mime: str) -> str | None:
             "wav, mp3, aiff, aac, ogg, flac, mpeg, m4a, l16, opus, alaw, "
             "mulaw and webm"
         )
-    if wire == "anthropic":
+    if is_anthropic_messages_wire(wire):
         return "the Anthropic messages API cannot carry audio input"
     if wire == "mock":
         # NOT a refusal, deliberately: the mock wire renders no request at all,
@@ -3278,7 +3303,7 @@ class OpenAICompatClient:
         # Aggregator identity alone is not the model family: Google keeps its
         # final-user requirement through OpenRouter's OpenAI-compatible wire.
         google_boundary_tokens = 0
-        if request.model.provider == "google" or (
+        if request.model.provider in ("google", "google-vertex") or (
             request.model.provider == "openrouter" and request.model.model_id.startswith("google/")
         ):
             google_boundary_tokens = _google_user_boundary(messages)
@@ -5451,6 +5476,7 @@ class AnthropicClient:
             "anthropic-messages",
             supports_images=request.model.supports_images,
             context_window=request.model.context_window,
+            model_id=request.model.model_id,
         )
         doc_budget = document_budget_for_request(doc_form, request)
         doc_text_cap = document_text_cap(request.model.context_window)
@@ -5572,17 +5598,26 @@ class AnthropicClient:
                 for tool in request.tools
             ]
         ttl = self._cache_ttl_for(request, body, oauth=oauth, account=account)
-        if blocks:
-            body["system"] = self._system_blocks(blocks, ttl=ttl)
-        # System-only breakpoints stop the cached prefix before the first
-        # message: the entire growing conversation would be re-processed at
-        # full price on every request. Mark the last content block of the
-        # final message and the settled boundary (the message before the
-        # newest frame; the previous user turn when there is none) so the
-        # second breakpoint's block survives frame re-renders, within
-        # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
-        # breakpoint.
-        self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
+        if request.cache_markers != "auto":
+            # One-shot auxiliary calls (see ``ChatRequest.cache_markers``):
+            # "none" leaves the marker-free render above as it is; "system"
+            # caches only the static head (e.g. the guardrail judge's fixed
+            # prompt, re-sent within the TTL), never the unique user turn.
+            system_rows = body.get("system")
+            if request.cache_markers == "system" and isinstance(system_rows, list) and system_rows:
+                system_rows[-1]["cache_control"] = self._cache_control(ttl)
+        else:
+            if blocks:
+                body["system"] = self._system_blocks(blocks, ttl=ttl)
+            # System-only breakpoints stop the cached prefix before the first
+            # message: the entire growing conversation would be re-processed at
+            # full price on every request. Mark the last content block of the
+            # final message and the settled boundary (the message before the
+            # newest frame; the previous user turn when there is none) so the
+            # second breakpoint's block survives frame re-renders, within
+            # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
+            # breakpoint.
+            self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #
@@ -5697,9 +5732,51 @@ class AnthropicClient:
                 set_wire_hint(request, "anthropic:messages", lifetime, "explicit-wire")
         return body
 
+    # -- Transport hooks -------------------------------------------------
+    #
+    # The three methods below are the ONLY seams a Messages-shaped transport
+    # that is not ``api.anthropic.com`` needs to override (Amazon Bedrock's
+    # ``InvokeModelWithResponseStream`` is the one today, see
+    # ``providers/bedrock/client.py``). Everything else — body building,
+    # cache breakpoints, thinking replay, the event loop and its usage
+    # accounting — is shared, so a Bedrock turn carries the same tuned body as
+    # a first-party one. The first-party implementations are byte-for-byte what
+    # ``_stream_once`` did inline before the extraction (pinned by
+    # ``tests/unit/providers/bedrock/test_client.py`` T4 regression cells).
+
+    async def _messages_request(
+        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
+    ) -> tuple[str, bytes, dict[str, str]]:
+        """``(url, exact body bytes, headers)`` for one Messages POST.
+
+        Async because a signing transport may have to resolve credentials
+        (network) and must sign the EXACT bytes that go on the wire — which is
+        why this returns encoded bytes rather than letting httpx serialise
+        ``json=``. Called once per send, so the diagnostics retry below
+        re-encodes (and a signer re-signs) after the body changed.
+        """
+        del api_key  # first party authenticates through ``headers`` already
+        return f"{self._base_url}/v1/messages", _encode_json_body(body), headers
+
+    def _iter_events(self, response: httpx.Response) -> AsyncIterator[Any]:
+        """Decoded Anthropic stream events, in order (first party: SSE ``data:``)."""
+
+        async def _gen() -> AsyncIterator[Any]:
+            async for data in _iter_sse_lines(response):
+                try:
+                    yield json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+        return _gen()
+
+    def _raise_for_status(self, response: httpx.Response) -> None:
+        """Map an HTTP error response (already read) onto ``ProviderError``."""
+        raise_for_status(response)
+
     @contextlib.asynccontextmanager
     async def _open_messages_stream(
-        self, url: str, body: dict[str, Any], headers: dict[str, str]
+        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None = None
     ) -> AsyncIterator[httpx.Response]:
         """Open the Messages stream, shedding a refused ``diagnostics`` key once.
 
@@ -5710,7 +5787,10 @@ class AnthropicClient:
         identical request is sent again. Nothing has been streamed yet, so the
         retry is invisible to the turn; every other status passes through.
         """
-        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        async with self._http.stream(
+            "POST", url, content=content, headers=sent_headers
+        ) as response:
             if not ("diagnostics" in body and await _refuses_diagnostics(response)):
                 yield response
                 return
@@ -5720,7 +5800,10 @@ class AnthropicClient:
             "anthropic: cache diagnostics refused by the API (HTTP 400); "
             "disabled for this process"
         )
-        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        async with self._http.stream(
+            "POST", url, content=content, headers=sent_headers
+        ) as response:
             yield response
 
     async def stream(
@@ -5744,7 +5827,6 @@ class AnthropicClient:
         oauth_access: "OAuthAccess | None",
         sent: dict[str, Any],
     ) -> AsyncIterator[StreamEvent]:
-        url = f"{self._base_url}/v1/messages"
         stop_reason = "stop"
         # Stamped at construction, before the request goes out: the ``Usage`` is
         # filled in as the stream arrives, and a call's time-of-use window is a
@@ -5778,7 +5860,6 @@ class AnthropicClient:
         served_model: str | None = None
 
         async with self._open_messages_stream(
-            url,
             body,
             self._headers(
                 api_key,
@@ -5795,6 +5876,7 @@ class AnthropicClient:
                     else None
                 ),
             ),
+            api_key,
         ) as response:
             if overage_account:
                 # Before the status check: a 429 carries the same headers, and
@@ -5807,13 +5889,30 @@ class AnthropicClient:
                 observe_unified_headers(overage_account, response.headers)
             if response.status_code >= 400:
                 await response.aread()
-                raise_for_status(response)
-            async for data in _iter_sse_lines(response):
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
+                self._raise_for_status(response)
+            async for event in self._iter_events(response):
                 event_type = event.get("type")
+                if event_type == USAGE_FILL_EVENT:
+                    # Synthesised by a transport, never sent by Anthropic: the
+                    # receipt a wrapper carries OUTSIDE the Messages events
+                    # (Bedrock's ``amazon-bedrock-invocationMetrics`` on the
+                    # last chunk). It fills ONLY counters the Messages events
+                    # did not report, so a stream that did report keeps its
+                    # own numbers and cost never silently under-reports when
+                    # one did not.
+                    fill = event.get("usage") or {}
+                    if not input_reported and _reported_token_count(fill, "input_tokens"):
+                        input_reported = True
+                        usage.input_tokens = int(fill["input_tokens"])
+                        usage.cache_read_tokens = int(fill.get("cache_read_input_tokens") or 0)
+                        usage.cache_write_tokens = int(fill.get("cache_creation_input_tokens") or 0)
+                        usage.context_tokens = (
+                            usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+                        ) or None
+                    if not output_reported and _reported_token_count(fill, "output_tokens"):
+                        output_reported = True
+                        usage.output_tokens = int(fill["output_tokens"])
+                    continue
                 if event_type == "message_start":
                     # Anthropic names the turn on its own ``message_start``,
                     # which is the moment it began generating for this request.
@@ -5965,19 +6064,28 @@ class AnthropicClient:
 # ---------------------------------------------------------------------------
 
 GOOGLE_API_URL = "https://generativelanguage.googleapis.com"
+VERTEX_API_URL = "https://aiplatform.googleapis.com"
 
 
 class GoogleClient:
-    """Minimal Gemini client: ``streamGenerateContent?alt=sse``."""
+    """Minimal Gemini client: ``streamGenerateContent?alt=sse``.
+
+    Serves both Google AI Studio (``vertex=False``) and Google Cloud Vertex AI
+    (``vertex=True``), because both endpoints accept the same Gemini request
+    body and SSE chunk schema while differing in URL layout and authentication
+    headers.
+    """
 
     def __init__(
         self,
         base_url: str = GOOGLE_API_URL,
         *,
+        vertex: bool = False,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 600.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._vertex = vertex
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
@@ -6194,18 +6302,102 @@ class GoogleClient:
             return "[tool returned image content]"
         return EMPTY_TOOL_RESULT_TEXT
 
+    def _vertex_endpoint_and_headers(
+        self,
+        model_id: str,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None",
+    ) -> tuple[str, dict[str, str]]:
+        """Resolve Vertex AI's streaming URL and auth headers for this credential.
+
+        OAuth and service-account credentials call the project/location path
+        with a Bearer token; API keys (express mode or service-account-bound)
+        call the publisher endpoint with ``x-goog-api-key``.
+        """
+        # Every path segment is percent-encoded and project/location are
+        # validated: they come from stored credentials and env vars, and a
+        # value like ``attacker.com/x#`` in ``location`` would otherwise be
+        # spliced into the regional HOST and send the bearer token elsewhere.
+        from local_operator.providers.oauth.vertex import LOCATION_RE, PROJECT_ID_RE
+
+        quoted_model = urllib.parse.quote(model_id, safe="")
+        headers = {"Content-Type": "application/json"}
+        if oauth_access is not None and oauth_access.kind == "oauth":
+            raw = oauth_access.raw or {}
+            project_id = (
+                str(raw.get("project_id") or "").strip()
+                or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+                or (os.environ.get("VERTEX_PROJECT") or "").strip()
+            )
+            if not project_id:
+                raise ProviderError(
+                    400,
+                    "Google Vertex AI OAuth/service-account credentials require a GCP project ID. "
+                    "Set GOOGLE_CLOUD_PROJECT (or VERTEX_PROJECT) or re-run "
+                    "`/login google-vertex`.",
+                    retryable=False,
+                )
+            location = (
+                str(raw.get("location") or "").strip()
+                or (os.environ.get("GOOGLE_CLOUD_LOCATION") or "").strip()
+                or (os.environ.get("VERTEX_LOCATION") or "").strip()
+                or "global"
+            )
+            if not PROJECT_ID_RE.fullmatch(project_id) or ".." in project_id:
+                raise ProviderError(
+                    400,
+                    f"Invalid Google Vertex AI project ID {project_id[:80]!r}.",
+                    retryable=False,
+                )
+            if not LOCATION_RE.fullmatch(location):
+                raise ProviderError(
+                    400,
+                    f"Invalid Google Vertex AI location {location[:80]!r} "
+                    "(expected 'global' or a region such as 'us-central1').",
+                    retryable=False,
+                )
+            # Only synthesize the regional host when the client is on Vertex's
+            # default global host; preserve an explicit custom base URL override
+            # (gateway, proxy, or test fixture).
+            if location != "global" and self._base_url == VERTEX_API_URL:
+                host = f"https://{location}-aiplatform.googleapis.com"
+            else:
+                host = self._base_url
+            url = (
+                f"{host}/v1/projects/{urllib.parse.quote(project_id, safe='')}"
+                f"/locations/{urllib.parse.quote(location, safe='')}"
+                f"/publishers/google/models/{quoted_model}:streamGenerateContent?alt=sse"
+            )
+            headers["Authorization"] = f"Bearer {oauth_access.access_token}"
+            headers["x-goog-user-project"] = project_id
+            return url, headers
+
+        url = (
+            f"{self._base_url}/v1/publishers/google/models/{quoted_model}"
+            ":streamGenerateContent?alt=sse"
+        )
+        if api_key:
+            headers["x-goog-api-key"] = api_key
+        return url, headers
+
     async def stream(
         self,
         request: ChatRequest,
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
-        url = (
-            f"{self._base_url}/v1beta/models/{request.model.model_id}:streamGenerateContent?alt=sse"
-        )
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["x-goog-api-key"] = api_key
+        if self._vertex or request.model.provider == "google-vertex":
+            url, headers = self._vertex_endpoint_and_headers(
+                request.model.model_id, api_key, oauth_access
+            )
+        else:
+            url = (
+                f"{self._base_url}/v1beta/models/{request.model.model_id}"
+                ":streamGenerateContent?alt=sse"
+            )
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["x-goog-api-key"] = api_key
         scope = credential_scope(api_key, oauth_access)
         usage: Usage | None = None
         stop_reason = "stop"
@@ -6345,7 +6537,10 @@ class GoogleClient:
                     )
                     usage._token_counts_reported = _reported_token_count(
                         raw_usage, "promptTokenCount"
-                    ) and _reported_token_count(raw_usage, "candidatesTokenCount")
+                    ) and (
+                        _reported_token_count(raw_usage, "candidatesTokenCount")
+                        or _reported_token_count(raw_usage, "thoughtsTokenCount")
+                    )
 
         if usage is not None:
             yield StreamUsageEvent(usage=usage)
@@ -6626,9 +6821,27 @@ def client_for_spec(
                 anthropic_subagent_cache_ttl_1h_min_context_tokens
             ),
         )
+    if wire == "bedrock":
+        # BEFORE the openai-compat fallthrough below, which would otherwise
+        # build a client aimed at localhost:11434 for a provider with no
+        # base_url. Imported here so botocore-adjacent code stays off the hot
+        # import path of every other provider (botocore itself is imported
+        # only when a Bedrock request is signed or decoded).
+        from local_operator.providers.bedrock.models import client_for_bedrock_spec
+
+        return client_for_bedrock_spec(
+            spec,
+            http_client=http_client,
+            cache_ttl_1h_min_context_tokens=anthropic_cache_ttl_1h_min_context_tokens,
+            subagent_cache_ttl_1h_min_context_tokens=(
+                anthropic_subagent_cache_ttl_1h_min_context_tokens
+            ),
+        )
     if wire == "google":
-        base = spec.base_url or GOOGLE_API_URL
-        return GoogleClient(base_url=base, http_client=http_client)
+        is_vertex = spec.provider == "google-vertex"
+        default_base = VERTEX_API_URL if is_vertex else GOOGLE_API_URL
+        base = spec.base_url or (definition.base_url if definition else None) or default_base
+        return GoogleClient(base_url=base, vertex=is_vertex, http_client=http_client)
     base = (
         spec.base_url
         or (definition.base_url if definition else None)

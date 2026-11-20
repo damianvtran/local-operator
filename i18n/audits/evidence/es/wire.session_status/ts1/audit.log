@@ -1,0 +1,18 @@
+normal_admission: PASS (0 problems) []
+negative_placeholder: REJECTED as expected ["es/wire.session_status: wire.session_status.retired_label: arguments (('wrong', 'simple'),) != en's (('base', 'simple'),): argument 1 is 'wrong', en's is 'base' (renamed or reordered)"]
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/f9eeb42530ec/scratchpad/es-first/validate.py", line 34, in <module>
+    validate('negative_missing_many',bad,True)
+  File "/Users/damian/.local-operator/sessions/f9eeb42530ec/scratchpad/es-first/validate.py", line 27, in validate
+    problems=check.check_catalogues(); assert bool(problems)==want,(name,problems)
+                                              ^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('negative_missing_many', [])
+normal_admission: PASS (0 problems) []
+negative_placeholder: REJECTED as expected ["es/wire.session_status: wire.session_status.retired_label: arguments (('wrong', 'simple'),) != en's (('base', 'simple'),): argument 1 is 'wrong', en's is 'base' (renamed or reordered)"]
+negative_missing_many_REPO_VALIDATOR_GAP: PASS (0 problems) []
+Independent CLDR completeness control REJECTED missing many; repo validator only checks legal categories plus other for plural-to-plural (check.py:712-738)
+negative_dropped_key: REJECTED as expected ["es/wire.session_status: missing key 'wire.session_status.complete'"]
+negative_broken_icu: REJECTED as expected ["es/wire.session_status: wire.session_status.signal_stop: expected a word (at offset 90 of 'Interrumpida — detenida con una señal{command, select, none {} other { mediante {command}}')"]
+restored_normal_admission: PASS (0 problems) []
+Independent checks PASS: strict JSON, 17 keys, exact frozen retired_label, placeholder kinds/names, all machine select arms, CLDR one/many/other, single line, no bidi controls
+PASS: 45 isolated ICU format samples (not integrated runtime/visual proof)

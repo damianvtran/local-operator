@@ -194,13 +194,31 @@ test-affected: ## Run the tests this branch's diff affects; print PR evidence
 # Auth failures refuse; unusable responses require the manual override. The explicit
 # I_KNOW_A_GATE_RUN_EXISTS=1 override skips the lookup with a visible warning,
 # so even an unreachable API cannot prevent an intentional arm.
+#
+# FAST-CI FIRST (GH #4194/#4215/#4145). Before ANY label write the ritual runs
+# the same cost-gate helper the runner's `precondition` job runs
+# (scripts/fast_gate_check.py --local) and REFUSES to arm unless `CI Gate` is
+# already green on this exact head. Why: the runner check is fail-closed and
+# deliberately never waits (a waiting precondition would hold a runner from the
+# same saturated pool the pending ci.yml run is queued for; ci.yml pull_request
+# runs measured 2026-11-17..18, n=140: median 46 min, p90 137 min, max 210 min
+# created->completed). So arming early bought a red `Merge gate (full suite)`
+# that looked like a test failure and a manual re-arm: 21 of 92 red gate runs
+# 2026-11-15..18 were exactly `ci.yml run <id> is queued, not finished`.
+# Refusing here costs no runner minutes and leaves no red check. Helper exit
+# codes: 0 green -> arm; 1 not green (pending/red/absent) -> refuse, no label
+# changed; 3 could not decide (API/token unavailable locally) -> warn and arm,
+# because the runner still decides fail-closed and a local outage must not
+# block an arm. FAST_GATE_HELPER is overridable only so the hygiene test can
+# stub the decision; the runner never reads it.
+FAST_GATE_HELPER ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/fast_gate_check.py
 # Prints the triggered run and how to follow it.
 # One-shot client check of the cost gate the full suite's `precondition` job
 # enforces on the runner (scripts/fast_gate_check.py, GH #4074): is `CI Gate`
 # green for this PR's exact head? Prints the verdict and exits; it NEVER waits
 # (poll with `gh pr checks <n> --watch` or a monitor, not a sleeping runner or
-# a blocked make). Run it before `make merge-gate` to avoid arming a gate that
-# will fail fast on a pending/red head.
+# a blocked make). `make merge-gate` runs the same check itself before arming
+# and refuses on a pending/red head, so this target is for a quick look.
 fast-gate: ## Check fast CI is green for PR=<number>'s head (no waiting)
 	@set -e; \
 	if [ -z "$(PR)" ]; then echo "usage: make fast-gate PR=<number>" >&2; exit 2; fi; \
@@ -217,12 +235,26 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	if [ -z "$(PR)" ]; then echo "usage: make merge-gate PR=<number>" >&2; exit 2; fi; \
 	command -v jq >/dev/null 2>&1 \
 	  || { echo "make merge-gate: jq is required (the run list is filtered with 'jq --arg', which gh's --jq cannot take); install it, e.g. 'brew install jq'" >&2; exit 1; }; \
-	spec="$$(gh pr view "$(PR)" --json state,headRefOid,headRefName \
-	  --jq '.state + " " + .headRefOid + " " + .headRefName')" \
+	spec="$$(gh pr view "$(PR)" --json state,headRefOid,headRefName,headRepository,headRepositoryOwner \
+	  --jq '.state + " " + .headRefOid + " " + .headRefName + " " + .headRepositoryOwner.login + "/" + .headRepository.name')" \
 	  || { echo "make merge-gate: PR #$(PR) not found (gh pr view failed); pass the number, e.g. PR=3631" >&2; exit 1; }; \
-	set -- $$spec; state="$$1"; head_sha="$$2"; head="$$3"; \
+	set -- $$spec; state="$$1"; head_sha="$$2"; head="$$3"; head_repo="$$4"; \
 	if [ "$$state" != "OPEN" ]; then \
 	  echo "make merge-gate: PR #$(PR) is $$state, not OPEN; only an open PR can be re-armed" >&2; exit 1; \
+	fi; \
+	repo="$$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || repo=""; \
+	fast_rc=0; \
+	fast_out="$$(python3 "$(FAST_GATE_HELPER)" --local --event pull_request --repo "$$repo" \
+	  --pr "$(PR)" --head-sha "$$head_sha" --head-repo "$$head_repo" 2>&1)" || fast_rc=$$?; \
+	if [ "$$fast_rc" = 0 ]; then \
+	  printf '%s\n' "$$fast_out" | sed -n '/^FAST-CI/{p;q;}'; \
+	elif [ "$$fast_rc" = 3 ]; then \
+	  echo "WARNING: could not confirm fast CI locally; arming anyway, the runner's precondition still fails closed: $$(printf '%s\n' "$$fast_out" | sed -n '/^FAST-CI/{p;q;}')" >&2; \
+	else \
+	  echo "make merge-gate: NOT ARMED on PR #$(PR) ($$head_sha); no label changed. Arming now would only produce a red 'PRECONDITION NOT MET' gate." >&2; \
+	  printf '%s\n' "$$fast_out" >&2; \
+	  echo "  wait for CI Gate (gh pr checks $(PR) --watch, or a monitor), then re-run: make merge-gate PR=$(PR)" >&2; \
+	  exit 1; \
 	fi; \
 	if [ "$(I_KNOW_A_GATE_RUN_EXISTS)" = "1" ]; then \
 	  echo "WARNING: I_KNOW_A_GATE_RUN_EXISTS=1: existing-gate lookup did not run (skipped); intentionally arming without duplicate detection" >&2; \

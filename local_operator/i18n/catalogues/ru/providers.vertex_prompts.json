@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "Идентификатор проекта Google Cloud",
+  "providers.vertex_prompts.field.service_account": "JSON сервисного аккаунта или путь к JSON-файлу",
+  "providers.vertex_prompts.hint.required": "Enter — отправить; Enter без ввода или Esc — отменить вход.",
+  "providers.vertex_prompts.prompt.field": "Введите {field} (оставьте пустым для отмены): "
+}

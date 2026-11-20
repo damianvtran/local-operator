@@ -50,6 +50,7 @@ import json
 import logging
 import re
 import secrets
+import unicodedata
 import weakref as _weakref
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -63,6 +64,7 @@ from local_operator.team_bridge.client import (
     SCREENING_VERSION_V3,
     SCREENING_VERSION_V4,
     SCREENING_VERSION_V5,
+    SCREENING_VERSION_V6,
     screening_template_sha256,
 )
 from local_operator.team_bridge.privacy_pass import (
@@ -1136,11 +1138,329 @@ def text_screening_version(
     if images is not None:
         return SCREENING_VERSION_V3
     if (
-        snapshot.addressed_version == SCREENING_VERSION_V5
+        snapshot.addressed_version in (SCREENING_VERSION_V5, SCREENING_VERSION_V6)
         and envelope.addressed in ADDRESSED_VALUES
     ):
-        return SCREENING_VERSION_V5
+        # v6 (holds triage 2026-11-18) is v5's successor in the same hub slot;
+        # either is rendered only as the version the hub offered with bytes we embed.
+        return snapshot.addressed_version
     return snapshot.screening_version
+
+
+#: The fixed local payload check (operator ruling 2026-11-18, holds triage H4/R4).
+#:
+#: WHY A LOCAL RULE AND NOT A PROMPT LINE. bridge-screen-v6 narrows ``hold`` to
+#: "unreadable, or you cannot tell what is asked" and stops reading replies and
+#: handoffs as new work (fix (e)). That makes the MODEL more willing to deliver, and
+#: the two messages the triage kept correctly away from the agent were 13 KB
+#: base64+gzip bundles carrying instructions to decode and run them: text the
+#: screener cannot read, so its verdict on them is a guess. A guess must not be what
+#: admits an opaque payload, and a hold naming ``new_work_request`` must not turn
+#: one into an owner-releasable work-scope hold (R4 had exactly that shape). So this
+#: check runs on the body, independently of the model, and only ever makes the
+#: outcome STRICTER (:func:`_payload_outcome`).
+#:
+#: WHAT IT DOES NOT COVER (security review S-3). It is a per-message floor against
+#: the encodings and phrasings below, not a guarantee: a payload split across
+#: several messages, an encoding it does not recognise, or a paraphrase of the
+#: decode/run instruction falls back to the screener's own verdict, which still
+#: bounces injection and exfiltration on its own terms.
+#:
+#: BLOB RULE. Unicode format characters (category ``Cf``: zero-width spaces and
+#: joiners) are deleted first, so a payload split by invisible characters is
+#: measured whole. Encoded-alphabet tokens that look ENCODED -- mixed case plus a
+#: digit (base64/base64url), or pure hex -- are summed across a cluster whose gaps are at most
+#: :data:`_PAYLOAD_MAX_GAP` characters, which joins wrapped lines (any column),
+#: JSON string arrays and labelled chunks (``part 2/4: ...``). Hex counts at half
+#: weight, since it carries half a byte per character: that keeps evidence lists of
+#: commit SHAs and sha256 digests (up to ~50 in a row) readable (code review F3)
+#: while a hex dump of the same payload still fires. Separated hex
+#: (``de ad be ef`` / ``de:ad:be:ef``) is a second pattern. Lowercase paths and
+#: identifiers (``local_operator/team_bridge``, ``bcmsg_...``) are not "encoded" and
+#: never count.
+#:
+#: NARROW WRAPS (code review round 2, M2). A cluster starts at an encoded token of
+#: :data:`_PAYLOAD_MIN_RUN` (8) characters, so a blob wrapped at 8-17 columns is
+#: measured too; at 16 every line of a 16-column wrap was too short to start one.
+#: Inside a cluster, a token that is not a plain lowercase word (a short wrapped line
+#: with no digit, say) BRIDGES the cluster without adding weight, so one such line
+#: does not reset the sum (and counts, when it mixes two character classes). Lowercase
+#: prose words still neither count nor bridge.
+#:
+#: IDENTIFIERS ARE NOT ENCODED (security review round 3 S-8, code review round 3 m1).
+#: The 8-character floor plus bridging held ordinary pastes as blobs: a page of
+#: ``new AuthService(ConfigV2, RetryPolicyX3)`` calls, a Python stack trace through
+#: ``/srv/app/LocalOperator/...``, a 3 KB ``PR-12 JIRA-12A bcmsg_12Xy`` ID list and a
+#: Go ``SourceSpec{Support: SourceNone}`` table. Their tokens mix case and digits the
+#: way base64 does, but they are built from WORDS, which random base64 almost never
+#: is. :func:`_identifier_like` names that shape (CamelCase, snake_case, path-like,
+#: ticket IDs, mostly-dictionary segments). Such a token never seeds a cluster and
+#: never chains one: it may bridge a single gap straight after a token that counted,
+#: and its length counts only once the next token counts too. A page of code is
+#: identifiers back to back, so it can no longer build a cluster. A wrapped base64
+#: line that happens to read as words (2-6% of 8-17 character lines, measured at
+#: :data:`_IDENTIFIER_WORD_SHARE`) sits between two encoded lines, so the blob loses
+#: nothing. Forbidding identifiers to bridge at all was measured and rejected: 1.1 KB
+#: blobs wrapped at 15 columns fell from 199/200 detected to 23/200.
+PAYLOAD_BLOB_MIN_BYTES = 1024
+_PAYLOAD_MIN_RUN = 8
+_PAYLOAD_MAX_GAP = 16
+_PAYLOAD_RUN = re.compile(r"[A-Za-z0-9+/=_-]+")
+_PAYLOAD_HEX = re.compile(r"[0-9A-Fa-f]+")
+_PAYLOAD_SPACED_HEX = re.compile(
+    r"(?:[0-9A-Fa-f]{2}[ \t\r\n:,]){%d,}" % (PAYLOAD_BLOB_MIN_BYTES // 3)
+)
+#: A dictionary-shaped segment: an optionally capitalised lowercase run of three or
+#: more letters that contains a vowel (``Config``, ``Policy``, ``srv`` does not, but
+#: ``app`` does). Random base64 produces lowercase runs too, but rarely three letters
+#: long with a vowel, which is what separates ``RetryPolicyX3`` from ``kQ9zRtwX3p``.
+_IDENTIFIER_WORD = re.compile(r"[A-Z]?[a-z]{2,}")
+_IDENTIFIER_VOWELS = frozenset("aeiouy")
+#: Share of a token's letters and digits that must sit in dictionary-shaped segments
+#: for it to read as an identifier. Measured 2026-11-19 on 20,000 random base64
+#: tokens per length (seed 1; the PR for this change carries the script): at 0.6 the
+#: share of random tokens misread as identifiers is 6.1% at 8 characters, 3.2% at 12,
+#: 1.8% at 17, 0.13% at 40 and 0.01% at 76, while ``ConfigV2`` scores 0.75, ``RetryPolicyX3`` 0.85,
+#: ``h3MaxTurboID`` 0.67 and ``/srv/app/LocalOperator/TeamBridge/`` 0.90.
+_IDENTIFIER_WORD_SHARE = 0.6
+#: snake_case / kebab-case led by a lowercase word (``bcmsg_12Xy``) and ticket IDs
+#: (``JIRA-12A``, ``PR-12``). Standard base64 has no ``_`` or ``-``; in base64url a
+#: line opening with three lowercase letters and a separator is ~0.1% of lines.
+_IDENTIFIER_SHAPE = re.compile(r"[a-z]{3,}[_-]|[A-Z]{2,}-[0-9]")
+
+
+def _identifier_like(token: str) -> bool:
+    """True when ``token`` is built from words, the way code identifiers are (S-8/m1).
+
+    Pure hex never reaches here as an identifier (it keeps its own half-weight rule),
+    so ``deadbeef`` dumps are unaffected.
+    """
+
+    if _IDENTIFIER_SHAPE.match(token) is not None:
+        return True
+    if _PAYLOAD_HEX.fullmatch(token):
+        return False
+    alnum = sum(c.isalnum() for c in token)
+    if not alnum:
+        return False
+    worded = sum(
+        len(seg)
+        for seg in _IDENTIFIER_WORD.findall(token)
+        if len(seg) >= 3 and not _IDENTIFIER_VOWELS.isdisjoint(seg.lower())
+    )
+    return worded / alnum >= _IDENTIFIER_WORD_SHARE
+
+
+#: DECODE/RUN RULE (code review F1). A word match is not an instruction, so every arm
+#: needs a payload context the same message supplies:
+#:   1. a shell command line that decodes, or pipes a fetch/echo into an
+#:      interpreter -- the command words are case-sensitive and must lead the line
+#:      or a code span, so a markdown table row ("| Python | 3.12 |"), "the gunzip
+#:      step failed" or a backticked mention of ``python -c`` never matches;
+#:   2. an imperative decode verb aimed at an object when the message names an
+#:      ENCODING (base64, hex, gzip, encoded, ...) -- "Decode errors dropped" or
+#:      "unpack the feedback" do not qualify; a SYNONYM (convert, translate,
+#:      reassemble, restore, ...) needs a STRONG encoding name (base64, gzip, rot13,
+#:      ...) or a payload object ("the parts/payload/bundle") -- "translate this into
+#:      French; it's UTF-8 encoded" or "convert the hex colours" do not qualify;
+#:   3. an imperative decode verb aimed at a pronoun/parts AND an imperative run
+#:      verb aimed at the result ("Glue the parts back together and follow the steps
+#:      in it") -- "run this by legal" alone does not qualify.
+_PAYLOAD_SHELL = re.compile(r"""(?mx)
+    (?:^|`)[ \t]*(?:\$[ \t]*)?
+    (?:gunzip\b|zcat\b
+      |(?:curl|wget|cat|echo|printf|base64)\b[^\n`|]*\|[ \t]*(?:sudo[ \t]+)?
+       (?:sh|bash|zsh|python3?|node|perl|ruby)\b)
+    | \beval[ \t]*\([ \t]*(?:atob|Buffer\.from|base64\.b64decode|b64decode)\b
+    # Decode commands are specific enough to count anywhere in a line ("then
+    # base64 -d bundle.txt"), as is an interpreter one-liner that decodes or execs.
+    | \bbase64[ \t]+(?:-d|-D|--decode)\b|\bxxd[ \t]+-r\b|\buudecode\b
+    | \bopenssl[ \t]+(?:enc|base64)\b[^\n`]*[ \t]-d\b
+    | \b(?:python3?|node|perl|ruby)[ \t]+-[ce][ \t]+["'][^"'\n]*
+      (?:b64decode|decompress|atob|Buffer\.from|exec|eval|system|spawn)
+    """)
+_ENCODING_NOUN = re.compile(
+    # ``base64`` without a leading boundary: redaction can glue it to the verb
+    # ("Decodebase64 then gunzip", triage R4).
+    r"(?i)base[- ]?64\b|\b(?:b64|hex(?:-encoded|adecimal)?|gzip(?:ped)?|zlib|uuencoded|rot13"
+    r"|encoded|ciphertext|encrypted)\b|\.gz\b"
+)
+#: Encoding names that only ever mean a payload encoding. ``hex``, ``encoded`` and
+#: ``encrypted`` also describe colours, file encodings and storage ("UTF-8 encoded",
+#: "encrypted at rest"), so they back a STRONG decode verb only (review round 2 M1).
+_STRONG_ENCODING = re.compile(
+    r"(?i)base[- ]?64\b|\b(?:b64|gzip(?:ped)?|zlib|uuencoded?|rot13|ciphertext)\b|\.gz\b"
+)
+#: Verbs that mean "decode" on their own.
+_DECODE_STRONG = r"(?:decode|decompress|unpack|unzip|gunzip|decrypt|deobfuscate)"
+#: Synonyms that also mean ordinary things ("translate this into French", "convert
+#: these to a table", "restore the backup"): they count only with a strong encoding
+#: name in the message or a payload referent as their object (review round 2 M1).
+_DECODE_SYNONYM = r"(?:convert|translate|reassemble|reconstruct|restore|glue|stitch|concatenate)"
+_DECODE_VERB = r"(?:" + _DECODE_STRONG + "|" + _DECODE_SYNONYM + ")"
+_PAYLOAD_REFERENT = (
+    r"the\s+(?:parts|chunks|pieces|payload|blob|bundle|packet|encoded\s+\w+|base64\s+\w+)"
+)
+#: Imperative position: opening a sentence or line, or after please/then/and/now/just.
+_IMPERATIVE = r"(?:^|[.!?;:]\s+|\n\s*(?:[-*]\s+|\d+[.)]\s+)?|\b(?:please|then|and|now|just)\s+)"
+_DECODE_OBJECT = (
+    r"\s+(?:it|this|that|them|these|the|in|into|with|using|from|to|each|all|both|part|parts"
+    r"|chunk|chunks)\b"
+)
+_DECODE_IMPERATIVE = re.compile(r"(?im)" + _IMPERATIVE + _DECODE_STRONG + _DECODE_OBJECT)
+_SYNONYM_IMPERATIVE = re.compile(r"(?im)" + _IMPERATIVE + _DECODE_SYNONYM + _DECODE_OBJECT)
+_SYNONYM_ON_PAYLOAD = re.compile(
+    r"(?im)" + _IMPERATIVE + _DECODE_SYNONYM + r"\s+(?:back\s+)?" + _PAYLOAD_REFERENT + r"\b"
+    # The referent must END the verb's object (code review round 3 m2): "convert the
+    # parts list to CSV" and "reassemble the bundle config" name a parts LIST and a
+    # bundle CONFIG, not a payload. So what follows has to close the clause or be a
+    # particle/preposition/conjunction, never another noun.
+    r"(?=\s*(?:$|[.,;:!?)]|(?:back|together|and|then|so|below|above|here|first|now"
+    r"|again|into|to|from|with|using|before|after)\b))"
+)
+#: Run verbs aimed at INSTRUCTIONS ("follow the steps", "do what it says"), not at a
+#: pronoun: "convert the hex colours to RGB and apply them" is ordinary work.
+_RUN_ON_INSTRUCTIONS = re.compile(
+    r"(?im)" + _IMPERATIVE + r"(?:run|execute|carry\s+out|follow|apply|do)\s+"
+    r"(?:what\s+it\s+says|the\s+(?:following\s+)?(?:steps|instructions|script|commands?"
+    r"|decoded\b))"
+)
+_DECODE_ON_PARTS = re.compile(
+    r"(?im)" + _IMPERATIVE + _DECODE_VERB + r"\s+(?:it|this|that|them|these|the\s+(?:parts"
+    r"|chunks|pieces|payload|blob|bundle|string|text|packet|data))\b"
+)
+_RUN_IMPERATIVE = re.compile(
+    r"(?im)" + _IMPERATIVE + r"(?:run|execute|carry\s+out|follow|apply|install|source|do)\s+"
+    r"(?:it|this|that|them|what\s+it\s+says|the\s+(?:following\s+)?(?:steps|instructions|script"
+    r"|result|output|commands?|patch|decoded\b))"
+)
+
+
+def _encoded_weight(token: str) -> float:
+    """How much of ``token`` counts toward a blob: 1/char base64, 1/2 hex, 0 plain.
+
+    Half weight applies only to digest-sized hex (64 characters or fewer: commit
+    SHAs, sha256 lines); a longer hex run is a dump, not an identifier.
+    """
+
+    if _PAYLOAD_HEX.fullmatch(token):
+        return len(token) / 2 if len(token) <= 64 else float(len(token))
+    has_upper = any(c.isupper() for c in token)
+    has_lower = any(c.islower() for c in token)
+    has_digit = any(c.isdigit() for c in token)
+    return float(len(token)) if (has_upper and has_lower and has_digit) else 0.0
+
+
+def opaque_payload(body: str) -> str:
+    """``"encoded_blob"`` / ``"decode_or_run"`` when the fixed local check fires, else ``""``.
+
+    Pure and linear in the body (non-backtracking scans), so it runs on every
+    screened message and on cached-verdict reuse, and the eval applies the identical
+    rule to its trials. See :data:`PAYLOAD_BLOB_MIN_BYTES` for the rules and limits.
+    """
+
+    if not isinstance(body, str) or not body:
+        return ""
+    text = "".join(ch for ch in body if unicodedata.category(ch) != "Cf")
+    total, previous_end, after_count, pending = 0.0, None, False, 0.0
+    for match in _PAYLOAD_RUN.finditer(text):
+        identifier = _identifier_like(match.group(0))
+        weight = 0.0 if identifier else _encoded_weight(match.group(0))
+        joins = previous_end is not None and match.start() - previous_end <= _PAYLOAD_MAX_GAP
+        if identifier:
+            # S-8/m1: an identifier never seeds a cluster and never counts. It may
+            # bridge ONE gap, and only straight after a token that counted, so a
+            # wrapped base64 line that happens to read as words (2-6% of 8-17
+            # character lines) does not reset a narrow wrap, while a run of
+            # identifiers -- a page of code -- cannot chain a cluster along.
+            # Measured: strict no-bridge dropped 1.1 KB blobs wrapped at 15
+            # columns from 199/200 to 23/200 detected. Its length is held as
+            # ``pending`` and counted only if the NEXT token counts too: sandwiched
+            # between encoded lines it was a wrapped line, not code.
+            if joins and after_count:
+                previous_end, after_count, pending = match.end(), False, float(len(match.group(0)))
+            continue
+        if weight == 0.0:
+            # A plain lowercase word neither counts nor bridges, so prose never
+            # stretches a cluster. Inside a cluster, any other alphabet token bridges
+            # it (M2), and one mixing two of upper/lower/digit -- a short wrapped line
+            # that happens to lack the third class -- also counts its length, so a
+            # narrow wrap of a just-over-1 KiB blob is not lost to its digitless lines.
+            token = match.group(0)
+            if joins and not token.islower():
+                previous_end, after_count = match.end(), False
+                pending = 0.0
+                classes = sum(
+                    (
+                        any(c.isupper() for c in token),
+                        any(c.islower() for c in token),
+                        any(c.isdigit() for c in token),
+                    )
+                )
+                if classes >= 2:
+                    total += len(token)
+                    after_count = True
+                    if total >= PAYLOAD_BLOB_MIN_BYTES:
+                        return "encoded_blob"
+            continue
+        if not joins and len(match.group(0)) < _PAYLOAD_MIN_RUN:
+            # Only a token of _PAYLOAD_MIN_RUN or more STARTS a cluster; a shorter
+            # one (the tail line of a wrapped blob) only continues one.
+            continue
+        if not joins:
+            total = 0.0
+        total += weight + (pending if joins else 0.0)
+        pending = 0.0
+        previous_end, after_count = match.end(), True
+        if total >= PAYLOAD_BLOB_MIN_BYTES:
+            return "encoded_blob"
+    if _PAYLOAD_SPACED_HEX.search(text) is not None:
+        return "encoded_blob"
+    if _PAYLOAD_SHELL.search(text) is not None:
+        return "decode_or_run"
+    if _ENCODING_NOUN.search(text) is not None and _DECODE_IMPERATIVE.search(text) is not None:
+        return "decode_or_run"
+    if _SYNONYM_ON_PAYLOAD.search(text) is not None or (
+        _STRONG_ENCODING.search(text) is not None and _SYNONYM_IMPERATIVE.search(text) is not None
+    ):
+        return "decode_or_run"
+    if (
+        # Security review round 3 S-7: a weak encoding name (hex, encrypted) cannot
+        # back a synonym verb alone (M1), but with an instruction to run the result
+        # all three together are the decode-and-run shape: "convert the hex back to
+        # text and follow the steps: <hex>". The small payload never reaches the blob
+        # rule, so this arm is what holds it.
+        _ENCODING_NOUN.search(text) is not None
+        and _SYNONYM_IMPERATIVE.search(text) is not None
+        and _RUN_ON_INSTRUCTIONS.search(text) is not None
+    ):
+        return "decode_or_run"
+    if _DECODE_ON_PARTS.search(text) is not None and _RUN_IMPERATIVE.search(text) is not None:
+        return "decode_or_run"
+    return ""
+
+
+def _payload_outcome(
+    parsed: "tuple[str, tuple[str, ...], str, str]", body: str
+) -> "tuple[tuple[str, tuple[str, ...], str, str], bool]":
+    """Apply :func:`opaque_payload` to a parsed verdict: ``(parsed', forced)``.
+
+    A firing check turns ``deliver``, ``hold`` and a bounce naming ONLY
+    ``new_work_request`` (the one shape B4b converts into an owner-releasable
+    ``work_scope_hold``) into a plain ``hold`` that must stay ``model_hold``. Every
+    other bounce -- a safety category, or the disclosure-class
+    ``out_of_scope_work``/``personal_info_request`` -- is left alone: a terminal
+    reject is already stricter than a review hold the owner could deliver.
+    """
+
+    disposition, categories, reason, verdict = parsed
+    code = opaque_payload(body)
+    if not code:
+        return parsed, False
+    if disposition == "bounce" and tuple(categories) != ("new_work_request",):
+        return parsed, False
+    local = f"local payload check: {code}"
+    return ("hold", (), f"{local}; screener: {reason}" if reason else local, verdict), True
 
 
 def unusable_reply_code(reply: Any) -> str:
@@ -1228,6 +1548,65 @@ _HOLD_FOR_COMMIT = {
 #: Every refusal holds; none admits. Anything unlisted reads as the policy
 #: having moved, which is what an outdated source row means.
 _HOLD_FOR_ADOPT = {**_HOLD_FOR_COMMIT, "proof_corrupt": "proof_corrupt"}
+
+
+def _resolve_write_once_conflict(
+    store: Store, owner: OwnerSnapshot, envelope: Envelope
+) -> ScreenResult | None:
+    """A ``write_once_conflict`` refusal answered by the verdict ALREADY committed.
+
+    WHY (holds triage 2026-11-18, finding c; H5). The refusal means this
+    message already has a committed receipt and a later pass produced a
+    different one. Write-once says the FIRST verdict stands, yet the caller
+    held the message under ``write_once_conflict``: no retry could ever commit
+    (the conflict is permanent), no owner action existed (it is not a review
+    code), and the sender was told a human was reviewing it. One such hold was
+    re-driven 368 times over eight days.
+
+    WHAT IT TRUSTS (security review S-1/S-2 on #4249). The committed verdict
+    stands only while it is still evidence under the LIVE policy:
+    :meth:`Store.write_once_resolution` puts it through ``receipt_authority``
+    (template, serving model, admission revision, creator generation, closed
+    categories and verdict) with only the epoch waived, and requires these
+    exact body bytes and envelope, a PREFERRED screener for an ``allow``, and a
+    final privacy allow when the privacy pass is on. A receipt the owner has
+    since superseded keeps the hold: the current pass's answer is never
+    overridden by an older policy's. Every outcome still passes
+    ``pre_handoff_gate`` and the ACK. Nothing is written.
+
+    TEXT ONLY, ENFORCED HERE (S-3). An envelope carrying images or files keeps
+    its hold: a resolution has no image or file grant to carry, so delivering
+    it would only park the message again downstream (``attachments_unbound`` /
+    ``files_unbound`` in the connector) and re-spend a screen on every re-drive.
+
+    ``None`` (keep holding) on anything else, including an unreadable row.
+    """
+
+    if envelope.attachments_hash is not None or envelope.files_hash is not None:
+        return None
+    existing = store.write_once_resolution(
+        owner,
+        envelope.message_id,
+        body_sha256=envelope.body_sha256,
+        envelope_digest=envelope.envelope_digest,
+    )
+    if existing is None:
+        return None
+    verdict = existing["verdict"]
+    receipt = ScreeningReceipt(
+        verdict=str(verdict),
+        model=str(existing.get("model") or ""),
+        prompt_version=str(existing.get("prompt_version") or ""),
+        template_sha256=str(existing.get("template_sha256") or ""),
+        body_sha256=str(existing.get("body_sha256") or ""),
+        categories=tuple(existing.get("categories") or ()),
+        screener_preferred=bool(existing.get("screener_preferred")),
+    )
+    return ScreenResult(
+        "deliver" if verdict == "allow" else "bounce",
+        receipt=receipt,
+        screened_bytes=len(envelope.private_body().encode("utf-8")),
+    )
 
 
 def _persist_hold(
@@ -1893,7 +2272,13 @@ def _screen_prepare_steps(
         f"{snapshot.admission_revision}|{envelope.envelope_digest}"
         f"|{_identities_digest(snapshot.approved_serving_identities)}"
     )
-    if snapshot.default_model is not None:
+    # Security review S-4: the receipt key carries the POLICY template's hash
+    # (v2), not the rendered addressed template or the engine, so an ``allow``
+    # recorded before the fixed payload check existed would replay as a delivery
+    # here, skipping :func:`_conclude_parsed`. A body the check fires on is
+    # therefore never served from a receipt: it falls through to a fresh screen,
+    # where the forced ``model_hold`` applies.
+    if snapshot.default_model is not None and not opaque_payload(envelope.private_body()):
         # ONE atomic native consumption (A2/A3): owner generation, current
         # published policy, receipt epoch and creator generation all verified
         # inside a single transaction; the live object is re-read LAST.
@@ -1947,6 +2332,10 @@ def _screen_prepare_steps(
                     envelope_digest=envelope.envelope_digest,
                 )
             except StoreRefused as failure:
+                if failure.code == "write_once_conflict":
+                    resolved = _resolve_write_once_conflict(store, owner, envelope)
+                    if resolved is not None:
+                        return resolved
                 code = _HOLD_FOR_ADOPT.get(failure.code, "policy_stale")
                 _persist_hold(store, owner, message_id, code)
                 return ScreenResult("hold", hold_code=code)
@@ -2792,6 +3181,12 @@ async def _screen_spend(
     # 13b. A8 ADMISSION DECISION (the production seam, shared with the batch
     #      path): disabled -> legacy; first non-deliver -> existing handling;
     #      trusted preferred hop -> bypass; otherwise the privacy pass.
+    #      The fixed local payload check is applied FIRST (review F4): a forced
+    #      hold is a first-stage non-deliver, so _decide passes it straight
+    #      through -- no paid privacy call, and no privacy_* code can replace the
+    #      required ``model_hold``.
+    screener_disposition = parsed[0]
+    parsed, payload_forced = _payload_outcome(parsed, prepared.envelope.private_body())
     decision = await _decide(
         store,
         owner,
@@ -2816,6 +3211,8 @@ async def _screen_spend(
         prepared,
         attempt_id=attempt_id,
         fingerprint=fingerprint,
+        payload_forced=payload_forced,
+        screener_disposition=screener_disposition,
         parsed=parsed,
         actual_model=actual_model,
         policy=policy,
@@ -3443,6 +3840,8 @@ def _conclude_parsed(
     answer_model: str | None = None,
     privacy_decision_id: str | None = None,
     privacy_gate: "tuple[Path | None, Any] | None" = None,
+    payload_forced: bool | None = None,
+    screener_disposition: str = "",
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
 
@@ -3473,16 +3872,27 @@ def _conclude_parsed(
 
     envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
     message_id = envelope.message_id
+    # The fixed local payload check only ever tightens: a forced hold skips the
+    # work-scope conversion below and lands as ``model_hold``. Both production
+    # callers apply it before the A8 decision and pass the result in; a caller
+    # that has not (``payload_forced is None``) gets it applied here.
+    if payload_forced is None:
+        screener_disposition = parsed[0]
+        parsed, payload_forced = _payload_outcome(parsed, envelope.private_body())
     disposition, categories, reason, _verdict = parsed
     cache_model = actual_model if answer_model is None else answer_model
-    if disposition == "hold" and _work_scope_hold_conversion(
-        store,
-        snapshot,
-        reason,
-        actual_model=actual_model,
-        served_provider=served_provider,
-        served_hop=served_hop,
-        screener_preferred=screener_preferred,
+    if (
+        disposition == "hold"
+        and not payload_forced
+        and _work_scope_hold_conversion(
+            store,
+            snapshot,
+            reason,
+            actual_model=actual_model,
+            served_provider=served_provider,
+            served_hop=served_hop,
+            screener_preferred=screener_preferred,
+        )
     ):
         # B4b scope update (2026-11-04, operator + Aida): under v2 the B4 relay
         # (rel-l01) is a HOLD naming new_work_request, not a bounce — measured on
@@ -3503,6 +3913,7 @@ def _conclude_parsed(
             screener_preferred=screener_preferred,
             screener_verdict="hold",
             answer_model=cache_model,
+            screener_reason=reason,
         ).set_private_reason(reason)
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
@@ -3518,7 +3929,11 @@ def _conclude_parsed(
             served_provider=served_provider,
             served_hop=served_hop,
             screener_preferred=screener_preferred,
-            screener_verdict="hold",
+            # A forced hold records what the MODEL answered (review F5), so the
+            # owner-review record does not claim the screener held a message it
+            # delivered; the reason carries "local payload check: <code>".
+            screener_verdict=(screener_disposition or "hold") if payload_forced else "hold",
+            screener_reason=reason,
         )
         return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
     if disposition == "bounce" and not categories:
@@ -3547,6 +3962,7 @@ def _conclude_parsed(
             served_hop=served_hop,
             screener_preferred=screener_preferred,
             screener_verdict="bounce",
+            screener_reason=reason,
         )
         return ScreenResult("hold", hold_code="bounce_without_category").set_private_reason(reason)
     if disposition == "bounce":
@@ -3571,6 +3987,32 @@ def _conclude_parsed(
             served_hop=served_hop,
             screener_preferred=screener_preferred,
         ):
+            from local_operator.team_bridge import hold_release as hr
+
+            if not hr.preferred_answer(served_provider, actual_model, screener_preferred):
+                # A fallback can identify work for OWNER review, not authorize
+                # a preferred-screener release. Reuse the generic review protocol:
+                # its signed owner decision is the only delivery authority, and
+                # its row retains the actual answering hop and bounce verdict.
+                code = "model_hold"
+                _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
+                _remember_answer_hold(
+                    store, owner, envelope, snapshot, code, epoch, answered_model=cache_model
+                )
+                _record_review_decision(
+                    store,
+                    owner,
+                    prepared,
+                    code,
+                    actual_model=actual_model,
+                    served_provider=served_provider,
+                    served_hop=served_hop,
+                    screener_preferred=screener_preferred,
+                    screener_verdict="bounce",
+                    screener_reason=reason,
+                    categories=categories,
+                )
+                return ScreenResult("hold", hold_code=code).set_private_reason(reason)
             return _commit_work_scope_hold(
                 store,
                 owner,
@@ -3584,6 +4026,7 @@ def _conclude_parsed(
                 screener_preferred=screener_preferred,
                 screener_verdict="bounce",
                 answer_model=cache_model,
+                screener_reason=reason,
             ).set_private_reason(reason)
     # 12b. Final admission fence (R6/Q15): the receipt may only be admitted
     #      while THIS call still owns the account turn — a successor that
@@ -3654,6 +4097,10 @@ def _conclude_parsed(
         else:
             _finish()
     except StoreRefused as failure:
+        if failure.code == "write_once_conflict":
+            resolved = _resolve_write_once_conflict(store, owner, prepared.envelope)
+            if resolved is not None:
+                return resolved
         code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
         _persist_hold(store, owner, message_id, code)
         return ScreenResult("hold", hold_code=code)
@@ -4099,6 +4546,9 @@ def _copy_work_scope_decision(
             screener_hop=_hop_of(source),
             screener_preferred=bool(source.get("screener_preferred")),
             hold_code=code,
+            # The same bytes and envelope, so the source's reason describes
+            # this copy too (owner audit only, finding d).
+            screener_reason=source.get("screener_reason"),
         )
     except StoreRefused:
         pass
@@ -4124,6 +4574,7 @@ def _record_review_decision(
     screener_preferred: bool,
     screener_verdict: str,
     categories: Sequence[str] = (),
+    screener_reason: str | None = None,
     unscreened: bool = False,
 ) -> None:
     """Give a fresh cached-answer hold its EXIT: a per-message review decision row.
@@ -4189,6 +4640,8 @@ def _record_review_decision(
             screener_hop=-1 if served_hop is None else int(served_hop),
             screener_preferred=screener_preferred,
             hold_code=code,
+            # Owner audit only (finding d): stored capped, never logged or sent.
+            screener_reason=screener_reason,
         )
     except StoreRefused:
         logger.info("bridge: review decision unrecorded code=store_refused")
@@ -4215,14 +4668,12 @@ def _work_scope_conversion(
     B4b DECISIONS Amendment 1, D2: only a v2 decision naming EXACTLY
     ``new_work_request``; ``out_of_scope_work`` and ``personal_info_request``
     are disclosure-class and stay terminal bounces under every template (S-1).
-    Amendment 2 adds two gates, both of which only ever keep the pre-B4b
-    terminal reject: the answer must carry trusted PREFERRED-stage provenance
-    from #3444 (including later preferred hops, never the ordinary cascade), and the
-    REASON must pass the release-only check (``hold_release.strict_release_reason``:
-    no prose-named second category, no negation, no format characters). A
-    non-preferred answer is therefore a bounce, not an ineligible hold (code
-    review m2), and with the setting off this is False and the path below is
-    byte-identical to the pre-B4b build.
+    Preferred-stage answers retain the B4b work-scope release path. A trusted
+    fallback answer may instead become a generic owner-review hold, never a
+    preferred release: the caller preserves its provenance and bounce verdict.
+    Both paths require the work-scope setting and strict release-only reason;
+    fallback review additionally requires the generic review setting. Disclosure
+    categories, untrusted provenance and setting-off remain terminal bounces.
     """
 
     from local_operator.team_bridge import hold_release
@@ -4233,7 +4684,13 @@ def _work_scope_conversion(
     if not hold_release.converts(tuple(categories)):
         return False
     if not hold_release.preferred_answer(served_provider, actual_model, screener_preferred):
-        return False
+        if not (
+            served_provider
+            and actual_model
+            and served_hop is not None
+            and hold_release.review_enabled(store.config_dir)
+        ):
+            return False
     if not hold_release.strict_release_reason(reason):
         return False
     return hold_release.enabled(store.config_dir)
@@ -4328,6 +4785,7 @@ def _commit_work_scope_hold(
     screener_preferred: bool,
     screener_verdict: str,
     answer_model: str | None = None,
+    screener_reason: str | None = None,
 ) -> ScreenResult:
     """Record the converted hold, its answer-cache row and its decision row.
 
@@ -4381,6 +4839,8 @@ def _commit_work_scope_hold(
             screener_preferred=hold_release.preferred_answer(
                 served_provider, actual_model, screener_preferred
             ),
+            # Owner audit only (finding d): stored capped, never logged or sent.
+            screener_reason=screener_reason,
         )
     except StoreRefused:
         pass
@@ -5250,7 +5710,10 @@ async def _screen_batch_pass(
         #      is persisted in its decision row before its own privacy call,
         #      which sees ONLY this message's body. A privacy failure is that
         #      message's typed hold — never ``batch_unresolved``, which would
-        #      buy a fresh paid first screen.
+        #      buy a fresh paid first screen. The local payload check runs
+        #      before it, as on the single path (review F4).
+        screener_disposition = parsed[0]
+        parsed, payload_forced = _payload_outcome(parsed, prepared.envelope.private_body())
         decision = await _decide(
             store,
             owner,
@@ -5278,6 +5741,8 @@ async def _screen_batch_pass(
             prepared,
             attempt_id=attempt_id,
             fingerprint=digest,
+            payload_forced=payload_forced,
+            screener_disposition=screener_disposition,
             parsed=parsed,
             actual_model=actual_model,
             policy=policy,

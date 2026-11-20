@@ -251,6 +251,7 @@ chain. `/usage` shows quota windows and spend, `/failovers` the cascade.
 | --- | --- |
 | ChatGPT / OpenAI | `lop login openai` (Plus/Pro; `openai-device` headless), or `OPENAI_API_KEY` |
 | Claude / Anthropic | `lop login anthropic` (Pro/Max), or `ANTHROPIC_API_KEY` |
+| Claude on Amazon Bedrock | `lop login bedrock` (Bedrock API key), `AWS_BEARER_TOKEN_BEDROCK`, or an AWS role ([guide](docs/providers/BEDROCK.md)) |
 | Kimi (Moonshot) | `lop login kimi` / `kimi-wechat`, or `KIMI_API_KEY` |
 | Grok / xAI | `lop login xai-oauth`, or `XAI_API_KEY` |
 | Z.AI (GLM) | `lop login zai-oauth` (GLM Coding Plan), or `ZAI_API_KEY` |

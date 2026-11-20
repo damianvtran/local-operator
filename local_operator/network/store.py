@@ -92,6 +92,7 @@ from local_operator.network.types import (
     MeshRefusal,
     NetworkRecord,
     PairDecision,
+    PairPreApproval,
     PeerRecord,
     PendingJoin,
     PendingPairing,
@@ -573,6 +574,16 @@ def decision_path(invite_id: str, root: Path | None = None) -> Path:
     return pending_dir(root) / f"{invite_id}.decision.json"
 
 
+def pre_approval_path(invite_id: str, root: Path | None = None) -> Path:
+    """Onboarding's :class:`PairPreApproval` — deliberately NOT the decision file.
+
+    A separate file is what lets the relay's stage-2 flip clear every generic
+    decision for the invite and still find the one record allowed to answer for a
+    person (security review round 2, S-R2-1).
+    """
+    return pending_dir(root) / f"{invite_id}.preapproval.json"
+
+
 def parked_join_path(invite_id: str, root: Path | None = None) -> Path:
     """The JOINING device's parked ceremony — the mirror of :func:`pending_path`.
 
@@ -650,6 +661,38 @@ def pair_decision(invite_id: str, root: Path | None = None) -> PairDecision | No
 
 def clear_pair_decision(invite_id: str, root: Path | None = None) -> None:
     decision_path(invite_id, root).unlink(missing_ok=True)
+
+
+def save_pre_approval(approval: PairPreApproval, root: Path | None = None) -> Path:
+    """Write onboarding's one-shot pre-approval, 0600 (see :class:`PairPreApproval`)."""
+    ensure_pending_dir(root)
+    return _write_private_json(pre_approval_path(approval.invite_id, root), approval.to_json())
+
+
+def pre_approval(
+    invite_id: str, root: Path | None = None, *, now: float | None = None
+) -> PairPreApproval | None:
+    """The OPEN pre-approval for ``invite_id``, or ``None``.
+
+    An expired one is removed as it is found: it expires with its invite, and a
+    stale approval must never be read as an answer to a later ceremony.
+    """
+    data = _read_json(pre_approval_path(invite_id, root))
+    if data is None:
+        return None
+    try:
+        approval = PairPreApproval.from_json(data)
+    except (TypeError, ValueError):
+        _quarantine(pre_approval_path(invite_id, root))
+        return None
+    if not approval.is_open(now):
+        clear_pre_approval(invite_id, root)
+        return None
+    return approval
+
+
+def clear_pre_approval(invite_id: str, root: Path | None = None) -> None:
+    pre_approval_path(invite_id, root).unlink(missing_ok=True)
 
 
 def save_pending_join(pending: PendingJoin, root: Path | None = None) -> Path:
@@ -838,6 +881,14 @@ def purge_network_artifacts(
             continue
         pending_file.unlink()
         clear_pair_decision(row.invite_id, root)
+        removed["pending"] += 1
+    # Onboarding pre-approvals for a purged network: attributed by their own
+    # ``network_id``, like the parked rows above, and counted with them.
+    for approval_file in sorted(pending_dir(root).glob("*.preapproval.json")):
+        data = _read_json(approval_file)
+        if data is None or str(data.get("network_id") or "") not in targets:
+            continue
+        clear_pre_approval(approval_file.name[: -len(".preapproval.json")], root)
         removed["pending"] += 1
     # And the ceremonies THIS device parked as the joiner, attributed the same exact
     # way. ``removed["pending"]`` counts them together with the inviter's rows because

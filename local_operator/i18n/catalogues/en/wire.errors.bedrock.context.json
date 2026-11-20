@@ -1,0 +1,122 @@
+{
+  "wire.errors.bedrock.access_denied": {
+    "note": "An IAM policy refused the call (not the per-model console setting). {region} is an AWS Region id such as us-east-1; keep it verbatim. 'IAM' is AWS's product term; keep it.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.aws_cli_missing": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.check_list_denied": {
+    "note": "Shown after saving a connection: credentials are fine but listing models is forbidden (common for invoke-only roles). Not an error. {region} is an AWS Region id.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.check_unverified": {
+    "note": "Network failure or timeout while validating at save time; the connection was still saved.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.connection_missing": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.context_failed": {
+    "note": "{detail} is parser output, English; keep verbatim.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.credential_resolution_failed": {
+    "note": "{detail} is AWS SDK diagnostic text in English; it is appended verbatim after the colon.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.credential_timeout": {
+    "note": "ICU plural on {seconds}; the credential lookup (SSO refresh, instance metadata) did not finish in time.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.credentials_rejected": {
+    "note": "The signature, key or token was refused (bad, revoked or expired). {region} is an AWS Region id.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.iam_denied": {
+    "note": "An IAM policy denied this identity one Bedrock action on one model or inference-profile ARN (not the console model-access setting). {action} is an IAM action like bedrock:InvokeModelWithResponseStream and {resource} an AWS ARN; keep both verbatim. 'IAM' is AWS's product term; keep it.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.input_invalid": {
+    "note": "{field} is a technical field name such as access_key_id; keep.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.invalid_connection": {
+    "note": "{detail} is a short English technical reason. 'Connect Bedrock again' means sign in to the provider again.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.model_access": {
+    "note": "The account has not been granted this model in the Bedrock console's model access page; the same credentials still work for other models. {model} is a model id like us.anthropic.claude-opus-5-5 and {region} an AWS Region id; keep both verbatim.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.model_unavailable": {
+    "note": "The model or inference profile id does not exist in that Region. 'global.' and 'us.' are literal id prefixes; keep them, including the trailing dot.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.no_credentials": {
+    "note": "{bearer_env} and {auth_env} are environment variable names/assignments (AWS_BEARER_TOKEN_BEDROCK, LOP_BEDROCK_AUTH=ambient); keep them verbatim.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.profile_no_credentials": {
+    "note": "{profile} is a profile name from ~/.aws/config; keep verbatim.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.profile_not_found": {
+    "note": "{profile} is a profile name; 'AWS config' is the ~/.aws/config file.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.region_invalid": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.secret_missing": {
+    "note": "{command} is a CLI command (lop login bedrock); keep verbatim. 'encrypted store' is the local secret store.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.session_expired": {
+    "note": "Covers AWS SSO and 'aws login' sessions. {command} is a shell command such as 'aws sso login --profile dev'; keep verbatim.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
+  "wire.errors.bedrock.sso_busy": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.sso_headless": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.sso_not_applicable": {
+    "note": "Part of the Amazon Bedrock connect flow.",
+    "role": "provider error sentence",
+    "tone": "plain, short, actionable"
+  },
+  "wire.errors.bedrock.use_aws_panel": {
+    "note": "Old desktop builds show this when they try a generic sign-in for Bedrock.",
+    "role": "provider error sentence returned to the desktop app",
+    "tone": "plain, short, actionable"
+  }
+}

@@ -24,12 +24,14 @@ import inspect
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
@@ -64,6 +66,8 @@ from local_operator.model.registry import (
     _hosting_qualified_bare_id,
     anthropic_default_model_info,
     anthropic_family_model_info,
+    bedrock_family_model_info,
+    bedrock_supports_1h_cache,
     get_model_info,
     meta_muse_family_model_info,
     unknown_model_info,
@@ -140,6 +144,10 @@ UNKNOWN_MAX_OUTPUT = 8_192
 #: 160k compaction threshold on a model with 1M of room.
 _FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
     "anthropic": anthropic_family_model_info,
+    # Bedrock ids are Anthropic ids behind a profile prefix and a version
+    # suffix (``us.anthropic.claude-haiku-5-5``); the resolver strips both,
+    # asks the Anthropic family, and re-prices for the prefix.
+    "bedrock": bedrock_family_model_info,
     # Muse ids reach here when discovery surfaces a tier this build's
     # registry has not been taught (a new Spark point release, Wonder
     # Full). Limits are inherited, prices are not — see the resolver.
@@ -1267,6 +1275,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     return ModelSpec(
         provider=canonical,
         model_id=model_name,
+        bedrock_metadata=getattr(info, "bedrock_metadata", None),
         context_window=context_window,
         default_context_window=getattr(info, "default_context_window", None),
         max_context_window=getattr(info, "max_context_window", None),
@@ -2027,10 +2036,8 @@ def _oauth_listing_token(
 
         storage = credential_provider_id(provider)
         store = (
-            shared_auth_store(
-                db_path=base / "auth.db" if base is not None else None, config_dir=base
-            )
-            if provider == "meta-muse"
+            shared_auth_store(db_path=base / "auth.db", config_dir=base)
+            if base is not None
             else shared_auth_store()
         )
         rows = store.list_credentials(provider=storage)
@@ -2041,6 +2048,20 @@ def _oauth_listing_token(
             else:
                 token = str(row.data.get("access") or "")
             if token:
+                if storage == "google-vertex" and row.credential_type == "oauth":
+                    # Vertex AI's publisher catalogue needs the GCP project id in
+                    # ``x-goog-user-project``; ``account_id`` stores the email.
+                    project_id = (
+                        row.data.get("project_id")
+                        or row.data.get("org_id")
+                        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+                        or os.environ.get("VERTEX_PROJECT")
+                    )
+                    return (
+                        token,
+                        True,
+                        (str(project_id).strip() if project_id else None),
+                    )
                 account_id = (
                     row.data.get("account_id")
                     or row.data.get("org_id")
@@ -2196,6 +2217,18 @@ def info_from_discovered_model(
             # number — it under-states an Anthropic 5m write by 20%, which is
             # why a quoted write price above takes precedence.
             info.cache_writes_price = info.input_price
+    if row.long_context_threshold > 0 and (
+        row.long_context_input_price > 0 or row.long_context_output_price > 0
+    ):
+        info.long_context_threshold = row.long_context_threshold
+        if row.long_context_input_price > 0:
+            info.long_context_input_price = row.long_context_input_price
+        if row.long_context_output_price > 0:
+            info.long_context_output_price = row.long_context_output_price
+        if row.long_context_cache_read_price > 0:
+            info.long_context_cache_reads_price = row.long_context_cache_read_price
+        if row.long_context_cache_write_price > 0:
+            info.long_context_cache_writes_price = row.long_context_cache_write_price
     if row.supports_images is not None:
         # The provider's own statement, including a ``false``: ``DiscoveredModel``
         # spells "the listing did not say" as ``None``, so the only thing an
@@ -2236,6 +2269,7 @@ def info_from_discovered_model(
         "cache_write_price": "cache_writes_price",
         "supports_prompt_cache": "supports_prompt_cache",
     }
+    info.bedrock_metadata = row.bedrock_metadata
     for field in row.authoritative_fields:
         if field in native_fields:
             setattr(info, native_fields[field], getattr(row, field))
@@ -2328,6 +2362,22 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
                 # an Anthropic 5m write by 20% (1.25x base), which is why a quoted
                 # write price above wins and this is only the floor.
                 info.cache_writes_price = info.input_price
+    if (
+        not info.long_context_threshold
+        and row.long_context_threshold > 0
+        and (row.long_context_input_price > 0 or row.long_context_output_price > 0)
+    ):
+        info.long_context_threshold = row.long_context_threshold
+        if row.long_context_input_price > 0:
+            info.long_context_input_price = row.long_context_input_price
+        if row.long_context_output_price > 0:
+            info.long_context_output_price = row.long_context_output_price
+        if row.long_context_cache_read_price > 0:
+            info.long_context_cache_reads_price = row.long_context_cache_read_price
+        if row.long_context_cache_write_price > 0:
+            info.long_context_cache_writes_price = row.long_context_cache_write_price
+    if (not info.name or info.name == info.id) and row.name:
+        info.name = row.name
     if not _has_real_window(info) and row.context_window > 0:
         # A missing window is not cosmetic and not merely a rendering gap: the
         # compaction threshold is derived from it, so an unknown window disables
@@ -2508,6 +2558,11 @@ def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
         return family
 
     template = _UNKNOWN_MODEL_TEMPLATES.get(provider)
+    if provider == "bedrock":
+        from local_operator.providers.bedrock.models import capabilities_for
+
+        if capabilities_for(model_id).protocol == "anthropic":
+            template = anthropic_default_model_info
     if template is not None:
         return template.model_copy(deep=True, update={"id": model_id, "name": model_id})
     if info is not None:
@@ -2987,20 +3042,17 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
     """
     bucket = int(time.time() // DEFAULT_TTL_S)
     info = _paint_memo.get((provider, model_id, bucket))
-    # SHALLOW copies, and the isolation they give is exactly what a deep copy
-    # gave: every ``ModelInfo`` field is a scalar (float/int/str/bool/None --
-    # ``test_paint_resolution_isolates_the_memo_with_a_shallow_copy`` pins that),
-    # so a caller assigning a field on its copy still cannot reach the memo or
-    # the registry row, and there is no nested container to share. What the
-    # deep copy cost was pydantic's ``__deepcopy__`` walk on every call, and
-    # this is called once per usage COMPONENT on every roster tick: at 16
-    # children the parent's 50 ms coalescer priced ~113 components per tick,
-    # and the deep copies were ~0.2 s of every second of that loop's CPU
-    # (``scripts/bench_subagent_fanout.py --profile``), paid on the same
-    # thread that runs every child's turn.
+    hit = info is not None
     if info is None:
-        return _registry_fallback(provider, model_id).model_copy(), False
-    return info.model_copy(), True
+        info = _registry_fallback(provider, model_id)
+    # Keep pydantic's whole-model deep walk off the roster tick: scalar-only
+    # providers still take exactly the shallow-copy path. Bedrock carries nested
+    # discovery/profile facts, however, and sharing those would let one caller
+    # corrupt the memo's capability decisions. Copy only that payload, without
+    # normalising unknown models into invented Claude capabilities.
+    if info.bedrock_metadata is not None:
+        return info.model_copy(update={"bedrock_metadata": deepcopy(info.bedrock_metadata)}), hit
+    return info.model_copy(), hit
 
 
 #: The effort ladder the PROVIDER'S OWN listing stated for a model, keyed the
@@ -8384,10 +8436,16 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     edit here. An unknown provider is treated as OpenAI-shaped because that is
     what every OpenAI-compatible endpoint in the registry is.
     """
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_anthropic_messages_wire,
+    )
 
     definition = get_provider_definition(provider)
-    return not (definition is not None and definition.wire == "anthropic")
+    # Bedrock's legacy grouping includes native Converse deliberately: BOTH
+    # Converse and Anthropic InvokeModel report disjoint cache buckets. This
+    # accounting predicate is not authority to select a model's request schema.
+    return not (definition is not None and is_anthropic_messages_wire(definition.wire))
 
 
 # OpenAI's published >272k tier is model-specific, not a generic property of
@@ -8488,13 +8546,15 @@ def cost_for_usage(
         # but this receipt has no OpenAI TTL provenance. Neither is safe.
         # Unstamped legacy/gateway receipts keep their pre-existing behavior.
         raise ValueError("OpenAI cache write TTL is unknown")
-    plain = _usage_field(usage, "input_tokens")
+    raw_input = _usage_field(usage, "input_tokens")
+    plain = raw_input
     if _cache_tokens_are_inside_input(provider):
         # Subtract, floored at zero: the buckets must stay disjoint, and a
         # provider that reports more cached tokens than prompt tokens is
         # malformed rather than a reason to hand back a negative bill.
         plain = max(0, plain - read - written)
     output = float(_usage_field(usage, "output_tokens"))
+    effective_info = model_info
     if (
         provider == "openai"
         and long_context
@@ -8506,20 +8566,63 @@ def cost_for_usage(
         read *= 2
         written *= 2
         output *= 1.5
-    price_moment = tariff.moment_for(model_info, usage, moment)
-    cost = calculate_cost(model_info, plain, output, read, written, moment=price_moment)
+    elif (
+        model_info.long_context_threshold
+        and (
+            # The tier threshold is measured against the FULL prompt. Where
+            # cached tokens are reported inside ``input_tokens`` (Google,
+            # Vertex, OpenAI-style receipts) the raw input already is the full
+            # prompt; Anthropic reports cache reads/writes as disjoint buckets,
+            # so a mostly-cached 210k prompt would show only ~10k input and
+            # silently miss the >200k tier if we compared raw input alone.
+            raw_input
+            if _cache_tokens_are_inside_input(provider)
+            else raw_input + read + written
+        )
+        > model_info.long_context_threshold
+        and (model_info.long_context_input_price or model_info.long_context_output_price)
+    ):
+        # Tiered long-context pricing (e.g. Google/Vertex/Anthropic >200k
+        # prompt tokens): once crossed the entire request bills at the
+        # long-context tier rates (input, output including thinking tokens,
+        # and cached content reads/writes).
+        lc_input = model_info.long_context_input_price or model_info.input_price
+        lc_output = model_info.long_context_output_price or model_info.output_price
+        lc_cache_read = model_info.long_context_cache_reads_price
+        if lc_cache_read is None:
+            lc_cache_read = model_info.cache_reads_price
+        lc_cache_write = model_info.long_context_cache_writes_price
+        if lc_cache_write is None:
+            lc_cache_write = model_info.cache_writes_price
+        effective_info = model_info.model_copy(
+            update={
+                "input_price": lc_input,
+                "output_price": lc_output,
+                "cache_reads_price": lc_cache_read,
+                "cache_writes_price": lc_cache_write,
+            }
+        )
+    price_moment = tariff.moment_for(effective_info, usage, moment)
+    cost = calculate_cost(effective_info, plain, output, read, written, moment=price_moment)
     cost *= fast_multiplier
-    if provider == "anthropic":
+    if provider == "anthropic" or (
+        provider == "bedrock" and bedrock_supports_1h_cache(model_info.id)
+    ):
+        # Bedrock carries the same Messages receipt (``cache_creation`` split)
+        # and bills the 1h write at the same 2x base (AWS Price List,
+        # 2026-11-18: e.g. Opus 5.5 regional 8.80 = 2 x 4.40).
         # Anthropic's receipt identifies the 1h subset; its documented price is
         # 2x base, not the catalog's ordinary 5m write rate. A malformed subset
         # cannot create more billed tokens than the total write count. Other
         # providers and unknown duration remain on their existing quoted rate.
         one_hour = min(written, _usage_field(usage, "cache_write_1h_tokens"))
-        write_rate = model_info.cache_writes_price or model_info.input_price
+        # Use the tier actually billed above: on a >200k request the 1h write
+        # surcharge is 2x the long-context input rate, not the base rate.
+        write_rate = effective_info.cache_writes_price or effective_info.input_price
         cost += (
             one_hour
-            * (2 * model_info.input_price - write_rate)
-            * tariff.scale_for(model_info, price_moment)
+            * (2 * effective_info.input_price - write_rate)
+            * tariff.scale_for(effective_info, price_moment)
             / 1_000_000.0
         )
     return cost

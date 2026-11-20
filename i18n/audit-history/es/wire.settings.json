@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "82e7b52d5a1dc17ebcd688478993ecacbf659e0083dc64f2daefbbf719a11cd3",
+  "history_sha256": "5d571832e5fa44cee6b25f8b4a5cfea82dc5fd823a30b63c3c9f0ba4dfcc7a3a",
   "entries": [
     {
       "locale": "es",
@@ -1193,6 +1193,79 @@
       "evidence": "i18n/audits/evidence/es/wire.settings/m4135b/record.json",
       "round": "m4135b",
       "keys_audited": 883
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "fc000662374f07bffb44f2e7d42e9616695fd31570ca27cbfcabbb77acb3dd8f",
+      "context_sha256": "d2561d10017129d746d20993c33984f0094849be6ef7e69af57e7d0da471ddfe",
+      "target_sha256": "8425d5b70466fe3b90bd3e77dd8182e244bc7ee784fb162921336ca5a8f9128a",
+      "translator": {
+        "agent": "translator not identified to the auditor: lopdev implementation lane, commit 8bfc7b9ed428 'feat(i18n): translate bedrock provider copy' (shared git author identity proves nothing); manager relayed only that other agents translated",
+        "model": null,
+        "date": "2026-11-19",
+        "provenance": "unknown — agent/session/model not available to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "es-B1"
+        ]
+      },
+      "status": "passed",
+      "note": "PR #4266 round 1: re-audit after en wire.settings moved c62db407a0b2 -> fc000662374f by exactly 4 added keys (providers_bedrock_auth/.region .label/.help). Three-way vs merge-base 0d057990a180: locale diff is exactly those 4 added lines; every other key byte-identical to the previously passed target 1b6f0095e6fe (prior row c62db407a0b2, carried). 4 new keys audited: faithful; 'ambient' and AWS_REGION verbatim; labels <=29 cells and helps <=76 cells (rich cell_len); placeholder-free; NFC; no bidi controls; key set equals en. Findings: es-B1 (nit): providers_bedrock_region.help: 'si la conexión no fija una' — 'no define ninguna' reads more naturally; meaning intact — deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "fc000662374f07bffb44f2e7d42e9616695fd31570ca27cbfcabbb77acb3dd8f",
+      "context_sha256": "d2561d10017129d746d20993c33984f0094849be6ef7e69af57e7d0da471ddfe",
+      "target_sha256": "8425d5b70466fe3b90bd3e77dd8182e244bc7ee784fb162921336ca5a8f9128a",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 35241b9c509a",
+        "session": "35241b9c509a",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task role, independent auditor brief), job ab68148cabf7, session f1e8189586d6; did not author these translations and read no translator scratchpad",
+        "session": "f1e8189586d6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "es-B1"
+        ],
+        "job": "ab68148cabf7"
+      },
+      "status": "passed",
+      "note": "Provenance correction, same audit and verdict as the preceding pr4266-r1 row (identical source/context/target hashes): translator identity relayed by the manager after the first append (was recorded unknown). PR #4266 round 1: re-audit after en wire.settings moved c62db407a0b2 -> fc000662374f by exactly 4 added keys (providers_bedrock_auth/.region .label/.help). Three-way vs merge-base 0d057990a180: locale diff is exactly those 4 added lines; every other key byte-identical to the previously passed target 1b6f0095e6fe (prior row c62db407a0b2, carried). 4 new keys audited: faithful; 'ambient' and AWS_REGION verbatim; labels <=29 cells and helps <=76 cells (rich cell_len); placeholder-free; NFC; no bidi controls; key set equals en. Findings: es-B1 (nit): providers_bedrock_region.help: 'si la conexión no fija una' — 'no define ninguna' reads more naturally; meaning intact — deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4266-r1-provenance"
     }
   ]
 }

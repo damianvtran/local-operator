@@ -154,6 +154,10 @@ CREDENTIAL_PLACEMENT_DIGEST_V1 = "credential-placement-digest-v1"
 #: A distinct string (no shipped capability is reused for a new frame kind): a peer
 #: without it is not nudged and keeps counting from its last own ask, as before.
 CREDENTIAL_RENEW_PUSH_V1 = "credential-renew-push-v1"
+#: The working-set move gate (``mobility.request_move``; docs/design/move-working-set.md
+#: §11.1): the ``workset_preflight``/``workset_probe`` phases of ``net_session_move`` and
+#: the ``dry_run``/``working_set`` fields of a local move request.
+SESSION_MOVE_WORKSET_V1 = "session-move-workset-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -195,6 +199,13 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-journal-source-v1",
     # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
     "session-peek-v1",
+    # THE WORKING-SET MOVE GATE (docs/design/move-working-set.md §11.1; review R1,
+    # round 1). Advertised on the relay's own peer record as well as on links, and
+    # read by ``mobility.request_move`` BEFORE it forwards ``dry_run`` or a consent:
+    # a relay that predates the gate (one left running across an update) ignores
+    # both and performs a real, ungated move — so a CLI newer than its relay must
+    # refuse rather than send them. Additive: an older peer ignores the string.
+    SESSION_MOVE_WORKSET_V1,
     # Owner-folded mobile history/projection; never infer this schema from a
     # legacy journal page whose entries use the desktop transcript vocabulary.
     "mobile-session-read-v1",

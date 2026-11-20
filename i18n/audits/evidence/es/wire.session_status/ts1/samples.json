@@ -1,0 +1,317 @@
+[
+  {
+    "key": "signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "Interrumpida — detenida con una señal"
+  },
+  {
+    "key": "signal_stop",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Interrumpida — detenida con una señal mediante /stop --all"
+  },
+  {
+    "key": "signal_stop",
+    "params": {
+      "command": "lop sessions stop --session synthetic-qa"
+    },
+    "text": "Interrumpida — detenida con una señal mediante lop sessions stop --session synthetic-qa"
+  },
+  {
+    "key": "unseen_signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "Interrupción sin leer — detenida con una señal"
+  },
+  {
+    "key": "unseen_signal_stop",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Interrupción sin leer — detenida con una señal mediante /stop --all"
+  },
+  {
+    "key": "unseen_signal_stop",
+    "params": {
+      "command": "lop sessions stop --session synthetic-qa"
+    },
+    "text": "Interrupción sin leer — detenida con una señal mediante lop sessions stop --session synthetic-qa"
+  },
+  {
+    "key": "forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "Interrumpida — finalizada por la fuerza"
+  },
+  {
+    "key": "forced_kill",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Interrumpida — finalizada por la fuerza mediante /stop --all"
+  },
+  {
+    "key": "forced_kill",
+    "params": {
+      "command": "lop sessions stop --session synthetic-qa"
+    },
+    "text": "Interrumpida — finalizada por la fuerza mediante lop sessions stop --session synthetic-qa"
+  },
+  {
+    "key": "unseen_forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "Interrupción sin leer — finalizada por la fuerza"
+  },
+  {
+    "key": "unseen_forced_kill",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Interrupción sin leer — finalizada por la fuerza mediante /stop --all"
+  },
+  {
+    "key": "unseen_forced_kill",
+    "params": {
+      "command": "lop sessions stop --session synthetic-qa"
+    },
+    "text": "Interrupción sin leer — finalizada por la fuerza mediante lop sessions stop --session synthetic-qa"
+  },
+  {
+    "key": "dormant",
+    "params": {
+      "count": 0
+    },
+    "text": "Detenida (0 despertares inactivos)"
+  },
+  {
+    "key": "dormant",
+    "params": {
+      "count": 1
+    },
+    "text": "Detenida (1 despertar inactivo)"
+  },
+  {
+    "key": "dormant",
+    "params": {
+      "count": 2
+    },
+    "text": "Detenida (2 despertares inactivos)"
+  },
+  {
+    "key": "dormant",
+    "params": {
+      "count": 1000000
+    },
+    "text": "Detenida (1.000.000 de despertares inactivos)"
+  },
+  {
+    "key": "dormant",
+    "params": {
+      "count": 1500000
+    },
+    "text": "Detenida (1.500.000 despertares inactivos)"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "Error — detenida por el usuario"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "Error — el runtime se cerró al agotar su límite sin avances"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "continuation_limit"
+    },
+    "text": "Error — límite de continuación alcanzado; mensaje pendiente descartado"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "output_limit"
+    },
+    "text": "Error — límite de salida del modelo alcanzado; no se pudo continuar"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "Error — retirada para actualizar"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "Error — el runtime terminó durante el turno"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "Error — el runtime salió para actualizar al agotar su margen de progreso"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "Error — la actualización no terminó; el runtime conservó la compilación cargada"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "Error — el runtime desapareció sin un cierre limpio; no se solicitó detenerlo"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "install_mid_update"
+    },
+    "text": "Error — instalación reemplazada durante el turno"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "owner_lost"
+    },
+    "text": "Error — el runtime dejó de responder durante el turno"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "disposed"
+    },
+    "text": "Error — sesión descartada durante el turno"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "Error"
+  },
+  {
+    "key": "error_cause",
+    "params": {
+      "cause": "synthetic_unknown"
+    },
+    "text": "Error"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "Error sin leer — detenida por el usuario"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "Error sin leer — el runtime se cerró al agotar su límite sin avances"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "continuation_limit"
+    },
+    "text": "Error sin leer — límite de continuación alcanzado; mensaje pendiente descartado"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "output_limit"
+    },
+    "text": "Error sin leer — límite de salida del modelo alcanzado; no se pudo continuar"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "Error sin leer — retirada para actualizar"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "Error sin leer — el runtime terminó durante el turno"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "Error sin leer — el runtime salió para actualizar al agotar su margen de progreso"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "Error sin leer — la actualización no terminó; el runtime conservó la compilación cargada"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "Error sin leer — el runtime desapareció sin un cierre limpio; no se solicitó detenerlo"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "install_mid_update"
+    },
+    "text": "Error sin leer — instalación reemplazada durante el turno"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "owner_lost"
+    },
+    "text": "Error sin leer — el runtime dejó de responder durante el turno"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "disposed"
+    },
+    "text": "Error sin leer — sesión descartada durante el turno"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "Error sin leer"
+  },
+  {
+    "key": "unseen_error_cause",
+    "params": {
+      "cause": "synthetic_unknown"
+    },
+    "text": "Error sin leer"
+  }
+]

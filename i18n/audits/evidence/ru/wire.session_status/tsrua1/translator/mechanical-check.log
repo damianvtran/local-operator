@@ -1,0 +1,50 @@
+check.py: catalogue checks: 0 problem(s)
+PASS: 17 keys in source order; 16 new translations; legacy retired_label unchanged
+PASS: exact ICU argument and select-arm identifiers; ru one/few/many/other plural arms
+PASS: one-line values, valid UTF-8 JSON, no manual bidi controls
+Mechanical branch interpolation samples (NOT application/runtime or visual clearance):
+wire.session_status.signal_stop [none]: Прервано — процесс остановлен сигналом
+wire.session_status.signal_stop [literal]: Прервано — процесс остановлен сигналом по команде /stop --all
+wire.session_status.unseen_signal_stop [none]: Прервано (не просмотрено) — процесс остановлен сигналом
+wire.session_status.unseen_signal_stop [literal]: Прервано (не просмотрено) — процесс остановлен сигналом по команде /stop --all
+wire.session_status.forced_kill [none]: Прервано — процесс принудительно завершён
+wire.session_status.forced_kill [literal]: Прервано — процесс принудительно завершён по команде /stop --all
+wire.session_status.unseen_forced_kill [none]: Прервано (не просмотрено) — процесс принудительно завершён
+wire.session_status.unseen_forced_kill [literal]: Прервано (не просмотрено) — процесс принудительно завершён по команде /stop --all
+dormant 0: Остановлено (0 пробуждений приостановлено)
+dormant 1: Остановлено (1 пробуждение приостановлено)
+dormant 2: Остановлено (2 пробуждения приостановлены)
+dormant 5: Остановлено (5 пробуждений приостановлено)
+dormant 11: Остановлено (11 пробуждений приостановлено)
+dormant 21: Остановлено (21 пробуждение приостановлено)
+dormant 22: Остановлено (22 пробуждения приостановлены)
+dormant 25: Остановлено (25 пробуждений приостановлено)
+dormant 101: Остановлено (101 пробуждение приостановлено)
+dormant 1.5: Остановлено (1,5 пробуждения приостановлено)
+wire.session_status.error_cause [user_stop]: Ошибка — выполнение остановлено пользователем
+wire.session_status.error_cause [runtime_stall_bound]: Ошибка — рантайм сам завершил работу по достижении предела простоя
+wire.session_status.error_cause [continuation_limit]: Ошибка — достигнут лимит продолжений; ожидающее сообщение отброшено
+wire.session_status.error_cause [output_limit]: Ошибка — достигнут лимит вывода модели; продолжить не удалось
+wire.session_status.error_cause [runtime_retired]: Ошибка — работа прервана для обновления
+wire.session_status.error_cause [runtime_shutdown]: Ошибка — рантайм завершил работу во время хода
+wire.session_status.error_cause [runtime_overdue]: Ошибка — рантайм завершил работу для обновления, исчерпав лимит ожидания прогресса
+wire.session_status.error_cause [runtime_update_failed]: Ошибка — обновление не завершилось; рантайм сохранил загруженную сборку
+wire.session_status.error_cause [runtime_killed]: Ошибка — рантайм исчез без штатного завершения; остановка не запрашивалась
+wire.session_status.error_cause [install_mid_update]: Ошибка — установленная копия заменена во время хода
+wire.session_status.error_cause [owner_lost]: Ошибка — рантайм перестал отвечать во время хода
+wire.session_status.error_cause [disposed]: Ошибка — сессия окончательно закрыта во время хода
+wire.session_status.error_cause [other]: Ошибка
+wire.session_status.unseen_error_cause [user_stop]: Ошибка (не просмотрена) — выполнение остановлено пользователем
+wire.session_status.unseen_error_cause [runtime_stall_bound]: Ошибка (не просмотрена) — рантайм сам завершил работу по достижении предела простоя
+wire.session_status.unseen_error_cause [continuation_limit]: Ошибка (не просмотрена) — достигнут лимит продолжений; ожидающее сообщение отброшено
+wire.session_status.unseen_error_cause [output_limit]: Ошибка (не просмотрена) — достигнут лимит вывода модели; продолжить не удалось
+wire.session_status.unseen_error_cause [runtime_retired]: Ошибка (не просмотрена) — работа прервана для обновления
+wire.session_status.unseen_error_cause [runtime_shutdown]: Ошибка (не просмотрена) — рантайм завершил работу во время хода
+wire.session_status.unseen_error_cause [runtime_overdue]: Ошибка (не просмотрена) — рантайм завершил работу для обновления, исчерпав лимит ожидания прогресса
+wire.session_status.unseen_error_cause [runtime_update_failed]: Ошибка (не просмотрена) — обновление не завершилось; рантайм сохранил загруженную сборку
+wire.session_status.unseen_error_cause [runtime_killed]: Ошибка (не просмотрена) — рантайм исчез без штатного завершения; остановка не запрашивалась
+wire.session_status.unseen_error_cause [install_mid_update]: Ошибка (не просмотрена) — установленная копия заменена во время хода
+wire.session_status.unseen_error_cause [owner_lost]: Ошибка (не просмотрена) — рантайм перестал отвечать во время хода
+wire.session_status.unseen_error_cause [disposed]: Ошибка (не просмотрена) — сессия окончательно закрыта во время хода
+wire.session_status.unseen_error_cause [other]: Ошибка (не просмотрена)
+PASS: exercised all command branches, all 13 cause branches in both messages, and Russian integer/fractional plural samples

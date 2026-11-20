@@ -38,6 +38,7 @@ import dataclasses
 import hashlib
 import logging
 import math
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -107,6 +108,23 @@ ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
 #: ``v1beta`` is the version the generation client already talks to, so the two
 #: agree about which models exist.
 GEMINI_API_VERSION = "v1beta"
+
+#: Vertex AI's publisher catalogue endpoint is exposed under ``v1beta1`` and
+#: returns ``publishers/google/models/*`` entries (verified live 2026-11-18).
+VERTEX_API_VERSION = "v1beta1"
+_VERTEX_PUBLISHER_PREFIX = "publishers/google/models/"
+#: Substrings identifying non-chat Gemini/Vertex entries in ``publisherModels``
+#: (embeddings, speech synthesis, image generation, transcription, live audio,
+#: nano-banana). Filtered out so the chat picker offers only text/multimodal
+#: generation models.
+_VERTEX_NON_CHAT_TOKENS: tuple[str, ...] = (
+    "embedding",
+    "-tts",
+    "-image",
+    "-transcribe",
+    "-live",
+    "nano-banana",
+)
 
 #: Hard stop on ``nextPageToken`` following. A provider bug that returns a fresh
 #: token forever would otherwise turn opening the picker into an unbounded run of
@@ -320,6 +338,7 @@ LISTING_CAPTURE_VERSIONS: dict[str, int] = {
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
 #: field its writer did not record.
+LISTING_CAPTURE_VERSIONS["bedrock"] = 2  # all-vendor/profile facts, not Claude-only inventory
 LISTING_CAPTURE_DEFAULT = 1
 
 
@@ -449,6 +468,13 @@ class DiscoveredModel:
     #: Anthropic 5-minute write by 20% (1.25x base), so a quoted number is
     #: worth carrying rather than guessing.
     cache_write_price: float = 0.0
+    #: Long-context pricing tier (e.g. Google/Vertex ``context_over_200k``).
+    #: ``0`` / ``0.0`` means flat pricing across the whole context window.
+    long_context_threshold: int = 0
+    long_context_input_price: float = 0.0
+    long_context_output_price: float = 0.0
+    long_context_cache_read_price: float = 0.0
+    long_context_cache_write_price: float = 0.0
     #: The SOURCE stated that both price legs are zero — the model is free at the
     #: point of use, not merely unpriced. Never inferred from the prices
     #: themselves (that is precisely the inference this field exists to replace):
@@ -479,6 +505,7 @@ class DiscoveredModel:
     # zero prices/false flags from omissions through a JSON cache round-trip.
     authoritative_fields: tuple[str, ...] = ()
     supports_tools: bool | None = None
+    bedrock_metadata: dict[str, Any] | None = None
     reasoning: bool | None = None
     active_context_window: int | None = None
     supports_prompt_cache: bool = False
@@ -1464,6 +1491,13 @@ def _capability_supported(capabilities: Mapping[str, object], name: str) -> bool
     return _stated_bool(_mapping(capabilities.get(name)).get("supported"))
 
 
+def _fetch_bedrock(ctx: _FetchContext) -> list[DiscoveredModel] | None:
+    """Amazon Bedrock listing; lazy so botocore loads only when Bedrock lists."""
+    from local_operator.providers.bedrock.discovery import fetch
+
+    return fetch(ctx)
+
+
 def _fetch_anthropic(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     """Anthropic's listing: ids, display names, limits and capabilities.
 
@@ -1624,6 +1658,107 @@ def _fetch_gemini(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     return rows
 
 
+def _row_from_vertex_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
+    """One Vertex AI ``publisherModels`` entry, or ``None`` if not a chat Gemini model.
+
+    Vertex AI returns resource names like ``publishers/google/models/gemini-4-neon``
+    (optionally suffixed with ``@<version>``) and mixes chat Gemini models with
+    embeddings, TTS, image generation, live audio, Imagen, Veo, and analytics
+    models. Keep bare ``gemini-*`` generation ids and drop non-chat families so
+    the picker offers only selectable chat/multimodal models; metadata and prices
+    are layered from ``models.dev`` / the static registry downstream.
+    """
+    resource = _first_str(entry.get("name"))
+    if not resource:
+        return None
+    if resource.startswith(_VERTEX_PUBLISHER_PREFIX):
+        model_id = resource[len(_VERTEX_PUBLISHER_PREFIX) :]
+    elif "/" in resource:
+        model_id = resource.rsplit("/", 1)[1]
+    else:
+        model_id = resource
+    # Strip any version qualifier (e.g. ``gemini-2.5-pro@default`` -> ``gemini-2.5-pro``).
+    if "@" in model_id:
+        model_id = model_id.split("@", 1)[0]
+    model_id = model_id.strip()
+    if not model_id:
+        return None
+    lowered = model_id.lower()
+    if not lowered.startswith("gemini-"):
+        return None
+    if any(token in lowered for token in _VERTEX_NON_CHAT_TOKENS):
+        return None
+    return DiscoveredModel(id=model_id)
+
+
+def _fetch_vertex(ctx: _FetchContext) -> list[DiscoveredModel] | None:
+    """Vertex AI's paginated publisher catalogue, filtered to chat Gemini models.
+
+    OAuth and service-account tokens authenticate with ``Authorization: Bearer``
+    and require ``x-goog-user-project`` (without a quota project Google returns
+    HTTP 403). API keys send ``x-goog-api-key``; if an express/restricted key
+    is rejected (401/403), returning ``None`` degrades cleanly to the static
+    registry + ``models.dev`` enrichment without surfacing a picker error.
+    """
+    if not ctx.api_key:
+        return None
+
+    url = f"{ctx.base_url}/{VERTEX_API_VERSION}/publishers/google/models"
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if ctx.is_oauth:
+        headers["Authorization"] = f"Bearer {ctx.api_key}"
+        project_id = (
+            (ctx.account_id or "").strip()
+            or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+            or (os.environ.get("VERTEX_PROJECT") or "").strip()
+        )
+        if project_id:
+            headers["x-goog-user-project"] = project_id
+    else:
+        headers["x-goog-api-key"] = ctx.api_key
+
+    rows: list[DiscoveredModel] = []
+    seen: set[str] = set()
+    page_token = ""
+    deadline = time.monotonic() + ctx.timeout
+    for _ in range(GEMINI_MAX_PAGES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            logger.debug(
+                "%s model listing exceeded its %.1fs budget after %d models",
+                ctx.provider_id,
+                ctx.timeout,
+                len(rows),
+            )
+            return None
+        params: dict[str, str | int] = {"pageSize": 100}
+        if page_token:
+            params["pageToken"] = page_token
+        body = _get_json(
+            ctx,
+            url,
+            headers=headers,
+            params=params,
+            timeout=remaining,
+        )
+        if body is None:
+            return None
+        page = _mapping(body)
+        entries = _entry_list(page, "publisherModels")
+        if entries is None:
+            return None
+        for entry in entries:
+            row = _row_from_vertex_entry(entry)
+            if row is not None and row.id not in seen:
+                seen.add(row.id)
+                rows.append(row)
+        next_token = _first_str(page.get("nextPageToken"))
+        if not next_token or next_token == page_token:
+            break
+        page_token = next_token
+    return rows
+
+
 _Transport = Callable[[_FetchContext], list[DiscoveredModel] | None]
 
 #: One transport per wire shape, because the wire -- not the vendor -- decides
@@ -1643,7 +1778,24 @@ _WIRE_TRANSPORTS: dict[WireFormat, _Transport | None] = {
     # The mock wire has no server behind it, so there is nothing to list and a
     # request would have nowhere to go; its registry rows are the whole truth.
     "mock": None,
+    # Amazon Bedrock: the endpoint is per Region and derived from the
+    # credential (a connection descriptor), so it has no base_url; the
+    # transport signs ListInferenceProfiles/ListFoundationModels itself.
+    "bedrock": _fetch_bedrock,
 }
+
+#: Per-canonical-provider transport overrides for providers that share a chat
+#: wire format (``google``) yet expose a distinct model-listing endpoint.
+#: Vertex AI lists ``/v1beta1/publishers/google/models`` with Bearer + quota
+#: project headers instead of AI Studio's ``/v1beta/models?key=``.
+_PROVIDER_TRANSPORTS: dict[str, _Transport] = {
+    "google-vertex": _fetch_vertex,
+}
+
+#: Providers that carry a ``base_url`` for inference (so wire clients know
+#: where to post) yet expose no uniform ``/models`` GET listing endpoint.
+#: Kept as a named constant derived into :data:`NO_LISTING_PROVIDERS`.
+_UNLISTABLE_PROVIDERS: frozenset[str] = frozenset()
 
 
 def _build_transports() -> dict[str, _Transport | None]:
@@ -1651,17 +1803,27 @@ def _build_transports() -> dict[str, _Transport | None]:
 
     A provider with no ``base_url`` maps to ``None`` unless local setup supplies
     its endpoint at runtime: an unconfigured generic server is not permanently
-    unlistable. That is the shape the credential-brokered providers take (Vertex,
-    Bedrock and Azure, none of which exist in this tree today), so adding one
-    later gets the correct "registry only" behaviour instead of a request to the
-    empty string.
+    unlistable. Providers in :data:`_UNLISTABLE_PROVIDERS` map to ``None``, and
+    :data:`_PROVIDER_TRANSPORTS` overrides the wire default when a vendor shares
+    an inference wire with a different listing API (e.g. Vertex AI vs AI Studio).
     """
     transports: dict[str, _Transport | None] = {}
     for definition in PROVIDER_REGISTRY:
-        if not definition.base_url and not definition.local_setup:
+        if definition.wire == "bedrock":
+            # Credential-brokered with a per-Region endpoint: listable with no
+            # base_url, because the descriptor carries the Region.
+            transports[definition.id] = _WIRE_TRANSPORTS.get(definition.wire)
+            continue
+        if definition.id in _UNLISTABLE_PROVIDERS or (
+            not definition.base_url and not definition.local_setup
+        ):
             transports[definition.id] = None
             continue
-        transports[definition.id] = _WIRE_TRANSPORTS.get(definition.wire)
+        canonical = credential_provider_id(definition.id)
+        if canonical in _PROVIDER_TRANSPORTS:
+            transports[definition.id] = _PROVIDER_TRANSPORTS[canonical]
+        else:
+            transports[definition.id] = _WIRE_TRANSPORTS.get(definition.wire)
     return transports
 
 
@@ -1730,7 +1892,12 @@ def fetch_models(
         return None
     from local_operator.providers.local import resolve_base_url
 
-    resolved_base = resolve_base_url(provider_id, override=base_url).rstrip("/")
+    if definition.wire == "bedrock":
+        # No base_url by design (per-Region endpoint from the credential); the
+        # transport builds its own URLs. A sentinel keeps the shared path below.
+        resolved_base = "bedrock"
+    else:
+        resolved_base = resolve_base_url(provider_id, override=base_url).rstrip("/")
     if not resolved_base:
         return None
 
@@ -1839,6 +2006,11 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         output_price=_positive_float(info.output_price),
         cache_read_price=_positive_float(info.cache_reads_price),
         cache_write_price=_positive_float(info.cache_writes_price),
+        long_context_threshold=_positive_int(info.long_context_threshold),
+        long_context_input_price=_positive_float(info.long_context_input_price),
+        long_context_output_price=_positive_float(info.long_context_output_price),
+        long_context_cache_read_price=_positive_float(info.long_context_cache_reads_price),
+        long_context_cache_write_price=_positive_float(info.long_context_cache_writes_price),
         supports_images=_stated_bool(info.supports_images),
         supports_audio_input=_stated_bool(info.supports_audio_input),
         supports_tools=info.supports_tools,
@@ -1893,6 +2065,7 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
     merged = DiscoveredModel(
         id=row.id,
         authoritative_fields=row.authoritative_fields,
+        bedrock_metadata=row.bedrock_metadata,
         name=_merge_name(row.name, info.name, row.id),
         # Only a positive live window beats the registry. A listing that omits the
         # field (a lean OpenAI-compatible gateway, or an Anthropic proxy on an API
@@ -1930,6 +2103,25 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         ),
         cache_write_price=(
             _positive_float(row.cache_write_price) or _positive_float(info.cache_writes_price)
+        ),
+        long_context_threshold=(
+            _positive_int(row.long_context_threshold) or _positive_int(info.long_context_threshold)
+        ),
+        long_context_input_price=(
+            _positive_float(row.long_context_input_price)
+            or _positive_float(info.long_context_input_price)
+        ),
+        long_context_output_price=(
+            _positive_float(row.long_context_output_price)
+            or _positive_float(info.long_context_output_price)
+        ),
+        long_context_cache_read_price=(
+            _positive_float(row.long_context_cache_read_price)
+            or _positive_float(info.long_context_cache_reads_price)
+        ),
+        long_context_cache_write_price=(
+            _positive_float(row.long_context_cache_write_price)
+            or _positive_float(info.long_context_cache_writes_price)
         ),
         # The provider decides its own capabilities WHEN IT SPEAKS: a stated
         # ``false`` is an answer, and OR-ing it against the registry made it
@@ -2143,6 +2335,15 @@ def _rows_from_payload(
                 output_price=_positive_float(entry.get("output_price")),
                 cache_read_price=_positive_float(entry.get("cache_read_price")),
                 cache_write_price=_positive_float(entry.get("cache_write_price")),
+                long_context_threshold=_positive_int(entry.get("long_context_threshold")),
+                long_context_input_price=_positive_float(entry.get("long_context_input_price")),
+                long_context_output_price=_positive_float(entry.get("long_context_output_price")),
+                long_context_cache_read_price=_positive_float(
+                    entry.get("long_context_cache_read_price")
+                ),
+                long_context_cache_write_price=_positive_float(
+                    entry.get("long_context_cache_write_price")
+                ),
                 # A stored ``false`` and an absent key mean the same thing here
                 # (not stated free), so a plain bool is enough — unlike
                 # ``supports_images`` below, this field has no third state.
@@ -2160,6 +2361,11 @@ def _rows_from_payload(
                 supports_images=_stated_bool(entry.get("supports_images")),
                 supports_audio_input=_stated_bool(entry.get("supports_audio_input")),
                 supports_tools=_stated_bool(entry.get("supports_tools")),
+                bedrock_metadata=(
+                    entry.get("bedrock_metadata")
+                    if isinstance(entry.get("bedrock_metadata"), dict)
+                    else None
+                ),
                 reasoning=_stated_bool(entry.get("reasoning")),
                 active_context_window=_positive_int(entry.get("active_context_window")) or None,
                 supports_prompt_cache=bool(entry.get("supports_prompt_cache")),
@@ -2213,7 +2419,12 @@ def _listing_replaces_static(
     An unavailable or invalid payload never gets deletion authority.
     """
     return rows is not None and (
-        provider_id in ("deepseek", "meta-muse") or (account_scoped and bool(rows))
+        provider_id in ("deepseek", "meta-muse")
+        or (
+            provider_id == "bedrock"
+            and all((row.bedrock_metadata or {}).get("inventory_complete") is True for row in rows)
+        )
+        or (account_scoped and bool(rows) and provider_id != "bedrock")
     )
 
 
@@ -2527,9 +2738,15 @@ def _available_models(
     # caller-supplied base still wins, because that is a deliberate override.
     from local_operator.providers.local import resolve_base_url
 
-    resolved_base = resolve_base_url(
-        definition.id,
-        override=base_url or (definition.oauth_base_url if is_oauth else None),
+    resolved_base = (
+        # Bedrock has no base_url (per-Region endpoint from the credential);
+        # the same sentinel ``fetch_models`` uses keeps it on the live path.
+        "bedrock"
+        if definition.wire == "bedrock"
+        else resolve_base_url(
+            definition.id,
+            override=base_url or (definition.oauth_base_url if is_oauth else None),
+        )
     )
     if not resolved_base:
         return merge_models(rows, None), "static"
@@ -2603,6 +2820,16 @@ def _available_models(
         from local_operator.providers.local import endpoint_cache_key
 
         key = endpoint_cache_key(key, resolved_base)
+    if definition.wire == "bedrock":
+        # Per Region AND per connection: a listing depends on the source
+        # Region and on what that identity may list, so one shared document
+        # would let whichever connection refreshed last decide what another
+        # can select. The first-paint reader (``cached_catalogue``) has no
+        # descriptor and reads the unscoped name nothing writes, so it paints
+        # the static rows until this scoped refresh lands.
+        from local_operator.providers.bedrock.discovery import listing_cache_key
+
+        key = listing_cache_key(api_key)
     # The soft TTL never exceeds the hard one: a picker asking for a 15-minute
     # document wants it fetched NOW, not served-and-refreshed-later.
     soft_ttl_s = min(SOFT_TTL_S, ttl_s)

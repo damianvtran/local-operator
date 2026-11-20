@@ -94,6 +94,11 @@ def static_feature_flags() -> dict[str, Any]:
     """
     return {
         "auth": 1,
+        # Amazon Bedrock's AWS panel routes (``routes/auth.py``: context,
+        # connection, sso-login, check; bedrock design §7). The desktop shows
+        # the AWS panel only when this is present; older backends answer the
+        # generic API-key path only.
+        "bedrock_auth": 1,
         "settings": 1,
         # 2 narrows the messages endpoint's slash policy: it now accepts a
         # message that merely BEGINS with a command word (`/mcp logout
@@ -979,6 +984,21 @@ def static_feature_flags() -> dict[str, Any]:
         # nothing.
         "peers": 1,
         "session_transfer": 1,
+        # The move's WORKING-SET GATE (docs/design/move-working-set.md §11.1):
+        # ``POST /v1/desktop/sessions/{id}/transfer/preflight`` and the
+        # ``confirm_working_set``/``without_working_set`` transfer fields. Its own
+        # key, per this file's rule: the old dialog keeps working byte for byte and
+        # meets an honest ``working_set_unconfirmed`` refusal (with the manifest)
+        # only for a session that has git worktrees to account for.
+        "session_transfer_working_set": 1,
+        # The preflight's DESTINATION PROBE (move-working-set.md §11.1): each
+        # ``working_set.worktrees[]`` row carries the destination's own
+        # ``clone_check`` answer (``ok``/``destination_cannot_fetch``/``_push``/
+        # ``_clone``/``unknown_destination``/``no_remote``), optional
+        # ``https_rewrite``/``remedy``/``missing_tools``, and the block carries
+        # ``destination_probe``. Additive members of the same mapping; a renderer
+        # without this key simply does not show them.
+        "session_transfer_working_set_probe": 1,
         # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
         # tool and ``/project``). ONE key gating both the affordance and
         # the reads: the Projects tab, its CRUD dialogs and the
@@ -1050,6 +1070,12 @@ def static_feature_flags() -> dict[str, Any]:
         # /v1/desktop/devices`, and the feed's `approvals.pair_request`. Its own key so
         # a renderer that lacks it never posts a pair-ack body an older backend 404s.
         "phone_pairing": 1,
+        # MESH PAIRING FROM THE MESH APPROVALS (design mesh-pairing-approvals §3.3):
+        # `GET /v1/desktop/mesh/pairings`, `POST .../{side}/{invite_id}/answer` (app
+        # attestation required; 403 `pairing_needs_app` otherwise), and the feed's
+        # `approvals.pairing_id`. Its own key so a renderer without it never shows a
+        # card an older backend cannot serve.
+        "mesh_pairing": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
         "profile_proposals": 1,
@@ -1333,6 +1359,13 @@ def static_feature_flags() -> dict[str, Any]:
         # and on/off are NOT on these routes: they stay on `PATCH
         # /v1/settings/{key}`, the one write funnel.
         "notification_sounds": 1,
+        # TEAM BRIDGE CARD BODIES (bridge-body design §4): `GET
+        # /v1/desktop/sessions/{id}/bridge-cards/{entry_id}/body` and the relay's
+        # `/api/sessions/{id}/bridge-cards/{entry_id}/body` answer the admitted
+        # body (or held/refused/pending state) behind one inbound bridge card.
+        # Shared by desktop and relay because both serve the route. Absent, a
+        # client keeps today's "body unavailable" copy.
+        "team_bridge_card_body": 1,
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the

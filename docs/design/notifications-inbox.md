@@ -210,6 +210,57 @@ cases, durable rows/tool receipts required. Run one positive and one negative
 first, stop on failure, and have independent QA repeat the discriminating pair.
 No fabricated statistical claim or positive-only flood-prevention claim.
 
+### 3.3a Explicit standalone notification authority
+
+Spawn provenance and notification routing are separate facts. An ordinary
+`agent-workstream` still reports to its delegating agent and has no `notify`
+tool. Attaching or registering a specialist, selecting `action_class=proactive`,
+receiving operator text, and ordinary spawn options do not promote that policy.
+A standalone workstream can receive an explicit operator-authorized local grant:
+
+```sh
+lop sessions notifications <session> --grant --reason "Operator requested standalone updates"
+lop sessions notifications <session>
+lop sessions notifications <session> --revoke --reason "Operator revoked standalone updates"
+```
+
+The command emits JSON and resolves the session reference unambiguously before
+writing. The additive `notification-authority.json` sidecar records schema version,
+session id, decision, source (`operator-cli`), reason and update time; it never
+rewrites `origin.json` or its `opened_by` provenance. The grant is bound to that
+session id, fails closed when malformed, and is checked again at invocation so a
+cached tool cannot survive revocation. Granting a hidden/subagent or mesh-placed
+session is refused; a grant cannot override child job ownership, one-shot/output
+contracts, hidden origin, `LOP_NOTIFY=0`, or remote placement policy. It survives a
+normal local park/resume, but copying its file into a different session grants
+nothing.
+
+This is explicit same-account **routing policy**, not authenticated-human proof
+or a sandbox against arbitrary code running as the operator. An assistant may
+execute the control only under the operator's explicit authorization for that
+session. It is not exposed as a self-granting agent tool, spawn flag, or profile
+field. Existing guard refusals still apply; a refused write is not retried through
+another route.
+
+### 3.3b Notify-requested delivery completion fallback
+
+A successful `notify:true` wake or monitor that produced assistant text, has the
+same deliberate-notify authority, and did not already call `notify` writes one
+normal-priority unread inbox item before turn persistence finishes. The final
+assistant text supplies its title/body and anchor, through the session's redactor
+and the store's existing title/body limits. Its key is `completion:<run token>`.
+This adds durable inbox visibility without requiring a second explicit model tool
+call. Quiet/empty turns, errors/interruption, ungranted workstreams, true children,
+and disabled notify capability do not fabricate a successful-completion item.
+An explicit item suppresses the fallback regardless of its priority.
+
+The automatic item is intentionally **normal**, not high: the existing completion
+channel owns this run's OS banner, including its settings, permissions, quieting,
+origin and delivery claims. It does not enter the high-item banner ladder, so it
+cannot produce a second OS notification. Explicit high `notify` retains the item
+ladder and existing completion-banner suppression. The fallback's durable write
+is not evidence that an OS permission or presence gate allowed a banner.
+
 ### 3.4 Quiet ends
 
 A wake or monitor turn that called `notify` may end with `no_reply` — including

@@ -1498,6 +1498,11 @@ class ScreenModelRunner:
             tool_choice="none",
             isolated=True,
             purpose="team_bridge_screen",
+            # No cache markers: every screen is ONE unique user turn whose
+            # static instructions are under the 512-token cache minimum, so a
+            # marker only bought the write premium (7-day ledger: 37,014
+            # distinct prompt hashes over 37,457 calls, 1.4% hit).
+            cache_markers="none",
             max_tokens=self._max_tokens,
             # A verdict should be a function of the bytes, not of sampling
             # noise: identical submissions were measured flipping 2 of 4

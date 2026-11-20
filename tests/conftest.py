@@ -59,6 +59,11 @@ _AMBIENT_VARS = (
     # point the suite's remote-compute client at a real host; tests that cover
     # the override set their own loopback value.
     "LOP_REMOTE_COMPUTE_API_URL",
+    # The working-set probe's host allowlist (``network/workset_probe.py``)
+    # names REAL machines the probe may ssh into. A developer's value leaking
+    # in would widen the allowlist the host-policy tests assert on and could
+    # aim a probe at a real host; tests that cover the override set their own.
+    "LOCAL_OPERATOR_MOVE_PROBE_HOSTS",
     # The per-build runtime image root (``procname.runtime_root``) is resolved
     # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
@@ -512,7 +517,46 @@ _AMBIENT_VARS = (
     "GOOGLE_API_KEY",
     "GOOGLE_AI_STUDIO_API_KEY",
     "GEMINI_API_KEY",
+    # Google Vertex AI: the GCP project/location name real cloud resources a
+    # developer's shell points at, the OAuth client pair is a credential, and
+    # the token-URI overrides are ESCAPE HATCHES that waive the pinned
+    # token-endpoint check the suite asserts.
+    "GOOGLE_CLOUD_PROJECT",
+    "VERTEX_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "VERTEX_LOCATION",
+    "GOOGLE_VERTEX_OAUTH_CLIENT_ID",
+    "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET",
+    "GOOGLE_VERTEX_TOKEN_URI",
+    "GOOGLE_VERTEX_ALLOW_CUSTOM_TOKEN_URI",
     "XAI_API_KEY",
+    # Amazon Bedrock (``providers/bedrock``). The bearer token is a live
+    # credential; ``LOP_BEDROCK_AUTH`` is an ESCAPE HATCH that forces the auth
+    # mode (bearer vs SigV4), so inheriting it would push every resolution cell
+    # down one branch while it looked like it tested the selection; and
+    # ``LOP_BEDROCK_ENDPOINT_URL`` names the host that receives signed requests,
+    # so a developer's staging/VPC value would aim the suite at a real endpoint.
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "LOP_BEDROCK_AUTH",
+    "LOP_BEDROCK_ENDPOINT_URL",
+    # botocore's default credential chain, which the Bedrock SigV4 path
+    # resolves through. Production code does not read these by name (botocore
+    # does), so the walker cannot demand them — but a developer's exported AWS
+    # identity would otherwise sign a test's request with real keys or pick a
+    # real profile/region. Tests that cover the chain set their own values.
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
     "KIMI_API_KEY",
     "MOONSHOT_API_KEY",
     "ALIBABA_CLOUD_API_KEY",

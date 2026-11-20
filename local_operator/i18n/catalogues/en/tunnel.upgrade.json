@@ -1,0 +1,5 @@
+{
+  "tunnel.upgrade.client.label": "Tunnel client update required",
+  "tunnel.upgrade.client.guidance": "Radient requires a relay-capable tunnel client. Run {update_command}, remove the {override} override from config.yml if set, then reconnect with {reconnect_command}. Signing in again or changing billing will not fix this.",
+  "tunnel.upgrade.client.plain": "Update Local Operator to a release that supports relay-only tunnels. In config.yml, remove the tunnel.transport: cloudflare override if set, then reconnect this computer. Signing in again or changing billing will not fix this."
+}
