@@ -4872,6 +4872,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
         "temp FILE; unlink rejects directories.",
     ),
+    # Heavy-lease audit trail rotation. Every caller of heavy_audit.record passes
+    # the same `heavy_lease.lease_dir()`; `audit_path(directory)` is the fixed
+    # `heavy-lease.jsonl` there, and rotation only shifts its fixed `.1`..`.3`
+    # siblings. No session id or caller-supplied name enters any of the paths.
+    (
+        "local_operator/heavy_audit.py::_rotate_if_needed",
+        "os.replace",
+        "Renames only run/heavy-jobs/heavy-lease.jsonl and its fixed .1..3 generations "
+        "within that directory (.3 overwritten: the count prune); the paths never carry a "
+        "session id and never resolve under sessions/.",
+    ),
 )
 
 
