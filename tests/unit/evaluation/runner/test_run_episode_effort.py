@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 import pytest
 
+from local_operator.evaluation.runner.secrets import StaticSecretResolver
 from local_operator.model.configure import build_model_spec
 from scripts import run_episode
 
@@ -295,7 +296,9 @@ async def test_admitted_session_effort_uses_scoped_route_before_allocation(
         status = owned_process.read_owner_status(channel.path)
         assert status is not None and status.phase == "admitted"
     else:
-        assert await run_episode.run(args, _test_owner_admission=admit) == run_episode.EXIT_PREFLIGHT
+        assert (
+            await run_episode.run(args, _test_owner_admission=admit) == run_episode.EXIT_PREFLIGHT
+        )
         refusal = capsys.readouterr().err
         assert (
             "session route deepseek/fixture-dynamic does not accept reasoning effort 'max'"
@@ -472,12 +475,15 @@ async def test_first_session_turn_serializes_effective_effort(
     )
     response = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
     if provider == "deepseek":
-        response = "".join(
-            "data: "
-            + json.dumps({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
-            + "\n\n"
-            for delta, finish in (({"content": "OK"}, None), ({}, "stop"))
-        ) + "data: [DONE]\n\n"
+        response = (
+            "".join(
+                "data: "
+                + json.dumps({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+                + "\n\n"
+                for delta, finish in (({"content": "OK"}, None), ({}, "stop"))
+            )
+            + "data: [DONE]\n\n"
+        )
 
     async def open_and_prompt(*, session_spec: Any, roots: SessionRoots, **_kwargs: Any) -> Any:
         # Replace the adapter/guest, but open and prompt the same typed Session.
@@ -544,7 +550,7 @@ async def test_first_session_turn_serializes_effective_effort(
         spec=SimpleNamespace(secret_refs=(), episode_id="effort-wire"),
         config=None,
         selector=SimpleNamespace(core_source=object()),
-        resolver=SimpleNamespace(resolve=lambda _: ()),
+        resolver=StaticSecretResolver({}),
         route=(_PROVIDER, _MODEL),
     )
 
