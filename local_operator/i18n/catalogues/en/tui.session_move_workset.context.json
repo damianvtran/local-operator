@@ -1,0 +1,52 @@
+{
+  "tui.session_move_workset.title_sends": {
+    "role": "TUI modal title",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim."
+  },
+  "tui.session_move_workset.title_stays": {
+    "role": "TUI modal title (files stay)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "tui.session_move_workset.checkbox_sends": {
+    "role": "TUI checkbox label the user must tick before Move is enabled",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim. First person, the user's own statement."
+  },
+  "tui.session_move_workset.checkbox_stays": {
+    "role": "TUI checkbox label (files stay)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "First person, the user's own statement. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
+  },
+  "tui.session_move_workset.confirm": {
+    "role": "TUI button",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "one short verb"
+  },
+  "tui.session_move_workset.cancel": {
+    "role": "TUI button",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "one short verb"
+  },
+  "tui.session_move_workset.loading": {
+    "role": "TUI status line while the preflight runs",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "tui.session_move_workset.cancelled": {
+    "role": "transcript notice after the user pressed Cancel on the working-files card",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Neutral, not an error: the user chose not to move. Nothing was moved."
+  },
+  "tui.session_move_workset.confirm_without": {
+    "role": "button on the working-files card when the files could not be listed: moves the conversation and leaves any working files behind",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Short button label (verb first)."
+  },
+  "tui.session_move_workset.checkbox_without": {
+    "role": "required checkbox before 'Move without the working files'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{source} is the device that keeps the files, verbatim. First person, like the other checkbox."
+  }
+}

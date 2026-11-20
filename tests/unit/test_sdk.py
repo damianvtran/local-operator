@@ -291,6 +291,60 @@ async def test_a_real_turn_streams_on_the_same_engine(scratch: SessionRoots) -> 
     assert Path(session.transcript_path).exists(), "a completed turn has written the transcript"
 
 
+@pytest.mark.asyncio
+async def test_a_declared_inventory_narrows_block_zero_not_just_block_one(
+    scratch: SessionRoots,
+) -> None:
+    """REGRESSION: the factory's block provider closed over the PRE-narrowing
+    tool list, so a session declared to three tools still shipped the browser
+    playbook (and library/todo/subagent/ask prose) in block 0 while block 1 said
+    the tool was not given. Block 0 must follow the session's live tool set —
+    before the first turn, so the frozen prefix carries the narrowed shape."""
+    declared = ("read", "web_search", "web_fetch")
+    async with sdk.open_session(
+        _mock_spec(approvals=ApprovalPolicy.declared(list(declared))), roots=scratch
+    ) as session:
+        session = cast(Any, session)
+        assert set(session.tool_inventory) == set(declared)
+        blocks = await session._prepare_system_blocks()
+        head = blocks[0]
+        for absent in (
+            "Browser work goes through the `browser` tool",
+            "Interactive terminal work (a TUI, REPL, installer, prompt)",
+            "## Library",
+            "Keep the todo list honest",
+            "Subagents: `task` delegates",
+            "Other `lop` sessions:",
+            "Session tags (`tags`)",
+            "`eval` persists Python state",
+            "call\n`no_reply` and write nothing",
+            "Reach for `ask` only when",
+            "Once that bar is met, `ask` is the only channel",
+        ):
+            assert absent not in head, f"block 0 still carries prose for an absent tool: {absent!r}"
+        assert "No `ask` tool in this session: decide yourself" in head
+        # The deciding-yourself guidance is judgement, not tool usage: it stays.
+        assert "Deciding is your job" in head
+        assert "An instruction already given is standing authorization." in head
+        # Block 0 and block 1 no longer contradict each other about the browser.
+        assert "`read` elided output at its `spill://` handle" in head
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_session_keeps_the_tool_gated_prose(scratch: SessionRoots) -> None:
+    """The control for the test above: the same SDK path without a declaration
+    holds library/todo/task/eval, so their prose is still rendered."""
+    async with sdk.open_session(_mock_spec(), roots=scratch) as session:
+        session = cast(Any, session)
+        held = set(session.tool_inventory)
+        assert {"library", "todo", "task", "eval"} <= held
+        head = (await session._prepare_system_blocks())[0]
+        assert "## Library" in head
+        assert "Keep the todo list honest" in head
+        assert "Subagents: `task` delegates" in head
+        assert "`eval` persists Python state" in head
+
+
 # --- approval policy -------------------------------------------------------------
 
 

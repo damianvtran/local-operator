@@ -1,0 +1,470 @@
+[
+  {
+    "message_id": "wire.session_status.retired_label",
+    "parameters": {
+      "base": "Interrupted"
+    },
+    "rendered": "Interrupted——因更新已退役",
+    "cells": 25,
+    "chars": 19
+  },
+  {
+    "message_id": "wire.session_status.interrupted",
+    "parameters": {},
+    "rendered": "已中断",
+    "cells": 6,
+    "chars": 3
+  },
+  {
+    "message_id": "wire.session_status.unseen_interruption",
+    "parameters": {},
+    "rendered": "未读：已中断",
+    "cells": 12,
+    "chars": 6
+  },
+  {
+    "message_id": "wire.session_status.retired",
+    "parameters": {},
+    "rendered": "已中断——为更新而退出",
+    "cells": 20,
+    "chars": 11
+  },
+  {
+    "message_id": "wire.session_status.unseen_retirement",
+    "parameters": {},
+    "rendered": "未读：已中断——为更新而退出",
+    "cells": 26,
+    "chars": 14
+  },
+  {
+    "message_id": "wire.session_status.signal_stop",
+    "parameters": {
+      "command": "none"
+    },
+    "rendered": "已中断——收到信号后停止",
+    "cells": 22,
+    "chars": 12
+  },
+  {
+    "message_id": "wire.session_status.signal_stop",
+    "parameters": {
+      "command": "/stop --all"
+    },
+    "rendered": "已中断——收到信号后停止（通过/stop --all）",
+    "cells": 41,
+    "chars": 27
+  },
+  {
+    "message_id": "wire.session_status.signal_stop",
+    "parameters": {
+      "command": "/kill --all"
+    },
+    "rendered": "已中断——收到信号后停止（通过/kill --all）",
+    "cells": 41,
+    "chars": 27
+  },
+  {
+    "message_id": "wire.session_status.unseen_signal_stop",
+    "parameters": {
+      "command": "none"
+    },
+    "rendered": "未读：已中断——收到信号后停止",
+    "cells": 28,
+    "chars": 15
+  },
+  {
+    "message_id": "wire.session_status.unseen_signal_stop",
+    "parameters": {
+      "command": "/stop --all"
+    },
+    "rendered": "未读：已中断——收到信号后停止（通过/stop --all）",
+    "cells": 47,
+    "chars": 30
+  },
+  {
+    "message_id": "wire.session_status.unseen_signal_stop",
+    "parameters": {
+      "command": "/kill --all"
+    },
+    "rendered": "未读：已中断——收到信号后停止（通过/kill --all）",
+    "cells": 47,
+    "chars": 30
+  },
+  {
+    "message_id": "wire.session_status.forced_kill",
+    "parameters": {
+      "command": "none"
+    },
+    "rendered": "已中断——已强制终止",
+    "cells": 18,
+    "chars": 10
+  },
+  {
+    "message_id": "wire.session_status.forced_kill",
+    "parameters": {
+      "command": "/stop --all"
+    },
+    "rendered": "已中断——已强制终止（通过/stop --all）",
+    "cells": 37,
+    "chars": 25
+  },
+  {
+    "message_id": "wire.session_status.forced_kill",
+    "parameters": {
+      "command": "/kill --all"
+    },
+    "rendered": "已中断——已强制终止（通过/kill --all）",
+    "cells": 37,
+    "chars": 25
+  },
+  {
+    "message_id": "wire.session_status.unseen_forced_kill",
+    "parameters": {
+      "command": "none"
+    },
+    "rendered": "未读：已中断——已强制终止",
+    "cells": 24,
+    "chars": 13
+  },
+  {
+    "message_id": "wire.session_status.unseen_forced_kill",
+    "parameters": {
+      "command": "/stop --all"
+    },
+    "rendered": "未读：已中断——已强制终止（通过/stop --all）",
+    "cells": 43,
+    "chars": 28
+  },
+  {
+    "message_id": "wire.session_status.unseen_forced_kill",
+    "parameters": {
+      "command": "/kill --all"
+    },
+    "rendered": "未读：已中断——已强制终止（通过/kill --all）",
+    "cells": 43,
+    "chars": 28
+  },
+  {
+    "message_id": "wire.session_status.complete",
+    "parameters": {},
+    "rendered": "已完成",
+    "cells": 6,
+    "chars": 3
+  },
+  {
+    "message_id": "wire.session_status.unseen_completion",
+    "parameters": {},
+    "rendered": "未读：已完成",
+    "cells": 12,
+    "chars": 6
+  },
+  {
+    "message_id": "wire.session_status.recent",
+    "parameters": {},
+    "rendered": "近期活动",
+    "cells": 8,
+    "chars": 4
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "parameters": {
+      "count": 0
+    },
+    "rendered": "已停止（0个唤醒已休眠）",
+    "cells": 23,
+    "chars": 12
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "parameters": {
+      "count": 1
+    },
+    "rendered": "已停止（1个唤醒已休眠）",
+    "cells": 23,
+    "chars": 12
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "parameters": {
+      "count": 2
+    },
+    "rendered": "已停止（2个唤醒已休眠）",
+    "cells": 23,
+    "chars": 12
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "parameters": {
+      "count": 55
+    },
+    "rendered": "已停止（55个唤醒已休眠）",
+    "cells": 24,
+    "chars": 13
+  },
+  {
+    "message_id": "wire.session_status.error",
+    "parameters": {},
+    "rendered": "出错",
+    "cells": 4,
+    "chars": 2
+  },
+  {
+    "message_id": "wire.session_status.unseen_error",
+    "parameters": {},
+    "rendered": "未读：出错",
+    "cells": 10,
+    "chars": 5
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "user_stop"
+    },
+    "rendered": "出错——用户已停止",
+    "cells": 16,
+    "chars": 9
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "runtime_stall_bound"
+    },
+    "rendered": "出错——运行时停滞超时后自行退出",
+    "cells": 30,
+    "chars": 16
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "continuation_limit"
+    },
+    "rendered": "出错——已达续接上限；待处理消息已丢弃",
+    "cells": 36,
+    "chars": 19
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "output_limit"
+    },
+    "rendered": "出错——已达模型输出上限；无法继续",
+    "cells": 32,
+    "chars": 17
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "runtime_retired"
+    },
+    "rendered": "出错——为更新而退出",
+    "cells": 18,
+    "chars": 10
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "runtime_shutdown"
+    },
+    "rendered": "出错——运行时在本轮中终止",
+    "cells": 24,
+    "chars": 13
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "runtime_overdue"
+    },
+    "rendered": "出错——运行时超过进度时限后退出以更新",
+    "cells": 36,
+    "chars": 19
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "runtime_update_failed"
+    },
+    "rendered": "出错——更新未完成；运行时仍使用已加载的构建",
+    "cells": 42,
+    "chars": 22
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "runtime_killed"
+    },
+    "rendered": "出错——运行时未正常退出便消失；未收到停止请求",
+    "cells": 44,
+    "chars": 23
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "install_mid_update"
+    },
+    "rendered": "出错——安装版本在本轮中被替换",
+    "cells": 28,
+    "chars": 15
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "owner_lost"
+    },
+    "rendered": "出错——运行时在本轮中停止响应",
+    "cells": 28,
+    "chars": 15
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "disposed"
+    },
+    "rendered": "出错——会话在本轮中被释放",
+    "cells": 24,
+    "chars": 13
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "other"
+    },
+    "rendered": "出错",
+    "cells": 4,
+    "chars": 2
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "parameters": {
+      "cause": "UNKNOWN_EXTERNAL_CAUSE"
+    },
+    "rendered": "出错",
+    "cells": 4,
+    "chars": 2
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "user_stop"
+    },
+    "rendered": "未读：出错——用户已停止",
+    "cells": 22,
+    "chars": 12
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "runtime_stall_bound"
+    },
+    "rendered": "未读：出错——运行时停滞超时后自行退出",
+    "cells": 36,
+    "chars": 19
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "continuation_limit"
+    },
+    "rendered": "未读：出错——已达续接上限；待处理消息已丢弃",
+    "cells": 42,
+    "chars": 22
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "output_limit"
+    },
+    "rendered": "未读：出错——已达模型输出上限；无法继续",
+    "cells": 38,
+    "chars": 20
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "runtime_retired"
+    },
+    "rendered": "未读：出错——为更新而退出",
+    "cells": 24,
+    "chars": 13
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "runtime_shutdown"
+    },
+    "rendered": "未读：出错——运行时在本轮中终止",
+    "cells": 30,
+    "chars": 16
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "runtime_overdue"
+    },
+    "rendered": "未读：出错——运行时超过进度时限后退出以更新",
+    "cells": 42,
+    "chars": 22
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "runtime_update_failed"
+    },
+    "rendered": "未读：出错——更新未完成；运行时仍使用已加载的构建",
+    "cells": 48,
+    "chars": 25
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "runtime_killed"
+    },
+    "rendered": "未读：出错——运行时未正常退出便消失；未收到停止请求",
+    "cells": 50,
+    "chars": 26
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "install_mid_update"
+    },
+    "rendered": "未读：出错——安装版本在本轮中被替换",
+    "cells": 34,
+    "chars": 18
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "owner_lost"
+    },
+    "rendered": "未读：出错——运行时在本轮中停止响应",
+    "cells": 34,
+    "chars": 18
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "disposed"
+    },
+    "rendered": "未读：出错——会话在本轮中被释放",
+    "cells": 30,
+    "chars": 16
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "other"
+    },
+    "rendered": "未读：出错",
+    "cells": 10,
+    "chars": 5
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "parameters": {
+      "cause": "UNKNOWN_EXTERNAL_CAUSE"
+    },
+    "rendered": "未读：出错",
+    "cells": 10,
+    "chars": 5
+  }
+]

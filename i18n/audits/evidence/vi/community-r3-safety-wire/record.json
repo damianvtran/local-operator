@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "audit_id": "community-round-3-vi-wire.community-08c6dfffd961",
+  "audit_kind": "bounded_independent_second_safety_audit",
+  "repository": "damianvtran/local-operator",
+  "pr": 4221,
+  "locale": "vi",
+  "namespace": "wire.community",
+  "audit_date": "2026-11-18",
+  "audited_revision": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+  "candidate_tree": "13010a25c61439070020148c7f01d0a6261a9f09",
+  "combined_patch_sha256": "7a520bb614cd7694422cd7d955c3b400b830a5e3d2f1bb7b6ae0d74a291db17f",
+  "scope": "Approval-card keys only. The card describes audience, moderation, attribution and per-post consent, not the TUI keyboard gate. None of the five strings asserts approval or publication has already happened.",
+  "auditor": {
+    "agent": "reviewer",
+    "model": "openai/gpt-6.2-sol",
+    "date": "2026-11-18",
+    "session": "08c6dfffd961",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "first_auditors": [
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "c739715f0519",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/vi/community-primary/record.json",
+      "sha256": "f6250559315a8679f678362b3a2bf7a3c583703bf91bbdccd7f0fbf144e419cc"
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.json",
+      "sha256": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.context.json",
+      "sha256": "b0c568ca3380d372c4f2ca43f2046ccc9dd8bf19e4c22014e037dcb63518e769"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/wire.community.json",
+      "sha256": "70cd8f2d3a6c0e98c4a787178c829e92000ccc1153788c6d1e15618e4cb48ff5"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "deferred_non_gating_finding_ids": []
+  },
+  "keys_semantically_audited": [
+    "wire.community.post_card_audience",
+    "wire.community.post_card_each_time",
+    "wire.community.post_card_label",
+    "wire.community.post_card_tainted",
+    "wire.community.post_card_title"
+  ],
+  "per_key": {
+    "wire.community.post_card_audience": {
+      "en": "Audience: all members of {channel} · checked by the community's moderator before anyone sees it.",
+      "target": "Người xem: mọi thành viên của {channel} · người kiểm duyệt của cộng đồng kiểm tra trước khi bất kỳ ai nhìn thấy.",
+      "verdict": "pass",
+      "reason": "Mọi thành viên names the full audience; kiểm tra trước khi puts community moderation before anyone sees it."
+    },
+    "wire.community.post_card_each_time": {
+      "en": "Each post asks you; there are no standing permissions yet.",
+      "target": "Mỗi bài đăng đều hỏi bạn; hiện chưa có quyền thường trực.",
+      "verdict": "pass",
+      "reason": "Mỗi bài đăng and chưa có quyền thường trực retain per-post prompts and no standing permission."
+    },
+    "wire.community.post_card_label": {
+      "en": "Shown as your own post: this server can't label agent posts yet, so others won't see it came from your agent.",
+      "target": "Hiển thị như bài đăng của chính bạn: máy chủ này chưa thể gắn nhãn bài đăng của tác nhân, nên người khác sẽ không biết bài đến từ tác nhân của bạn.",
+      "verdict": "pass",
+      "reason": "Chính bạn and người khác sẽ không biết retain self-attribution and hidden agent provenance."
+    },
+    "wire.community.post_card_tainted": {
+      "en": "Your agent read community posts in this session, so no standing permission applies until a new session; only your answer posts this.",
+      "target": "Tác nhân của bạn đã đọc bài đăng cộng đồng trong phiên này, nên không quyền thường trực nào được áp dụng cho đến phiên mới; chỉ câu trả lời của bạn mới đăng được bài này.",
+      "verdict": "pass",
+      "reason": "Không quyền thường trực nào … cho đến phiên mới means no standing grant applies before a new session; chỉ … mới keeps posting conditional on your answer."
+    },
+    "wire.community.post_card_title": {
+      "en": "Post to {channel} in {community}, as you?",
+      "target": "Đăng vào {channel} trong {community} với tư cách là bạn?",
+      "verdict": "pass",
+      "reason": "Với tư cách là bạn? asks whether to post as the reader, with channel and community."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/community-r3-safety-wire/report.md",
+      "sha256": "fff324a681a8e3336dc5e44bfde6a026d3ae5cbdee61ce790076e9fd98a19905"
+    }
+  ]
+}

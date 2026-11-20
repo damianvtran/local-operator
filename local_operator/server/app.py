@@ -57,6 +57,7 @@ from local_operator.server.routes import (
     desktop_catalogues,
     desktop_claim,
     desktop_code_requests,
+    desktop_community,
     desktop_credentials,
     desktop_hub,
     desktop_imports,
@@ -66,6 +67,7 @@ from local_operator.server.routes import (
     desktop_link_preview,
     desktop_mcp,
     desktop_mesh,
+    desktop_mesh_pairings,
     desktop_mobile_doctor,
     desktop_mobile_password,
     desktop_monitors,
@@ -235,10 +237,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # instead of paying the 26.5 s cold scan inside the request that opened the
     # Library page. Its first run backfills newest-first and reports
     # ``state=building`` with real session counts until it catches up.
+    #
+    # OWNED BY THIS LIFESPAN, AND STOPPED IN ITS TEARDOWN. The indexer's threads
+    # are daemons, so nothing else ends them before the process exits: every
+    # in-process boot (each ``with TestClient(app)``) used to leave a
+    # ``library-indexer`` and a ``library-thumbs`` thread running against a
+    # config dir the test then deleted. ``metadata._connect`` mkdirs a missing
+    # parent back and switches the fresh file to WAL while the old file's
+    # connections are still held, which SIGBUSed xdist workers in CI. We keep
+    # the instance only when THIS boot started it: one already running (a lazy
+    # ``service.list_assets`` start, a caller's own indexer) is not ours to end.
+    library_indexer = None
     try:
-        from local_operator.library.indexer import ensure_started
+        from local_operator.library.indexer import ensure_started, is_running
 
-        ensure_started(config_dir)
+        already_running = is_running(config_dir)
+        started = ensure_started(config_dir)
+        if not already_running:
+            library_indexer = started
     except Exception:  # noqa: BLE001 — indexing must never be the failure
         logger.debug("library indexer unavailable at startup", exc_info=True)
 
@@ -413,6 +429,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `/health` said against the record it dialled from. Process-scoped and
     # random, never persisted — it identifies THIS process, not the install.
     app.state.instance_id = secrets.token_urlsafe(32)
+    # THE MESH PAIRING ATTESTATION LISTENER (`network.pairing_attest`): ONE per serve,
+    # at `<config>/run/attest/mesh-pairing.sock`, macOS only. Without it every pairing
+    # card answer is refused (`pairing_needs_app`) — fail closed, never a boot gate.
+    app.state.mesh_pairing_attest = None
+    try:
+        from local_operator.network import pairing_attest
+
+        app.state.mesh_pairing_attest = await pairing_attest.start_service(config_dir)
+    except Exception:  # noqa: BLE001 — additive, never a boot gate
+        logger.warning("mesh pairing attest listener not started", exc_info=True)
     # An announcer is what makes this process a DAEMON rather than merely an app
     # that happens to answer HTTP: `serve_command` announces the address it
     # bound, in-process for the daemon it serves and through the environment
@@ -758,6 +784,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Off-record panels belong to this HTTP lifetime, not the durable session.
         app.state.desktop_asides = None
         app.state.desktop_receipts = None
+        mesh_attest = getattr(app.state, "mesh_pairing_attest", None)
+        if mesh_attest is not None:
+            try:
+                await mesh_attest.close()
+            except Exception:  # noqa: BLE001 — teardown never raises
+                logger.debug("mesh pairing attest close failed", exc_info=True)
+            app.state.mesh_pairing_attest = None
         await app.state.scheduler_service.shutdown()
 
         app.state.config_manager = None
@@ -774,6 +807,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await unbind_hub_pool()
         except Exception:  # noqa: BLE001 — teardown of a socket pool must never be the failure
             logger.debug("hub http pool close failed at shutdown", exc_info=True)
+        # The library indexer this boot started (see the startup block for the
+        # SIGBUS this prevents). Never raises: a derived index that will not stop
+        # is logged, not allowed to abort the rest of the teardown; it sits in
+        # ``finally`` so a raise earlier in the teardown cannot leak the threads. ``stop``
+        # joins with its own 5 s bound and the loops honour the stop flag
+        # between units of work, so this does not hold shutdown on a long scan.
+        if library_indexer is not None:
+            try:
+                from local_operator.library.indexer import stop_started
+
+                # Off the loop: the joins block, and the loop still serves the
+                # rest of the teardown (and the watchdog) while they run.
+                await asyncio.to_thread(stop_started, library_indexer)
+            except Exception:  # noqa: BLE001 — teardown of a derived index never raises
+                logger.debug("library indexer stop failed at shutdown", exc_info=True)
         # The record outlives nothing: it is removed here, LAST, and under
         # `finally:` so that no exit path can leave a file behind claiming a
         # live daemon at a port nothing listens on. The heartbeat keeps running
@@ -913,7 +961,31 @@ _LEGACY_CONTROL_PATHS = frozenset(
 #: OAuth access token — they read and publish organization content through the
 #: hub as the signed-in PERSON — so they cannot sit at a weaker posture than the
 #: agent routes that spend the same credential.
-_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams")
+#:
+#: ``/v1/chat`` is the family that STARTS AN AGENT TURN. ``POST /v1/chat`` and
+#: its agent-scoped and ``/async`` siblings call ``create_operator`` and then
+#: ``handle_user_input``, and a server-built session runs its tools unattended
+#: — that is the contract the desktop app's authenticated chat relies on, so
+#: the approval default is NOT the thing to change. What must hold instead is
+#: that only the bearer holder reaches those routes: a turn is immediate
+#: execution, the same reason ``/v1/schedules`` (delayed execution) is here.
+#: Gated by prefix so every current and future ``/v1/chat*`` route is covered
+#: the day it exists, on every method (HEAD included, see the matchers).
+#:
+#: ``/v1/sse/jobs`` and ``/v1/sse/messages`` stream those turns' output —
+#: conversation content, tool output — keyed by an id the caller got from a
+#: gated route. Gating them keeps the stream at the posture of the turn that
+#: produced it. ``/v1/sse/capabilities`` (transport negotiation, no content)
+#: deliberately stays open and is not covered by either prefix.
+_LEGACY_GATED_PREFIXES = (
+    "/v1/agents",
+    "/v1/chat",
+    "/v1/jobs",
+    "/v1/schedules",
+    "/v1/sse/jobs",
+    "/v1/sse/messages",
+    "/v1/teams",
+)
 
 #: The ONLY routes under :data:`_LEGACY_GATED_PREFIXES` left open in managed
 #: mode, each with the reason it is safe. Keyed ``"METHOD /path/template"`` using
@@ -928,8 +1000,31 @@ _LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams"
 #: gated the moment it exists, and an omission fails a test instead of shipping
 #: a bypass.
 #:
-#: Currently EMPTY, and the emptiness is load-bearing: no legacy route today has
-#: a justification for staying open.
+#: ONE entry today, and it is a recorded compatibility hold rather than a claim
+#: of safety: ``POST /v1/chat/agents/{agent_id}/edit``. The desktop canvas's
+#: inline edit calls it straight from the renderer (``file://``, Origin
+#: ``"null"``) with a plain ``fetch`` that carries no bearer, so gating it would
+#: break that feature for every managed install.
+#:
+#: What the route really does: ONE model completion (``executor.invoke_model``,
+#: ``tools=[]``, ``tool_choice="none"``; no session, no tool executes) over the
+#: agent's stored conversation history plus the edit prompt and file text, and
+#: it returns the model's text. With the bearer it may read the target from the
+#: agent's workspace (confined by ``_read_edit_workspace_file``) and persists
+#: ``data:`` attachments under ``<config>/uploads``. WITHOUT the bearer
+#: (``_edit_caller_is_unauthenticated_managed`` in ``routes/chat.py``) it is
+#: narrowed to the renderer's own request shape: Origin ``"null"`` or a
+#: non-browser caller with no Origin (anything else is 403 and gets no CORS
+#: grant -- ``desktop_origin_cors``), the caller's ``file_content`` is required
+#: (no workspace read), and attachments are never written to disk.
+#:
+#: The RESIDUAL this entry still carries: a ``null``-origin page (a sandboxed
+#: iframe, a local file) or a local process that knows an agent's UUID can
+#: have that agent's stored history fed to the model and, with a prompt asking
+#: for it, echoed back -- and spend model quota. Agent ids are disclosed only by
+#: gated routes. Remove this entry in the change that moves the UI's edit call
+#: onto the main-process, bearer-carrying desktop transport — the coverage
+#: tests then hold the route gated.
 #:
 #: It previously held the two agent-scoped schedules routes, excused as "paired
 #: with the ungated /v1/schedules/{schedule_id}; gate the surface as one
@@ -945,7 +1040,17 @@ _LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams"
 #: Before adding a key here, check the route against the router rather than
 #: against the shape of the URL: a path that LOOKS like the counterpart of
 #: something ungated may be the only way in.
-_LEGACY_GATE_EXCEPTIONS: dict[str, str] = {}
+_LEGACY_GATE_EXCEPTIONS: dict[str, str] = {
+    "POST /v1/chat/agents/{agent_id}/edit": (
+        "one model completion, no tools, over the agent's stored history and the "
+        "caller's buffer; without the bearer it requires file_content (no "
+        "workspace read), writes no attachments and admits only Origin null or "
+        "a non-browser caller. Open because the desktop renderer calls it "
+        "without the bearer; residual: a null-origin caller knowing an agent id "
+        "can have that agent's history echoed via the model, until the UI routes "
+        "the call through the main-process bearer transport"
+    ),
+}
 
 
 def _iter_routes(routes: Iterable[Any]) -> Iterator[tuple[str, frozenset[str]]]:
@@ -1001,6 +1106,22 @@ def _legacy_gate_matchers() -> tuple[tuple[Pattern[str], frozenset[str]], ...]:
         regex, _format, _converters = compile_path(path)
         matchers.append((regex, frozenset(gated)))
     return tuple(matchers)
+
+
+@lru_cache(maxsize=1)
+def _legacy_gate_exception_matchers() -> tuple[Pattern[str], ...]:
+    """Compiled path regexes of :data:`_LEGACY_GATE_EXCEPTIONS`, any method.
+
+    Method-agnostic on purpose: the CORS preflight for an exception route is an
+    ``OPTIONS`` request, and it is the preflight's grant that decides whether a
+    page may send the real request at all.
+    """
+    return tuple(compile_path(key.split(" ", 1)[1])[0] for key in _LEGACY_GATE_EXCEPTIONS)
+
+
+def _legacy_gate_exception_path(path: str) -> bool:
+    """Whether ``path`` is one of the managed gate's bearer-less exceptions."""
+    return any(regex.match(path) for regex in _legacy_gate_exception_matchers())
 
 
 def _legacy_desktop_gated(path: str, method: str) -> bool:
@@ -1231,6 +1352,14 @@ app.include_router(desktop_link_preview.router)
 # module, and the catalogue usage route returns credential identities that
 # this advisory must never echo. See `routes/desktop_quota.py`.
 app.include_router(desktop_quota.router)
+# The Local Operator Community member door (RFC v2.4 §7.2):
+# `/v1/desktop/community/communities...`. Every template starts with the
+# literal `community/communities` segment pair, which no sibling above
+# declares, so nothing registered earlier can swallow it. Registered
+# unconditionally: the handlers answer `community_disabled` themselves while
+# `LOCAL_OPERATOR_COMMUNITY` is off, so a dark install is a typed refusal
+# rather than a 404 the renderer would read as a broken backend.
+app.include_router(desktop_community.router)
 # The machine-wide wake surface. Registered AFTER `desktop_sessions` and after
 # the lifecycle routes for the reason the sessions module documents about its
 # own ordering: FastAPI matches in declaration order, so a `/v1/desktop/...`
@@ -1273,6 +1402,10 @@ app.include_router(desktop_approvals.router)
 # their own router because `desktop_approvals.router`'s route set is a pinned contract.
 # Two-segment children of the same template family, so they collide with nothing above.
 app.include_router(desktop_credentials.router)
+# Mesh pairing cards for the Mesh approvals (`features.mesh_pairing`): `GET
+# /v1/desktop/mesh/pairings` and `.../{side}/{invite_id}/answer`. Their own router for
+# the same pinned-contract reason; the `/v1/desktop/mesh/` prefix collides with nothing.
+app.include_router(desktop_mesh_pairings.router)
 # The CODE-REQUEST surface (`features.code_requests`): the per-session read of which PRs
 # and MRs this conversation touched, and the refresh affordance. Registered after the
 # approvals block for the reason each block above gives — FastAPI matches in declaration
@@ -1386,6 +1519,24 @@ async def desktop_origin_cors(request: Request, call_next):
     posture = desktop_posture()
     allowed = posture.origins
     origin = request.headers.get("origin")
+    # The managed gate's open exceptions (today only the inline-edit route) are
+    # reachable without the bearer, so even an allowlist-less managed daemon
+    # must not hand them a grant for a foreign origin: the renderer that the
+    # exception exists for sends ``Origin: null``, and an echoed grant for any
+    # other origin -- on the preflight too, which ``CORSMiddleware`` answers
+    # without reaching the route -- would let that page read the model's reply.
+    # ``"null"`` and admitted origins keep their grant, so inline edit and a
+    # bearer'd desktop caller are unchanged.
+    if (
+        posture.enabled
+        and origin is not None
+        and origin != "null"
+        and origin not in allowed
+        and _legacy_gate_exception_path(request.url.path)
+    ):
+        del response.headers["access-control-allow-origin"]
+        del response.headers["access-control-allow-credentials"]
+        return response
     if not allowed:
         if posture.enabled or origin is None:
             return response

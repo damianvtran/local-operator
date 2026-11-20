@@ -1,0 +1,7 @@
+{
+  "wire.community.post_card_audience": "Người xem: mọi thành viên của {channel} · người kiểm duyệt của cộng đồng kiểm tra trước khi bất kỳ ai nhìn thấy.",
+  "wire.community.post_card_each_time": "Mỗi bài đăng đều hỏi bạn; hiện chưa có quyền thường trực.",
+  "wire.community.post_card_label": "Hiển thị như bài đăng của chính bạn: máy chủ này chưa thể gắn nhãn bài đăng của tác nhân, nên người khác sẽ không biết bài đến từ tác nhân của bạn.",
+  "wire.community.post_card_tainted": "Tác nhân của bạn đã đọc bài đăng cộng đồng trong phiên này, nên không quyền thường trực nào được áp dụng cho đến phiên mới; chỉ câu trả lời của bạn mới đăng được bài này.",
+  "wire.community.post_card_title": "Đăng vào {channel} trong {community} với tư cách là bạn?"
+}

@@ -679,7 +679,16 @@ def test_the_session_move_contract_is_frozen() -> None:
         "engagement",
         "queue",
         "carry",
+        # The FIFTH optional member (docs/design/move-working-set.md §3.4): the
+        # session's git working set. ABSENT for every move whose manifest is empty
+        # (pinned on a document by test_workset_confirm_gate's empty-manifest cell),
+        # so a chat-only session's receipt is unchanged.
+        "working_set",
+        # The SIXTH optional member (UI #1978 QA Q-1): an offload's record of the
+        # resume it requested, since the destination's engage outcome never returns.
+        "resume_requested",
     }
+    assert set(mobility.MoveResumeRequested.__annotations__) == {"reason", "session_id"}
     # The queue block's own shape: a projection of the source's record, so a
     # reader tolerates missing keys (``total=False``) rather than re-validating
     # a file another device owns.
@@ -732,7 +741,16 @@ def test_the_session_move_contract_is_frozen() -> None:
     # ``tests/unit/network/test_engage_on_arrival.py::test_a_move_without_the_flag_still_arrives_cold``
     # is what actually pins the runtime behaviour that matters: a move that did not ask
     # for the engage carries no ``engagement`` member at all.
-    assert set(mobility.MoveEngagement.__annotations__) == {"engaged", "detail", "session_id"}
+    # ``reason``/``arrival_note`` (move-working-set.md §7.4): present only when the
+    # engage was the ACTIVE-MOVE RESUME's default, never on an ``--engage-on-arrival``
+    # engage — pinned by tests/unit/network/test_workset_arrival_resume.py.
+    assert set(mobility.MoveEngagement.__annotations__) == {
+        "engaged",
+        "detail",
+        "session_id",
+        "reason",
+        "arrival_note",
+    }
     assert set(mobility.SessionMoveRefusal.__annotations__) == {
         "ok",
         "code",
@@ -740,5 +758,9 @@ def test_the_session_move_contract_is_frozen() -> None:
         "session_id",
         "phase_reached",
         "changed",
+        # Optional, and present only on the working-set gate's own refusals.
+        "working_set",
     }
     assert {"busy", "unreachable", "deadline_exceeded"} <= mobility.MOVE_REFUSAL_CODES
+    # The working-set gate's codes are part of the vocabulary a front end branches on.
+    assert mobility.WORKSET_REFUSAL_CODES <= mobility.MOVE_REFUSAL_CODES

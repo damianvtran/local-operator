@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "audit_id": "delta-r2-secondary-837443aac8da-vi",
+  "audit_kind": "approval_card_second_pass_same_auditor",
+  "locale": "vi",
+  "namespaces": [
+    "tui.community"
+  ],
+  "audit_date": "2026-11-18",
+  "audited_revision": {
+    "head": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+    "patch": "pr4221-d-r1-i18n.patch (held, b9ae8b63, applied on head)",
+    "patch_sha256": "9b00194c5f960523fc2e0c0092050f725b93b52b7e84755a320c36cd7093cd36",
+    "pr": "https://github.com/damianvtran/local-operator/pull/4221",
+    "previous_audit": "i18n/audits/evidence/vi/community-secondary/record.json"
+  },
+  "key_count": {
+    "tui.community": 2
+  },
+  "keys": [
+    "tui.community.post_allow_unread",
+    "tui.community.post_card_cut"
+  ],
+  "auditor": {
+    "agent": "reviewer / i18n-auditor (second pass, same session)",
+    "session": "837443aac8da",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header; no fallback",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": false,
+    "independence": "Separate key-by-key pass with its own receipt, but the SAME session and model as pass A, and the same model as the translator. The wire.bridge_taint precedent (i18n/audits/evidence/fr/bridge-taint-secondary) used a different agent AND model; if that standard applies, one more pass on these 2 keys by another session/model is still needed before un-darking."
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "guides": [
+    "i18n/style-guides/vi.md",
+    "i18n/glossary.md"
+  ],
+  "input_hashes": {
+    "en": {
+      "tui.community": "67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616"
+    },
+    "context": {
+      "tui.community": "d3030886a774ad2ed4cdb2f14e9969e8eb2c3afb2b9cd416c116d20cfa9abd88"
+    },
+    "target": {
+      "tui.community": {
+        "path": "local_operator/i18n/catalogues/vi/tui.community.json",
+        "sha256": "faabb4ec9f874f6ee73fab1fe849aea742489e7f1b5320bd7bd92dfcfe81c70b"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/community-delta-r2-secondary/report.md",
+      "sha256": "31801b0ef2a2ff1d6c32f30b53cb3433fe8885652139ed3b9495fa7978b83d81"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/community-delta-r2-secondary/audit.log",
+      "sha256": "86370529cd1753f1d979867676a913c4a2330c1bce7170d8c3d78cb9e3df906b"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "B2-vi-M1"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    }
+  }
+}

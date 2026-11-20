@@ -1,0 +1,6 @@
+NORMAL ADMISSION expected_history_sha=d159e2c2fe93f1a63e10cdb9252005bbf7b33abc4708a3dfc40c87e2006320dc
+i18n/audit-history/fr/wire.session_status.json
+normal_exit=0
+NEGATIVE CONTROL stale expected history
+ledger.py: stale expected history for fr/wire.session_status
+stale_history_exit=2

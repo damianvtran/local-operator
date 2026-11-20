@@ -669,6 +669,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # no input reaches the path, and unlink refuses a directory.
         "Drops <config>/operator/authority-setup.running, the marker this attempt wrote",
     ),
+    (
+        "local_operator/providers/bedrock/converse.py::project_conversation",
+        "<path>.remove",
+        # pending_calls is a set[str] built from assistant tool-call IDs; removing
+        # a matched ID tracks the in-memory pairing, never a filesystem path.
+        "set.remove on the in-memory pending tool-call IDs; no filesystem path",
+    ),
     # The effective-access listener registry is a module-level ``list`` of
     # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
     # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).
@@ -1286,6 +1293,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace cannot target a directory",
     ),
     (
+        "local_operator/network/mobility.py::_arrival_resume_note",
+        "os.replace",
+        # The once-per-move arrival-note fence: `staged` is the marker's own
+        # `.tmp` sibling, written by `write_text` (a regular FILE) one line above,
+        # and the target is the fixed FILE name ARRIVAL_NOTE_MARKER inside the
+        # session directory — never the directory itself. os.replace refuses a
+        # directory target, so the session directory cannot be removed through it.
+        "Publishes the just-written move-arrival-note.json.tmp FILE over the fixed "
+        "move-arrival-note.json marker inside the session dir; os.replace rejects a "
+        "directory target.",
+    ),
+    (
         "local_operator/network/store.py::_quarantine",
         "os.replace",
         "Sets an unparsable network record or parked decision aside as <name>.corrupt, "
@@ -1314,6 +1333,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/store.py::clear_pair_decision",
         "<path>.unlink",
         "The human's recorded answer FILE <config>/network/pending/<invite>.decision.json",
+    ),
+    (
+        "local_operator/network/store.py::clear_pre_approval",
+        "<path>.unlink",
+        "Onboarding's one-shot pairing pre-approval FILE "
+        "<config>/network/pending/<invite>.preapproval.json, once consumed, expired, "
+        "released by its run, or purged with its network",
     ),
     (
         "local_operator/network/store.py::clear_pending_join",
@@ -3505,6 +3531,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "widget.remove()",
     ),
     (
+        # The /community page, one mode over from the settings page: `view` is
+        # the mounted CommunityView widget held in `_community_view`.
+        "local_operator/tui/app.py::OperatorApp._close_community_view",
+        "<path>.remove",
+        "Textual CommunityView.remove unmounts the page; no filesystem path",
+    ),
+    (
+        # The /community page remembers the last-viewed org. Both paths are
+        # built from the config dir plus fixed literals
+        # (`<config>/community/org_selection.json` and its `.tmp` sibling); no
+        # caller input reaches either, and `sessions/` is never named.
+        "local_operator/tui/community_backend.py::LiveCommunityBackend.remember_selection",
+        "os.replace",
+        "atomic write of the FILE <config>/community/org_selection.json from its .tmp "
+        "sibling; fixed literal path, never under sessions/",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._recall_queued_steers",
         "<path>.remove",
         "widget.remove() / list.remove",
@@ -4666,6 +4709,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
     ),
+    # -- notification authority: fixed sidecar, never the session directory ----
+    (
+        "local_operator/notifications/authority.py::set_grant",
+        "os.replace",
+        "Replaces only notification-authority.json with its sibling mkstemp file; "
+        "file-to-directory replacement fails without removing the directory",
+    ),
+    (
+        "local_operator/notifications/authority.py::set_grant",
+        "os.unlink",
+        "Cleans only its own mkstemp staging file; unlink cannot remove a directory",
+    ),
     # -- harness_import: private import bookkeeping under <config>/imports ----
     # These writers are called only with `<config>/imports/{snapshots,...}`,
     # `<config>/imports/.lock`, and the target session's OWN sidecars
@@ -4816,6 +4871,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
         "temp FILE; unlink rejects directories.",
+    ),
+    # Heavy-lease audit trail rotation. Every caller of heavy_audit.record passes
+    # the same `heavy_lease.lease_dir()`; `audit_path(directory)` is the fixed
+    # `heavy-lease.jsonl` there, and rotation only shifts its fixed `.1`..`.3`
+    # siblings. No session id or caller-supplied name enters any of the paths.
+    (
+        "local_operator/heavy_audit.py::_rotate_if_needed",
+        "os.replace",
+        "Renames only run/heavy-jobs/heavy-lease.jsonl and its fixed .1..3 generations "
+        "within that directory (.3 overwritten: the count prune); the paths never carry a "
+        "session id and never resolve under sessions/.",
     ),
 )
 

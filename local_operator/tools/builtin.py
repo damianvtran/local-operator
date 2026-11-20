@@ -2857,6 +2857,9 @@ async def _acquire_heavy_lease(
         reason=heavy.reason,
         session_id=str(session_id or ""),
         command=preview,
+        # The ceiling this command runs under, for the audit trail; None when
+        # the memory cap is off (there is no ceiling to record).
+        memory_mb=None if memory_budget.source == "disabled" else memory_budget.ceiling_mb,
         on_wait=_on_wait,
         aborted=(lambda: signal is not None and signal.aborted),
     )
@@ -2898,7 +2901,8 @@ def _release_heavy_lease_on_exit(process: Any, lease: heavy_lease.Lease) -> None
         try:
             await process.wait()
         finally:
-            lease.release()
+            # returncode is None only if the wait itself was cancelled.
+            lease.release(exit_code=getattr(process, "returncode", None))
 
     task = asyncio.get_running_loop().create_task(_watch())
     _HEAVY_LEASE_WATCHERS.add(task)
@@ -17430,6 +17434,8 @@ async def execute_send(
         candidate_lines,
         exact_ignored_clause,
         live_scan_found_nothing,
+        pid_not_on_this_device,
+        remote_pid_decision,
         resolve_peer_target,
         session_id_unowned,
         skipped_clause,
@@ -17480,6 +17486,41 @@ async def execute_send(
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     cold_session_id = ""
+    if record is None and params.pid is not None and pid_not_on_this_device(error or ""):
+        # A REMOTE PID (2026-11-18): `sessions` lists remote rows WITH their
+        # owner's pid, which invites `send(pid=N)` — and the local resolver
+        # knew nothing of it ("no session found with pid N"), while the same
+        # session by `session=` routed fine. Pids are device-local and recycle,
+        # so the pid is translated to a session id ONLY when the owner's fresh
+        # report names exactly one running session for it; that session then
+        # rides the existing session-id route (no new transport). Several
+        # devices, a non-running row, or no match at all stay refusals — see
+        # ``peer_send.remote_pid_decision``. Entered only on the resolver's
+        # MISS form, so a local pid hit (or a local refusal about a pid this
+        # device does hold) never reaches the catalogue: local wins.
+        from local_operator.session.peer_rows import peer_pid_rows
+
+        pid_rows = await asyncio.to_thread(peer_pid_rows, params.pid, config_dir())
+        routed_row, pid_refusal = remote_pid_decision(
+            params.pid, pid_rows, address=lambda sid, _device: f"session={sid}"
+        )
+        if routed_row is None:
+            return _error(tool_call_id, "send", pid_refusal)
+        by_session = params.model_copy(update={"pid": None, "session": routed_row.session_id})
+        result = await _execute_send_routed(tool_call_id, by_session, routed_row, context)
+        # Identifier field: the session id the pid was translated to.
+        lead = (
+            f"pid {params.pid} is session {identifier_text(context, routed_row.session_id)} "
+            f"on {routed_row.owner_device_name}; routed by session id"
+        )
+        details = dict(result.details or {})
+        details["routed_from_pid"] = params.pid
+        return result.model_copy(
+            update={
+                "content": [TextContent(text=f"{lead}\n{result.text}")],
+                "details": details,
+            }
+        )
     if record is None and session_id_unowned(error):
         # No live record OWNS this id — the scan did not know it, or the record
         # it found was stale (the pid is gone) — so an exact ``session`` may
@@ -37325,22 +37366,20 @@ def _ask_report(
 
 #: The RESTRAINT half of the `ask` description: the SAME text under both modes.
 #:
-#: It is factored out rather than duplicated because the brake and the triggers
-#: do not depend on how an ask settles — a question is worth the operator's
-#: attention or it is not, whether the tool parks on them or queues. Duplicating
-#: it would let the two modes drift into disagreeing about what warrants asking,
-#: which is the one thing about this tool that must not vary.
+#: Factored out because the brake does not depend on how an ask settles. It is
+#: a POINTER, not the rules: the triggers and the brake ship in ``system.md``'s
+#: "Deciding and asking", which renders its ask rules exactly when ``ask`` is
+#: held (``has_ask`` in ``prompts_api.TOOL_GATED_PROSE_FLAGS``, derived from the
+#: session's LIVE tools by both ``build_system_blocks`` callers — the factory
+#: provider's ``live_tools`` probe and the subagent provider, whose children
+#: never hold ``ask``). Compaction rewrites history, never the system blocks,
+#: so the rules are on every request that carries this description. Repeating
+#: them here cost ~1.8k chars on every call of every ask-holding session (wave 2,
+#: 2026-11-19); what stays is what system.md does not say.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to decide, never for FYI. LAST RESORT, not a checkpoint: research, "
-    "run or delegate it to a subagent and decide yourself, then report the choice. "
-    "Ask only when: the action is destructive or irreversible and the user has not "
-    "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
-    "and no evidence picks between them; you need something only the user has (a "
-    "credential, access); or the answer is genuinely theirs to state. "
-    "Two technical approaches is not ambiguity. Work the user already asked for is "
-    "authorized: do not stop to confirm it — but that never extends to an "
-    "irreversible step by implication. Asking notifies: never also `notify` it or "
-    "reply with it; mechanics: `read tool://ask`."
+    "Ask the user to decide, never for FYI: a last resort under the system "
+    'prompt\'s "Deciding and asking" rules. Asking notifies: never also `notify` '
+    "it or reply with it; mechanics: `read tool://ask`. "
 )
 
 #: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
@@ -37370,28 +37409,25 @@ _ASK_DESCRIPTION_INLINE = (
 #: 2. A RECEIPT IS NOT CONSENT (design risk 1) — the whole reason this copy is
 #:    capitals, and the reason every guide that tells an agent to act after
 #:    asking carries the same rule;
-#: 3. the deadline, its calibration and what a deadline that passes means, then
-#:    the caps, because non-blocking asking is cheap for the model and expensive
-#:    for the human.
+#: 3. the urgent deadline, then the caps, because non-blocking asking is cheap
+#:    for the model and expensive for the human.
 #:
-#: The calibration is stated as the note's §3 table (1 h routine / 5-10 min
-#: urgent / up to 24 h non-urgent, 2 min floor) rather than as "the default is
-#: 3600": a default the model cannot calibrate against is a number, and the
-#: urgent case needs its own instruction (resolve it another way) because the
-#: timeout notice repeats it.
+#: The rest of the note's §3 calibration lives where it is not repeated: the
+#: ``timeout`` field states the default (1 h), floor (2 min) and cap (24 h),
+#: and ``system.md``'s queued paragraph (rendered with ``ask``, see
+#: ``_ASK_DESCRIPTION_RESTRAINT``) states the 24 h use and what a timeout
+#: notice permits — "a timeout is never consent" — which the notice itself
+#: repeats (``ASK_UNANSWERED_TEXT``). Only the urgent 5-10 min case is said
+#: nowhere else. Likewise ``relay``'s ref shape and "one answer settles both"
+#: are its field description verbatim (wave 2, 2026-11-19).
 _ASK_DESCRIPTION_QUEUED = (
     "Ask everything you need in ONE call. It returns at once with a RECEIPT; the "
     "ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not run "
     "anything the ask was meant to authorise until the answer arrives — continue "
-    "other work, or end the turn saying what is queued. `timeout`: 1 h (3600) is "
-    "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
-    "(floor 2 min); on a timeout notice take your own recommendation only where it is "
-    "reversible and say what you assumed — a timeout is never consent to delete or "
-    "overwrite. At most 8 asks can be open at once; "
+    "other work, or end the turn saying what is queued. `timeout`: 5-10 minutes "
+    "when someone should answer now. At most 8 asks can be open at once; "
     "duplicates are refused. "
     "Settle one with `ask_withdraw` the moment it stops mattering. "
-    "To re-raise another session's pending ask instead, pass that one ask's "
-    "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "
     "Credentials: secret=true on that question (see `read tool://ask`)."
 )
 
@@ -37733,25 +37769,29 @@ class AskWithdrawParams(BaseModel):
 
 #: The description keeps to the facts a model cannot infer, in the order it
 #: needs them (the ask receipt's prose is the budget precedent): what settles,
-#: the two reasons with their one-line consequences, the DETECTION RULE — which
-#: is what makes the tool reachable at all, because both reasons are the model's
-#: judgment call — and the one thing it must never be used for.
+#: the two reasons with their one-line consequences, and the refusals. The
+#: DETECTION RULE (settle an ask the user's message answered before ending the
+#: turn), the dropped/handed-off moot cases, and "an answer is
+#: `answered_in_chat`, never `moot`" ship in ``system.md``'s queued-ask
+#: paragraph, which renders whenever this tool is held: both gate on the same
+#: host ask hook, and the paragraph on ``ask`` membership (see
+#: ``_ASK_DESCRIPTION_RESTRAINT``). They were repeated here verbatim until
+#: wave 2 (2026-11-19). The two moot examples system.md does NOT carry ("you
+#: found the answer yourself", "the work moved on") stay here, shortest form
+#: (PR #4326 QA Q-F2). The tool itself stays PUBLISHED —
+#: see the ``ask_withdraw`` note in ``tools/deferral.py`` for the measurement.
 _ASK_WITHDRAW_DESCRIPTION = (
     "Close a queued ask you no longer need answered — the asker's own settle. "
     "reason='moot': the question stopped mattering (you found the answer "
-    "yourself, the work moved on, or the user dropped or handed off the work "
-    "the question was about); it settles as withdrawn and nothing more is "
-    "delivered for it. reason='answered_in_chat': the user's chat message that "
-    "answered it (latest or earlier) IS the answer — an answer is "
-    "`answered_in_chat`, never `moot`, even if they used their own words "
-    "rather than the options: record their words VERBATIM in `answers`; the "
-    "standard response arrives as usual. To settle only some of its questions, "
-    "put the user's words in their cells and an empty list on the rest — those "
-    "close unanswered; re-ask any you still need. Every cell empty is refused "
-    "(that is a `moot`, not an answer). If the user's message answers a queued "
-    "ask, settle it with this tool rather than leaving the ask reading as "
-    "waiting. A secret question cannot be settled from chat — its card is the "
-    "only path. A settled ask is refused with its own words; do not retry."
+    "yourself or the work moved on); it settles as withdrawn and "
+    "nothing more is delivered for it. reason='answered_in_chat': the user's chat "
+    "message that answered it (latest or earlier) IS the answer: record their "
+    "words VERBATIM in `answers`; the standard response arrives as usual. To "
+    "settle only some of its questions, put the user's words in their cells and "
+    "an empty list on the rest — those close unanswered; re-ask any you still "
+    "need. Every cell empty is refused (that is a `moot`, not an answer). A "
+    "secret question cannot be settled from chat — its card is the only path. A "
+    "settled ask is refused with its own words; do not retry."
 )
 
 
@@ -38118,8 +38158,9 @@ class NotifyParams(BaseModel):
 #: stops a call that had nothing to say from being made at all.
 _NOTIFY_DESCRIPTION = (
     "Post an item to the operator's Notifications inbox; it stays until read or "
-    "dismissed, on every device. For FYI results, metrics or events to see on "
-    "return; never routine progress or a question (`ask` notifies). Pass a "
+    "dismissed, on every device. For FYI results, metrics (a markdown table in "
+    "`body`) or events to see on return; never routine progress or a question "
+    "(`ask` notifies). Pass a "
     "stable `key` so a repeat (a wake tick, a new count) updates one item. "
     "`title` must say what happened — a placeholder (`x`, `done`) is refused."
 )

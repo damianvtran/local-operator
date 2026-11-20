@@ -1,0 +1,70 @@
+{
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-fr-zh-second-audit",
+    "session": "3d32baae3ed6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session Model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "independent_from_translator_session": "a14cc322d1da",
+    "independent_from_translator": true,
+    "independent_from_first_auditor_session": "4730cb4c2fb8",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/wire.session_status.fr.json",
+      "sha256": "1b48011bda6364f5091c78e236020980018fa15934ff9424feca4280f5a9429d"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32/report.json",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/report.json",
+      "sha256": "f1304237a0238ee3e437bba9e65f7d89ded160c1ebfb42f246ae7ac9a7901d90"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32/receipt.json",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/receipt.json",
+      "sha256": "c1f4a1a2823266264b564cbd24bd54289078ca5ddcb39e7c7798bb6442cef2af"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32/audit.log",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/audit.log",
+      "sha256": "8d6dd37fae73d4459f335f5462014cc445c33ead65f3447d099468a295cb3674"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32/probe.py",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/probe.py",
+      "sha256": "469e1a27b3561929ac3d314eaaee0d6e48da557eb8a64d7cc45084c4410f8565"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.session_status/ts2-3d32/ledger-dryrun.log",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-fr/ledger-dryrun.log",
+      "sha256": "461c8c6b4417bdcd30c570bd67c35256e5809886a98a58a46263aff0e340d4f3"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "artifact_state": "SCRATCH ONLY; intended canonical tracked paths, not yet retained or merged",
+  "audit_notes_not_execution_log": false,
+  "execution_log_reference": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32/audit.log",
+  "execution_log_companions_provenance": "audit.log is actual captured shared two-locale scoped-validator execution; probe.py records exact probe. ledger-dryrun.log is actual append dry-run output. Both use this record auditor session/model and frozen input provenance."
+}

@@ -1183,7 +1183,25 @@ def revoke(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict
     return apply(approval_id, expected_block, root)
 
 
-async def authorized_context(link: Any, auth: AuthStore, credential_id: int) -> dict[str, Any]:
+@dataclass(frozen=True, slots=True)
+class _VerifiedFileContext:
+    """Owner-internal snapshot, never a raw slot or permission to disclose bytes.
+
+    Construct only after signature/current-context/negative-journal verification
+    under the file-domain lock. The intent contains frozen scalar-only models;
+    neither the mutable signed record nor the journal maps escape that lock.
+    """
+
+    association: str
+    authority_epoch: str
+    generation: int
+    request_digest: str
+    journal_revision: int
+    deny_generation: int
+    intent: FileIntent
+
+
+async def _verified_context(link: Any, auth: AuthStore, credential_id: int) -> _VerifiedFileContext:
     """Metadata-only current-context check; future P3 still needs its own guards.
 
     Activation request expiry does not expire standing association; context and
@@ -1228,13 +1246,27 @@ async def authorized_context(link: Any, auth: AuthStore, credential_id: int) -> 
                     or _anchor(root) != anchor
                 ):
                     raise _refuse("file_approval_context_changed")
-                return {
-                    "association": key,
-                    "authority_epoch": document.authority_epoch,
-                    "generation": slot.generation,
-                    "request_digest": slot.record["request_digest"],
-                }
+                return _VerifiedFileContext(
+                    association=key,
+                    authority_epoch=document.authority_epoch,
+                    generation=slot.generation,
+                    request_digest=slot.record["request_digest"],
+                    journal_revision=journal.revision,
+                    deny_generation=journal.fences[key].deny_generation,
+                    intent=intent,
+                )
     raise _refuse("file_approval_not_active")
+
+
+async def authorized_context(link: Any, auth: AuthStore, credential_id: int) -> dict[str, Any]:
+    """Preserve the existing metadata API; this projection grants no file access."""
+    context = await _verified_context(link, auth, credential_id)
+    return {
+        "association": context.association,
+        "authority_epoch": context.authority_epoch,
+        "generation": context.generation,
+        "request_digest": context.request_digest,
+    }
 
 
 class FileDeviceApprovalOp:

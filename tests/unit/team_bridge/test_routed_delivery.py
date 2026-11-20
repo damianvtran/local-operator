@@ -525,11 +525,19 @@ def test_a_row_the_routed_session_claimed_meanwhile_does_not_wake_the_designated
 
 def test_a_recovery_card_goes_to_the_routed_session(tmp_path, monkeypatch) -> None:
     """A retry after an image admit takes the ``recovery`` branch, which used to hand the
-    card to the designated session even for a row reserved for another one."""
+    card to the designated session even for a row reserved for another one.
+
+    The recovery branch also commits the body reservation and re-proves the local
+    receipt before it wakes anything. Both must hold together: the fence is asked
+    about the row's OWN session, so a routed row is not refused as "unavailable"
+    (which would hold this message for ever), and the stored route decides where
+    the card goes.
+    """
 
     import asyncio
     import sqlite3
 
+    from local_operator.team_bridge.store import Store
     from tests.unit.team_bridge import test_attachments as att
 
     hub = att.Hub([att._png(), att._png((0, 0, 255))])
@@ -551,12 +559,67 @@ def test_a_recovery_card_goes_to_the_routed_session(tmp_path, monkeypatch) -> No
     assert held["action"] == "hold"
     with sqlite3.connect(tmp_path / "team_bridge" / "state.sqlite3") as conn:
         conn.execute("UPDATE body_reservations SET routed_session = ?", (ASKER,))
-    att._prior_receipt(monkeypatch, "allow", hub.body)
-
+    # No faked receipt: the recovery proof compares the stored envelope digest
+    # and creator generation, and only the receipt the rig's own screen wrote
+    # carries them.
     out = asyncio.run(att._deliver(owner, ref, tmp_path, hub))
 
     assert out["action"] == "delivered" and out["recovered"] == "images_admitted"
     assert sessions == [(ASKER, True)]
+    # The row the recovery found is the row it delivered: one row, still routed,
+    # and re-recording it was a no-op rather than a second promise.
+    store = Store(tmp_path)
+    row = store.body_reservation(owner, ref.conversation_id, ref.message_id)
+    assert row is not None and row["routed_session"] == ASKER and row["state"] == "pending"
+
+
+def test_a_recovery_with_no_stored_row_goes_to_the_designated_session(
+    tmp_path, monkeypatch
+) -> None:
+    """A lost admit response leaves a receipt but no reservation.
+
+    The recovery branch must then commit the body obligation itself, before the
+    wake, and the fresh row carries no stored route — so the card goes to the
+    designated session. Routing never runs on a recovery: there was no decision
+    to replay, and inventing one here would wake a session the admission never
+    chose.
+    """
+
+    import asyncio
+
+    from local_operator.team_bridge.store import Store
+    from tests.unit.team_bridge import test_attachments as att
+
+    hub = att.Hub([att._png()])
+    owner, ref, _screened, _cards = att._connector_rig(
+        monkeypatch, tmp_path, hub, verdict="deliver", preferred=True
+    )
+    store = Store(tmp_path)
+    real_admit = att.HubWire.conversation_admit
+
+    async def lost_response(self, *args, **kwargs):
+        await real_admit(self, *args, **kwargs)
+        raise RuntimeError("controlled lost admission response")
+
+    monkeypatch.setattr(att.HubWire, "conversation_admit", lost_response)
+    first = asyncio.run(att._deliver(owner, ref, tmp_path, hub))
+    assert first["action"] == "hold"
+    assert store.receipt_for_message(owner, ref.message_id) is not None
+    assert store.body_reservation(owner, ref.conversation_id, ref.message_id) is None
+
+    sessions: list[str] = []
+
+    async def deliver(owner: Any, payload: str, *, session_id: str, **kwargs: Any) -> str:
+        sessions.append(session_id)
+        return "delivered"
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", deliver)
+    out = asyncio.run(att._deliver(owner, ref, tmp_path, hub))
+
+    assert out["action"] == "delivered" and out["recovered"] == "images_admitted"
+    assert sessions == ["sess_a"], "the designated session, never a routed one"
+    row = store.body_reservation(owner, ref.conversation_id, ref.message_id)
+    assert row is not None and row["routed_session"] is None and row["state"] == "pending"
 
 
 # -- the wake seam: a routed delivery only ever dials ------------------------------------------

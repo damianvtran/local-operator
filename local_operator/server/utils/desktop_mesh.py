@@ -944,7 +944,15 @@ def resolve_network(root: Path | None, target: str) -> Any:
 
 
 def transfer(
-    session_id: str, *, to: str, keep: bool = False, wait_s: float = 0.0, root: Path | None = None
+    session_id: str,
+    *,
+    to: str,
+    keep: bool = False,
+    wait_s: float = 0.0,
+    root: Path | None = None,
+    confirm_working_set: str = "",
+    without_working_set: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Move (or ``keep``-copy) a conversation, through ``mobility.request_move``.
 
@@ -960,7 +968,18 @@ def transfer(
     """
     from local_operator.network import mobility
 
-    return dict(mobility.request_move(session_id, to=to, keep=keep, wait_s=wait_s, root=root))
+    return dict(
+        mobility.request_move(
+            session_id,
+            to=to,
+            keep=keep,
+            wait_s=wait_s,
+            root=root,
+            confirm_working_set=confirm_working_set,
+            without_working_set=without_working_set,
+            dry_run=dry_run,
+        )
+    )
 
 
 def transfer_receipt(
@@ -1008,4 +1027,19 @@ def transfer_receipt(
         "new_session_id": str(result.get("new_session_id") or session_id),
         "mode": "keep" if mode == "keep" else "move",
         "state": state,
+        # Verbatim and absent-as-None: the renderer reads it only when present.
+        "working_set": (
+            result.get("working_set") if isinstance(result.get("working_set"), dict) else None
+        ),
+        "engagement": (
+            result.get("engagement") if isinstance(result.get("engagement"), dict) else None
+        ),
+        # Verbatim too: an offload's request record (the outcome is the destination's
+        # and never returns), so the dialog says it was asked to resume, not that
+        # nothing runs there.
+        "resume_requested": (
+            result.get("resume_requested")
+            if isinstance(result.get("resume_requested"), dict)
+            else None
+        ),
     }
