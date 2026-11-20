@@ -101,7 +101,10 @@ User-space census-to-send remains NON-ATOMIC; this is checked owner-alive, not a
 kernel-held capability or a hard-owner-SIGKILL immediate-cleanup guarantee.
 Unknown/reused/mixed/terminal-only groups refuse with a nonzero outcome and a
 durable residual receipt naming births. Escaped/new-session descendants are
-outside this group's signal authority.
+outside this group's signal authority; on Linux the wrapper is a child subreaper
+and `local_operator.escaped_descendants` counts, SIGKILLs and proves them gone
+at cleanup, and `cleanup=proven-empty` requires that proof too (otherwise
+`cleanup=unproven`, naming the live pids). See that module for why.
 No keeper, tokenless fallback, or existing monitor-policy changes are introduced.
 
 DIAGNOSTICS go to stderr, never stdout: the lint/format gates' stdout is
@@ -169,6 +172,7 @@ from typing import IO, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from local_operator import (  # noqa: E402
     bounded_contract,
+    escaped_descendants,
     memory_guard,
     owned_process_group,
 )
@@ -761,11 +765,21 @@ def _run_cleanup_required(
 
     child_env = _child_environment(budget)
 
+    # Escapees (setsid/setpgid out of the owned group) are outside the owned
+    # group's reservation, so the certificate used to say `proven-empty` while
+    # one lived (fd36, 2026-11-19: Chrome outlived an rc=124 reap). Becoming a
+    # child subreaper BEFORE the spawn keeps every orphan of the command in this
+    # process's ppid closure, so the final sweep can count, kill and prove them
+    # gone; the baseline excludes children an in-process caller already had.
+    # See local_operator/escaped_descendants.py for the attribution argument.
+    subreaper, subreaper_was = escaped_descendants.enable_subreaper()
+    escape = escaped_descendants.Tracker.before_spawn(subreaper=subreaper)
     previous = {sig: signal.signal(sig, _forward) for sig in FORWARDED_SIGNALS}
     try:
         proc = subprocess.Popen(list(argv), start_new_session=True, env=child_env)
     except OSError as exc:
         # A gate that never ran must never look green (#423's lesson).
+        escaped_descendants.restore_subreaper(subreaper_was)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         stream.write(f"[run_bounded] could not start {argv[0]!r}: {exc}\n")
@@ -773,6 +787,7 @@ def _run_cleanup_required(
             _outcome.termination_cause = "spawn-failure"
         return EXIT_NOT_STARTED
     pgid = proc.pid
+    escape.bind(pgid)
     # ONE REPRESENTATION for the horizon, normalised here where it enters: the
     # unbounded case is `inf`, never `None`. Every downstream reader -- the loop's
     # `now >= deadline`, the probe windows, and `leader_terminal(deadline)` -- then
@@ -929,6 +944,9 @@ def _run_cleanup_required(
                     else min(deadline, now + 3.0)
                 )
                 require(owner.refresh(deadline=probe_until), "required-refresh")
+                # The subreaper makes us the parent of the command's orphans;
+                # reap their corpses on the same cadence init would have.
+                escape.reap_orphans()
                 next_probe = now + _AUTHORITY_REFRESH_SECONDS
             if signum:
                 until = begin_cleanup(grace + 2 * _CLEANUP_PROOF_SECONDS)
@@ -1093,10 +1111,27 @@ def _run_cleanup_required(
             # records only the signals this code's ladder uses to END a group, so
             # there is one source of truth and the call site cannot claim a kill
             # that never happened (round 9, R2).
+            # Escapees next, after the owned group is dead (a SIGKILLed member
+            # cannot fork a new one) and BEFORE the terminal census, because the
+            # sweep also reaps the owned group's orphaned corpses, which the
+            # subreaper made ours and which would otherwise read as members.
+            swept = escape.sweep(deadline=until)
+            if swept.signalled:
+                _report(
+                    stream,
+                    "[run_bounded] SIGKILL to escaped descendant(s) "
+                    + ",".join(str(pid) for pid in swept.signalled),
+                )
+            if not swept.proven:
+                _report(stream, f"[run_bounded] {swept.describe()}")
             terminal = owner.refresh(deadline=until, terminal=bool(owner.terminating_sends))
-            certified = bool(owner.accepted_terminal(terminal))
+            # An empty owned group is NOT cleanup while an escapee may live: the
+            # certificate needs both proofs, or it is never `proven-empty`.
+            certified = bool(owner.accepted_terminal(terminal)) and swept.proven
             if _outcome is not None:
-                _outcome.accept_terminal(owner, terminal)
+                _outcome.accept_terminal(owner, terminal, escaped=swept)
+            if not swept.proven:
+                refused = True
             if terminal.status != "OBSERVED_EMPTY":
                 refused = True
                 # KEEP THE CLASS. Dropping it made the record say only "not observed
@@ -1143,6 +1178,7 @@ def _run_cleanup_required(
                 _outcome.finalization_failed("strict-finalization", exc)
             raise
         finally:
+            escaped_descendants.restore_subreaper(subreaper_was)
             try:
                 for sig, handler in previous.items():
                     try:
