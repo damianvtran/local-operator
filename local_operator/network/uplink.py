@@ -358,8 +358,11 @@ def uplink_checks(
 
     - this device, ``offline`` (no route to the public route keys): ``FAIL``,
       "no route to the internet", remedy "check this device's network" —
-      unless some peer row is ``ok``: a LAN/loopback peer answering proves the
-      device has a network, and the row must not contradict it (review R1);
+      suppressed only when it explains nothing: some peer row is ``ok`` (a
+      LAN/loopback peer answering, review R1) AND no failing peer is
+      unroutable. "No route to the internet" does not contradict a LAN peer
+      answering, and when a public-only peer has no route it is the ONLY row
+      that names this device as the cause (UX-U1);
     - this device, one family only: an ``ok`` row naming its families, and
       only ahead of a per-peer family row it explains;
     - ``dual`` or ``unknown``: no device row;
@@ -384,6 +387,7 @@ def uplink_checks(
     peer_rows_out: list[dict[str, Any]] = []
     by_peer: dict[str, list[Mapping[str, Any]]] = {}
     any_ok = False
+    offline_explains = False
     for check in checks:
         if check.get("check") != "reachability":
             continue
@@ -403,9 +407,15 @@ def uplink_checks(
         if no_route_for(endpoints, route_reader):
             # The family sentence names a fact the DEVICE reading proves, so it
             # needs one family this device has no route in. Under ``offline``
-            # the device row already says it for every peer; a mixed-family or
-            # unproven case adds no fact. Never "isn't answering": undialable.
-            if state == OFFLINE or family not in ("ipv4", "ipv6"):
+            # the device row says it for every peer — so record that it must
+            # be printed (UX-U1: skipping this peer AND dropping the device row
+            # because a LAN peer answered left doctor blaming the peer). A
+            # mixed-family or unproven case adds no fact. Never "isn't
+            # answering": undialable.
+            if state == OFFLINE:
+                offline_explains = True
+                continue
+            if family not in ("ipv4", "ipv6"):
                 continue
             if reading.get(family) is not False:
                 continue
@@ -447,7 +457,9 @@ def uplink_checks(
         "detail": "",
         "observed": {"ipv4": reading.get("ipv4"), "ipv6": reading.get("ipv6")},
     }
-    if state == OFFLINE and not any_ok:
+    # Under ``offline`` the row is dropped only when a peer answered (R1) and
+    # no failing peer is left that only this row explains (UX-U1).
+    if state == OFFLINE and (not any_ok or offline_explains):
         device_row["detail"] = _device_words(state)
         device_row["remedies"] = [remedy]
         return [device_row, *peer_rows_out]

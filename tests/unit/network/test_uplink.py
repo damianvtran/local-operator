@@ -402,6 +402,44 @@ def test_offline_device_row_never_shows_while_a_lan_peer_answers(
     assert rows == []
 
 
+def test_offline_device_row_stays_while_a_lan_peer_answers_and_a_public_peer_has_no_route(
+    no_default_route: _RouteTable,
+) -> None:
+    """UX-U1: the LAN peer must not hide the only row explaining the public peer.
+
+    The per-peer loop skips an unroutable peer under ``offline`` because the
+    device row says it; dropping the device row too (LAN ``ok``) left doctor's
+    only words on node2 as "nothing answered at that address".
+    """
+    rows = uplink.uplink_checks(
+        OFFLINE,
+        [
+            _reach("d_lan", "192.168.50.7:4097", "ok", ok=True),
+            _reach("d_n2", "16.52.146.32:4097", "connect_failed:OSError"),
+        ],
+        route_reader=_REAL_ENDPOINT,
+    )
+    assert len(rows) == 1
+    assert rows[0]["ok"] is False and rows[0]["code"] == "offline"
+    assert rows[0]["detail"] == "This device has no route to the internet."
+    assert rows[0]["remedies"] == ["check this device's network"]
+
+
+def test_offline_device_row_stays_hidden_when_no_failing_peer_is_unroutable(
+    no_default_route: _RouteTable,
+) -> None:
+    """R1 unchanged: LAN ok, the only failing peer is routable → no device row."""
+    rows = uplink.uplink_checks(
+        OFFLINE,
+        [
+            _reach("d_lan", "192.168.50.7:4097", "ok", ok=True),
+            _reach("d_pub", "203.0.113.5:4097", "connect_failed:TimeoutError", dial_silent=True),
+        ],
+        route_reader=_REAL_ENDPOINT,
+    )
+    assert [row["code"] for row in rows] == ["peer_not_answering"]
+
+
 def test_a_silent_lan_peer_without_a_default_route_isnt_answering(
     no_default_route: _RouteTable,
 ) -> None:
