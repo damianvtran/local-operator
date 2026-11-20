@@ -728,6 +728,9 @@ _CLONE_GUARD_FIELDS = frozenset(
         # selects a marker TTL, never message bytes, so an armed one-turn secret
         # stays in the one body it was approved for.
         "cache_role",
+        # Marker placement for one-shot auxiliary calls (``cache_markers``):
+        # where cache_control goes, never which bytes the model reads.
+        "cache_markers",
         # Same policy input, same stamper: "this conversation already had a
         # long-streaming turn" picks the marker TTL and nothing else.
         "cache_after_long_call",
@@ -5058,6 +5061,21 @@ class ChatRequest(BaseModel):
     #: outside a session stream) derives the role from ``purpose`` alone, as a
     #: top-level conversation. Transport policy, never wire content.
     cache_role: str | None = Field(default=None, exclude=True, repr=False)
+    #: Where the Anthropic wire may place ``cache_control`` markers.
+    #: ``"auto"`` (default) is the conversation policy, byte-identical to the
+    #: tree before this field: system breakpoints plus message breakpoints.
+    #: ``"system"`` puts ONE marker on the last system block and none on
+    #: messages; ``"none"`` sends no marker at all.
+    #:
+    #: WHY: one-shot auxiliary calls (screeners, judges) are isolated, single
+    #: user-turn requests whose only marker landed on ``messages[-1]`` — AFTER
+    #: content unique to that call — so every call paid the cache-WRITE premium
+    #: for a prefix nothing would ever read. Measured on the 7-day usage ledger:
+    #: ``team_bridge_screen`` 37,014 distinct prompt hashes over 37,457 calls
+    #: (1.4% cache hit), ``guardrail`` 0% hit. Transport policy, never content.
+    cache_markers: Literal["auto", "system", "none"] = Field(
+        default="auto", exclude=True, repr=False
+    )
     #: This conversation has already had a turn that ran at least
     #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
     #: start to stream end. Stamped by ``SessionStreamFn`` from its own

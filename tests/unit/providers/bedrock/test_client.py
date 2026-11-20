@@ -406,6 +406,35 @@ def test_1h_ttl_kept_only_for_known_bedrock_models(monkeypatch) -> None:
     assert client._cache_ttl_for(_request("us.anthropic.claude-3-haiku-20240307-v1:0"), {}) is None
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "us.anthropic.claude-haiku-5-5",
+        "global.anthropic.claude-fable-5-2",
+        "anthropic.claude-fable-5-1",
+        "eu.anthropic.claude-mythos-5-2",
+        "anthropic.claude-mythos-5-1",
+        "anthropic.claude-mythos-5",
+    ],
+)
+def test_1h_ttl_for_aws_documented_models_without_a_static_row(model_id: str) -> None:
+    """AWS's prompt-caching table lists these with the 1h TTL (read 2026-11-19)
+    though ``anthropic_models`` has no row to derive a static Bedrock row from;
+    they used to fall back to the 5m cache."""
+    from local_operator.model.registry import bedrock_supports_1h_cache
+
+    assert bedrock_supports_1h_cache(model_id)
+
+
+def test_1h_ttl_stays_off_for_ids_aws_does_not_list() -> None:
+    from local_operator.model.registry import bedrock_supports_1h_cache
+
+    # Sonnet 4.5 is absent from AWS's caching table; an undocumented ttl is a
+    # ValidationException, so the gate must keep refusing it.
+    assert not bedrock_supports_1h_cache("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    assert not bedrock_supports_1h_cache("us.anthropic.claude-3-haiku-20240307-v1:0")
+
+
 # -- first-party regression of the hook extraction ------------------------------
 
 

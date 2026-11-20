@@ -5598,17 +5598,26 @@ class AnthropicClient:
                 for tool in request.tools
             ]
         ttl = self._cache_ttl_for(request, body, oauth=oauth, account=account)
-        if blocks:
-            body["system"] = self._system_blocks(blocks, ttl=ttl)
-        # System-only breakpoints stop the cached prefix before the first
-        # message: the entire growing conversation would be re-processed at
-        # full price on every request. Mark the last content block of the
-        # final message and the settled boundary (the message before the
-        # newest frame; the previous user turn when there is none) so the
-        # second breakpoint's block survives frame re-renders, within
-        # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
-        # breakpoint.
-        self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
+        if request.cache_markers != "auto":
+            # One-shot auxiliary calls (see ``ChatRequest.cache_markers``):
+            # "none" leaves the marker-free render above as it is; "system"
+            # caches only the static head (e.g. the guardrail judge's fixed
+            # prompt, re-sent within the TTL), never the unique user turn.
+            system_rows = body.get("system")
+            if request.cache_markers == "system" and isinstance(system_rows, list) and system_rows:
+                system_rows[-1]["cache_control"] = self._cache_control(ttl)
+        else:
+            if blocks:
+                body["system"] = self._system_blocks(blocks, ttl=ttl)
+            # System-only breakpoints stop the cached prefix before the first
+            # message: the entire growing conversation would be re-processed at
+            # full price on every request. Mark the last content block of the
+            # final message and the settled boundary (the message before the
+            # newest frame; the previous user turn when there is none) so the
+            # second breakpoint's block survives frame re-renders, within
+            # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
+            # breakpoint.
+            self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #
