@@ -83,5 +83,75 @@
     "role": "Sidebar/picker terminal status label",
     "tone": "terse, factual",
     "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+  },
+  "wire.session_status.approval_needed": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse, action-prompting",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. The session is paused on a tool approval the user must grant or deny. Highest-priority rung: the user needs to act."
+  },
+  "wire.session_status.answer_needed": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse, action-prompting",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. The session is paused on a question the agent asked the user. Highest-priority rung: the user needs to reply."
+  },
+  "wire.session_status.wedged": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse, cautious, factual",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. The session's owner process still exists but its heartbeat went stale. Say 'not answering' (what was observed), NOT 'not responding'/'frozen'/'dead': a stale beat does not prove the process stopped. The middle dot separates the two facts; keep it. Used when no heartbeat age was measured."
+  },
+  "wire.session_status.wedged_heartbeat": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse, cautious, factual",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. Same state as wire.session_status.wedged, plus the measured heartbeat age. {duration} is an already-formatted compact duration such as `4m` or `1h 5m`, inserted verbatim; do not translate or reorder it. Keep the 'process alive' qualifier: it stops readers inferring the process died."
+  },
+  "wire.session_status.working": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. The session's agent turn is running right now. Generic busy state."
+  },
+  "wire.session_status.attached": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. The session is open (attached) in a live window or terminal, but not running a turn. Means 'open in a window', not 'unlocked' or 'available'."
+  },
+  "wire.session_status.ready": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. The session's runtime is idle and waiting for the user's next message."
+  },
+  "wire.session_status.exec_headless": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse, technical",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. An idle one-shot `lop exec` run started by a supervisor, without a UI. Keep `exec` verbatim (it is the command name) inside the parentheses."
+  },
+  "wire.session_status.waiting": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. The turn is blocked waiting on background jobs it started. {jobs} is the job count (always >= 1); use locale plural rules."
+  },
+  "wire.session_status.waiting_subagents": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. As wire.session_status.waiting, plus subagents (delegated child agents) still running. {jobs} >= 1 and {subagents} >= 1; use locale plural rules for each. 'Subagent' is the product's term for a delegated child agent, not an agent profile. The middle dot separates the two facts; keep it."
+  },
+  "wire.session_status.delegating_jobs": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. One segment of a delegating row: the parent's own turn is NOT running, but background jobs it owns are. {count} >= 1; locale plural rules. Segments are joined by ' · ' in the order jobs, running subagents, queued; each segment must stand alone as a phrase."
+  },
+  "wire.session_status.delegating_running": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. One segment of a delegating row: subagents (delegated child agents) still running while the parent's own turn is not. {count} >= 1; locale plural rules. Joined to other segments by ' · '; must stand alone as a phrase. Do not phrase as the parent 'delegating' or acting."
+  },
+  "wire.session_status.delegating_queued": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. One segment of a delegating row, used when NO subagent is running: subagents parked waiting for capacity. {count} >= 1; locale plural rules. Must not read as idle. Joined to other segments by ' · '."
+  },
+  "wire.session_status.delegating_queued_addend": {
+    "role": "Sidebar/picker live row status label",
+    "tone": "terse",
+    "note": "EN-only context sidecar. Live sidebar/picker row status label, composed by the backend (session/catalog.py CatalogEntry.status) and rendered verbatim in the desktop sidebar title/sr-only, the status feed, the mobile relay and the TUI sidebar. One logical line, no fixed cell cap. Short segment that FOLLOWS the running-subagents segment (wire.session_status.delegating_running) after ' · ', e.g. `2 subagents running · 1 queued`; the noun is implied by that preceding segment. {count} >= 1 subagents waiting for capacity; plural forms are provided so the adjective can agree."
   }
 }

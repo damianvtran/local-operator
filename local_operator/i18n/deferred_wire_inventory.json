@@ -387,11 +387,11 @@
         {
           "path": "local_operator/session/catalog.py",
           "symbol": "_terminal_label (render)",
-          "note": "complete terminal messages selected by CatalogEntry.status/_stop_label/_error_label and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
+          "note": "complete messages selected by CatalogEntry.status (terminal rungs via _stop_label/_error_label, and since PR #4334 the live rungs: approval/answer needed, wedged heartbeat, working, unseen completion, attached, ready/exec headless, dormant, complete, recent, waiting) and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
         }
       ],
       "references": {
-        "session/catalog.py": 10
+        "session/catalog.py": 28
       }
     },
     "wire.sessions": {

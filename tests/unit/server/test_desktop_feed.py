@@ -69,10 +69,10 @@ from local_operator.server.utils.desktop_sessions import (
 )
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import (
-    WEDGED_STATUS,
     load_catalog,
     status_dedupe_key,
     status_of,
+    wedged_status,
 )
 from local_operator.session.creation import CREATED_AT_NAME
 from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
@@ -1924,7 +1924,7 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
     # so a second derivation of the label — the one string that is not a
     # constant — is compared against the list's own spelling.
     assert frames[wedged]["code"] == "wedged"
-    assert frames[wedged]["label"].startswith(WEDGED_STATUS), frames[wedged]["label"]
+    assert frames[wedged]["label"].startswith(wedged_status()), frames[wedged]["label"]
     # A session nothing happened to is not a candidate at all: no frame, because
     # its pair (``recent``) is what the client's own list already says.
     assert cold not in frames
@@ -2149,7 +2149,7 @@ def test_a_stale_heartbeat_publishes_wedged_with_no_write(tmp_path):
     assert [frame["payload"]["code"] for frame in wedged] == ["wedged"]
     # The label is the one home's sentence, with the measured age appended — the
     # same string the sidebar's tooltip shows.
-    assert wedged[0]["payload"]["label"].startswith(WEDGED_STATUS)
+    assert wedged[0]["payload"]["label"].startswith(wedged_status())
     asyncio.run(feed.close())
 
 
