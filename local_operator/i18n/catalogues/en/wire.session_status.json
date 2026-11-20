@@ -29,5 +29,9 @@
   "wire.session_status.delegating_jobs": "{count, plural, one {# job running} other {# jobs running}}",
   "wire.session_status.delegating_running": "{count, plural, one {# subagent running} other {# subagents running}}",
   "wire.session_status.delegating_queued": "{count, plural, one {# subagent queued} other {# subagents queued}}",
-  "wire.session_status.delegating_queued_addend": "{count, plural, one {# queued} other {# queued}}"
+  "wire.session_status.delegating_queued_addend": "{count, plural, one {# queued} other {# queued}}",
+  "wire.session_status.duration_seconds": "{count, number}s",
+  "wire.session_status.duration_minutes": "{count, number}m",
+  "wire.session_status.duration_hours_minutes": "{hours, number}h {minutes, number}m",
+  "wire.session_status.duration_days_hours": "{days}d {hours, number}h"
 }

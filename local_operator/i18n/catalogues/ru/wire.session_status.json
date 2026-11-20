@@ -29,5 +29,9 @@
   "wire.session_status.delegating_jobs": "{count, plural, one {# задание выполняется} few {# задания выполняются} many {# заданий выполняется} other {# задания выполняется}}",
   "wire.session_status.delegating_running": "{count, plural, one {# субагент работает} few {# субагента работают} many {# субагентов работают} other {# субагента работают}}",
   "wire.session_status.delegating_queued": "{count, plural, one {# субагент в очереди} few {# субагента в очереди} many {# субагентов в очереди} other {# субагента в очереди}}",
-  "wire.session_status.delegating_queued_addend": "{count, plural, one {# в очереди} few {# в очереди} many {# в очереди} other {# в очереди}}"
+  "wire.session_status.delegating_queued_addend": "{count, plural, one {# в очереди} few {# в очереди} many {# в очереди} other {# в очереди}}",
+  "wire.session_status.duration_seconds": "{count, number} с",
+  "wire.session_status.duration_minutes": "{count, number} мин",
+  "wire.session_status.duration_hours_minutes": "{hours, number} ч {minutes, number} мин",
+  "wire.session_status.duration_days_hours": "{days} д {hours, number} ч"
 }
