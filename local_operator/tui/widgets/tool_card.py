@@ -160,6 +160,8 @@ _t_tc = tr("tui.tool_card")
 def _more_marker(msg) -> str:
     """An elision marker: the `… ` lead glyph stays code, the words are keyed."""
     return f"… {_t_tc(msg)}"
+
+
 _profile_copy = tr_record("tui.profile_actions")
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -223,6 +225,8 @@ _RESET_LEADS = ("Session state was reset",)
 #: session was reset, so the row must state that even where there is no notice
 #: sentence to promote (design review round 1, D2).
 _RESET_LABEL = "session reset"
+
+
 #: The word a stopped row states when the owner ACCEPTED the stop but had not
 #: exited when the tool stopped waiting — the collapsed row's whole signal that
 #: this is not a completed stop (UX round 2, U6: it painted the same `✓` as one).
@@ -239,6 +243,7 @@ def _stop_pending_label() -> str:
 #: Expansion affordance trailing the summary. Both spellings are the same
 #: click target; only the label flips so the row always says what a click does.
 _LOG = logging.getLogger(__name__)
+
 
 #:
 #: Functions, not constants, so the words follow a live language change; the
@@ -599,6 +604,8 @@ LIVE_MAX_LINES = 20
 #: per-update work becomes a constant. Sized well above ``LIVE_MAX_LINES`` ×
 #: a wide terminal so the cap is reached by the line count, not by the slice.
 LIVE_INGEST_CHARS = 64 * 1024
+
+
 #: The live block's heading, stating the one thing a half-drawn card must not
 #: leave ambiguous. An expanded running card that showed a command and an
 #: empty output area is byte-identical to a FINISHED call that printed

@@ -19,21 +19,29 @@ Two claims, each driven through the REAL paint paths (``_build_row`` and
 2. With a synthetic ``fr`` carrying only this namespace, every keyed surface
    paints the fr text after a LIVE language change, while the machine tokens
    (``ctrl+c``, URLs, the ``miss`` cache token, the ``…``/``⋯``/``⟨⟩`` glyphs)
-   stay verbatim. The fixture symlinks the real English tree so every other
-   namespace keeps rendering; only this fixture makes the synthetic locale
-   eligible.
+   stay verbatim. The fixture COPIES the real English tree (the loader refuses
+   symlinked catalogue paths as escaping the root, so a symlinked ``en`` would
+   paint raw key IDs) so every other namespace keeps rendering; only this
+   fixture makes the synthetic locale eligible.
+3. With the SHIPPED fr catalogue (no fixture tree), the audited translation
+   reaches the painted card.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
 from local_operator.i18n import catalogues, resolve, text
 from local_operator.tui.widgets import tool_card
-from local_operator.tui.widgets.tool_card import EXPAND_MAX_LINES, LIVE_MAX_LINES, ToolCard
+from local_operator.tui.widgets.tool_card import (
+    EXPAND_MAX_LINES,
+    LIVE_MAX_LINES,
+    ToolCard,
+)
 
 NS = "tui.tool_card"
 EN_ROOT = Path(catalogues.__file__).resolve().parent / "catalogues"
@@ -47,9 +55,9 @@ def _fr(value: str) -> str:
     return "FR " + value
 
 
-def _surfaces() -> dict[str, object]:
+def _surfaces() -> dict[str, str]:
     """Every keyed surface, read from what the card actually paints."""
-    out: dict[str, object] = {}
+    out: dict[str, str] = {}
 
     search = ToolCard("s", "web_search", {"query": "q"})
     search.mark_done("\n".join(f"hit {i}" for i in range(EXPAND_MAX_LINES + 5)))
@@ -108,7 +116,9 @@ def _surfaces() -> dict[str, object]:
     )
     fetch.toggle_expanded()
     out["fetched"] = next(
-        line.strip() for line in fetch._build_content(160).plain.splitlines() if "https://example.com/docs/" in line
+        line.strip()
+        for line in fetch._build_content(160).plain.splitlines()
+        if "https://example.com/docs/" in line
     )
 
     stop = ToolCard("p", "sessions", {"session": "payments-audit"})
@@ -163,7 +173,9 @@ def test_singular_branches_are_english_singular() -> None:
 @pytest.fixture
 def fr_tool_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Only this fixture may make a synthetic locale eligible, never production."""
-    (tmp_path / "en").symlink_to(EN_ROOT / "en", target_is_directory=True)
+    # Copy, never symlink: `load_catalogue` refuses a symlinked path as escaping
+    # the catalogue root, and English lookups would then paint raw key IDs.
+    shutil.copytree(EN_ROOT / "en", tmp_path / "en")
     (tmp_path / "fr").mkdir()
     (tmp_path / "fr" / f"{NS}.json").write_text(
         json.dumps({k: _fr(v) for k, v in BASE.items()}, ensure_ascii=False), encoding="utf-8"
@@ -180,6 +192,12 @@ def fr_tool_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_every_surface_follows_a_live_language_change(fr_tool_card) -> None:
+    # Under the fixture tree English must still be real English, not key IDs:
+    # this is what a symlinked `en` silently broke.
+    before = _surfaces()
+    assert "⟨expand⟩ ✓" in before["expand"]
+    assert before["live_pending"] == "⋯ running · 0s · no output yet"
+    assert not any(NS in value for value in before.values()), before
     text.set_active_locale("fr")
     got = _surfaces()
     assert "⟨FR expand⟩ ✓" in got["expand"]
@@ -202,3 +220,31 @@ def test_every_surface_follows_a_live_language_change(fr_tool_card) -> None:
     assert "FR stop unconf" in got["stop"]
     assert " FR you: git status" in got["you"]
     assert tool_card.EXPAND_HINT == "⟨FR expand⟩"  # legacy names resolve live too
+
+
+@pytest.fixture
+def shipped_fr(monkeypatch: pytest.MonkeyPatch):
+    """The REAL shipped catalogue tree and shipped set — no synthetic locale.
+
+    The synthetic fixture proves the wiring; this proves the audited fr
+    translation reaches the painted card once fr is eligible through the
+    generated ``shipped.json`` (a missing ledger row would un-ship fr and the
+    card would silently fall back to English).
+    """
+    monkeypatch.setattr(text, "_active_locale", "en")
+    monkeypatch.setattr(text, "_refreshers", [])
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    text._sources.cache_clear()
+    yield
+    text.set_active_locale("en")
+    text._sources.cache_clear()
+
+
+def test_shipped_fr_catalogue_paints_the_tool_card(shipped_fr) -> None:
+    assert "fr" in resolve.shipped_locales()
+    text.set_active_locale("fr")
+    got = _surfaces()
+    assert "⟨déplier⟩" in got["expand"], got["expand"]
+    # `diff` is not sanctioned English in fr (audit round 1, F1): the marker
+    # must carry the translated noun.
+    assert "comparaison" in got["diff_more"], got["diff_more"]

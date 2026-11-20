@@ -1,0 +1,101 @@
+{
+  "locale": "ur",
+  "namespace": "tui.tool_card",
+  "date": "2026-11-20",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "files": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.json",
+      "sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/tui.tool_card.json",
+      "sha256": "d8b9ed84313ff5c1b4a7c44395f8e7197aefab9068dec8ebf7a836e619780391"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.context.json",
+      "sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087"
+    }
+  },
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null,
+    "provenance": "Supplied by delegating brief; not independently verified."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "6555df20c0db",
+    "date": "2026-11-20",
+    "result": "changes_requested",
+    "findings": 3,
+    "unresolved_blocker_major": 1
+  },
+  "status": "changes_requested",
+  "verdict": "fail",
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "UR1",
+        "key": "tui.tool_card.more.diff_lines",
+        "current": "{count, plural, one {{shown} مزید diff لائن} other {{shown} مزید diff لائنیں}}",
+        "proposed": "{count, plural, one {فرق کی {shown} مزید لائن} other {فرق کی {shown} مزید لائنیں}}",
+        "reason": "The prose noun diff is untranslated English, not a command, tool name, diff body, or sanctioned kept-English term (glossary lines 19–50, 118–126; ur style lines 19–28, 64–66)."
+      }
+    ],
+    "minor": [
+      {
+        "id": "UR2",
+        "key": "tui.tool_card.fetch.cache",
+        "current": "کیش {state}",
+        "proposed": "کیشے {state}",
+        "reason": "Terminology drifts from shipped wire.settings.web_fetch_cache_ttl_seconds.label (کیشے TTL (s)); use کیشے rather than کیش, preserving the literal outcome token."
+      },
+      {
+        "id": "UR3",
+        "key": "tui.tool_card.live.no_output_yet",
+        "current": "ابھی کوئی آؤٹ پٹ نہیں",
+        "proposed": "ابھی آؤٹ پٹ نہیں",
+        "reason": "21 cells versus English 13 in a shared live-header row; shortening yields 16 cells. No hard maxCells exists here: request a rendered narrow-row check, not a claimed overflow."
+      }
+    ],
+    "nit": []
+  },
+  "checks": {
+    "head": "4e164d26c8ecc5a8f5fe8d510526277efc4fdd0e",
+    "keys_read": 16,
+    "key_argument_parity": "pass",
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "exact_numeric_selectors": 0,
+    "render_samples": 36,
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "params": {
+      "url": "https://example.com",
+      "state": "miss",
+      "chord": "ctrl+c"
+    },
+    "maxCells": "5 constrained keys pass via rich.cells.cell_len",
+    "manual_bidi_controls": 0,
+    "rendered_terminal": "not performed; no visual RTL or truncation sign-off",
+    "reference_terms": [
+      "tui.small.copy_picker.more_lines",
+      "tui.small.network_panel.relay_running",
+      "tui.small.todo_panel.collapse",
+      "tui.small.todo_panel.expand",
+      "wire.tool_rows.bridge.outcome.unconfirmed",
+      "wire.settings.web_fetch_cache_ttl_seconds.label"
+    ],
+    "notes": "User attribution آپ: matches ur guide 9–15 and the USER-run context, not an agent first-person line. Literal miss, URLs and ctrl+c are intentional machine tokens. Parentheses retained; logical RTL storage, no manual bidi controls."
+  }
+}

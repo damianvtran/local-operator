@@ -1,0 +1,106 @@
+{
+  "locale": "hi",
+  "namespace": "tui.tool_card",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "target_sha256": "cedd1fbcec84726aa0e84e4305033451ed5e396d145f34c13bb684efcaf45abe",
+  "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Provided by delegating task; not independently inferred"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "e0a50173dfc8",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "fallback": "none",
+    "result": "passed",
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": {
+    "head": "4e164d26c8ecc5a8f5fe8d510526277efc4fdd0e",
+    "changed_keys": [
+      "tui.tool_card.more.diff_lines"
+    ],
+    "composition_keys": [
+      "tui.tool_card.more.lines",
+      "tui.tool_card.more.search_lines",
+      "tui.tool_card.hint.expand"
+    ],
+    "catalogue_keys_read": 16,
+    "reaudited_changed_keys": 1,
+    "composition_keys_checked": 3
+  },
+  "checks": {
+    "message_arguments_parity_all_16_keys": true,
+    "changed_arguments": [
+      [
+        "count",
+        "plural"
+      ],
+      [
+        "shown",
+        "simple"
+      ]
+    ],
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "million_not_applicable": "Hindi has no many branch",
+    "samples": [
+      {
+        "count": 0,
+        "en": "0 more diff lines",
+        "hi": "0 और बदलाव की पंक्ति",
+        "en_cells": 17,
+        "hi_cells": 15,
+        "composition": "… 0 और बदलाव की पंक्ति ⟨फैलाएँ⟩",
+        "composition_cells": 23
+      },
+      {
+        "count": 1,
+        "en": "1 more diff line",
+        "hi": "1 और बदलाव की पंक्ति",
+        "en_cells": 16,
+        "hi_cells": 15,
+        "composition": "… 1 और बदलाव की पंक्ति ⟨फैलाएँ⟩",
+        "composition_cells": 23
+      },
+      {
+        "count": 2,
+        "en": "2 more diff lines",
+        "hi": "2 और बदलाव की पंक्तियाँ",
+        "en_cells": 17,
+        "hi_cells": 16,
+        "composition": "… 2 और बदलाव की पंक्तियाँ ⟨फैलाएँ⟩",
+        "composition_cells": 24
+      },
+      {
+        "count": 5,
+        "en": "5 more diff lines",
+        "hi": "5 और बदलाव की पंक्तियाँ",
+        "en_cells": 17,
+        "hi_cells": 16,
+        "composition": "… 5 और बदलाव की पंक्तियाँ ⟨फैलाएँ⟩",
+        "composition_cells": 24
+      },
+      {
+        "count": 21,
+        "en": "21 more diff lines",
+        "hi": "21 और बदलाव की पंक्तियाँ",
+        "en_cells": 18,
+        "hi_cells": 17,
+        "composition": "… 21 और बदलाव की पंक्तियाँ ⟨फैलाएँ⟩",
+        "composition_cells": 25
+      }
+    ]
+  },
+  "findings": [],
+  "note": "Round-2 delta-only independent audit; not a replacement full-namespace round-1 audit. Read current English/Hindi catalogues, English context, Hindi style guide and glossary. बदलाव की पंक्ति/पंक्तियाँ correctly localizes diff lines in the edit-preview context; count/shown intact; 0 and 1 select Hindi one, 2/5/21 other. Consistent पंक्ति/पंक्तियाँ and polite फैलाएँ; no English remains in changed key. Rich cell_len shows no expansion versus English. Checked actual tool_card.py marker truncation and optional expand composition. Text rendering only, no screenshot/native shaping claim. No repository edits."
+}
