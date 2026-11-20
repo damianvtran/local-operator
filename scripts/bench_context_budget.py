@@ -1938,7 +1938,16 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #     = +217 chars = ~+78 billed, exactly the sentence; the ceiling moves by
 #     that delta so main's headroom carries over unchanged. (This host reads
 #     main itself 206 over 37,389 — the known local-vs-CI offset.)
-BUDGET_BILLED_TOKENS = 37_467
+# LOWERED 37,467 -> 32,047 by wave 2 (perf/harness-cost-wave2): ten zero-use
+# tools (media, ``tags``, ``harness_import``) ride on demand, the ``ask`` /
+# ``ask_withdraw`` descriptions stop repeating system.md, and params-class
+# docstrings leave every schema's top level. Measured with THIS script,
+# ISOLATED HOME, one host, base checked out then head:
+#   origin/main 1566e04b   104,149 chars = ~37,464 billed (3 of headroom)
+#   this branch             89,080 chars = ~32,043 billed
+#     = -15,069 chars = ~-5,420 billed; lowered by exactly the saving so the
+#     ceiling keeps main's headroom (local-vs-CI offset, notes above).
+BUDGET_BILLED_TOKENS = 32_047
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2179,7 +2188,14 @@ BUDGET_BILLED_TOKENS = 37_467
 #     = -2,144 chars = ~-771 billed; lowered by exactly the saving so the
 #     ceiling keeps main's 213 of headroom (CI reads differ from local by tens
 #     of tokens, see the TOP ceiling's notes). The top arm is byte-identical.
-BUDGET_CHILD_BILLED_TOKENS = 32_698
+# LOWERED 32,698 -> 27,734 by wave 2 (perf/harness-cost-wave2): the same
+# deferral, docstring and description trims as the top arm (a child holds the
+# media tools, ``tags`` and ``harness_import`` too). Measured locally, isolated
+# HOME, base checked out then head:
+#   origin/main 1566e04b   90,307 chars = ~32,485 billed / 213 headroom
+#   this branch            76,507 chars = ~27,521 billed
+#     = -13,800 chars = ~-4,964 billed; lowered by exactly the saving.
+BUDGET_CHILD_BILLED_TOKENS = 27_734
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
