@@ -373,7 +373,9 @@ def test_system_prompt_and_ask_docs_say_a_timeout_is_not_consent() -> None:
     assert "a timeout is never consent" in queued
     inline = " ".join(render_template("system.md", {"ask_inline": True}).split())
     assert "never for a delete, overwrite or other irreversible step" in inline
-    assert "a timeout is never consent to delete" in builtin._ASK_DESCRIPTION_QUEUED
+    # The description no longer repeats system.md's rule (wave 2): the queued
+    # paragraph above renders whenever ``ask`` is held, and the timeout notice
+    # itself carries it at the moment it applies.
     assert "Closing it is NOT consent" in builtin.ASK_UNANSWERED_TEXT
 
 

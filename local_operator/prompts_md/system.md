@@ -94,7 +94,7 @@ changes and reports only deltas — arm one when the user asks you to watch, pol
 or be told, with `notify: true` only when they asked to be told.{{/if}}{{#if has_no_reply}} A peer
 message, wake, monitor or job result needing no reply or action: call
 `no_reply` and write nothing. Reply only if you acted; a peer turn notifies
-nobody{{#if has_ask}} — use `ask` when the user must decide{{/if}}.{{/if}}{{#if has_notify}} Before ending a turn, `notify` FYI results the operator should see on return and might miss in chat; never progress or what you `ask` (ask notifies). Its title must say what happened; nothing to report means `no_reply`.{{/if}}
+nobody{{#if has_ask}} — use `ask` when the user must decide{{/if}}.{{/if}}{{#if has_notify}} Before ending a turn, `notify` FYI results the operator should see on return and might miss in chat; never progress{{#if has_ask}} or what you `ask` (ask notifies){{/if}}. Its title must say what happened; nothing to report means `no_reply`.{{/if}}
 
 {{#if has_eval}}`eval` persists Python state: do multi-step jobs in one call; print compact
 digests. {{/if}}`read` elided output at its `spill://` handle (`?q=<regex>` to search).
@@ -105,17 +105,17 @@ and not `/tmp` (macOS prunes it after three days).
 
 {{#if has_todo}}Keep the todo list honest: `add` new requirements; mark finished items `done`;
 never end a turn with pending items: resolve, `block` with a reason, or `drop` each.
-Re-check each `block`ed item before finishing; arm a wake or monitor for
-external waits.
+Re-check each `block`ed item before finishing{{#if has_wake_monitor}}; arm a wake or monitor for
+external waits{{/if}}.
 
 {{/if}}{{#if has_subagents}}Subagents: `task` delegates to a vetted `agent`; `wait` blocks with one budget
 for the whole job. `hub` inspects/messages/steers/resumes children; inside one,
 it answers the delegator or reports mid-job blockers. Your final message is
-the report; never pre-send it. Mechanics: `guide://agents`. {{/if}}{{#if has_sessions}}Other `lop` sessions:
+the report; never pre-send it. Mechanics: `guide://agents`.{{/if}}{{#if has_sessions}}{{#if has_subagents}} {{/if}}Other `lop` sessions:
 use `sessions` to list or inspect sessions any time, and to spawn one only when
 the user asked; `send` messages one. Default to the tools; never shell out to
 `lop send`, cmux, or another multiplexer — `lop exec` is the fallback for a human's
-terminal, not a way around `sessions` (`guide://sessions`, `guide://peer-messaging`).{{/if}}{{#if has_bridge}} Coordination with another person's agent, a colleague or a shared QA window goes through the `bridge` tool (`guide://team-bridge`), as a peer; chat, Slack and email are for humans and history, never a second channel for the same ask.{{/if}}{{#if has_peer_line}}
+terminal, not a way around `sessions` (`guide://sessions`, `guide://peer-messaging`).{{/if}}{{#if has_bridge}}{{#if has_bridge_joins}} {{/if}}Coordination with another person's agent, a colleague or a shared QA window goes through the `bridge` tool (`guide://team-bridge`), as a peer; chat, Slack and email are for humans and history, never a second channel for the same ask.{{/if}}{{#if has_peer_line}}
 {{/if}}{{#if has_tags}}Session tags (`tags`): `assign` takes existing category NAMES only — create
 missing ones first.
 {{/if}}{{#if has_peer_paragraph}}

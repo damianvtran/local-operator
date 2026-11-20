@@ -128,7 +128,16 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Mapping
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterable,
+    Literal,
+    Mapping,
+    cast,
+)
 
 from local_operator.agent_profiles import (
     READ_ONLY_NETWORK_TOOLS,
@@ -4769,8 +4778,19 @@ async def _construct_child_session(
             if store is not None and hasattr(store, "credential_names")
             else []
         )
+        # The CHILD's live tool set once its Session installed the probe (see
+        # ``session_tool_membership`` below), else the construction list. The
+        # closure's ``tools`` is a construction snapshot: anything the child
+        # Session rebinds afterwards (``refresh_tools``, an ask hook, a host
+        # narrowing) never reaches it, so block zero's tool-gated prose
+        # (``TOOL_GATED_PROSE_FLAGS``) described tools the child did not hold.
+        # Same probe the top-level factory provider got in #4318 (review R2).
+        live_probe = getattr(system_blocks_provider, "live_tools", None)
+        current_tools: list[AgentTool] = (
+            list(cast("Iterable[AgentTool]", live_probe())) if callable(live_probe) else tools
+        )
         return build_system_blocks(
-            tools,
+            current_tools,
             "\n\n".join(
                 filter(None, (knowledge, mcp.catalogue(prompt) if mcp is not None else ""))
             ),
@@ -4827,6 +4847,8 @@ async def _construct_child_session(
         )
 
     setattr(system_blocks_provider, "append_only_state", True)
+    # Asks the child Session to install ``live_tools`` (read in the provider).
+    setattr(system_blocks_provider, "session_tool_membership", True)
     setattr(system_blocks_provider, "repo_guidance", repo_guidance)
     setattr(system_blocks_provider, "injected_guidance", injected_guidance)
     setattr(system_blocks_provider, "knowledge_hooks", parent_hooks)
