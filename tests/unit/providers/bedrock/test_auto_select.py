@@ -211,3 +211,53 @@ def test_sdk_resolver_shares_the_rule(clean_env, census, tmp_path: Path) -> None
     )
     configured: Any = _Config(tmp_path, {"hosting": "openai", "model_name": "gpt-6-astra"})
     assert resolve_hosting_model(configured, None, None, None) == ("openai", "gpt-6-astra")
+
+
+class _DirlessConfig:
+    """A config-shaped object with ONLY ``get_config_value`` (no ``config_dir``).
+
+    Mirrors the SDK test double that broke the v0.108 merge gate with
+    ``AttributeError: ... no attribute 'config_dir'`` (test_sdk.py SDK4).
+    """
+
+    def __init__(self, values: dict[str, Any] | None = None) -> None:
+        self._values = values or {}
+
+    def get_config_value(self, key: str, default: Any = None) -> Any:
+        return self._values.get(key, default)
+
+
+def test_resolvers_tolerate_a_config_without_config_dir(clean_env, census) -> None:
+    from local_operator import bootstrap, session_factory
+
+    config: Any = _DirlessConfig()
+    with pytest.raises(session_factory.HostingNotConfiguredError):
+        session_factory.resolve_hosting_model(None, _args(), config)
+    with pytest.raises(ValueError, match="Hosting platform is not configured."):
+        bootstrap.resolve_hosting_model(config, None, None, None)
+
+    model = "bedrock/ca.anthropic.claude-haiku-5-5"
+    assert session_factory.resolve_hosting_model(None, _args(model=model), config) == (
+        "bedrock",
+        "ca.anthropic.claude-haiku-5-5",
+    )
+    assert bootstrap.resolve_hosting_model(
+        _DirlessConfig({"model_name": model}), None, None, None
+    ) == (
+        "bedrock",
+        "ca.anthropic.claude-haiku-5-5",
+    )
+
+
+def test_no_config_dir_never_reads_the_default_store(clean_env, census, monkeypatch) -> None:
+    # Even with a live env signal, no run config dir means no inference: the
+    # census and config tier would otherwise read the operator's real store.
+    clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "fake-key")
+    import local_operator.config as config_mod
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("default config must not be read")
+
+    monkeypatch.setattr(config_mod, "read_config_values", boom)
+    assert auto_select.implied_bedrock_hosting(None, config_dir=None) is None
+    assert census["calls"] == 0

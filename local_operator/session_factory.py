@@ -819,7 +819,13 @@ def resolve_hosting_model_with_source(
         # BELOW the whole precedence above, so it can never override a choice.
         from local_operator.providers.bedrock.auto_select import implied_bedrock_hosting
 
-        implied = implied_bedrock_hosting(model_name, config_dir=config_manager.config_dir)
+        # getattr, not attribute access: callers (the SDK and its tests) pass
+        # lighter config-shaped objects with only ``get_config_value``, and this
+        # preflight must reach its own HostingNotConfiguredError, never die on
+        # an AttributeError first. No dir means prefix-only inference.
+        implied = implied_bedrock_hosting(
+            model_name, config_dir=getattr(config_manager, "config_dir", None)
+        )
         if implied is not None:
             hosting, model_name = implied
     if not hosting:

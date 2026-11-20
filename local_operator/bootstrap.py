@@ -86,7 +86,12 @@ def resolve_hosting_model(
         # agent/request/config hosting exists, so it never overrides one.
         from local_operator.providers.bedrock.auto_select import implied_bedrock_hosting
 
-        implied = implied_bedrock_hosting(model_name, config_dir=config_manager.config_dir)
+        # getattr for the same reason as session_factory.resolve_hosting_model:
+        # config-shaped objects without ``config_dir`` must reach the
+        # not-configured error, not an AttributeError. No dir = prefix only.
+        implied = implied_bedrock_hosting(
+            model_name, config_dir=getattr(config_manager, "config_dir", None)
+        )
         if implied is not None:
             hosting, model_name = implied
     if not hosting:

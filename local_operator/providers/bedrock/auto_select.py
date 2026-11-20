@@ -63,9 +63,19 @@ def implied_bedrock_hosting(
         stripped = model_name[len(_MODEL_PREFIX) :].strip()
         return PROVIDER_ID, (stripped or None)
 
+    if config_dir is None:
+        # No run config dir (a duck-typed config manager, e.g. the SDK's test
+        # doubles): only the explicit ``bedrock/`` prefix above may count. The
+        # env leg needs "Bedrock is the ONLY credentialed provider", which is a
+        # store read, and both ``bedrock_env_key``'s config tier and
+        # ``credentialed_chat_providers_here`` fall back to the process-default
+        # config dir — i.e. the operator's real ~/.local-operator. Inferring
+        # from someone else's store is worse than not inferring, so decline.
+        return None
+
     from local_operator.providers.bedrock.connection import bedrock_env_key
 
-    if config_values is None and config_dir is not None:
+    if config_values is None:
         # Read THIS run's config dir, not ``paths.config_dir()`` (what
         # ``bedrock_env_key`` falls back to): a ConfigManager pointed elsewhere
         # (tests, the SDK's own dir) must see its own ``providers.bedrock.auth``.
