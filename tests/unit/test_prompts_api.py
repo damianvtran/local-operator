@@ -1474,7 +1474,7 @@ def test_a_detached_session_is_not_told_the_operator_is_unavailable() -> None:
         [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK
     )
 
-    assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY_QUEUED)
+    assert detached[-1].endswith(UNATTACHED_INTERACTIVITY_QUEUED)
     # Belt and braces on the two claims this block may never make again, in
     # either casing: a reader of this file should not have to diff literals to
     # find out that the text says nothing about a screen.
@@ -1497,7 +1497,7 @@ def test_an_attached_session_is_told_a_question_will_be_presented() -> None:
         [], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK
     )
 
-    assert attached[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
+    assert attached[-1].endswith(ATTACHED_INTERACTIVITY_QUEUED)
     # The positive text says the question WAITS; it never claims the operator is
     # looking at this moment, which is the fact the block cannot know.
     assert "screen" not in attached[-1].lower()
@@ -1522,8 +1522,8 @@ def test_the_queued_interactivity_bodies_replace_the_blocking_claim(
     detached = build_system_blocks(
         [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK
     )
-    assert attached[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
-    assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY_QUEUED)
+    assert attached[-1].endswith(ATTACHED_INTERACTIVITY_QUEUED)
+    assert detached[-1].endswith(UNATTACHED_INTERACTIVITY_QUEUED)
     assert "parked for hours" not in attached[-1]
     assert "may block for hours" not in detached[-1]
     # The KILL-SWITCH arm still ships the old bytes, byte for byte: the switch
@@ -1531,14 +1531,14 @@ def test_the_queued_interactivity_bodies_replace_the_blocking_claim(
     # describes it), so the other arm must remain reachable and unchanged.
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
     inline = build_system_blocks([], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK)
-    assert inline[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+    assert inline[-1].endswith(ATTACHED_INTERACTIVITY)
     # ...and the DETACHED body on the same arm, so neither blocking literal is
     # left unpinned once the queued pair becomes the default: the kill switch
     # has to restore BOTH, or an operator who takes it gets half the old voice.
     inline_detached = build_system_blocks(
         [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK
     )
-    assert inline_detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY)
+    assert inline_detached[-1].endswith(UNATTACHED_INTERACTIVITY)
 
 
 def test_the_shipped_default_renders_the_queued_arm() -> None:
@@ -1560,7 +1560,7 @@ def test_the_shipped_default_renders_the_queued_arm() -> None:
     text = build_system_blocks([], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK)[
         -1
     ]
-    assert text.endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
+    assert text.endswith(ATTACHED_INTERACTIVITY_QUEUED)
     assert "parked for hours" not in text
 
 
@@ -1581,8 +1581,8 @@ def test_the_queue_does_not_move_the_hub_or_no_channel_bodies(
     nothing = build_system_blocks(
         [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_NONE
     )
-    assert child[-1].endswith("\n\n" + CHILD_ATTACHED_INTERACTIVITY)
-    assert nothing[-1].endswith("\n\n" + NO_CHANNEL_UNATTACHED_INTERACTIVITY)
+    assert child[-1].endswith(CHILD_ATTACHED_INTERACTIVITY)
+    assert nothing[-1].endswith(NO_CHANNEL_UNATTACHED_INTERACTIVITY)
 
 
 def test_system_md_ships_the_ask_paragraph_for_the_process_mode(
@@ -1677,7 +1677,7 @@ def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
     )
 
     assert attached_last == attached_first
-    assert attached_last[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
+    assert attached_last[-1].endswith(ATTACHED_INTERACTIVITY_QUEUED)
 
 
 #: The child's two bodies, VERBATIM, for the same reason as the pair above.
@@ -1782,14 +1782,14 @@ def test_a_delegated_child_is_told_the_route_it_actually_has() -> None:
     attached = build_system_blocks(
         child_tools, "", "env", "2026-01-01", interactive=True, channel=CHANNEL_HUB
     )
-    assert attached[-1].endswith("\n\n" + CHILD_ATTACHED_INTERACTIVITY)
+    assert attached[-1].endswith(CHILD_ATTACHED_INTERACTIVITY)
     assert "`ask`" not in attached[-1]
     assert "attached to this session" not in attached[-1]
 
     detached = build_system_blocks(
         child_tools, "", "env", "2026-01-01", interactive=False, channel=CHANNEL_HUB
     )
-    assert detached[-1].endswith("\n\n" + CHILD_UNATTACHED_INTERACTIVITY)
+    assert detached[-1].endswith(CHILD_UNATTACHED_INTERACTIVITY)
     assert "`ask`" not in detached[-1]
 
 
@@ -1809,7 +1809,7 @@ def test_a_session_with_no_channel_promises_no_presentation() -> None:
         interactive=True,
         channel=CHANNEL_NONE,
     )
-    assert attached[-1].endswith("\n\n" + NO_CHANNEL_ATTACHED_INTERACTIVITY)
+    assert attached[-1].endswith(NO_CHANNEL_ATTACHED_INTERACTIVITY)
     body = attached[-1]
     assert "`ask`" not in body and "`hub`" not in body
     assert "WILL be presented" not in body
@@ -1822,7 +1822,7 @@ def test_a_session_with_no_channel_promises_no_presentation() -> None:
         interactive=False,
         channel=CHANNEL_NONE,
     )
-    assert detached[-1].endswith("\n\n" + NO_CHANNEL_UNATTACHED_INTERACTIVITY)
+    assert detached[-1].endswith(NO_CHANNEL_UNATTACHED_INTERACTIVITY)
 
 
 def test_an_unstated_channel_is_read_off_the_tool_inventory() -> None:
@@ -1838,12 +1838,12 @@ def test_an_unstated_channel_is_read_off_the_tool_inventory() -> None:
     with_ask = build_system_blocks(
         [_tool("ask", "Ask the user.")], "", "env", "2026-01-01", interactive=True
     )
-    assert with_ask[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
+    assert with_ask[-1].endswith(ATTACHED_INTERACTIVITY_QUEUED)
 
     parent_with_hub = build_system_blocks(
         [_tool("hub", "Message a subagent.")], "", "env", "2026-01-01", interactive=True
     )
-    assert parent_with_hub[-1].endswith("\n\n" + NO_CHANNEL_ATTACHED_INTERACTIVITY)
+    assert parent_with_hub[-1].endswith(NO_CHANNEL_ATTACHED_INTERACTIVITY)
     assert "delegated from" not in parent_with_hub[-1]
 
 
@@ -2075,10 +2075,14 @@ def test_marker_shaped_content_degrades_granularity_but_never_bytes() -> None:
 # with the tool, and a session holding every tool keeps its exact bytes.
 # ---------------------------------------------------------------------------
 
-from local_operator.prompts_api import TOOL_GATED_PROSE_FLAGS  # noqa: E402
+from local_operator.prompts_api import (  # noqa: E402
+    CAPABILITY_CLASS_FLAGS,
+    TOOL_GATED_PROSE_FLAGS,
+)
 
 _GATED_TOOL_NAMES = sorted(
-    {name for names in TOOL_GATED_PROSE_FLAGS.values() for name in names} | {"read", "bash"}
+    {name for names in TOOL_GATED_PROSE_FLAGS.values() for name in names}
+    | {name for names in CAPABILITY_CLASS_FLAGS.values() for name in names}
 )
 
 
