@@ -231,3 +231,35 @@ async def test_every_surface_follows_a_live_language_change(fr_sidebar) -> None:
         bare = CatalogEntry(SessionRow("r6", time.time(), "x", locality="remote"))
         assert app._session_sidebar._describe(bare).splitlines()[2] == "FR on FR unnamed device"
         assert text._refreshers == []
+
+
+@pytest.fixture
+def shipped_fr(monkeypatch: pytest.MonkeyPatch):
+    """The REAL shipped catalogue tree and shipped set — no synthetic locale.
+
+    The synthetic fixture above proves the wiring; this one proves the audited
+    fr translation actually reaches the painted frame once fr is eligible
+    through the generated ``shipped.json`` (a missing ledger row would un-ship
+    fr and the frame would silently fall back to English).
+    """
+    monkeypatch.setattr(text, "_active_locale", "en")
+    monkeypatch.setattr(text, "_refreshers", [])
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    text._sources.cache_clear()
+    yield
+    text.set_active_locale("en")
+    text._sources.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_shipped_fr_catalogue_paints_the_sidebar(shipped_fr) -> None:
+    assert "fr" in resolve.shipped_locales()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        text.set_active_locale("fr")
+        got = await _surfaces(pilot, app)
+        assert "Sessions actives" in [line.strip() for line in got["frame"]], got["frame"]
+        # `lop stop` is a command the operator types, so it must stay literal
+        # inside the translated clause rather than being translated with it.
+        assert got["wedged"] == f"{wedged_status()} · lop stop si le silence persiste"

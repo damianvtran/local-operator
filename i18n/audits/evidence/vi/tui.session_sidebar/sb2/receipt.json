@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "audit_id": "sb2",
+  "locale": "vi",
+  "namespace": "tui.session_sidebar",
+  "record": "i18n/audits/evidence/vi/tui.session_sidebar/sb2/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from its session scratchpad (~/.local-operator/sessions/5ec315c949b3/scratchpad/vi-sidebar-round2-receipt.json)",
+  "record_sha256": "f635f0709f5786c68ce7d4041525ba326e71f46daee6ba84e4e4bb662f47f817",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+  "target_sha256": "6b2466d96e782ed936dfd7e9817a91b6024158bd1ce41ea5017934ad6658630d",
+  "verdict": "passed",
+  "commit_audited": "c8343f3a6087 (worktree head; locale bytes uncommitted at audit time)",
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+    "session": "5ec315c949b3",
+    "model": "openai/gpt-6.1-sol"
+  },
+  "ledger_receipt": {
+    "locale": "vi",
+    "namespace": "tui.session_sidebar",
+    "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+    "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+    "target_sha256": "6b2466d96e782ed936dfd7e9817a91b6024158bd1ce41ea5017934ad6658630d",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator')",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-20",
+      "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+      "session": "5ec315c949b3",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-20",
+      "result": "clean-with-findings",
+      "findings": 1,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "finding_ids": [
+        "VI-R2-1"
+      ],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own receipt (model field)"
+    },
+    "status": "passed",
+    "note": "Independent full audit (round 2 (delta re-audit after the round-1 fixes)) of the new tui.session_sidebar namespace (21 keys), source commit c8343f3a6087. Auditor 5ec315c949b3 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (VI-R2-1). VI-R2-1 (hub_note abbreviation l.kết vs LK) deferred by the manager: LK is a bare initialism and less recognisable; tracked in the PR thread. Record: i18n/audits/evidence/vi/tui.session_sidebar/sb2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/vi/tui.session_sidebar/sb2/record.json",
+    "round": "sb2"
+  }
+}
