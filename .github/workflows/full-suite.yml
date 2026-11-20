@@ -1350,12 +1350,25 @@ jobs:
       # (PR #3804: `CI Gate` job 130798073631, `Merge gate (full suite)` job
       # 130788458667). tests/unit/test_ci_hygiene.py runs this exact step
       # script against such a NEEDS payload.
+      #
+      # PRECONDITION NOT MET is named separately (GH #4194/#4215/#4145): a red
+      # cost gate skips every heavy job, so this check goes red with NO test
+      # having run. Before, that red read exactly like a failed suite; 21 of 92
+      # red gate runs 2026-11-15..18 were a label armed while ci.yml was still
+      # queued. The verdict is unchanged (still exit 1, still fail-closed);
+      # only the words differ so a reader re-arms instead of hunting a test.
       - name: Fail unless every needed job succeeded or was skipped
         env:
           NEEDS: ${{ toJSON(needs) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if [ "$(echo "$NEEDS" | jq -r '.precondition.result // "absent"')" = failure ]; then
+            msg="PRECONDITION NOT MET (not a test failure): fast CI (ci.yml CI Gate) was not green on this head when the gate armed, so the full suite did not run; the precondition job's FAST-CI line says why. Next: after CI Gate is green: make merge-gate PR=${PR_NUMBER:-<n>}"
+            echo "::error title=Merge gate: precondition not met::$msg"
+            echo "### Merge gate: $msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
           # `precondition` is the cost gate, not a path-filtered job: only
           # `success` is a pass for it. A skipped one would leave every heavy
           # job skipped (`ok` unset) and the gate green with nothing run.
