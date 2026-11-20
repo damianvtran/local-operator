@@ -127,6 +127,16 @@ def _reap(proc: subprocess.Popen[Any]) -> None:
     proc.wait(timeout=10)
 
 
+def _spawned[P: subprocess.Popen[Any]](procs: list[subprocess.Popen[Any]], proc: P) -> P:
+    """Track ``proc`` for the cell's ``finally`` and return it.
+
+    ``communicate(timeout=…)`` raising ``TimeoutExpired`` leaves its process
+    running; every spawned waiter is reaped in ``finally`` (PR #4351 N2).
+    """
+    procs.append(proc)
+    return proc
+
+
 def _slot_free() -> bool:
     lease = heavy_lease.try_acquire(heavy_lease.lease_dir(), 1)
     if lease is None:
@@ -242,6 +252,10 @@ def test_heavy_run_inside_a_leased_bash_command_runs_at_once(
     take, nested = events[0], events[1]
     assert take["label"] == "go test" and take["pid"] == os.getpid()
     assert nested["slot"] == 0 and nested["holder"] == os.getpid() and nested["label"] == "sh"
+    # The holder is the RUNTIME's pid (subagents share it); the checking process
+    # is the nested CLI, so inherited_lease's own-pid refusal (PR #4351 R1) does
+    # not touch this shape.
+    assert nested["pid"] != nested["holder"], nested
 
 
 def test_heavy_wait_inside_a_leased_bash_command_returns_at_once(lease_env: dict[str, str]) -> None:
@@ -297,20 +311,26 @@ def test_marker_without_an_inherited_descriptor_still_queues(
 ) -> None:
     """(c) bare env var: no such fd in the child, so it queues and is refused."""
     holder = _hold(lease_env, tmp_path / "holder.log")
+    spawned: list[subprocess.Popen[Any]] = []
     try:
-        waiter = _forged(lease_env, "0:987")
+        waiter = _spawned(spawned, _forged(lease_env, "0:987"))
         _, err = waiter.communicate(timeout=60)
-        runner = _lop(
-            {**lease_env, MARKER: "0:987"},
-            "run",
-            "--timeout",
-            "1",
-            "--",
-            "touch",
-            str(tmp_path / "ran"),
+        runner = _spawned(
+            spawned,
+            _lop(
+                {**lease_env, MARKER: "0:987"},
+                "run",
+                "--timeout",
+                "1",
+                "--",
+                "touch",
+                str(tmp_path / "ran"),
+            ),
         )
         _, run_err = runner.communicate(timeout=60)
     finally:
+        for proc in spawned:
+            _reap(proc)
         (tmp_path / "holder.log.release").write_text("1")
         _reap(holder)
     assert waiter.returncode == EXIT_TIMED_OUT, err
@@ -327,10 +347,13 @@ def test_marker_naming_an_fd_to_another_file_still_queues(
     other = tmp_path / "decoy.lock"
     other.write_text("")
     fd = os.open(other, os.O_RDONLY)
+    spawned: list[subprocess.Popen[Any]] = []
     try:
-        waiter = _forged(lease_env, f"0:{fd}", pass_fds=(fd,))
+        waiter = _spawned(spawned, _forged(lease_env, f"0:{fd}", pass_fds=(fd,)))
         _, err = waiter.communicate(timeout=60)
     finally:
+        for proc in spawned:
+            _reap(proc)
         os.close(fd)
         (tmp_path / "holder.log.release").write_text("1")
         _reap(holder)
@@ -349,10 +372,13 @@ def test_marker_naming_a_fresh_open_of_the_real_lock_still_queues(
     """
     holder = _hold(lease_env, tmp_path / "holder.log")
     fd = os.open(heavy_lease.lease_dir() / "slot-0.lock", os.O_RDONLY)
+    spawned: list[subprocess.Popen[Any]] = []
     try:
-        waiter = _forged(lease_env, f"0:{fd}", pass_fds=(fd,))
+        waiter = _spawned(spawned, _forged(lease_env, f"0:{fd}", pass_fds=(fd,)))
         _, err = waiter.communicate(timeout=60)
     finally:
+        for proc in spawned:
+            _reap(proc)
         os.close(fd)
         (tmp_path / "holder.log.release").write_text("1")
         _reap(holder)
@@ -389,32 +415,167 @@ def test_a_released_lease_is_not_inherited_and_is_not_retaken(lease_env: dict[st
         os.close(fd)
 
 
+def _ancestor_lease(directory: Path, **kw: Any) -> heavy_lease.Lease:
+    """Slot 0 held on a descriptor in THIS process, its record naming our parent.
+
+    How a descendant sees an ancestor's lease: the fd is the holder's own
+    description, and the record's pid is someone else's (a live one: the
+    process that started this test run). A record naming this process would
+    be refused as its own lease (``inherited_lease`` step 3, PR #4351 R1).
+    """
+    lease = heavy_lease.try_acquire(directory, 1, pid=os.getppid(), **kw)
+    assert lease is not None and lease.fileno() is not None
+    return lease
+
+
 def test_a_release_racing_the_probe_unlocks_what_the_probe_retook(
     lease_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Step 5: the record vanished between the check and the probe.
+    """Step 5: the ancestor released between the record check and the probe.
 
-    The record read is stubbed to say "held, then gone" (the real flock is
-    not): the probe re-locked the shared description, so the verifier must
-    unlock it again, never leaving a slot held with no record.
+    The release itself is real and lands exactly in that window: the first
+    record read is wrapped so that, after it returns "held", the record is
+    unlinked and the description unlocked, as ``Lease.release`` does. The
+    real probe then RE-TAKES the freed lock on the shared description, the
+    real second read finds no record, and the verifier must unlock again,
+    never leaving a slot held with no record.
     """
     directory = heavy_lease.lease_dir()
-    lease = heavy_lease.try_acquire(directory, 1)
-    assert lease is not None
+    lease = _ancestor_lease(directory)
     fd = lease.fileno()
     assert fd is not None
-    real = heavy_lease._slot_holder(directory, 0)
-    answers = iter([real, None])
+    real_read = heavy_lease._slot_holder
+    reads: list[Any] = []
+
+    def racing(d: Path, s: int) -> Any:
+        found = real_read(d, s)
+        if not reads:
+            (directory / "slot-0.json").unlink()
+            heavy_lease.fcntl.flock(fd, heavy_lease.fcntl.LOCK_UN)
+        reads.append(found)
+        return found
+
     try:
         # A scoped context, never monkeypatch.undo(): undo would also revert
         # lease_env's isolated config dir and aim _slot_free at the real one.
         with monkeypatch.context() as patch:
-            patch.setattr(heavy_lease, "_slot_holder", lambda _d, _s: next(answers))
+            patch.setattr(heavy_lease, "_slot_holder", racing)
             assert heavy_lease.inherited_lease(directory, {MARKER: f"0:{fd}"}) is None
+        # Both reads ran, so the probe between them did take the lock.
+        assert reads[0] is not None and reads[1:] == [None], reads
         assert heavy_lease.lease_dir() == directory
         assert _slot_free()
     finally:
         lease.release()
+
+
+def test_a_failed_record_read_after_the_probe_never_frees_the_ancestors_slot(
+    lease_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4351 M1: "no record" from a read ERROR is not a release.
+
+    ``read_holders`` skips a record it cannot read or parse, so step 5 can see
+    nothing while the ancestor still holds the slot and its record is on disk.
+    Here the second read really fails (the record is unparseable by then). The
+    verifier must refuse WITHOUT unlocking: an unlock on the ancestor's live
+    description would free its slot mid-build for the next heavy job.
+    """
+    directory = heavy_lease.lease_dir()
+    lease = _ancestor_lease(directory)
+    record = directory / "slot-0.json"
+    real_read = heavy_lease._slot_holder
+    reads: list[Any] = []
+
+    def failing(d: Path, s: int) -> Any:
+        found = real_read(d, s)
+        if not reads:
+            record.write_text("{", encoding="utf-8")
+        reads.append(found)
+        return found
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(heavy_lease, "_slot_holder", failing)
+            assert heavy_lease.inherited_lease(directory, {MARKER: f"0:{lease.fileno()}"}) is None
+        assert reads[0] is not None and reads[1:] == [None], reads
+        assert record.exists()
+        intruder = heavy_lease.try_acquire(directory, 1)
+        if intruder is not None:
+            intruder.release()
+        assert intruder is None, "the ancestor's slot was freed by a failed read"
+    finally:
+        lease.release()
+    assert _slot_free()
+
+
+# -- a process is never its own ancestor (PR #4351 R1) ---------------------------
+
+
+def test_a_marker_naming_this_processs_own_lease_is_not_inherited(
+    lease_env: dict[str, str],
+) -> None:
+    """A bare marker plus this process's own later lease on the same fd number.
+
+    The state R1 reproduced: an intermediate runner dropped the ancestor's fd
+    but kept the marker, the ancestor released, and this process's own lease
+    then landed on the fd number the marker names. Inode, record and flock
+    checks all pass on one's own description; only the pid check refuses it.
+    It must queue like anyone else: refused after the 1 s bound, slot kept.
+    """
+    directory = heavy_lease.lease_dir()
+    own = heavy_lease.try_acquire(directory, 1, command="pnpm build")
+    assert own is not None
+    marker = {MARKER: f"{own.slot}:{own.fileno()}"}
+    try:
+        assert heavy_lease.inherited_lease(directory, marker) is None
+        result = asyncio.run(
+            heavy_lease.acquire(
+                directory, 1, wait_seconds=1, reason="go test", command="go test", environ=marker
+            )
+        )
+        assert isinstance(result, heavy_lease.Refusal), result
+        assert heavy_lease.try_acquire(directory, 1) is None, "own lease was unlocked"
+    finally:
+        own.release()
+    events = [e["event"] for e in heavy_audit.tail(directory, 50)]
+    assert "nested" not in events and "timeout" in events, events
+    assert _slot_free()
+
+
+def test_bash_tool_refuses_its_own_runtimes_lease_as_an_ancestor(
+    lease_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R1 through the real ``execute_bash``: a sibling session's lease is not ours.
+
+    Subagents share their runtime's pid, so session A's bash-tool lease is a
+    record naming THIS process. A stale marker naming that lease's fd in the
+    runtime's environment must not let session B's heavy command run beside
+    it: B queues, is refused at the 1 s bound and never spawns, and A's slot
+    stays held. (Before the fix B ran after 0.03 s, audited as ``nested``.)
+    """
+    from local_operator.tools import builtin
+
+    directory = heavy_lease.lease_dir()
+    session_a = heavy_lease.try_acquire(directory, 1, command="go test")
+    assert session_a is not None
+    monkeypatch.setenv(MARKER, f"{session_a.slot}:{session_a.fileno()}")
+    ran = tmp_path / "ran"
+    try:
+        result = asyncio.run(
+            builtin.execute_bash(
+                "t", {"command": f"touch {shlex.quote(str(ran))}" + _HEAVY_TAIL}, None, None, None
+            )
+        )
+        text = _text(result)
+        assert result.is_error and "HEAVY JOB QUEUE FULL" in text, text
+        assert "ancestor" not in text, text
+        assert not ran.exists()
+        assert heavy_lease.try_acquire(directory, 1) is None, "session A's slot was freed"
+    finally:
+        session_a.release()
+    events = [e["event"] for e in heavy_audit.tail(directory, 50)]
+    assert "nested" not in events and "timeout" in events, events
+    assert _slot_free()
 
 
 # -- the bash tool of a runtime that itself runs under a lease -------------------
@@ -425,8 +586,9 @@ def test_bash_tool_under_an_inherited_lease_runs_and_never_frees_it(
 ) -> None:
     """A nested lop runtime's bash tool runs under the ancestor's slot.
 
-    This process plays the ancestor: it holds slot 0 and names its own
-    descriptor in the marker, as an inherited one would be. The heavy command
+    This process holds the ancestor's descriptor, as an inherited one would
+    be, and the record names the ancestor (our parent pid, see
+    :func:`_ancestor_lease`), not this runtime. The heavy command
     must run (a queued one would be refused after the 1 s bound), say so, and
     leave the slot HELD: the InheritedLease's release must never unlock the
     ancestor's description.
@@ -434,8 +596,7 @@ def test_bash_tool_under_an_inherited_lease_runs_and_never_frees_it(
     from local_operator.tools import builtin
 
     directory = heavy_lease.lease_dir()
-    lease = heavy_lease.try_acquire(directory, 1, command="pnpm build")
-    assert lease is not None
+    lease = _ancestor_lease(directory, command="pnpm build")
     monkeypatch.setenv(MARKER, f"{lease.slot}:{lease.fileno()}")
     updates: list[Any] = []
     try:
@@ -488,6 +649,16 @@ def test_holder_label_names_the_heavy_segment_not_the_first_word() -> None:
     assert heavy is not None
     assert heavy_audit.command_label(line) == "rm"  # what the 2026-11-20 record said
     assert heavy.label(line) == "go test"
+    # PR #4351 N1: the line's own label wins when it refines the classifier's
+    # normalised reason (`make test-all` is reasoned as `make test`), and only
+    # then: a different first command still yields the heavy segment.
+    for line, label in (
+        ("timeout 600 make test-all", "make test-all"),
+        ("make lint && make test-all", "make test"),
+    ):
+        heavy = heavy_lease.is_heavy(line)
+        assert heavy is not None and heavy.reason == "make test", line
+        assert heavy.label(line) == label, line
     # A reason that is not a command falls back to the line's own label.
     by_memory = heavy_lease.is_heavy("make test", 4096)
     assert by_memory is not None and by_memory.reason == "memory_mb=4096"

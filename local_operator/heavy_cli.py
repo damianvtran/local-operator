@@ -215,6 +215,15 @@ def run_command(
     replaced with ``/dev/null`` — heavy jobs are builds and tests, not
     interactive programs, and an inherited tty fd would be one it cannot own.
     A piped stdin is passed through untouched.
+
+    Nested inside another leased command (a verified
+    ``LOCAL_OPERATOR_HEAVY_LEASE``, see ``heavy_lease.inherited_lease``), the
+    run does not queue and takes NO slot of its own: it shares its ancestor's,
+    as any child of a leased command does. So a nested run that outlives the
+    ancestor (started in the background) keeps running with no slot once the
+    ancestor releases, and an unrelated heavy job may start beside it; that is
+    the residual a self-backgrounded child already has (``heavy_lease``'s
+    module docstring), not a second queue.
     """
     out = out if out is not None else sys.stderr
     if not argv:

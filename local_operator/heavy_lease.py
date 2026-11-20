@@ -61,11 +61,18 @@ A leased command's children are inside its lease. The holder exports
 beside the descriptor it passes down, and :func:`acquire` (so the bash tool,
 including a nested lop runtime's, and ``lop services heavy run``) and
 ``heavy wait`` first check it with :func:`inherited_lease`. Verified means the
-fd is open on this very ``slot-<i>.lock`` and a non-blocking ``flock`` on it
-succeeds, which only the ancestor's own open file description can do; then the
-command runs under that slot without taking another, and a ``nested`` audit
-line is written. Anything less (a closed fd, a different file, a lock not held,
-a bare or forged variable) is ignored and the command queues as before. Why:
+fd is open on this very ``slot-<i>.lock``, the slot's live record names a pid
+other than the checking process, and a non-blocking ``flock`` on the fd
+succeeds. A separately opened description is refused by the holder's lock, so
+only the holder's own description passes; and since the holder itself also
+passes that probe on its own fd, the pid check rules the holder out, leaving
+its descendants. Then the command runs under that slot without taking another,
+and a ``nested`` audit line is written. Anything less (a closed fd, a different
+file, a lock not held, this process's own lease, a bare or forged variable) is
+ignored and the command queues as before. A nested run SHARES its ancestor's
+slot and never gets one of its own: it is inside the ancestor's lease exactly
+as a backgrounded child is, so if it outlives the ancestor it runs on with no
+slot (the same residual as the self-backgrounding bullet above). Why:
 on 2026-11-20 a bash-tool lease on a ``go test -race`` line held the only slot
 while a ``lop services heavy run`` inside that same line queued behind it for
 its whole 3300 s timeout, and every other heavy command was refused at 900 s.
@@ -198,10 +205,18 @@ class HeavyClass:
         running. ``reason`` is the classifier's own short name for the heavy
         segment (``go test``, ``pnpm build``); it still goes through
         ``command_label``'s privacy filter, and a reason that is not a command
-        (``memory_mb=2048``) falls back to the line's label.
+        (``memory_mb=2048``) falls back to the line's label. The line's label
+        also wins when it merely REFINES the reason's: the classifier normalises
+        ``make test-all`` to the reason ``make test``, and the line's own
+        ``make test-all`` (both already privacy-filtered) says more (PR #4351
+        N1). A different first command (``make lint && make test-all``) keeps
+        the reason's label.
         """
         named = heavy_audit.command_label(self.reason)
-        return named if named != "?" else heavy_audit.command_label(command)
+        line = heavy_audit.command_label(command)
+        if named == "?" or line.startswith(named):
+            return line
+        return named
 
 
 @dataclass(frozen=True)
@@ -1328,7 +1343,19 @@ def inherited_lease(
        fails here;
     3. the slot has a live holder record: :meth:`Lease.release` unlinks the
        record BEFORE it unlocks, so a lease already released fails here
-       without the lock being touched;
+       without the lock being touched; and that record's ``pid`` is NOT this
+       process. A process is never its own ancestor, but its own
+       :class:`Lease` passes steps 2 and 4 (its fd is that lock, and a flock
+       on its own description is a no-op). A bare marker reaches a process
+       routinely (a Python or JVM runner in between keeps the environment and
+       drops the fd), so once the ancestor has released and this process's
+       own later lease lands on the same fd number, the marker would
+       otherwise wave a second heavy job past the queue (PR #4351 R1).
+       Every genuine descendant checks against someone else's record: the
+       bash tool's command, or ``heavy run``'s child, has its own pid, and a
+       nested runtime's record names the outer harness. Subagents share their
+       runtime's pid, so a runtime whose bash tool finds its OWN pid on the
+       slot is looking at a sibling session's lease, never an ancestor's;
     4. ``flock(fd, LOCK_EX | LOCK_NB)`` succeeds. flock locks belong to the
        open file DESCRIPTION, so on the holder's own description (inherited
        through fork/exec) this is a no-op that succeeds, while a description
@@ -1339,7 +1366,12 @@ def inherited_lease(
        between 3 and 4, step 4 may have RE-TAKEN the freed lock on the shared
        description; it is unlocked again (what the ancestor's release was
        doing anyway) and the marker refused, so no slot is ever held without
-       a record.
+       a record. The unlock happens ONLY when ``slot-<i>.json`` is provably
+       gone: a mismatch can also be a failed read (``read_holders`` skips a
+       file it cannot read or parse), and a record still on disk means the
+       ancestor has not reached its ``LOCK_UN`` yet (release unlinks first),
+       so step 4 was a no-op on a lock it still holds and unlocking would free
+       its slot mid-build (PR #4351 M1). That case is refused untouched.
     """
     if fcntl is None:
         return None
@@ -1356,7 +1388,9 @@ def inherited_lease(
     if not stat.S_ISREG(held.st_mode) or (held.st_dev, held.st_ino) != (lock.st_dev, lock.st_ino):
         return None
     before = _slot_holder(directory, slot)
-    if before is None:
+    # Refused BEFORE the flock probe, so this process's own lease is never
+    # touched (step 3 above).
+    if before is None or before.pid == os.getpid():
         return None
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1364,12 +1398,29 @@ def inherited_lease(
         return None
     after = _slot_holder(directory, slot)
     if after is None or (after.pid, after.started_at) != (before.pid, before.started_at):
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
+        if _record_gone(directory, slot):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
         return None
     return InheritedLease(slot, fd, after)
+
+
+def _record_gone(directory: Path, slot: int) -> bool:
+    """True only when ``slot-<slot>.json`` is provably absent (step 5 above).
+
+    Any other ``lstat`` failure counts as present: the one effect of a False
+    here is leaving a lock alone, and that is the safe side when the answer
+    is unknown.
+    """
+    try:
+        os.lstat(directory / f"slot-{slot}.json")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def export_marker(env: MutableMapping[str, str], lease: Lease | InheritedLease | None) -> None:
