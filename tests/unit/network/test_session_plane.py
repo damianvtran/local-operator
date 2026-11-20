@@ -3241,13 +3241,38 @@ def _warm_frame_index(root: Path, session_id: str) -> None:
     Through ``start_refresh`` rather than ``refresh_index``: the frame's fast path
     reads the RESIDENT index, which only the refresh task publishes (the desktop
     twin's ``_Harness.warm`` makes the same choice for the same reason).
+
+    THE PUBLISHED INDEX MUST DESCRIBE THE JOURNAL AS IT IS NOW. ``start_refresh``
+    joins a refresh already in flight — since PR #4224 across loops too, so a
+    refresh an EARLIER frame read armed on the relay's page loop is joined from
+    this ``asyncio.run`` loop. That scan may have read the journal before the
+    cell rewrote it, and its (correct, but older) index makes the next frame
+    answer ``runs_state: "building"`` and re-arm (gate run 44793529479). So the
+    joined scan is drained and the refresh re-run until the published
+    signature matches the journal on disk; a refresh that never catches up
+    still fails the assertion below rather than being accepted as warm.
     """
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    journal = root / "sessions" / session_id / TRANSCRIPT_FILENAME
 
     async def _warm() -> None:
         from local_operator.session import transcript_index as ti
 
-        task, _started = ti.start_refresh(root, session_id)
-        assert await task is not None
+        published: dict[str, Any] = {}
+        for _attempt in range(3):
+            task, _started = ti.start_refresh(root, session_id)
+            index = await task
+            assert index is not None
+            published = dict(index.sig)
+            st = journal.stat()
+            if (published.get("inode"), published.get("size"), published.get("mtime")) == (
+                st.st_ino,
+                st.st_size,
+                st.st_mtime,
+            ):
+                return
+        raise AssertionError(f"resident index never caught up with the journal: {published}")
 
     asyncio.run(_warm())
 
