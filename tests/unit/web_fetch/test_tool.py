@@ -186,8 +186,10 @@ async def test_query_ranking_starts_at_same_threshold_without_read(tmp_path) -> 
     from local_operator.tools.builtin import TOOL_OUTPUT_LIMIT_CHARS
 
     answer = "NEEDLE_TOKEN port 4318 is the deployment endpoint."
-    page = ("Ordinary article filler without an endpoint.\n" * 125) + answer + (
-        "\nOrdinary article filler without an endpoint." * 125
+    page = (
+        ("Ordinary article filler without an endpoint.\n" * 125)
+        + answer
+        + ("\nOrdinary article filler without an endpoint." * 125)
     )
     assert TOOL_OUTPUT_LIMIT_CHARS < len(page) < 24_000
     readable = ToolContext(cwd=str(tmp_path), session_id="medium-read", spill_readable=True)
