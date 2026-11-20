@@ -687,12 +687,15 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
     follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
     state (no row), the allowlist's defaults are server truth surfaced as data
     by ``team_bridge.client.allowlist_view``, not config, and
-    ``hold_alert_after_minutes``/``hold_release`` are read keys with no row.
+    ``hold_alert_after_minutes`` is a read key with no row. ``hold_release``
+    is registered (BOOL, default ON) and pinned below to DEFAULT_HOLD_RELEASE,
+    so the page can never advertise a release state the receiver does not read.
     The four ``team_bridge.screening.*`` ceilings are here because a page that
     showed a ceiling the receiver does not read would be exactly this drift.
     """
 
     from local_operator.team_bridge.settings import (
+        DEFAULT_HOLD_RELEASE,
         DEFAULT_TEAM_BRIDGE_ENABLED,
         DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
@@ -704,6 +707,7 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
 
     return {
         "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.hold_release": DEFAULT_HOLD_RELEASE,
         "team_bridge.screening.ambient_budget_per_hour": (
             DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
         ),
@@ -1050,6 +1054,43 @@ def test_the_turn_answer_rail_flag_defaults_off_and_round_trips(
 
     settings_io.write_setting(manager, setting, False)
     assert settings_get("display.turn_answer_rail") is False
+
+
+def test_hold_release_row_round_trips_through_the_consumer(manager: ConfigManager) -> None:
+    """``team_bridge.hold_release``: listed, read, written, reset — and the receiver agrees.
+
+    The row is NESTED (``values.team_bridge.hold_release``), the only path
+    ``TeamBridgeSettings`` reads, so every state is asserted on the consumer,
+    not just on the file: an absent key reads ON (the shipped default), a
+    written ``false`` is the one value that turns release off, and reset
+    returns to ON by removing the key rather than writing a literal.
+    """
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    setting = settings_io.BY_KEY["team_bridge.hold_release"]
+    assert setting in settings_io.SETTINGS
+    assert setting.section == "team_bridge" and setting.kind is settings_io.Kind.BOOL
+    assert setting.path == ("team_bridge", "hold_release") and setting.default is True
+    assert setting.label and setting.help and "screen" not in setting.help.lower()
+
+    assert settings_io.read_setting(manager, setting) is True
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+    settings_io.write_setting(manager, setting, False)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["team_bridge"]["hold_release"] is False
+    assert settings_io.read_setting(manager, setting) is False
+    assert TeamBridgeSettings.from_config(manager).hold_release is False
+
+    settings_io.write_setting(manager, setting, True)
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+    settings_io.write_setting(manager, setting, False)
+    settings_io.reset_setting(manager, setting)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text()) or {}
+    assert "hold_release" not in ((stored.get("values") or {}).get("team_bridge") or {})
+    assert settings_io.read_setting(manager, setting) is True
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
 
 
 def test_the_narration_key_is_flat_dotted() -> None:

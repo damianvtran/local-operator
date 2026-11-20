@@ -204,12 +204,13 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: because the outcome it opens is a HOLD a person controls, never an admit:
 #: nothing is delivered without the operator's signed Deliver.
 #:
-#: Still read from the config file with NO ``/settings`` registry row, like
-#: ``hold_alert_after_minutes``: a row adds ``wire.settings`` copy, and measured
-#: on 2026-11-18 that drops ``i18n/data/shipped.json`` to ``["en"]`` until all
-#: seven locales are translated and independently audited. The off switch is
-#: documented in the Team Bridge guide (``hold_release: false`` under
-#: ``values:`` > ``team_bridge:``); the row is a separately-translated change.
+#: Registered as the ``team_bridge.hold_release`` ``/settings`` row (BOOL,
+#: default ``True``), whose literal ``_team_bridge_consumer_defaults()`` in
+#: tests/unit/test_settings_io.py pins to this constant. The row's copy carries
+#: ``wire.settings`` keys, which is why it arrived separately from S3a: it
+#: needed every locale translated (and independently audited) first. The
+#: config-file form documented in the Team Bridge guide (``hold_release:
+#: false`` under ``values:`` > ``team_bridge:``) is the same key.
 DEFAULT_HOLD_RELEASE = True
 
 #: ``team_bridge.review_held`` — the owner-review EXIT for a cached screening

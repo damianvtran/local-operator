@@ -259,6 +259,16 @@
     "tone": "calm, factual, operator-facing; no alarm, no blame",
     "note": "Body of the same notification. Facts that must survive: (1) the safety check tries Claude Sonnet 5.5 and Claude Opus 5.5 via Anthropic or Radient FIRST, then the owner's own default model and its fallbacks (product and model names stay in Latin script, untranslated); (2) none could run, so new agent messages are held; (3) nothing is lost; (4) the fix: sign in to Anthropic or Radient, add credit in the Radient Console, or check that the default model works; (5) held messages are re-screened automatically. Do not imply messages were rejected, deleted, or that a human reviews them."
   },
+  "cli.team_bridge.notify.owner_action_hold_title": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Title shown ONLY to the owner of the receiving agent when incoming agent messages are held because the Radient hub withdrew the owner's authority for a reason only the owner can fix (sign-in ended, consent needed again, organization not eligible). Shown once per receiving machine and reason, never per message. Carries no sender, message or conversation detail. Agent messages is the product name of Team Bridge. No ICU arguments."
+  },
+  "cli.team_bridge.notify.owner_action_hold_body": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Body of the same notification: a whole-message ICU select over {reason}; translate every arm and keep the selector values (sign_in_required, consent_required, owner_ineligible, other) verbatim. Each arm states: why messages are held, that held messages are KEPT (not discarded), and the ONE fix the owner must make — sign in again as account owner in the Local Operator app; turn on Agent messages in the app to review and accept consent; ask an administrator of the Radient organization to check eligibility. Never offer to deliver these messages: this hold has no deliver action. Do not promise automatic delivery after the fix. 'Local Operator' and 'Radient' are product names; keep in Latin script."
+  },
   "cli.team_bridge.status.running": {
     "role": "lop team-bridge CLI output",
     "tone": "terse, plain English, operator-facing",

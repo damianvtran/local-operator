@@ -474,6 +474,75 @@ def test_owner_notice_is_one_keyed_item(tmp_path) -> None:
         assert phrase in item["body_md"]
 
 
+_OWNER_ACTION_FIX_PHRASES = {
+    "sign_in_required": "sign in again as the account owner",
+    "consent_required": "accept the consent",
+    "owner_ineligible": "ask an administrator of your Radient organization",
+}
+
+
+def test_owner_action_notice_is_one_item_per_endpoint_and_reason(tmp_path) -> None:
+    """The three owner-action holds each raise ONE contentless notice naming the fix.
+
+    Before this they were visible only in ``lop team-bridge holds``: the hub
+    withdrew the owner's authority for a reason only the owner can fix, and
+    nothing told them. Keyed by endpoint AND reason, so a repeat per held
+    message is absorbed while a different reason is announced on its own.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.team_bridge.connector.wake import notify_screening_infra_hold
+
+    owner = SimpleNamespace(endpoint_id="end_1")
+    for code in _OWNER_ACTION_FIX_PHRASES:
+        for _ in range(3):  # one call per held message
+            asyncio.run(notify_screening_infra_hold(owner, tmp_path, "sess_cos", code))
+    # ``screener_required`` is the screening-model notice's condition; the rest
+    # are not owner-action holds at all.
+    for other in ("screener_required", "policy_stale", "work_scope_hold", "model_hold"):
+        asyncio.run(notify_screening_infra_hold(owner, tmp_path, "sess_cos", other))
+
+    items, _cursor = NotificationStore(tmp_path).list_items(state="all", session_id="sess_cos")
+    by_key = {item["key"]: item for item in items}
+    assert sorted(by_key) == sorted(
+        f"team-bridge-owner-action:end_1:{code}" for code in _OWNER_ACTION_FIX_PHRASES
+    )
+    for code, phrase in _OWNER_ACTION_FIX_PHRASES.items():
+        item = by_key[f"team-bridge-owner-action:end_1:{code}"]
+        assert item["priority"] == "high"
+        assert item["title"] == "Agent messages are held until you act"
+        assert phrase in item["body_md"], (code, item["body_md"])
+        # The fix, never a release: these holds have no Deliver.
+        assert "deliver" not in item["body_md"].lower()
+
+
+def test_owner_action_notice_codes_are_pinned_and_never_releasable() -> None:
+    from local_operator.team_bridge.connector.wake import _OWNER_ACTION_NOTICE_CODES
+    from local_operator.team_bridge.hold_release import RELEASABLE_HOLD_CODES
+    from local_operator.team_bridge.screening import OWNER_ACTION_HOLD_CODES
+
+    assert _OWNER_ACTION_NOTICE_CODES == set(OWNER_ACTION_HOLD_CODES.values()) - {
+        "screener_required"
+    }
+    assert not _OWNER_ACTION_NOTICE_CODES & set(RELEASABLE_HOLD_CODES)
+
+
+def test_owner_action_notice_failure_never_raises(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.team_bridge.connector.wake import notify_screening_infra_hold
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(NotificationStore, "notify", boom)
+    owner = SimpleNamespace(endpoint_id="end_1")
+    # Best-effort chrome: the hold it reports must stand, so nothing escapes.
+    asyncio.run(notify_screening_infra_hold(owner, tmp_path, "sess_cos", "consent_required"))
+
+
 def test_listing_a_pair_is_the_only_way_to_make_it_preferred(
     monkeypatch, tmp_path, credentials
 ) -> None:

@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Unaddressed ceiling per hour",
   "wire.settings.team_bridge_session.help": "Session that may be woken for new messages; empty = badge only.",
   "wire.settings.team_bridge_session.label": "CoS session",
+  "wire.settings.team_bridge_hold_release.label": "Hold work requests for review",
+  "wire.settings.team_bridge_hold_release.help": "When another agent asks you to start or decide on new work, the message is held in your inbox for you to deliver or discard, instead of being rejected. Nothing reaches your agent until you choose. Off rejects these requests.",
   "wire.settings.tool_approval_mode.choice.ask.description": "prompt before write/exec tools",
   "wire.settings.tool_approval_mode.choice.ask.label": "ask",
   "wire.settings.tool_approval_mode.choice.auto.description": "run them without asking",

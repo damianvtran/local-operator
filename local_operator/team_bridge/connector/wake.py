@@ -944,6 +944,14 @@ async def deliver_wake(
     return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
 
 
+#: The owner-action hold codes that raise a contentless owner notice. Literals
+#: rather than an import of ``screening.OWNER_ACTION_HOLD_CODES`` so this
+#: module keeps the screening pipeline off its import path; a unit test pins
+#: them to that mapping's values minus ``screener_required`` (which the
+#: screening-model notice already covers).
+_OWNER_ACTION_NOTICE_CODES = frozenset({"sign_in_required", "consent_required", "owner_ineligible"})
+
+
 async def notify_screening_infra_hold(
     owner: Any, config_dir: Path, session_id: str, hold_code: Any
 ) -> None:
@@ -960,13 +968,30 @@ async def notify_screening_infra_hold(
     ONCE per receiving endpoint: the item is keyed by endpoint with fixed copy,
     so a repeat is absorbed by the notification store (same key, same content
     hash) instead of adding one item per held message. Contentless like the
-    budget notice: no sender, body or conversation. Any other hold code is a
-    no-op. Best-effort: never turns the hold into a failure.
+    budget notice: no sender, body or conversation. Best-effort: never turns the
+    hold into a failure.
+
+    OWNER-ACTION HOLDS (``sign_in_required``, ``consent_required``,
+    ``owner_ineligible``; ``screening.OWNER_ACTION_HOLD_CODES``) get the same
+    once-per-endpoint treatment, keyed by endpoint AND reason so each distinct
+    fix is announced once and a repeat of the same reason is absorbed. They
+    exist because the hub withdrew the owner's authority for a reason only the
+    owner can fix, so, like an unavailable screener, waiting does not clear
+    them; until this notice they were visible only in ``lop team-bridge holds``.
+    The notice names the ACTION, never a Deliver: these codes are not
+    releasable (``hold_release.RELEASABLE_HOLD_CODES``) and nothing here may
+    make them so. ``screener_required`` is deliberately absent: it is the same
+    condition the ``screening_model_unavailable`` notice already explains.
+    Every other hold code is a no-op.
     """
 
     from local_operator.team_bridge.model_boundary import SCREENING_MODEL_UNAVAILABLE
 
-    if hold_code != SCREENING_MODEL_UNAVAILABLE:
+    if hold_code == SCREENING_MODEL_UNAVAILABLE:
+        key = f"team-bridge-screening-model:{owner.endpoint_id}"
+    elif hold_code in _OWNER_ACTION_NOTICE_CODES:
+        key = f"team-bridge-owner-action:{owner.endpoint_id}:{hold_code}"
+    else:
         return
     from local_operator.i18n.keys import cli_team_bridge as _k
     from local_operator.i18n.text import tr
@@ -974,12 +999,20 @@ async def notify_screening_infra_hold(
 
     def _notify() -> None:
         t = tr("cli.team_bridge")
+        if hold_code == SCREENING_MODEL_UNAVAILABLE:
+            title = t(_k.notify_screening_model_unavailable_title())
+            body = t(_k.notify_screening_model_unavailable_body())
+        else:
+            # A closed ICU select over the code itself: the reason is one of
+            # three literals checked above, never sender- or message-derived.
+            title = t(_k.notify_owner_action_hold_title())
+            body = t(_k.notify_owner_action_hold_body(reason=str(hold_code)))
         NotificationStore(config_dir).notify(
             session_id,
-            title=t(_k.notify_screening_model_unavailable_title()),
-            body_md=t(_k.notify_screening_model_unavailable_body()),
+            title=title,
+            body_md=body,
             priority="high",
-            key=f"team-bridge-screening-model:{owner.endpoint_id}",
+            key=key,
         )
 
     try:

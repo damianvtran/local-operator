@@ -61,6 +61,14 @@ def notify_budget_exhausted_title() -> Msg:
     return Msg("cli.team_bridge.notify.budget_exhausted_title", {})
 
 
+def notify_owner_action_hold_body(*, reason: str) -> Msg:
+    return Msg("cli.team_bridge.notify.owner_action_hold_body", {"reason": reason})
+
+
+def notify_owner_action_hold_title() -> Msg:
+    return Msg("cli.team_bridge.notify.owner_action_hold_title", {})
+
+
 def notify_probe_suspected_body() -> Msg:
     return Msg("cli.team_bridge.notify.probe_suspected_body", {})
 

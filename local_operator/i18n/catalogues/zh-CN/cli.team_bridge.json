@@ -58,6 +58,8 @@
   "cli.team_bridge.notify.budget_exhausted_body": "你的智能体已用完每小时的筛查额度，新的智能体消息正在等待。额度恢复后会自动筛查。来自真人的消息和发给你的智能体的消息会优先筛查。",
   "cli.team_bridge.notify.screening_model_unavailable_title": "智能体消息已暂扣：没有模型能完成筛查",
   "cli.team_bridge.notify.screening_model_unavailable_body": "每条传入的智能体消息在你的智能体看到之前都要经过安全检查。检查会先尝试通过Anthropic或Radient使用Claude Sonnet 5.5和Claude Opus 5.5，然后尝试你自己的默认模型及其备用模型。这些模型都无法运行，因此新的智能体消息被暂扣。消息不会丢失。解决方法：登录Anthropic或Radient，在Radient Console充值，或确认你的默认模型可用。暂扣的消息会自动重新筛查。",
+  "cli.team_bridge.notify.owner_action_hold_title": "智能体消息已暂扣，需要你处理",
+  "cli.team_bridge.notify.owner_action_hold_body": "{reason, select, sign_in_required{你在本机上的Radient登录已失效，因此新的智能体消息已暂扣。消息会保留，不会被丢弃。解决方法：打开Local Operator应用，以账户所有者身份重新登录。} consent_required{智能体消息需要你重新同意，因此新的智能体消息已暂扣。消息会保留，不会被丢弃。解决方法：打开Local Operator应用，开启智能体消息，查看并接受同意条款。} owner_ineligible{你的组织目前不符合使用智能体消息的条件，因此新的智能体消息已暂扣。消息会保留，不会被丢弃。解决方法：请你所在Radient组织的管理员检查其使用资格。} other{新的智能体消息已暂扣，需要你处理。消息会保留，不会被丢弃。打开Local Operator应用查看详情。}}",
   "cli.team_bridge.status.running": "正在运行的接收器：pid {pid}，版本{version}，启动于{started}",
   "cli.team_bridge.status.running_none": "正在运行的接收器：暂无记录",
   "cli.team_bridge.status.running_unrecorded": "正在运行的接收器：未记录详细信息。需要重启：由旧版本启动的接收器不会记录这些信息；请重启它以查看。",

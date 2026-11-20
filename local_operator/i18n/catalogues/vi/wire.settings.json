@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Trần không đích danh mỗi giờ",
   "wire.settings.team_bridge_session.help": "Phiên có thể được đánh thức khi có tin nhắn mới; để trống = chỉ hiện huy hiệu.",
   "wire.settings.team_bridge_session.label": "Phiên CoS",
+  "wire.settings.team_bridge_hold_release.label": "Giữ yêu cầu công việc để xem xét",
+  "wire.settings.team_bridge_hold_release.help": "Khi một tác nhân khác đề nghị bạn bắt đầu hoặc quyết định một công việc mới, tin nhắn sẽ được giữ trong hộp thư của bạn để bạn chuyển hoặc bỏ, thay vì bị từ chối. Không có gì đến được tác nhân của bạn cho đến khi bạn chọn. Khi tắt, các yêu cầu này bị từ chối.",
   "wire.settings.tool_approval_mode.choice.ask.description": "hỏi trước với công cụ ghi/thực thi",
   "wire.settings.tool_approval_mode.choice.ask.label": "hỏi trước",
   "wire.settings.tool_approval_mode.choice.auto.description": "chạy chúng không hỏi",

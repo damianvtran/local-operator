@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Plafond non adressés / heure",
   "wire.settings.team_bridge_session.help": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
   "wire.settings.team_bridge_session.label": "Session CoS",
+  "wire.settings.team_bridge_hold_release.label": "Retenir les demandes de travail",
+  "wire.settings.team_bridge_hold_release.help": "Quand un autre agent vous demande de lancer un nouveau travail ou d’en décider, le message est retenu dans votre boîte de réception pour que vous le transmettiez ou l’écartiez, au lieu d’être refusé. Rien n’atteint votre agent avant votre choix. Désactivé, ces demandes sont refusées.",
   "wire.settings.tool_approval_mode.choice.ask.description": "demander avant les outils d’écriture/exécution",
   "wire.settings.tool_approval_mode.choice.ask.label": "demander",
   "wire.settings.tool_approval_mode.choice.auto.description": "les exécuter sans demander",

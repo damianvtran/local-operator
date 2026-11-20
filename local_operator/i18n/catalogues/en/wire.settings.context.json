@@ -405,6 +405,17 @@
     "role": "Settings row label",
     "tone": "concise, neutral"
   },
+  "wire.settings.team_bridge_hold_release.label": {
+    "maxCells": 29,
+    "role": "Settings row label (boolean toggle)",
+    "tone": "concise, neutral",
+    "note": "Toggle for Team Bridge (product name 'Agent messages') owner release. ON: a valid request from another member's agent asking the user to START or DECIDE new work is HELD in the user's inbox for the person to deliver or discard, instead of being REJECTED back to the sender. 'Work requests' = those new-work requests only. 'Hold' means kept waiting for a person, never delivered automatically. Do not say 'screen'/'filter'. No ICU arguments."
+  },
+  "wire.settings.team_bridge_hold_release.help": {
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Three claims to preserve exactly: (1) only a request to start or decide NEW work is affected, and with the toggle ON it is held for the person instead of rejected; (2) nothing reaches the user's agent until the person chooses deliver or discard, so this is never automatic delivery and never widens who may give the agent instructions; (3) OFF rejects these requests (the earlier behaviour). 'deliver'/'discard' are lowercase verbs describing the person's choice, not button labels. Do not use the word for screening/filtering. No ICU arguments, no numbers."
+  },
   "wire.settings.update_auto_prune.choice.false.description": {
     "role": "description of the 'off' choice",
     "tone": "terse fragment",
