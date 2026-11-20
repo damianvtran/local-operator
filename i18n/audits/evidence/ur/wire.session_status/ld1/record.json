@@ -1,0 +1,82 @@
+{
+  "locale": "ur",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_path": "local_operator/i18n/catalogues/en/wire.session_status.json",
+  "target_path": "local_operator/i18n/catalogues/ur/wire.session_status.json",
+  "context_path": "local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+  "target_sha256": "b71ced8b6a58c93e8754f199d67bd258b29936ee21e182dfc2884dc95a40730e",
+  "context_sha256": "4f9cf2dabc89f7e711c3cf2d74b2a6e75c274954152daa14a1dad31ac9cf12f2",
+  "translator": {
+    "agent": "translator (identity reported by delegator; instance not supplied)",
+    "model": "anthropic/claude-opus-5-5",
+    "instance": null,
+    "date": "2026-11-20",
+    "provenance": "Model from delegation brief, not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor / dur-audit-ur",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "5a9a0087e06f",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "fallback": "No fallback observed; actual model supplied by session state"
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "findings_by_severity": {
+    "blocker": [],
+    "major": [],
+    "minor": [
+      {
+        "id": "UR-D1",
+        "severity": "minor",
+        "keys": [
+          "wire.session_status.duration_seconds",
+          "wire.session_status.duration_minutes",
+          "wire.session_status.duration_hours_minutes",
+          "wire.session_status.duration_days_hours"
+        ],
+        "current_text": {
+          "wire.session_status.duration_seconds": "{count, number} سیکنڈ",
+          "wire.session_status.duration_minutes": "{count, number} منٹ",
+          "wire.session_status.duration_hours_minutes": "{hours, plural, one {# گھنٹہ} other {# گھنٹے}} {minutes, number} منٹ",
+          "wire.session_status.duration_days_hours": "{days} دن {hours, plural, one {# گھنٹہ} other {# گھنٹے}}"
+        },
+        "proposed_text": "Retain the idiomatic unit words; request a rendered sidebar/relay width and bidi check, rather than introducing unfamiliar Urdu abbreviations.",
+        "reason": "Measured duration cells expand 42s 3→8, 4m 2→5, 3h 12m 6→14, 2d 4h 5→12; context asks for compact labels but specifies no fixed cap, so this is a nonblocking fit-check flag, not demonstrated clipping."
+      }
+    ],
+    "nit": []
+  },
+  "scope": {
+    "keys_read": 35,
+    "new_keys_audited": 4,
+    "existing_composition_key_rechecked": "wire.session_status.wedged_heartbeat",
+    "note": "Other 30 entries read for context and preservation, not a new full linguistic certification."
+  },
+  "evidence": {
+    "runtime": "~/local-operator/.venv/bin/python with PYTHONPATH set to the manager worktree; runtime.message_arguments, format.plural_categories, runtime.render_message",
+    "cases": [
+      "0s",
+      "42s",
+      "1m",
+      "4m",
+      "1h 0m",
+      "3h 12m",
+      "21h 0m",
+      "1d 1h",
+      "2d 4h",
+      "1000d 0h"
+    ],
+    "results": "10 duration + 10 heartbeat renders passed; CLDR one/other and _Hash nodes verified in every plural branch; days remains simple string and 1000 ungrouped; numeric→plural hours lossless; no Latin unit letters or manual bidi controls. Initial probe incorrectly looked for literal # in AST repr, corrected to _Hash node check and rerun passed.",
+    "preservation": "git diff only four additions and necessary comma after old last entry; all 31 pre-existing values unchanged; first 31 lines byte-identical and old last-entry line byte-identical except appended comma.",
+    "glossary": "Matches relay.asks.duration.minutes/hours/days and relay.shell.usage.countdown_days/hours/hour/minutes: منٹ، گھنٹہ/گھنٹے، دن.",
+    "rtl": "Logical-order mixed Latin digits and Urdu units; surrounding parentheses and پہلے appropriate. No browser/TUI rendered-frame proof produced in this audit; renderer bidi/shaping and clipping remain for visual QA."
+  },
+  "note": "Read-only audit; no repository edits or ledger writes. Namespace clean of blocker/major; one nonblocking overflow/render-check flag. Receipt applies to exact pinned hashes."
+}

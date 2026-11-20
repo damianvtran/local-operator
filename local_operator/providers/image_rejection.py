@@ -142,7 +142,9 @@ def _image_parts(node: Mapping[str, Any]) -> list[Any]:
     if not isinstance(content, list):
         return []
     return [
-        part for part in content if isinstance(part, Mapping) and "image" in str(part.get("type"))
+        part
+        for part in content
+        if isinstance(part, Mapping) and ("image" in str(part.get("type")) or "image" in part)
     ]
 
 
@@ -153,12 +155,15 @@ def _payload_of(node: Any) -> str | None:
             return node.split(",", 1)[1]
         return None
     if isinstance(node, Mapping):
+        # Converse REST blobs are base64 already, not data URLs.
+        if isinstance(node.get("bytes"), str):
+            return node["bytes"]
         # Anthropic ``source.data`` is the bare base64, not a data URL.
         if isinstance(node.get("data"), str) and node.get("type") == "base64":
             return node["data"]
         # OpenAI chat ``image_url.url``, Responses ``image_url`` (a string),
         # Anthropic ``source``.
-        for key in ("image_url", "url", "source"):
+        for key in ("image_url", "url", "source", "image", "toolResult"):
             if key in node:
                 found = _payload_of(node[key])
                 if found is not None:

@@ -15,8 +15,9 @@ hand the resolver, recorded by wrapping ``resolve_command`` during a run of
 both, plus every concrete reviewer row from rounds 1-3. For each, the head
 rank must be ``>=`` base's, as an unrelated session and as the session that
 created the directories the commands work in. Base ranks run through the
-CURRENT ``classify`` (only ``resolve`` is swapped), so the property isolates
-the cwd model from the PR's intended ownership relaxations.
+current ordinary ranking with the base resolver and without exact cleanup
+recovery (added later by #4240). This keeps the pins tied to the policy under
+which they were recorded. Head ranks still use the full current classifier.
 
 Base ranks are PINNED in ``tests/fixtures/guardrails/loop_cd_base_ranks.json``
 because CI checks out with ``fetch-depth: 2`` and has no ``BASE`` object.
@@ -189,16 +190,19 @@ def _converted(res: Any) -> resolve_mod.Resolution:
 
 
 def _live_base_ranks(home: Path, base: types.ModuleType) -> list[dict[str, str]]:
-    """Base ranks for every row: base ``resolve`` behind the current ``classify``."""
-    original = classify_mod.resolve_command
-    classify_mod.resolve_command = lambda *a, **k: _converted(base.resolve_command(*a, **k))
-    try:
+    """Validate pins with base resolution and the pre-#4240 cleanup routing."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            classify_mod,
+            "resolve_command",
+            lambda *a, **k: _converted(base.resolve_command(*a, **k)),
+        )
+        # This only affects the live pin check, never the head-versus-pin test.
+        mp.setattr(classify_mod, "_literal_worktree_remove", lambda *_: False)
         return [
             {"unrelated": _rank(home, row, UNRELATED).name, "owner": _rank(home, row, OWNER).name}
             for row in _rows()
         ]
-    finally:
-        classify_mod.resolve_command = original
 
 
 def test_corpus_covers_every_review_round() -> None:

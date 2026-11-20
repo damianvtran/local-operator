@@ -1,0 +1,3 @@
+$ ledger.py append --dry-run (expected history 10a49bdf54c6127bdfa24e72689cbaf1e58ecb4bb6dfbc977c49610f0635131c)
+i18n/audit-history/ur/wire.session_status.json
+exit 0

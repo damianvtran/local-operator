@@ -74,15 +74,43 @@ def test_the_description_reconciles_earlier_answers_with_verbatim_words():
     paraphrase the user. The description names both readings once: the message
     that answered it (latest or earlier), and the user's own words rather than
     the options — still recorded verbatim."""
+    from local_operator.prompts_api import render_template
+
     tool = _tools(_context(withdraw=lambda *_a, **_k: {"ok": True}))["ask_withdraw"]
     text = " ".join(tool.description.split())
     assert "the user's chat message that answered it (latest or earlier)" in text
-    assert "even if they used their own words rather than the options" in text
     assert "VERBATIM" in text
     assert "paraphrase" not in text
+    # "Their own words is still an answer" moved to system.md's queued-ask
+    # paragraph in wave 2 (PR #4326), which renders whenever this tool is held
+    # (both gate on the same host ask hook); it must still reach the model.
+    queued = " ".join(render_template("system.md", {"has_ask": True, "ask_queued": True}).split())
+    assert "even if they used their own words rather than the options" in queued
     # The all-empty refusal (m2) is stated here so the model does not learn it
     # from an error: the recipe this release teaches makes it reachable.
     assert "Every cell empty is refused" in text
+
+
+def test_the_moot_examples_reach_the_model_somewhere() -> None:
+    """REGRESSION (PR #4326 QA Q-F2): wave 2 cut the description's moot examples
+    as "verbatim in system.md", but system.md names only the dropped/handed-off
+    and decided-under-timeout cases. The other two must stay in the description."""
+    from local_operator.prompts_api import render_template
+
+    tool = _tools(_context(withdraw=lambda *_a, **_k: {"ok": True}))["ask_withdraw"]
+    seen = " ".join(
+        (
+            tool.description
+            + " "
+            + render_template("system.md", {"has_ask": True, "ask_queued": True})
+        ).split()
+    )
+    for example in (
+        "you found the answer yourself",
+        "the work moved on",
+        "dropped or handed off the work",
+    ):
+        assert example in seen, example
 
 
 @pytest.mark.asyncio

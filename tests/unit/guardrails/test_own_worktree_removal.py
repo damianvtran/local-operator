@@ -231,10 +231,8 @@ async def test_rm_rf_of_an_exact_own_worktree_settles(home: Path, mobile: Path) 
     assert judge.prompts == []
 
 
-def test_own_worktree_with_unregenerable_ignored_output_is_own_clean(
-    home: Path, mobile: Path
-) -> None:
-    """Ignored entries never make an OWN tree dirty: git's own remove deletes them."""
+def test_exact_remove_preserves_unregenerable_ignored_output(home: Path, mobile: Path) -> None:
+    """Git would delete ignored notes; exact removal checks preservation first."""
     wt = mobile / ".worktrees" / "keyboard-bound"
     # Ignored through the shared ``info/exclude``, and not regenerable by name.
     with (mobile / ".git" / "info" / "exclude").open("a") as fh:
@@ -247,7 +245,7 @@ def test_own_worktree_with_unregenerable_ignored_output_is_own_clean(
     v = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S
     )
-    assert v.risk is Risk.LOW, v.targets[0].reason
+    assert v.risk is Risk.HIGH and v.targets[0].cleanup_hold, v.targets[0].reason
     foreign = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S2
     )
@@ -337,20 +335,18 @@ async def test_real_untracked_work_goes_to_the_judge_with_the_ledger_and_the_ent
 
 
 @pytest.mark.asyncio
-async def test_judge_may_settle_own_dirty_worktree_by_citing_the_ledger(
+async def test_judge_cannot_override_exact_remove_with_uncommitted_work(
     home: Path, mobile: Path
 ) -> None:
-    """The judge's ``ALLOW ledger`` is re-verified against the ledger, not trusted."""
+    """Creation is not permission to discard new work in a linked checkout."""
     wt = mobile / ".worktrees" / "composer-ios-wrap"
     (wt / "scratch.txt").write_text("throwaway")
     _record(home, wt)  # the root changed after recording (Linux ctime stamp)
     judge = _Judge("ALLOW ledger")
     outcome = await _check(home, f"git worktree remove --force {wt}", judge)
     assert outcome is not None
-    assert not outcome.blocked, outcome.text
-    assert "ledger" in " ".join(outcome.warnings)
-    brief = judge.prompts[0]
-    assert f"ledger: created by {C}" in brief  # the subagent, recorded under S too
+    assert outcome.blocked and "stash or commit" in outcome.text
+    assert not judge.prompts
 
 
 @pytest.mark.asyncio

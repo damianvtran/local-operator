@@ -16,5 +16,6 @@
   "tui.bridge_card.body.show_less": "Afficher moins",
   "tui.bridge_card.body.more_messages": "{count, plural, one {# message supplémentaire dans cette carte} many {# de messages supplémentaires dans cette carte} other {# messages supplémentaires dans cette carte}}",
   "tui.bridge_card.header.held_transient": "En attente de filtrage",
-  "tui.bridge_card.header.open_to_load": "Ouvrez pour charger le message"
+  "tui.bridge_card.header.open_to_load": "Ouvrez pour charger le message",
+  "tui.bridge_card.header.offline": "Impossible de joindre Radient — ouvrez pour réessayer"
 }

@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original paths/provenance/verdicts remain unchanged. Integration-only retention mapping, not an audit. No eligibility or history promotion in Phase A.",
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "round": "second_audits",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "963b8bf337981a328bb80b265cb49d033db10c7afb2838c4ec8d5f05df20c1d1",
+  "original_receipt": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/receipt.json",
+  "original_receipt_sha256": "4c8ccf9fdbfa31d6e2d9c2d33c9240a79150591629bfa125272233d719329ee4",
+  "original_record": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/record.json",
+  "original_record_sha256": "96cb1699dbdf90b84acf7024dc3f6ec355459544628cc6114f5079a8eb0faf73",
+  "original_status": "changes_requested",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "terminal-status-vi",
+    "session": "56c3029571f6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model header",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-vi-hi-ur-second-audit",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_first_auditor_session": "7a2548e2c7b1",
+    "independent_from_translator": true
+  },
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/record.json",
+      "sha256": "96cb1699dbdf90b84acf7024dc3f6ec355459544628cc6114f5079a8eb0faf73"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/receipt.json",
+      "sha256": "4c8ccf9fdbfa31d6e2d9c2d33c9240a79150591629bfa125272233d719329ee4"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/report.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/report.json",
+      "sha256": "3b776addfd7b587270cf547e5821de2f28b96dcd16cb93212b247bf3901a99c5"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/admission-initial-schema-failure.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/admission-initial-schema-failure.json",
+      "sha256": "26cc8890e7ca8b52839a5a6f1d30c5a43ca1cf5155902705c52d0f64c59206ab"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/audit.log",
+      "sha256": "2b642eb9f52674d4ad0e532930dea1a2077457b3be694b7a931b4981ec1cfaf8"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/first-receipt-verification.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/first-receipt-verification.json",
+      "sha256": "4b0703c71e58a870d7010319582abd9c0617a6106b5ebec2eb1ce362cd3b9930"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.session_status/ts2-5f0a/admission.json",
+      "original_path": "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi/admission.json",
+      "sha256": "6907187df21f406d8bee2f318d534c96cec130f4c6901c3fbfb7a54c21002321"
+    }
+  ],
+  "eligibility_note": "Original 963b target only. First passed, second changes_requested with VI-S2-01 MAJOR; not eligible. Revised candidate requires both independent passes on its new hash before any promotion."
+}

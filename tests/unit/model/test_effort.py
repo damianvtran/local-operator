@@ -308,6 +308,9 @@ _DOC_SUPPORTED = {
     # Added from the same page read 2026-09-29: "Claude Sonnet 5.5 supports all
     # five effort levels, and `high` is the default on the Claude API".
     "claude-sonnet-5-5",
+    # Added from the same page read 2026-11-20: "Claude Haiku 5.5 supports all
+    # five effort levels, and `medium` is the default".
+    "claude-haiku-5-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",

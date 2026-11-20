@@ -1,0 +1,19 @@
+{
+  "wire.session_status.retired_label": "{base} — retiré pour une mise à jour",
+  "wire.session_status.interrupted": "Interrompue",
+  "wire.session_status.unseen_interruption": "Interruption non lue",
+  "wire.session_status.retired": "Interrompue — retirée pour une mise à jour",
+  "wire.session_status.unseen_retirement": "Interruption non lue — retirée pour une mise à jour",
+  "wire.session_status.signal_stop": "Interrompue — arrêtée par un signal{command, select, none {} other { via {command}}}",
+  "wire.session_status.unseen_signal_stop": "Interruption non lue — arrêtée par un signal{command, select, none {} other { via {command}}}",
+  "wire.session_status.forced_kill": "Interrompue — arrêt forcé{command, select, none {} other { via {command}}}",
+  "wire.session_status.unseen_forced_kill": "Interruption non lue — arrêt forcé{command, select, none {} other { via {command}}}",
+  "wire.session_status.complete": "Terminée",
+  "wire.session_status.unseen_completion": "Fin de session non lue",
+  "wire.session_status.recent": "Récente",
+  "wire.session_status.dormant": "Arrêtée ({count, plural, one {# réveil en sommeil} many {# de réveils en sommeil} other {# réveils en sommeil}})",
+  "wire.session_status.error": "Erreur",
+  "wire.session_status.unseen_error": "Erreur non lue",
+  "wire.session_status.error_cause": "{cause, select, user_stop {Erreur — arrêtée par l’utilisateur} runtime_stall_bound {Erreur — le runtime s’est arrêté de lui-même après le délai maximal sans progression} continuation_limit {Erreur — limite de continuation atteinte ; message en attente abandonné} output_limit {Erreur — limite de sortie du modèle atteinte ; impossible de continuer} runtime_retired {Erreur — retirée pour une mise à jour} runtime_shutdown {Erreur — runtime arrêté pendant le tour} runtime_overdue {Erreur — runtime arrêté pour une mise à jour après le délai maximal sans progression} runtime_update_failed {Erreur — mise à jour inachevée ; le runtime a conservé sa version chargée} runtime_killed {Erreur — runtime disparu sans arrêt normal ; aucun arrêt demandé} install_mid_update {Erreur — installation remplacée pendant le tour} owner_lost {Erreur — le runtime ne répondait plus pendant le tour} disposed {Erreur — session fermée pendant le tour} other {Erreur}}",
+  "wire.session_status.unseen_error_cause": "{cause, select, user_stop {Erreur non lue — arrêtée par l’utilisateur} runtime_stall_bound {Erreur non lue — le runtime s’est arrêté de lui-même après le délai maximal sans progression} continuation_limit {Erreur non lue — limite de continuation atteinte ; message en attente abandonné} output_limit {Erreur non lue — limite de sortie du modèle atteinte ; impossible de continuer} runtime_retired {Erreur non lue — retirée pour une mise à jour} runtime_shutdown {Erreur non lue — runtime arrêté pendant le tour} runtime_overdue {Erreur non lue — runtime arrêté pour une mise à jour après le délai maximal sans progression} runtime_update_failed {Erreur non lue — mise à jour inachevée ; le runtime a conservé sa version chargée} runtime_killed {Erreur non lue — runtime disparu sans arrêt normal ; aucun arrêt demandé} install_mid_update {Erreur non lue — installation remplacée pendant le tour} owner_lost {Erreur non lue — le runtime ne répondait plus pendant le tour} disposed {Erreur non lue — session fermée pendant le tour} other {Erreur non lue}}"
+}

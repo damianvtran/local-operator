@@ -3842,16 +3842,25 @@ if "--arg" in args:
     answer("unknown flag: --arg", 1)
 
 if args[:2] == ["pr", "view"]:
-    if "state,headRefOid,headRefName" in args:
+    if "state,headRefOid,headRefName,headRepository,headRepositoryOwner" in args:
         if os.environ.get("STUB_PR_MISSING") == "1":
             answer("graphql: Could not resolve to a PullRequest", 1)
-        print(os.environ["STUB_STATE"], os.environ["STUB_SHA"], os.environ["STUB_HEAD"])
+        print(
+            os.environ["STUB_STATE"],
+            os.environ["STUB_SHA"],
+            os.environ["STUB_HEAD"],
+            "damianvtran/local-operator",
+        )
         raise SystemExit(0)
     if "labels" in args:
         for label in json.loads(Path(os.environ["STUB_LABEL_STATE"]).read_text()):
             print(label)
         raise SystemExit(0)
     answer("unexpected pr view: " + " ".join(args), 3)
+
+if args[:2] == ["repo", "view"]:
+    print("damianvtran/local-operator")
+    raise SystemExit(0)
 
 if args[:2] == ["label", "create"]:
     answer("Label already exists", 1)
@@ -3903,6 +3912,24 @@ if args[:2] == ["run", "list"]:
 
 answer("unexpected gh call: " + " ".join(args), 3)
 """
+#: Stands in for scripts/fast_gate_check.py (unit-tested on its own against a
+#: fake API in tests/unit/test_fast_gate_check.py): records its argv and exits
+#: with the verdict code the case asks for, printing the helper's line shape.
+_FAST_GATE_STUB_BODY = """
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["STUB_FAST_ARGV"]).write_text(" ".join(sys.argv[1:]))
+rc = int(os.environ.get("STUB_FAST_RC", "0"))
+LINES = {
+    0: "FAST-CI OK: stub green",
+    1: "FAST-CI NOT GREEN: ci.yml run 9 is queued, not finished. Full suite not started.",
+    3: "FAST-CI NOT GREEN: GitHub API unavailable (stub); unknown is not green.",
+}
+print(LINES[rc])
+raise SystemExit(rc)
+"""
 
 
 def _merge_gate_runs(*runs: tuple[int, str]) -> str:
@@ -3934,8 +3961,18 @@ def _arm_merge_gate(
     active_failures: int = 999,
     active_response: str = "",
     know_run_exists: bool = False,
+    fast_rc: int = 0,
+    makefile: Path | None = None,
+    cwd: Path | None = None,
+    fast_helper: str | None = "stub",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the REAL `make merge-gate` target with a stubbed `gh` on PATH.
+
+    `makefile`/`cwd` default to the repo Makefile run from `tmp_path` (not a git
+    checkout, so helpers fall back to the Makefile's directory). `fast_helper`
+    is the FAST_GATE_HELPER override: "stub" (default) for the recording stub,
+    a path to point it elsewhere, or None for no override at all.
 
     `make` runs it, not the extracted recipe text: `$$` is make's escape for a
     literal `$`, so a shell handed that text directly would read every variable
@@ -3952,6 +3989,8 @@ def _arm_merge_gate(
     (shim / "gh").chmod(0o755)
     (shim / "sleep").write_text(f"#!{sys.executable}\n")
     (shim / "sleep").chmod(0o755)
+    fast_stub = tmp_path / "fast_gate_stub.py"
+    fast_stub.write_text(_FAST_GATE_STUB_BODY)
     (tmp_path / "home").mkdir(exist_ok=True)
     log = tmp_path / "gh.log"
     # Persist boundary state: a re-arm must really remove/add the existing label,
@@ -3977,17 +4016,25 @@ def _arm_merge_gate(
         "STUB_ACTIVE_FAILURES": str(active_failures),
         "STUB_ACTIVE_COUNT": str(tmp_path / "active.count"),
         "STUB_ACTIVE_RESPONSE": active_response,
+        "STUB_FAST_RC": str(fast_rc),
+        "STUB_FAST_ARGV": str(tmp_path / "fast.argv"),
+        **(extra_env or {}),
     }
     proc = subprocess.run(
         [
             "make",
             "-f",
-            str(MAKEFILE),
+            str(makefile or MAKEFILE),
             "merge-gate",
             "PR=3631",
+            *(
+                []
+                if fast_helper is None
+                else [f"FAST_GATE_HELPER={fast_stub if fast_helper == 'stub' else fast_helper}"]
+            ),
             *(["I_KNOW_A_GATE_RUN_EXISTS=1"] if know_run_exists else []),
         ],
-        cwd=str(tmp_path),
+        cwd=str(cwd or tmp_path),
         env=env,
         capture_output=True,
         text=True,
@@ -3995,6 +4042,72 @@ def _arm_merge_gate(
         check=False,
     )
     return proc, (log.read_text().splitlines() if log.exists() else [])
+
+
+def _makefile_copy(tmp_path: Path) -> Path:
+    """A byte copy of the repo Makefile in a directory with no scripts/ beside it."""
+    copy = tmp_path / "elsewhere" / "Makefile"
+    copy.parent.mkdir()
+    copy.write_bytes(MAKEFILE.read_bytes())
+    return copy
+
+
+def test_merge_gate_from_a_makefile_copy_resolves_helpers_from_the_repo_root(
+    tmp_path: Path,
+) -> None:
+    """`make -f <copy> merge-gate` inside the checkout uses the checkout's helpers.
+
+    Before the fix both helpers resolved next to the Makefile copy: the missing
+    advisory read as a lookup outage ("lookup unavailable … proceeding to arm
+    without duplicate detection") and the missing fast-gate helper as an unmet
+    precondition. Neither FAST_GATE_HELPER nor any helper path is overridden.
+    """
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="synthetic",
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        makefile=_makefile_copy(tmp_path),
+        cwd=MAKEFILE.parent,
+        fast_helper=None,
+        # The REAL fast-gate helper runs here; keep it off the network: a
+        # synthetic token against a closed local port is "could not decide"
+        # (rc 3), which warns and arms by design and proves the helper was FOUND.
+        extra_env={"GH_TOKEN": "synthetic-token", "GITHUB_API_URL": "http://127.0.0.1:9"},
+    )
+    assert "can't open file" not in proc.stderr, proc.stderr
+    assert "lookup unavailable" not in proc.stderr, proc.stderr
+    assert "WARNING: could not confirm fast CI locally" in proc.stderr, proc.stderr
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert sum("--status" in call for call in calls) == 5, calls
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
+
+
+@pytest.mark.parametrize("missing", ["fast_gate_check.py", "merge_gate_advisory.py"])
+def test_merge_gate_refuses_when_a_helper_is_missing(tmp_path: Path, missing: str) -> None:
+    """A missing helper is a named refusal before any `gh` label write, never a degraded arm."""
+    if missing == "fast_gate_check.py":
+        # Repo Makefile (advisory present), fast-gate helper pointed at nothing.
+        absent = tmp_path / "nowhere" / "fast_gate_check.py"
+        stub: dict[str, Any] = {"fast_helper": str(absent)}
+    else:
+        # A copy run outside any checkout falls back to its own directory, which
+        # has no scripts/; the fast-gate stub override is still present.
+        copy = _makefile_copy(tmp_path)
+        absent = copy.parent / "scripts" / "merge_gate_advisory.py"
+        stub = {"makefile": copy}
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="synthetic",
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        **stub,
+    )
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert f"make merge-gate: helper not found: {absent}" in proc.stderr, proc.stderr
+    assert "no label changed" in proc.stderr
+    assert "WARNING" not in proc.stderr and "re-armed" not in proc.stdout
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic"]
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls), calls
+    assert not (tmp_path / "label-transitions.jsonl").exists()
 
 
 def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:
@@ -4033,6 +4146,57 @@ def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:
         edits[:1] and "--remove-label" in edits[0]
     ), f"a present label must be removed first, or no event fires: {calls}"
     assert len(edits) > 1 and "--add-label" in edits[1], f"the add must follow the removal: {calls}"
+
+
+@pytest.mark.parametrize("labels", ["", "ready-to-merge"])
+def test_merge_gate_refuses_to_arm_while_fast_ci_is_not_green(tmp_path: Path, labels: str) -> None:
+    """GH #4194/#4215/#4145: arming on a queued ci.yml run bought a red gate.
+
+    The runner's precondition fails closed without waiting, so a label armed
+    before `CI Gate` is green produced `Merge gate (full suite)` = failure with
+    no test run. The ritual must ask the SAME helper first and, on a decided
+    not-green (exit 1), change NO label (a present label stays present, so no
+    stale gate is disturbed either) and say how to retry. Mutation that must
+    fail this: drop the pre-check, or arm on exit 1.
+    """
+    proc, calls = _arm_merge_gate(tmp_path, labels=labels, fast_rc=1)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "NOT ARMED on PR #3631" in proc.stderr and "no label changed" in proc.stderr
+    assert "is queued, not finished" in proc.stderr
+    assert "then re-run: make merge-gate PR=3631" in proc.stderr
+    assert not [c for c in calls if c.startswith(("pr edit", "label create", "run list"))], calls
+    assert json.loads((tmp_path / "labels.json").read_text()) == labels.split()
+    argv = (tmp_path / "fast.argv").read_text()
+    for needle in (
+        "--local",
+        "--event pull_request",
+        "--repo damianvtran/local-operator",
+        "--pr 3631",
+        f"--head-sha {_MERGE_GATE_SHA}",
+        "--head-repo damianvtran/local-operator",
+    ):
+        assert needle in argv, (needle, argv)
+
+
+@pytest.mark.parametrize(("fast_rc", "warns"), [(0, False), (3, True)])
+def test_merge_gate_arms_on_green_or_on_an_undecidable_local_check(
+    tmp_path: Path, fast_rc: int, warns: bool
+) -> None:
+    """Green arms; exit 3 (API/token unavailable locally) warns and arms.
+
+    A local outage must not block an arm: the runner's precondition re-decides
+    fail-closed with its own token, so arming on "unknown" can cost at most a
+    cheap red precondition, never a full suite on a non-green head.
+    """
+    armed = 2222
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        poll_runs=_merge_gate_runs((armed, _MERGE_GATE_AFTER)),
+        fast_rc=fast_rc,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert any(c.startswith("pr edit") and "--add-label" in c for c in calls), calls
+    assert ("could not confirm fast CI locally" in proc.stderr) is warns, proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -4548,6 +4712,42 @@ def test_required_gate_script_fails_closed_on_non_success_results(
             # The error must name the job AND its result, so a reader of the
             # check sees `b=abandoned`, not just a red gate.
             assert f"{key}={'null' if value is None else value}" in proc.stdout
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None or shutil.which("bash") is None,
+    reason="the real gate script needs bash and jq",
+)
+@pytest.mark.parametrize(
+    ("precondition", "test_result", "named"),
+    [("failure", "skipped", True), ("success", "failure", False), ("success", "success", False)],
+)
+def test_merge_gate_names_an_unmet_precondition_as_not_a_test_failure(
+    precondition: str, test_result: str, named: bool
+) -> None:
+    """GH #4194/#4215/#4145: a red cost gate must not read like a red suite.
+
+    The verdict is unchanged (a failed precondition still fails the gate);
+    only an unmet precondition gets the distinct PRECONDITION NOT MET line, and
+    a real test failure never does.
+    """
+    needs = {
+        "precondition": {"result": precondition, "outputs": {}},
+        "changes": {"result": "success", "outputs": {}},
+        "test": {"result": test_result, "outputs": {}},
+    }
+    proc = subprocess.run(
+        ["bash", "-c", _gate_step_runs()["merge-gate"]],
+        env={"PATH": os.environ.get("PATH", ""), "NEEDS": json.dumps(needs), "PR_NUMBER": "4215"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (proc.returncode == 0) is (precondition == test_result == "success"), proc.stdout
+    assert ("PRECONDITION NOT MET (not a test failure)" in proc.stdout) is named, proc.stdout
+    if named:
+        assert "make merge-gate PR=4215" in proc.stdout
+        assert "precondition=failure" in proc.stdout
 
 
 def test_ci_gate_aggregates_every_pr_job() -> None:

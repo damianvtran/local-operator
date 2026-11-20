@@ -77,5 +77,9 @@ def header_held_transient() -> Msg:
     return Msg("tui.bridge_card.header.held_transient", {})
 
 
+def header_offline() -> Msg:
+    return Msg("tui.bridge_card.header.offline", {})
+
+
 def header_open_to_load() -> Msg:
     return Msg("tui.bridge_card.header.open_to_load", {})

@@ -1,0 +1,177 @@
+{
+  "locale": "es",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+  "target_sha256": "75a66cc6585aa45f0a43d66fa805bffbb386bcef7766f678666a6d742e7dee35",
+  "context_sha256": "4f9cf2dabc89f7e711c3cf2d74b2a6e75c274954152daa14a1dad31ac9cf12f2",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/es/wire.session_status.json",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "translator": {
+    "agent": "translator (provided by manager; not independently inspected)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "task brief"
+  },
+  "auditor": {
+    "agent": "translation-auditor (dur-audit-es)",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "d6d7243588ea",
+    "session": "d6d7243588ea",
+    "date": "2026-11-20",
+    "actual_model_source": "developer session-state Model",
+    "fallback": "none observed",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true
+  },
+  "findings_by_severity": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "clean",
+  "status": "passed",
+  "scope": {
+    "changed_keys": 4,
+    "heartbeat_rechecked": 1,
+    "total_namespace_keys_read": 35,
+    "unchanged_preexisting_keys": 31
+  },
+  "note": "Independent audit: 4 new duration keys plus existing heartbeat composition, all 35 catalogue rows read side by side. 31 pre-existing serialized entries unchanged except JSON separator comma after last entry. Spanish s/min/h/d are native conventional unit symbols, not untranslated English; exact min/h/d consistency with relay.asks.duration.minutes/hours/days and relay.shell.usage.countdown_minutes/hours/days. No plural required for invariant symbols. Spanish CLDR one/many/other preserved with # on all pre-existing plural branches. No RTL applicable. New duration outputs expand 1–4 cells; complete heartbeat labels range from equal to 3 cells longer than English; sidecar says no fixed cell cap. Text rendering only, no browser/visual-layout proof claimed. Days remains string, 1000 ungrouped. This receipt does not newly certify unrelated pre-existing wording.",
+  "runtime_cases": [
+    {
+      "input": "0s",
+      "duration": "0 s",
+      "heartbeat": "No responde · proceso activo (último latido hace 0 s)",
+      "duration_cells_es_en": [
+        3,
+        2
+      ],
+      "full_cells_es_en": [
+        53,
+        53
+      ]
+    },
+    {
+      "input": "42s",
+      "duration": "42 s",
+      "heartbeat": "No responde · proceso activo (último latido hace 42 s)",
+      "duration_cells_es_en": [
+        4,
+        3
+      ],
+      "full_cells_es_en": [
+        54,
+        54
+      ]
+    },
+    {
+      "input": "1m",
+      "duration": "1 min",
+      "heartbeat": "No responde · proceso activo (último latido hace 1 min)",
+      "duration_cells_es_en": [
+        5,
+        2
+      ],
+      "full_cells_es_en": [
+        55,
+        53
+      ]
+    },
+    {
+      "input": "4m",
+      "duration": "4 min",
+      "heartbeat": "No responde · proceso activo (último latido hace 4 min)",
+      "duration_cells_es_en": [
+        5,
+        2
+      ],
+      "full_cells_es_en": [
+        55,
+        53
+      ]
+    },
+    {
+      "input": "1h 0m",
+      "duration": "1 h 0 min",
+      "heartbeat": "No responde · proceso activo (último latido hace 1 h 0 min)",
+      "duration_cells_es_en": [
+        9,
+        5
+      ],
+      "full_cells_es_en": [
+        59,
+        56
+      ]
+    },
+    {
+      "input": "3h 12m",
+      "duration": "3 h 12 min",
+      "heartbeat": "No responde · proceso activo (último latido hace 3 h 12 min)",
+      "duration_cells_es_en": [
+        10,
+        6
+      ],
+      "full_cells_es_en": [
+        60,
+        57
+      ]
+    },
+    {
+      "input": "21h 0m",
+      "duration": "21 h 0 min",
+      "heartbeat": "No responde · proceso activo (último latido hace 21 h 0 min)",
+      "duration_cells_es_en": [
+        10,
+        6
+      ],
+      "full_cells_es_en": [
+        60,
+        57
+      ]
+    },
+    {
+      "input": "1d 1h",
+      "duration": "1 d 1 h",
+      "heartbeat": "No responde · proceso activo (último latido hace 1 d 1 h)",
+      "duration_cells_es_en": [
+        7,
+        5
+      ],
+      "full_cells_es_en": [
+        57,
+        56
+      ]
+    },
+    {
+      "input": "2d 4h",
+      "duration": "2 d 4 h",
+      "heartbeat": "No responde · proceso activo (último latido hace 2 d 4 h)",
+      "duration_cells_es_en": [
+        7,
+        5
+      ],
+      "full_cells_es_en": [
+        57,
+        56
+      ]
+    },
+    {
+      "input": "1000d 0h",
+      "duration": "1000 d 0 h",
+      "heartbeat": "No responde · proceso activo (último latido hace 1000 d 0 h)",
+      "duration_cells_es_en": [
+        10,
+        8
+      ],
+      "full_cells_es_en": [
+        60,
+        59
+      ]
+    }
+  ]
+}

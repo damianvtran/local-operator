@@ -1,0 +1,14 @@
+# i18n audit pass A — fr — mechanical log
+auditor session c739715f0519 model anthropic/claude-opus-5-5 date 2026-11-18
+tree: bd219f20b928f570b0230bac1197173267f04a74 + held patch sha256 fcf8ed47f7d7fa28a4ab4ab4e728ac4efdc0da489d71911ed82ccdb68762a7c5
+ok   tui.community: key set and order == en (148 keys)
+ok   tui.community.settings_agents_no_grants: 'Allow' inside a future-feature label, translated by design
+ok   wire.community: key set and order == en (5 keys)
+mechanical errors: 0
+plural categories (glossary: fr one/many/other, es one/many/other, zh-CN/vi other, ru one/few/many/other, ur/hi one/other): {"tui.community.browse_count": ["many", "one", "other"], "tui.community.images": ["many", "one", "other"], "tui.community.post_card_more": ["many", "one", "other"], "tui.community.replies": ["many", "one", "other"]}
+status-row fit budget 58 cells; over-budget rows: 5
+  tui.community.status_local_command: en 53 → fr 84
+  tui.community.status_locked: en 45 → fr 64
+  tui.community.status_rate_probation: en 48 → fr 61
+  tui.community.status_read_only: en 41 → fr 61
+  tui.community.status_restricted: en 60 → fr 90

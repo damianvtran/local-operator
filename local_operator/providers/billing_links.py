@@ -221,6 +221,16 @@ BILLING_LINKS: dict[str, BillingLink] = {
             "aistudio.google.com/billing is not discriminating"
         ),
     ),
+    "google-vertex": BillingLink(
+        kind="balance",
+        url="https://console.cloud.google.com/billing",
+        dashboard="the Google Cloud billing console",
+        verified=False,
+        note=(
+            "console.cloud.google.com/billing redirects to Google Cloud sign-in "
+            "(unverified); pricing docs at https://cloud.google.com/vertex-ai/generative-ai/pricing"
+        ),
+    ),
     "mistral": BillingLink(
         kind="balance",
         url="https://admin.mistral.ai/plateforme/billing",
@@ -239,6 +249,25 @@ BILLING_LINKS: dict[str, BillingLink] = {
         # one.
         verified=False,
         note="openrouter.ai/settings/credits redirects to sign-in for any path (unverified)",
+    ),
+    "bedrock": BillingLink(
+        # Bedrock is pay-as-you-go on the caller's AWS bill (no prepaid
+        # credit), and the billing failure it does surface is an AWS account
+        # one — Anthropic models are sold through AWS Marketplace and need a
+        # valid payment method — so the remedy is the account's Billing and
+        # Cost Management console, not a provider-specific page.
+        kind="balance",
+        url="https://console.aws.amazon.com/billing/home",
+        dashboard="the AWS Billing console",
+        # Unverified: checked 2026-11-19 with curl, the URL answers 302 to
+        # us-east-1.console.aws.amazon.com/billing/home, but a bogus sibling
+        # path (/billing/home-bogus-xyz) also answers 302, so it is not
+        # discriminating (sign-in wall).
+        verified=False,
+        note=(
+            "console.aws.amazon.com/billing/home 302 -> regional console (unverified: "
+            "bogus sibling path also 302s to sign-in), checked 2026-11-19"
+        ),
     ),
     "alibaba": BillingLink(
         kind="balance",

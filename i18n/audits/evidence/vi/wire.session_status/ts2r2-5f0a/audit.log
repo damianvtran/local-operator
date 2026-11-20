@@ -1,0 +1,183 @@
+{
+  "execution": "Independent R2: scoped check.check_catalogues with scratch-only catalogue root; render_message replay against retained original 54 cases; 24 explicit delta/neighbor render rows",
+  "repository_validator_problems": [],
+  "key_parity": 17,
+  "plural_categories": [
+    "other"
+  ],
+  "NFC": true,
+  "reverse_byte_proof": true,
+  "retained_52_cases_exact_render_match": true,
+  "independent_cause_completeness_guard": true,
+  "missing_cause_negative_control_rejected": true,
+  "render_rows": [
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "Lỗi — runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "Lỗi — runtime tự kết thúc khi chạm ngưỡng đình trệ"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "Lỗi — đã ngừng để cập nhật"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "Lỗi — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "Lỗi"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "Lỗi"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "Lỗi — chưa đọc — runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "Lỗi — chưa đọc — runtime tự kết thúc khi chạm ngưỡng đình trệ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "Lỗi — chưa đọc — đã ngừng để cập nhật"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "Lỗi — chưa đọc — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "Lỗi — chưa đọc"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "Lỗi — chưa đọc"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — đã dừng bằng tín hiệu"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — đã dừng bằng tín hiệu qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "opaque_command --flag"
+      },
+      "formatted": "Gián đoạn — đã dừng bằng tín hiệu qua opaque_command --flag"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "opaque_command --flag"
+      },
+      "formatted": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua opaque_command --flag"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — bị buộc kết thúc"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — bị buộc kết thúc qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "opaque_command --flag"
+      },
+      "formatted": "Gián đoạn — bị buộc kết thúc qua opaque_command --flag"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — chưa đọc — bị buộc kết thúc"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — chưa đọc — bị buộc kết thúc qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "opaque_command --flag"
+      },
+      "formatted": "Gián đoạn — chưa đọc — bị buộc kết thúc qua opaque_command --flag"
+    }
+  ]
+}

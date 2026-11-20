@@ -1,0 +1,76 @@
+{
+  "locale": "ur",
+  "namespace": "wire.session_status",
+  "status": "translated",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b97856c53df",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state model declaration",
+    "fallback_used": false
+  },
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-terminal-status",
+  "frozen_head": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "frozen_target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/ur/wire.session_status.json",
+      "sha256": "8c06a1fac064e5179bb65b7aca5445729e4717e1b2653662212a103c6e49cbe4"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/ur.md",
+      "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "output_hashes": {
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur.json",
+      "sha256": "4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b"
+    },
+    "checks": {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur-checks.json",
+      "sha256": "cb6d3eb288117ed04cd42931099484dbd5b378577e2beb37e890228ec9b12c01"
+    },
+    "checker": {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/check-terminal-status-ur.py",
+      "sha256": "c91e5168a07582cc02f3e96f272760ab459167b149b7c1e713881886dfcbef0a"
+    }
+  },
+  "counts": {
+    "total_keys": 17,
+    "new_keys_translated": 16,
+    "frozen_values_preserved": 1
+  },
+  "audit_state": "NOT AUDITED; two independent safety audits required",
+  "reasoning": [
+    "Unseen is rendered as کیفیت ابھی نہیں پڑھی گئی (status not yet read), explicitly separating read-state from cause and avoiding an unseen=unknown outcome reading.",
+    "Signal stop uses سگنل سے روکا گیا; forced kill uses زبردستی بند کیا گیا. command select none stays empty and other attributes the literal parameter as کمانڈ: {command}.",
+    "Retirement explicitly names the runtime leaving for an update; frozen retired_label remains untouched even though the new whole-message phrasing differs.",
+    "Dormant uses غیر فعال, not cancelled or scheduled; بیداری/بیداریاں follows glossary and one/other.",
+    "Stall-bound self-termination and progress-bound update departure remain distinct; update failure explicitly retains the loaded build; runtime_killed explicitly says no stop was requested.",
+    "The context provides no fixed cell/character caps; no truncation or width exception is claimed."
+  ],
+  "glossary_proposals": {
+    "runtime": "رن ٹائم",
+    "signal": "سگنل",
+    "forced kill": "زبردستی بند کرنا",
+    "dormant": "غیر فعال",
+    "turn": "باری",
+    "loaded build": "لوڈ شدہ بلڈ",
+    "unseen status": "کیفیت ابھی نہیں پڑھی گئی"
+  },
+  "programme_gap": "Unknown nonempty external diagnostic retains legacy English outside this namespace: unresolved programme gap, not accepted exception.",
+  "restrictions": "Scratch outputs only; no repository/generated/history writes, commits, builds, installs, servers, PR operations, translation services or self-audit.",
+  "created_at": "2026-11-19T21:01:10.858194+00:00"
+}
