@@ -1090,6 +1090,12 @@ def _fal_fallback_urls(base: str, model_path: str, request_id: str) -> tuple[str
     return f"{root}/status", root, f"{root}/cancel"
 
 
+#: FAL app-path prefixes whose request schemas have no ``seed`` field (GPT
+#: Image 2.x and FLUX 3, OpenAPI schemas read 2026-11-19): ``run_fal`` drops a
+#: requested seed there instead of sending a field the app cannot honour.
+_FAL_SEEDLESS_APP_PREFIXES: tuple[str, ...] = ("openai/gpt-image-", "blackforestlabs/flux-3/")
+
+
 def _fal_gpt_image_edit_route(model_path: str) -> FalEditRoute | None:
     """The edit route for any pinned FAL GPT Image app, else ``None``.
 
@@ -1250,8 +1256,8 @@ async def run_fal(
                     body["strength"] = strength
         else:
             body["image_size"] = image_size
-        if seed is not None and not model_path.startswith("openai/gpt-image-"):
-            # The GPT Image apps' schemas document no seed (2.5/2.6, read
+        if seed is not None and not model_path.startswith(_FAL_SEEDLESS_APP_PREFIXES):
+            # The GPT Image and FLUX 3 apps' schemas document no seed (read
             # 2026-11-19), so a seed is dropped there — the OpenAI and Google
             # rungs' rule: a field the wire cannot carry cannot be honoured.
             body["seed"] = seed

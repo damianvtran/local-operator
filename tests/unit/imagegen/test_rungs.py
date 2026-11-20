@@ -1975,7 +1975,11 @@ async def test_fal_a_pinned_gpt_image_app_edits_on_its_own_family_editor(
 @pytest.mark.asyncio
 async def test_fal_drops_a_seed_the_gpt_image_schema_cannot_carry() -> None:
     """The GPT Image apps document no seed; flux-class apps still get it."""
-    for model, expect_seed in ((None, False), ("fal-ai/flux/dev", True)):
+    for model, expect_seed in (
+        (None, False),
+        ("blackforestlabs/flux-3/text-to-image", False),
+        ("fal-ai/flux/dev", True),
+    ):
         recorder = _Recorder()
         submit = {"request_id": "req1", "status": "IN_QUEUE"}
         async with _client(_fal_handler(recorder, submit=submit)) as client:

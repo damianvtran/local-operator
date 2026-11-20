@@ -32,9 +32,10 @@ the same frontier model. It replaced ``bytedance-seed/seedream-4.5``, a
 mid-tier model that on 2026-11-19 served an unpinned edit with prompt words
 rendered as on-image text, invented popups/avatars and unreadable UI text,
 where a frontier pin produced a faithful edit. Trade-off, accepted: the GPT
-Image models document no ``seed``, so a pinned seed with no pinned model
-fails forward instead of being honoured — pin a seed-capable model (e.g.
-``black-forest-labs/flux-3-image``) for reproducible runs. Frontier
+Image models document no ``seed``, so a seed sent with no pinned model is
+not honoured (whether OpenRouter ignores or rejects it is unprobed) — pin a
+model whose listing's ``supported_parameters`` include ``seed`` for
+reproducible runs. Frontier
 alternatives: ``google/gemini-3-pro-image`` (Nano Banana Pro) and
 ``black-forest-labs/flux-3-image`` / ``flux.2-max``.
 

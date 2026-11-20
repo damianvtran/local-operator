@@ -128,13 +128,15 @@ does not change model character:
 - **OpenRouter**: any image model slug from its catalogue — e.g.
   `openai/gpt-image-2.6-sunburst` (default), `google/gemini-3-pro-image`
   (Nano Banana Pro) or `black-forest-labs/flux-3-image`. The GPT Image
-  default takes no `seed`: pin a seed-capable model for reproducible runs.
+  default takes no `seed`: pin a model whose OpenRouter listing supports
+  `seed` for reproducible runs.
 
 `image_size` accepts `square_hd`, `square`, `portrait_4_3`, `portrait_16_9`,
 `landscape_4_3`, `landscape_16_9` and is mapped per provider. `seed` runs only
 where the provider and model support it: Radient, FAL and OpenRouter, per
-model — the GPT Image defaults on FAL and OpenRouter take no seed (pin a
-flux-class model for reproducible runs);
+model — the GPT Image defaults on FAL and OpenRouter take no seed, and
+neither does FLUX 3; for reproducible runs pin a seed-capable model
+(`fal-ai/flux/dev` on FAL; check the model's parameters on OpenRouter);
 OpenAI, Google and the ChatGPT-plan route cannot honour it — do not promise
 reproducibility there.
 
