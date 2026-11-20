@@ -1283,20 +1283,34 @@ with the operator's authorisation (`guide://browser` "Headless nodes") — and
 
 ### Team Bridge does not travel
 
-Mesh nodes aren't enrolled in Team Bridge (agent messages to teammates) by
-default — setup never enrols one — and a node does not send on the operator's
-behalf. Enrolment is consent, and consent cannot
-be given from a node: mesh device auth proves a device, not a person, and the
-desktop bearer and device key are readable from a shell there, so nothing a node
-does can prove the operator agreed. `lop team-bridge setup` on a joined node says
-so (`mesh_node_not_enrolled`) instead of pointing at the app.
+`lop team-bridge setup` never enrols a mesh node in Team Bridge (agent
+messages to teammates; an enrolment copied from the primary is left as it is),
+and a node does not send on the operator's behalf. Enrolment is consent, and
+consent cannot be given from a node: mesh device auth proves a device, not a
+person, and the desktop bearer and device key are readable from a shell there,
+so nothing a node does can prove the operator agreed. `lop team-bridge setup`
+on a joined node says so (`mesh_node_not_enrolled`) instead of pointing at the
+app.
 
 To reach a teammate or post to the bridge from a node, `send` the request to the
 operator's chief-of-staff session on their primary device, saying what to send
-and to whom; it relays the message and replies. Find that session from the node
-itself: `sessions` `list` already includes remote rows (filter with
-`peer=<primary device>`; team none, named for the chief of staff). Address it by
-session id with no `peer` field.
+and to whom; it relays the message and tells you what it did. Find it with
+`sessions` `list`, narrowed with `peer=<primary device>`: the row with team none
+whose title is your chief of staff's name (Aida unless renamed); if unsure, ask
+the operator which session that is. Then call `send` with `session=<that id>`
+and leave `peer` unset; an id held by exactly one paired device is routed there
+on its own (`guide://peer-messaging`). If `send` answers `no session found`
+(the node cannot list the primary's sessions right now), pass
+`peer=<primary device>` too, using the device name from
+`lop network show <network>`, which lists members even when the relay is down.
+
+The `lop send` shell command does not do this: it reaches sessions on this
+device only. A person at a node's shell can ask the chief of staff on the
+primary device directly, or deliver the request with:
+
+```sh
+lop network sessions --peer <primary device> --send <session id> --mailbox "<request>"
+```
 
 ### The build gates the machinery
 

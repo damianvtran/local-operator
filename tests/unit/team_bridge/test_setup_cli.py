@@ -365,7 +365,15 @@ def test_a_joined_mesh_node_is_routed_to_the_chief_of_staff_not_the_app(
     lines = setup_cli.render_lines(result)
     assert len(lines) == 1
     text = lines[0]
-    assert "chief-of-staff session" in text and "`send`" in text and "no `peer` field" in text
+    assert "chief-of-staff session" in text and "the `send` tool" in text
+    # Design D1 / UX-U3: a person at this shell must not be sent to `lop send`,
+    # which only reaches sessions on this device and has no peer route.
+    assert "lop send" not in text
+    # UX-U2: `peer` is optional (added only when send cannot find the id), so the
+    # line must not forbid it.
+    assert "no `peer`" not in text and "`peer=<primary device>`" in text
+    # UX-U1: the line says where the session id comes from.
+    assert "`sessions` `list`" in text and "guide://network" in text
     # The app path is NOT offered on a node: neither primary-device line appears.
     assert "Local Operator app" not in text
     assert "run this command again" not in text
