@@ -330,6 +330,13 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
         "has_peer_line",
         bool(seed["has_subagents"] or seed["has_sessions"] or seed.get("has_bridge")),
     )
+    # The bridge sentence is INLINE after the subagents/sessions sentences, so
+    # its separating space belongs to it only when one of them precedes it:
+    # unconditional, a bridge-holding session without ``sessions`` rendered a
+    # line starting with a space (or a double space after the subagents
+    # sentence) — #4318 review R3. The sessions sentence does the same off
+    # ``has_subagents`` inline in the template.
+    seed.setdefault("has_bridge_joins", bool(seed["has_subagents"] or seed["has_sessions"]))
     seed.setdefault("has_peer_paragraph", bool(seed["has_peer_line"] or seed["has_tags"]))
     resolved = {
         **seed,

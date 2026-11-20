@@ -2172,3 +2172,49 @@ def test_has_ask_and_no_ask_cannot_both_be_true() -> None:
 
     with pytest.raises(ValueError, match="has_ask and no_ask"):
         render_template("system.md", {"has_ask": True, "no_ask": True})
+
+
+def test_every_gated_flag_combination_joins_its_sentences_cleanly() -> None:
+    """REGRESSION (#4318 review R3): the inline peer sentences carried their
+    separating spaces unconditionally, so ``has_bridge`` without
+    ``has_sessions`` rendered a line starting with a space (or a double space
+    after the subagents sentence). Every combination of the tool-gated flags,
+    plus ``has_bridge`` and ``has_notify`` which share those lines, must join
+    with single spaces: no double space, no leading or trailing space."""
+    import itertools
+
+    from local_operator.prompts_api import render_template
+
+    flags = [*sorted(TOOL_GATED_PROSE_FLAGS), "has_bridge", "has_notify"]
+    base = {"has_browser": False, "no_browser": False, "has_console": False, "no_console": False}
+    for combo in itertools.product([False, True], repeat=len(flags)):
+        text = render_template("system.md", {**base, **dict(zip(flags, combo, strict=True))})
+        # The gated inline joins all live between these headings; the safety
+        # list above them indents its continuation lines on purpose.
+        region = text[text.index("## Tools") : text.index("### Resources")]
+        for line in region.splitlines():
+            assert "  " not in line, (combo, line)
+            assert not line.startswith(" "), (combo, line)
+            assert not line.endswith(" "), (combo, line)
+
+
+def test_wake_and_ask_clauses_render_only_with_their_tools() -> None:
+    """REGRESSION (#4318 review R4): the todo paragraph told every session to
+    "arm a wake or monitor" and the notify sentence named ``ask``, whether or
+    not either tool was held."""
+    from local_operator.prompts_api import render_template
+
+    base = {"has_browser": False, "no_browser": False, "has_console": False, "no_console": False}
+    wake = "; arm a wake or monitor for\nexternal waits."
+    ask_clause = "or what you `ask` (ask notifies)"
+
+    held = render_template("system.md", {**base, "has_notify": True})
+    assert wake in held and ask_clause in held
+
+    bare = render_template(
+        "system.md", {**base, "has_notify": True, "has_wake_monitor": False, "has_ask": False}
+    )
+    assert "arm a wake or monitor" not in bare
+    assert "Re-check each `block`ed item before finishing.\n" in bare
+    assert "(ask notifies)" not in bare
+    assert "never progress. Its title must say what happened" in bare
