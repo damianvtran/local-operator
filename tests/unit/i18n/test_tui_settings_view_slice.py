@@ -305,3 +305,103 @@ async def test_shipped_fr_catalogue_paints_the_settings_view(shipped_fr) -> None
     tags = {line[sv_mod._VALUE_COLUMN :].rstrip() for line in lines if "prise d’effet" in line}
     assert "prise d’effet\u202f: immédiat" in tags, tags
     assert not any("takes effect" in line for line in lines), lines
+
+
+async def _paint_every_surface(
+    view: SettingsView, pilot: Any, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Paint each keyed surface once through its real paint path.
+
+    Any projection error (an RTL locale rejecting a control character it was
+    handed, a technical span the display boundary refuses) raises out of here,
+    which is the whole point: these crashes only surface at paint time.
+    """
+    out: dict[str, Any] = {}
+    out["lines"] = view.render_lines_for_test()
+    out["add"] = view._row_text(_Row(kind="hop_add", chain="default"), -1, 100).plain
+    out["plain"] = _contract(view, "retry.baseDelayMs", monkeypatch, _list_width=lambda: 200)
+    out["unset"] = _contract(
+        view, "network.memory.exclude_devices", monkeypatch, _list_width=lambda: 200
+    )
+    out["ladder"] = _suggest_ladder(view, monkeypatch)
+    view._editing = None
+    teams = [(f"team{i:02d}", "3 members", "") for i in range(12)]
+    providers = [(f"prov{i:02d}", "signed in") for i in range(40)]
+    view.load(teams=teams, agents=[], providers=providers)
+    await pilot.pause()
+    out["teams"] = view.rendered_pane()
+    view.action_pane(1)
+    await pilot.pause()
+    out["agents"] = view.rendered_pane()
+    return out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", resolve.shipped_locales())
+async def test_every_shipped_locale_paints_the_settings_view(
+    shipped_fr, locale: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for PR #4361 review R1/R2 (QA Q1/Q2): `ur` crashed on open.
+
+    The scope word was projected for display (Urdu wraps it in bidi isolates)
+    and then substituted into `takes effect: {scope}`, whose own projection
+    rejects control characters; and `↑↓` was declared a technical parameter,
+    which the display boundary admits only as printable ASCII. Both raised at
+    paint, so only a frame painted with the REAL shipped catalogue in every
+    locale can catch the class — not a synthetic one, and not English.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(180, 40)) as pilot:
+        await pilot.pause()
+        text.set_active_locale(locale)
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        got = await _paint_every_surface(view, pilot, monkeypatch)
+    # Each scope tag sits on the shared value column; four sections carry one.
+    tagged = [line for line in got["lines"] if line[sv_mod._VALUE_COLUMN :].strip()]
+    assert tagged, got["lines"]
+    # The widest ladder rung names the browse keys verbatim in every locale.
+    assert "↑↓" in got["ladder"][0], got["ladder"]
+    assert len(got["ladder"]) == 4, got["ladder"]
+    # A projected string balances its isolates: every opener has a closer.
+    for painted in [got["add"], got["plain"], got["unset"], *got["ladder"], *got["lines"]]:
+        opens = sum(painted.count(c) for c in "\u2066\u2067\u2068")
+        assert opens == painted.count("\u2069"), repr(painted)
+    assert got["teams"].rstrip().endswith(got["agents"].rstrip().splitlines()[-1])
+
+
+@pytest.mark.asyncio
+async def test_es_roster_spill_count_never_wraps_the_tab_row(shipped_fr) -> None:
+    """QA Q3 / design D3: the collapsed roster count rode the tab row unbudgeted.
+
+    In es `equipos  agentes  (←→)  … 12 más` is 32 cells against the pane's
+    31, so the row wrapped and pushed the `solo lectura` caption out of the
+    pane at 120x34. Every pane line must fit the pane's width (a wrapped line
+    costs a row the height budget never counted) and the caption must survive.
+    """
+    from rich.cells import cell_len
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        text.set_active_locale("es")
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        view.load(
+            teams=[(f"team{i:02d}", "3 members", "") for i in range(12)],
+            agents=[],
+            providers=[(f"prov{i:02d}", "signed in") for i in range(40)],
+        )
+        await pilot.pause()
+        pane = view.rendered_pane().splitlines()
+        width = view._pane_width()
+        height = view._pane_height()
+    assert all(cell_len(line) <= width for line in pane), [
+        (cell_len(line), line) for line in pane if cell_len(line) > width
+    ]
+    assert len(pane) <= height, pane
+    assert pane[-1].strip() == "solo lectura", pane
+    # The roster still says it is withholding entries rather than going silent.
+    assert any("más" in line and "equipos" in line for line in pane), pane

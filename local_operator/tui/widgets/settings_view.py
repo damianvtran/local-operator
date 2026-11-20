@@ -89,10 +89,24 @@ _record_t = tr_record("tui.small")
 # bidi-isolated as one island in RTL locales) while the prose around them is
 # translated. Every lookup resolves at PAINT time, so a live language change
 # repaints without a refresher.
+#
+# `browse_keys` (`↑↓`) is deliberately NOT technical. The display boundary
+# (`i18n.display.isolated_status_text`) admits only printable ASCII inside a
+# technical span — a shared validation contract that also guards against
+# smuggled controls, so it is not widened for one glyph pair. Nor does it need
+# to be: the arrows are bidi-neutral and not Bidi_Mirrored, so in RTL prose
+# they at worst lay out as `↓↑`, which names the same two keys. Declaring them
+# technical made every suggestion hint raise in `ur` (PR #4361 review R2).
 _t_sv = display_tr(
     "tui.settings_view",
-    technical_params=("save_key", "cancel_key", "browse_keys", "complete_key", "command"),
+    technical_params=("save_key", "cancel_key", "complete_key", "command"),
 )
+#: The same namespace resolved to PLAIN text, for a word that is substituted
+#: into another catalogued sentence. Display projection must happen exactly
+#: once, on the outermost string: a projected word carries bidi isolates in
+#: `ur`, and the enclosing sentence's projection rejects control characters
+#: (PR #4361 review R1 — `/settings` crashed on open in Urdu).
+_raw_sv = tr("tui.settings_view")
 #: Key names the editor hints mention. Literal key labels, not prose: the
 #: same words the footer legend and every keymap print.
 _KEY_SAVE = "enter"  # i18n: ignore key name
@@ -4123,13 +4137,15 @@ class SettingsView(Vertical):
             # new point on that timeline. A fourth member would have to be
             # handled by every consumer of `Scope` to say one thing about one
             # section.
-            scope_word = _t_sv(
+            scope_msg = (
                 _sv.scope_never()
                 if row.section.name == "retired"
                 else _SCOPE_WORDS[row.section.scope]()
             )
-            full = _t_sv(_sv.section_takes_effect(scope=scope_word))
-            short = scope_word
+            # The PLAIN word goes into the sentence; each painted string is
+            # projected once (see `_raw_sv`).
+            full = _t_sv(_sv.section_takes_effect(scope=_raw_sv(scope_msg)))
+            short = _t_sv(scope_msg)
             # LEFT-aligned on one shared column, not right-aligned against each
             # title. Right-aligning made the tag's position depend on the
             # title's length, so `Model` and `Failover and retry` — two headers
@@ -5922,12 +5938,33 @@ class SettingsView(Vertical):
             text.append("\n")
         if gap:
             text.append("\n")
-        text.append_text(tabs)
         if roster_collapsed:
             # The count rides on the tab row itself. The tab row keeps its own
             # accent because it still names the live pane; the count follows in
             # `dim` so it reads as a fact rather than as a third tab.
-            text.append(_t(_x.settings_view_overflow_more(spilled=str(spilled))), style=dim)
+            #
+            # Budgeted by cells, because the height arithmetic above counts
+            # this as ONE row: a row wider than the pane wraps onto a second
+            # one nothing paid for and pushes the `read-only` caption out of
+            # the box (es `equipos  agentes  (←→)  … 12 más` is 32 cells
+            # against 31 — PR #4361 QA Q3 / design D3). Widest first: the full
+            # row; then without the `(←→)` key hint, because the count is a
+            # FACT (entries are withheld) and the hint only an accelerator the
+            # footer legend also carries; then the bare tabs, never a wrap.
+            count = _t(_x.settings_view_overflow_more(spilled=str(spilled)))
+            room = self._pane_width()
+            bare = tabs[: len(tabs.plain) - len("(←→)")]
+            bare.rstrip()
+            if cell_len(tabs.plain) + cell_len(count) <= room:
+                text.append_text(tabs)
+                text.append(count, style=dim)
+            elif cell_len(bare.plain) + cell_len(count) <= room:
+                text.append_text(bare)
+                text.append(count, style=dim)
+            else:
+                text.append_text(tabs)
+        else:
+            text.append_text(tabs)
         text.append("\n")
         for segments in roster_block():
             for chunk, style in segments:
