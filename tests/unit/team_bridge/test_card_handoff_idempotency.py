@@ -34,7 +34,12 @@ from local_operator.mobile import peer_send
 from local_operator.mobile.peer_client import PeerAck
 from local_operator.session.runtime import launch
 from local_operator.team_bridge.connector import coalesce, conversation, wake
-from local_operator.team_bridge.store import Store, StoreRefused, state_db_path
+from local_operator.team_bridge.store import (
+    Store,
+    StoreRefused,
+    delivery_hold_class,
+    state_db_path,
+)
 from tests.unit.session.test_session import ScriptedStream, make_session
 from tests.unit.team_bridge import test_conversation_delivery as rig
 
@@ -46,6 +51,7 @@ class _Receiver:
         self.session = make_session(tmp_path / "receiver", ScriptedStream([[]]))
         self.dispatched: list[str] = []  # every id that reached the hop
         self.accepted: list[str] = []  # ids the REAL gate appended as new rows
+        self.accepted_text: list[str] = []  # the card text of each accepted id
         self.hold_inflight = False
 
     async def engage(self, session_id, cwd, work, *, config_dir):
@@ -69,6 +75,7 @@ class _Receiver:
         delivery = getattr(detail, "delivery", None) or {}
         if not delivery.get("duplicate"):
             self.accepted.append(work.command_id)
+            self.accepted_text.append(work.text)
         return SimpleNamespace(detail=PeerAck(str(detail), delivery), state="delivered")
 
 
@@ -262,6 +269,10 @@ def test_legacy_unbound_row_is_held_with_zero_dispatch(tmp_path, monkeypatch):
     assert receiver.dispatched == dispatched
     assert rig._reservation_rows(config_dir)[0]["card_posted_at"] is None
     assert _handoff_ids(config_dir)[rig.MESSAGE_ID] is None, "nothing inferred or rewritten"
+    # Visible upgrade effect (R4/S-3): the owner sees it in the review class,
+    # never the auto-retried delivery_pending class.
+    assert delivery_hold_class("card_provenance_unknown") == "awaiting_review"
+    assert delivery_hold_class("card_unconfirmed") == "delivery_pending"
 
 
 def test_concurrent_binds_converge_on_one_identity(tmp_path, monkeypatch):
@@ -401,12 +412,29 @@ def test_partial_group_marker_failure_retry_with_new_member(tmp_path, monkeypatc
     assert _posted(config_dir) == {a: True, b: True, c: True}
 
 
-def test_group_replay_never_reached_receiver_narrows_unsent_member(tmp_path, monkeypatch):
-    """A+B bound, the dispatch failed (nothing landed); retry carries only B.
+def _dial_refused(monkeypatch):
+    from local_operator.mobile.peer_client import ControlDialFailed
 
-    The id is accepted as NEW for B alone, so A (still owed, still bound to that
-    id) is released: otherwise A's own replay would be swallowed as a duplicate.
+    async def refused(*args, **kwargs):
+        raise ControlDialFailed()
+
+    monkeypatch.setattr(launch, "engage_runtime", refused)
+
+
+def _accepted_carrying(receiver, config_dir) -> set[str]:
+    """Message ids named by a card the REAL receiver gate accepted as new.
+
+    Read from the accepted card text itself (its ``message_id:`` /
+    ``message_ids:`` lines), not from the sender's bookkeeping: a card
+    "carries" a member only if the card the receiver took names it.
     """
+
+    blob = "\n".join(receiver.accepted_text)
+    return {mid for mid in _posted(config_dir) if mid in blob}
+
+
+def _group_bound_then_split(tmp_path, monkeypatch):
+    """A+B bound to X; the first dispatch is a CONFIRMED non-delivery."""
 
     owner, config_dir, _server, receiver = _rig(tmp_path, monkeypatch)
     monkeypatch.setattr(coalesce, "_persist_hold", lambda *a, **k: None)
@@ -414,27 +442,137 @@ def test_group_replay_never_reached_receiver_narrows_unsent_member(tmp_path, mon
     a, b = "bcmsg_abcdef0a", "bcmsg_abcdef0b"
     _reserve(owner, config_dir, [a, b])
     real_engage = receiver.engage
-
-    async def refused(*args, **kwargs):
-        raise launch_dial_failed()
-
-    from local_operator.mobile.peer_client import (
-        ControlDialFailed as launch_dial_failed,
-    )
-
-    monkeypatch.setattr(launch, "engage_runtime", refused)
+    _dial_refused(monkeypatch)
     assert [o["action"] for o in _flush(owner, config_dir, [(a, 1), (b, 2)])] == ["hold"]
     group_id = _handoff_ids(config_dir)[a]
+    assert peer_send.valid_peer_message_id(group_id)
     assert _handoff_ids(config_dir)[b] == group_id
     monkeypatch.setattr(launch, "engage_runtime", real_engage)
+    return owner, config_dir, receiver, real_engage, a, b, group_id
 
+
+def test_subset_replay_of_a_bound_id_moves_the_subset_before_dispatch(tmp_path, monkeypatch):
+    """A bound id is never sent with fewer of its still-owed members (R1/S-1/Q1).
+
+    B re-drives alone: it is moved to its OWN id in the bind transaction, so the
+    group id still names exactly A, and A's own replay is accepted as new.
+    """
+
+    owner, config_dir, receiver, _engage, a, b, group_id = _group_bound_then_split(
+        tmp_path, monkeypatch
+    )
     assert [o["action"] for o in _flush(owner, config_dir, [(b, 2)])] == ["delivered"]
-    assert receiver.accepted == [group_id]
-    assert _handoff_ids(config_dir)[a] == "", "A released for its own identity"
+    b_id = _handoff_ids(config_dir)[b]
+    assert b_id != group_id and peer_send.valid_peer_message_id(b_id)
+    assert _handoff_ids(config_dir)[a] == group_id, "A keeps the id that now names only A"
+    assert receiver.dispatched == [b_id], "the group id was never sent without A"
     _flush(owner, config_dir, [(a, 1)])
-    a_id = _handoff_ids(config_dir)[a]
-    assert a_id != group_id and receiver.accepted == [group_id, a_id]
+    assert receiver.dispatched == [b_id, group_id]
+    assert receiver.accepted == [b_id, group_id]
     assert _posted(config_dir) == {a: True, b: True}
+    assert _accepted_carrying(receiver, config_dir) == {a, b}
+
+
+def test_new_member_is_not_held_behind_an_owed_group(tmp_path, monkeypatch):
+    """A new C arriving with B (A+B's id still owed, A absent) gets its own card
+    at once: neither the group id nor C waits for A to co-buffer."""
+
+    owner, config_dir, receiver, _engage, a, b, group_id = _group_bound_then_split(
+        tmp_path, monkeypatch
+    )
+    c = "bcmsg_abcdef0c"
+    Store(config_dir).record_body_reservation(
+        owner,
+        conversation_id=rig.CONVERSATION_ID,
+        message_id=c,
+        conversation_seq=3,
+        mention=False,
+        body_sha256="a" * 64,
+        screening_fingerprint="b" * 64,
+        policy_epoch=1,
+        consent_version=None,
+        designated_session="sess_a",
+        now=1.0,
+    )
+    outcomes = _flush(owner, config_dir, [(b, 2), (c, 3)])
+    assert [o["action"] for o in outcomes] == ["delivered", "delivered"]
+    assert group_id not in receiver.dispatched, "group id never sent without A"
+    assert _posted(config_dir) == {a: False, b: True, c: True}
+    _flush(owner, config_dir, [(a, 1)])
+    assert _posted(config_dir)[a] and a in _accepted_carrying(receiver, config_dir)
+    assert len(receiver.accepted) == 3 == len(set(receiver.accepted))
+
+
+@pytest.mark.parametrize("answer", ["queued", "timeout"])
+def test_uncertain_subset_commit_then_full_retry_still_delivers_a(tmp_path, monkeypatch, answer):
+    """Reviewer R1 / security repro A: B alone lands but the sender sees no
+    confirmation (receiver busy -> queued, or a timeout after the commit); then
+    A+B retry together. Base of this PR: A was marked posted with no card ever
+    carrying it. Now a card carrying A must be accepted before A is posted.
+    """
+
+    owner, config_dir, receiver, real_engage, a, b, group_id = _group_bound_then_split(
+        tmp_path, monkeypatch
+    )
+
+    async def lands_then_uncertain(*args, **kwargs):
+        result = await real_engage(*args, **kwargs)
+        if answer == "timeout":
+            raise TimeoutError()
+        return SimpleNamespace(detail=PeerAck("queued", {"queued": True}), state=result.state)
+
+    monkeypatch.setattr(launch, "engage_runtime", lands_then_uncertain)
+    _flush(owner, config_dir, [(b, 2)])
+    b_id = _handoff_ids(config_dir)[b]
+    assert b_id != group_id and receiver.accepted == [b_id]
+    assert _handoff_ids(config_dir)[a] == group_id
+    monkeypatch.setattr(launch, "engage_runtime", real_engage)
+
+    _flush(owner, config_dir, [(a, 1), (b, 2)])
+    assert a in _accepted_carrying(receiver, config_dir), "a card carrying A was accepted"
+    assert _posted(config_dir)[a] is True
+    # B: committed once under its own id; any replay of it is deduplicated.
+    assert receiver.accepted.count(b_id) == 1
+    assert set(receiver.accepted) == {b_id, group_id}
+
+
+@pytest.mark.parametrize("fault", ["refused", "killed"])
+def test_no_post_send_write_can_strand_a_sibling(tmp_path, monkeypatch, fault):
+    """QA Q1 / reviewer R2: a refused write or a kill right after a FRESH
+    accept of a re-driven subset. The old post-send narrow is gone; the only
+    post-send writes are the posted marker and the hold delete, so fault those.
+    A must still get a card carrying it; B must not be duplicated."""
+
+    owner, config_dir, receiver, _engage, a, b, group_id = _group_bound_then_split(
+        tmp_path, monkeypatch
+    )
+    assert not hasattr(Store, "narrow_card_handoff")
+    real_mark = Store.mark_body_card_posted
+    hit: list[str] = []
+
+    def faulty(self, owner_, conversation_id, message_id, *, now):
+        if not hit:
+            hit.append(message_id)
+            if fault == "killed":
+                raise KeyboardInterrupt()
+            raise StoreRefused("store_refused")
+        return real_mark(self, owner_, conversation_id, message_id, now=now)
+
+    monkeypatch.setattr(Store, "mark_body_card_posted", faulty)
+    if fault == "killed":
+        with pytest.raises(KeyboardInterrupt):
+            _flush(owner, config_dir, [(b, 2)])
+    else:
+        _flush(owner, config_dir, [(b, 2)])
+    b_id = _handoff_ids(config_dir)[b]
+    assert hit == [b] and receiver.accepted == [b_id]
+    assert _handoff_ids(config_dir)[a] == group_id
+    # "Restart": the held group re-drives together.
+    _flush(owner, config_dir, [(a, 1), (b, 2)])
+    assert _posted(config_dir) == {a: True, b: True}
+    assert a in _accepted_carrying(receiver, config_dir)
+    assert receiver.accepted.count(b_id) == 1, "B deduplicated, not duplicated"
+    assert sorted(receiver.accepted) == sorted([b_id, group_id])
 
 
 def test_unreserved_card_keeps_the_minted_id(tmp_path, monkeypatch):

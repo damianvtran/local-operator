@@ -1024,10 +1024,12 @@ def _card_handoff_settled(
       found by id on disk): the earlier hand-off landed, so the caller may mark
       the card posted. No second card exists.
     * ``delivered`` — accepted as NEW: the id was never committed before, so
-      no earlier card under it reached anyone. The id now names exactly
-      ``members``; any OTHER still-owed row bound to it is released for its own
-      id (:meth:`Store.narrow_card_handoff`) so its replay is not swallowed as a
-      duplicate (a lost wake).
+      no earlier card under it reached anyone, and this card carried EVERY
+      still-owed member bound to it — :meth:`Store.bind_card_handoff` moves a
+      strict subset to its own fresh id before dispatch, so no sibling can be
+      left bound to an id that a card without it committed. Nothing to write
+      after the send, hence no post-send window a refused write or a kill
+      could turn into a lost wake (PR #4348 review r1: R2/S-1/Q1).
     * ``unconfirmed`` (in flight at the receiver, queued, or no answer) —
       truthfully unknown: raise ``card_unconfirmed`` so the reservation stays
       owed and held. The retry re-sends the SAME id (deduplicated), never a
@@ -1053,13 +1055,6 @@ def _card_handoff_settled(
         logger.info("bridge: card replay deduplicated code=card_already_delivered")
         return
     if state == DELIVERY_DELIVERED:
-        try:
-            store.narrow_card_handoff(owner, conversation_id, handoff.message_id, members)
-        except StoreRefused:
-            # Second store failure in the same window: the card IS out, so the
-            # caller still records it; a sibling still bound to this id stays a
-            # residual (see the PR's residual list), logged as a closed code.
-            logger.warning("bridge: card handoff unnarrowed code=store_refused")
         return
     if state == DELIVERY_UNCONFIRMED:
         logger.warning("bridge: card replay held code=card_unconfirmed")

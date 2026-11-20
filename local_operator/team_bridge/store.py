@@ -1600,7 +1600,15 @@ _DELIVERY_HOLD_CODES = frozenset(
         # body reservation failures (conversation._record_body_reservation)
         "receipt_unavailable",
         "reservation_refused",
-        # card hand-off identity (Store.bind_card_handoff / _deliver_card)
+        # card hand-off identity (Store.bind_card_handoff / _deliver_card).
+        # ``card_provenance_unknown`` is DELIBERATELY not delivery_pending: a
+        # legacy (NULL) row's earlier card, if any, went out under an id nothing
+        # recorded, so no automatic replay may run for it (it could only
+        # duplicate). On upgrade every unposted legacy reservation therefore
+        # shows as ``awaiting_review`` and is never auto-re-driven; the message
+        # stays readable in the channel history, and it clears through the
+        # owner's existing hold review, never by an automatic probe or replay
+        # (PR #4348 review r1 R4 / security S-3).
         "card_unconfirmed",
         "card_provenance_unknown",
         "card_handoff_split",
@@ -4176,7 +4184,12 @@ class Store:
         unadmitted recovery card, which has never had a reservation),
         :data:`CARD_HANDOFF_LEGACY` (NULL: provenance unknown), ``''`` (bound to
         nothing yet) or the bound ``peer-`` id. Live-owner fenced: a fenced
-        owner reads every id as unreserved and the bind below refuses it.
+        owner reads every id as unreserved, so ``_deliver_card`` takes the
+        historical minted-id path and :meth:`bind_card_handoff` never runs for
+        it (PR #4348 security r1 S-2: this is NOT a refusal). That grants
+        nothing new — base sent this card unconditionally, and the receiving
+        session re-checks its own live owner fence (see ``wake.deliver_wake``) —
+        it only means the identity guarantee does not cover a fenced owner.
         Takes the write lock for the guarded additive ``ALTER`` (as
         :meth:`body_card_status` does).
         """
@@ -4212,10 +4225,13 @@ class Store:
 
         Returns ``(handoff_id, replay)``. All rows unbound (``''``) → every row
         takes ``minted_id`` in this one transaction and ``replay`` is False. All
-        rows already bound to the SAME id → that id, ``replay`` True; the
-        membership is whatever rows carry it, so a replay can never re-label a
-        different logical card. Anything else REFUSES with a closed code and
-        nothing is dispatched:
+        rows already bound to the SAME id AND they are every still-owed row
+        bound to it → that id, ``replay`` True; the membership is whatever rows
+        carry it, so a replay can never re-label a different logical card. A
+        STRICT SUBSET of an id's still-owed rows is moved to ``minted_id`` in
+        this same transaction (``replay`` False) so the id is never sent without
+        a member it still owes (see the comment in the body). Anything else
+        REFUSES with a closed code and nothing is dispatched:
 
         * ``card_provenance_unknown`` — a legacy (NULL) row: its earlier card,
           if any, went out under an id nothing recorded, so a new id proves
@@ -4261,9 +4277,58 @@ class Store:
             if len(bound) != 1:
                 raise StoreRefused("card_handoff_split")
             (current,) = bound
-            if current:
-                return current, True
             placeholders = ",".join("?" for _ in message_ids)
+            if current:
+                # A BOUND ID IS NEVER SENT WITH FEWER OF ITS STILL-OWED MEMBERS
+                # (PR #4348 review r1: R1/R2, S-1, Q1). The receiver dedups on
+                # the id alone, so whichever card first COMMITS under it decides
+                # what it means. If the earlier send's outcome was uncertain
+                # (timeout, queued busy, in flight) and a re-drive now carries a
+                # strict subset, a fresh accept would commit the id for the
+                # subset and every omitted sibling's later replay would be
+                # answered duplicate -> marked posted with no card ever naming
+                # it: a silent lost wake. Re-grouping cannot be relied on (holds
+                # are re-driven one at a time, bounded per pass, and a sibling
+                # may sit in a different hold class), so waiting for the full
+                # group could stall forever.
+                #
+                # So the subset is moved, in THIS transaction and before any
+                # dispatch, to its own fresh id; the omitted siblings keep the
+                # original id, which now names exactly them. Every outcome of
+                # the original send then stays loss-free: committed -> the
+                # siblings' replay is a truthful duplicate (that card carried
+                # them) and the subset gets a second card (at-least-once, the
+                # base behaviour, never a loss); never committed -> each id is
+                # first committed by a card carrying all of its owed members.
+                # Because the move is part of the bind, there is no post-send
+                # write whose failure or a kill could strand a sibling (the old
+                # ``narrow_card_handoff`` window, now removed).
+                owed = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM body_reservations WHERE owner_key = ? "
+                        "AND conversation_id = ? AND card_handoff_id = ? "
+                        "AND state = 'pending' AND card_posted_at IS NULL "
+                        "AND credential_id = ? AND enrollment_generation = ?",
+                        (
+                            _owner_key(owner),
+                            conversation_id,
+                            current,
+                            owner.credential_id,
+                            owner.enrollment_generation,
+                        ),
+                    )
+                }
+                if owed <= set(message_ids):
+                    return current, True
+                conn.execute(
+                    "UPDATE body_reservations SET card_handoff_id = ? WHERE owner_key = ? "
+                    f"AND conversation_id = ? AND message_id IN ({placeholders}) "
+                    "AND card_handoff_id = ?",
+                    (minted_id, _owner_key(owner), conversation_id, *message_ids, current),
+                )
+                logger.info("bridge: card handoff subset rebound code=card_handoff_regrouped")
+                return minted_id, False
             conn.execute(
                 "UPDATE body_reservations SET card_handoff_id = ? WHERE owner_key = ? "
                 f"AND conversation_id = ? AND message_id IN ({placeholders}) "
@@ -4271,39 +4336,6 @@ class Store:
                 (minted_id, _owner_key(owner), conversation_id, *message_ids),
             )
             return minted_id, False
-
-    def narrow_card_handoff(
-        self,
-        owner: OwnerSnapshot,
-        conversation_id: str,
-        handoff_id: str,
-        delivered: list[str],
-    ) -> int:
-        """Unbind members a FRESH accept of a replayed id did not carry.
-
-        Called only when a replay under ``handoff_id`` was accepted as NEW by the
-        receiver: that proves the id was never committed before, so no earlier
-        card under it reached anyone, and the id now names exactly the
-        ``delivered`` subset. Any other still-owed member bound to it would
-        otherwise be swallowed as a "duplicate" on its own replay (a lost wake),
-        so it returns to ``''`` and gets its own id next time. Posted rows are
-        never touched. Returns the number of rows unbound.
-        """
-
-        placeholders = ",".join("?" for _ in delivered) or "''"
-        with self._connect() as conn:
-            self._init(conn)
-            self._begin_write(conn)
-            self._require_live(conn, owner)
-            self._ensure_card_posted_column(conn)
-            self._ensure_card_handoff_column(conn)
-            cursor = conn.execute(
-                "UPDATE body_reservations SET card_handoff_id = '' WHERE owner_key = ? "
-                "AND conversation_id = ? AND card_handoff_id = ? AND card_posted_at IS NULL "
-                f"AND message_id NOT IN ({placeholders})",
-                (_owner_key(owner), conversation_id, handoff_id, *delivered),
-            )
-            return int(cursor.rowcount)
 
     def mark_body_card_posted(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float
