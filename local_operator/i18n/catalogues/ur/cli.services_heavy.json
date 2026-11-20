@@ -11,5 +11,8 @@
   "cli.services_heavy.events_header": "  لیز کے حالیہ واقعات (لاگ: {path}):",
   "cli.services_heavy.event_line": "    {time} {record}",
   "cli.services_heavy.no_events": "  ابھی تک لیز کا کوئی واقعہ درج نہیں ہوا (لاگ: {path})",
-  "cli.services_heavy.audit_row": "بھاری کام آڈٹ: آخری {record}، {age} پہلے (لاگ: {path})"
+  "cli.services_heavy.audit_row": "بھاری کام آڈٹ: آخری {record}، {age} پہلے (لاگ: {path})",
+  "cli.services_heavy.start_by": "کمانڈ شروع ہونے کا آخری وقت: epoch سیکنڈز یا آفسیٹ یا Z کے ساتھ ISO-8601 (مثلاً 2026-11-19T08:05:00Z)۔ قطار کے انتظار کے بعد، کمانڈ شروع ہونے سے عین پہلے جانچا جاتا ہے؛ وقت گزر چکا ہو تو کمانڈ نہیں چلتی اور ایگزٹ اسٹیٹس 79 ہوتا ہے",
+  "cli.services_heavy.late_start": "تاخیر سے آغاز: start-by {start_by} گزر چکا ہے (ابھی {now}، {late} سیکنڈ تاخیر)؛ کمانڈ شروع نہیں ہوئی",
+  "cli.services_heavy.not_start_by": "{value} نہ epoch سیکنڈز ہے اور نہ آفسیٹ یا Z والا ISO-8601 وقت"
 }

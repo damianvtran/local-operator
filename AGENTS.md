@@ -939,6 +939,17 @@ named on the last stderr line); spawned cleanup-required runs also write
 `$LOCAL_OPERATOR_RUN_ID` binds the id); see `scripts/run_bounded.py`'s RUN
 RECORD section for the schema.
 
+`--start-by <epoch | ISO-8601 with offset/Z>` (also on `lop services heavy run`)
+enforces a granted window's latest start ("start by 08:05Z"): checked after any
+queue/lease wait, immediately before spawn; if it has passed the command is
+never started and the status is **79**. `run_bounded.py` writes a completion
+record for it (`cause=late-start`, `spawned=no`); `heavy run` prints a stderr
+line and appends a `late-start` row to the lease trail
+(`<config>/run/heavy-jobs/heavy-lease.jsonl`), which `heavy status` shows only
+while the queue is enabled. An unreadable or out-of-range value is a usage
+error (2) before any wait;
+`--timeout` and runtime are untouched.
+
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
 nothing runs a sweep in that case — what protects the group there is that the
 members were signalled as a group in the first place.

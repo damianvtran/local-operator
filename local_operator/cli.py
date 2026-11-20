@@ -165,6 +165,25 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
+def _start_by_time(text: str) -> float:
+    """argparse ``type`` for ``lop services heavy run --start-by``.
+
+    Epoch seconds or ISO-8601 with an offset/Z (``bounded_contract.parse_start_by``,
+    shared with ``scripts/run_bounded.py``). Unreadable is a usage error (exit 2)
+    before any queue wait; a past deadline is NOT one: it parses, and the run is
+    refused at spawn time with the late-start code instead.
+    """
+    from local_operator import bounded_contract
+    from local_operator.i18n.keys import cli_services_heavy as _shv_copy
+
+    try:
+        return bounded_contract.parse_start_by(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            tr("cli.services_heavy")(_shv_copy.not_start_by(value=repr(text)))
+        ) from None
+
+
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
@@ -224,6 +243,16 @@ def _add_services_heavy_parser(
     )
     run.add_argument(
         "--timeout", type=_positive_seconds, default=None, metavar="SECONDS", help=timeout_help
+    )
+    # Latest-start window granted by a node host ("start by 08:05Z"). An
+    # unreadable value is a usage error here, before any queue wait; a deadline
+    # already past parses and is refused at spawn time with the breach code.
+    run.add_argument(
+        "--start-by",
+        type=_start_by_time,
+        default=None,
+        metavar="WHEN",
+        help=_shv.start_by().envelope(locale=help_locale)["text"],
     )
     # REMAINDER after `--`: the wrapped command's own flags (`pytest -x`) must
     # reach it untouched instead of being parsed as lop's.
@@ -19339,7 +19368,11 @@ def main() -> int:
                     # REMAINDER keeps the separator when it follows an option.
                     if argv and argv[0] == "--":
                         argv = argv[1:]
-                    return heavy_cli.run_command(argv, getattr(args, "timeout", None))
+                    return heavy_cli.run_command(
+                        argv,
+                        getattr(args, "timeout", None),
+                        start_by=getattr(args, "start_by", None),
+                    )
                 if heavy == "status":
                     return heavy_cli.status_command()
                 print(

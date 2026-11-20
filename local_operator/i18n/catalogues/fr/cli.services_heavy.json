@@ -11,5 +11,8 @@
   "cli.services_heavy.events_header": "  événements de bail récents (journal : {path}) :",
   "cli.services_heavy.event_line": "    {time} {record}",
   "cli.services_heavy.no_events": "  aucun événement de bail enregistré pour l’instant (journal : {path})",
-  "cli.services_heavy.audit_row": "audit des tâches lourdes : dernier {record}, il y a {age} (journal : {path})"
+  "cli.services_heavy.audit_row": "audit des tâches lourdes : dernier {record}, il y a {age} (journal : {path})",
+  "cli.services_heavy.start_by": "Heure limite de démarrage de la commande : secondes epoch ou ISO-8601 avec décalage ou Z (p. ex. 2026-11-19T08:05:00Z). Vérifiée après l’attente dans la file, juste avant le démarrage ; si elle est dépassée, la commande n’est pas exécutée et le code de sortie est 79",
+  "cli.services_heavy.late_start": "démarrage tardif : la limite start-by {start_by} est dépassée (maintenant {now}, {late} s de retard) ; commande non démarrée",
+  "cli.services_heavy.not_start_by": "{value} n’est ni un nombre de secondes epoch ni une heure ISO-8601 avec décalage ou Z"
 }

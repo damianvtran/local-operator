@@ -11,5 +11,8 @@
   "cli.services_heavy.events_header": "  последние события аренды слота (журнал: {path}):",
   "cli.services_heavy.event_line": "    {time} {record}",
   "cli.services_heavy.no_events": "  событий аренды слота пока нет (журнал: {path})",
-  "cli.services_heavy.audit_row": "аудит тяжёлых задач: последнее {record}, {age} назад (журнал: {path})"
+  "cli.services_heavy.audit_row": "аудит тяжёлых задач: последнее {record}, {age} назад (журнал: {path})",
+  "cli.services_heavy.start_by": "Крайний срок запуска команды: секунды epoch или ISO-8601 со смещением или Z (например, 2026-11-19T08:05:00Z). Проверяется после ожидания в очереди, непосредственно перед запуском; если срок прошёл, команда не запускается, код выхода 79",
+  "cli.services_heavy.late_start": "поздний запуск: срок start-by {start_by} прошёл (сейчас {now}, опоздание {late} с); команда не запущена",
+  "cli.services_heavy.not_start_by": "{value} не является ни секундами epoch, ни временем ISO-8601 со смещением или Z"
 }

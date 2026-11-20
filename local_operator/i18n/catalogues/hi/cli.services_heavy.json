@@ -11,5 +11,8 @@
   "cli.services_heavy.events_header": "  हाल की लीज़ घटनाएँ (लॉग: {path}):",
   "cli.services_heavy.event_line": "    {time} {record}",
   "cli.services_heavy.no_events": "  अभी तक कोई लीज़ घटना दर्ज नहीं हुई (लॉग: {path})",
-  "cli.services_heavy.audit_row": "भारी-काम ऑडिट: अंतिम {record}, {age} पहले (लॉग: {path})"
+  "cli.services_heavy.audit_row": "भारी-काम ऑडिट: अंतिम {record}, {age} पहले (लॉग: {path})",
+  "cli.services_heavy.start_by": "कमांड शुरू होने का अंतिम समय: epoch सेकंड या ऑफ़सेट या Z के साथ ISO-8601 (जैसे 2026-11-19T08:05:00Z)। कतार की प्रतीक्षा के बाद, कमांड शुरू होने से ठीक पहले जाँचा जाता है; समय निकल चुका हो तो कमांड नहीं चलती और एग्ज़िट कोड 79 होता है",
+  "cli.services_heavy.late_start": "देर से शुरुआत: start-by {start_by} निकल चुका है (अभी {now}, {late} सेकंड देर); कमांड शुरू नहीं हुई",
+  "cli.services_heavy.not_start_by": "{value} न epoch सेकंड है, न ऑफ़सेट या Z वाला ISO-8601 समय"
 }
