@@ -203,6 +203,29 @@ def test_nova_high_sampling_and_cache_limits():
     assert not any("cachePoint" in part for part in body(req)["system"])
 
 
+def test_system_cache_point_survives_a_conversation_past_the_cache_max():
+    """REGRESSION: the measured context hint is the whole previous request, so
+    once a conversation passed ``cache_max_tokens`` (20k on Nova) the system
+    point vanished although tools+system never grew — a mid-session cache
+    break. The system gate reads the tools+system prefix only; the hint still
+    bounds the conversation (frozen-prefix) point."""
+    caps = capabilities_for(NOVA)
+    assert caps.cache_max_tokens is not None
+    req = request(
+        prompt_cache_key="stable",
+        context_tokens_hint=caps.cache_max_tokens + 5_000,
+        context_tokens_hint_measured=True,
+    )
+    req.system_blocks = ["stable instructions"]
+    req.messages = [Message.user("one"), Message.assistant("two"), Message.user("three")]
+    req.frozen_prefix_messages = 2
+    value = body(req)
+    assert value["system"][-1] == {"cachePoint": {"type": "default"}}
+    assert not any(
+        "cachePoint" in part for row in value["messages"] for part in row["content"]
+    ), "the conversation point is still bounded by the measured hint"
+
+
 def test_missing_optional_image_decoder_fails_clearly(monkeypatch):
     import sys
 

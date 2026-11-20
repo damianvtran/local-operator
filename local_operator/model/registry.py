@@ -1471,16 +1471,42 @@ def bedrock_anthropic_id(model_id: str) -> Optional[str]:
     return _BEDROCK_VERSION_SUFFIX_RE.sub("", stripped)
 
 
+#: Bedrock Claude bases the AWS prompt-caching "Supported models" table lists
+#: with "5 minutes, 1 hour" TTL but which have NO first-party row in
+#: ``anthropic_models`` — so they cannot join ``BEDROCK_ANTHROPIC_MODEL_IDS``
+#: (every entry there derives a priced static row from its first-party twin).
+#: Without this set a discovered ``us.anthropic.claude-haiku-5-5`` fell back to
+#: the 5m cache: a long agent session whose turns are >5 min apart re-wrote its
+#: whole prefix instead of reading it. Transcribed from
+#: https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+#: (read 2026-11-19); ONLY ids that table lists with the 1h TTL, because a
+#: ``ttl`` on a 5m-only model is a ``ValidationException`` (design risk 10).
+BEDROCK_1H_CACHE_EXTRA_ANTHROPIC_IDS: frozenset[str] = frozenset(
+    {
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+        "claude-fable-5-1",
+        "claude-mythos-5-2",
+        "claude-mythos-5-1",
+        "claude-mythos-5",
+    }
+)
+
+
 def bedrock_supports_1h_cache(model_id: str) -> bool:
     """Whether a ``ttl: "1h"`` cache marker is safe to send for ``model_id``.
 
-    True only for ids whose base is in the static catalogue (each has a 1h
-    cache-write SKU in the AWS Price List, 2026-11-18). Unknown ids stay on the
-    5m cache because Bedrock answers ``ValidationException`` to a ``ttl`` on a
-    5m-only model (design risk 10).
+    True for ids whose base is in the static catalogue (each has a 1h
+    cache-write SKU in the AWS Price List, 2026-11-18) or in
+    :data:`BEDROCK_1H_CACHE_EXTRA_ANTHROPIC_IDS` (AWS-documented 1h, no static
+    row). Unknown ids stay on the 5m cache because Bedrock answers
+    ``ValidationException`` to a ``ttl`` on a 5m-only model (design risk 10).
     """
     anthropic_id = bedrock_anthropic_id(model_id)
-    return anthropic_id is not None and anthropic_id in BEDROCK_ANTHROPIC_MODEL_IDS
+    return anthropic_id is not None and (
+        anthropic_id in BEDROCK_ANTHROPIC_MODEL_IDS
+        or anthropic_id in BEDROCK_1H_CACHE_EXTRA_ANTHROPIC_IDS
+    )
 
 
 def bedrock_family_model_info(model_id: str) -> Optional[ModelInfo]:
