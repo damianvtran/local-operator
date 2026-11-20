@@ -47,6 +47,7 @@ import ast
 import inspect
 import re
 import socket
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -292,11 +293,47 @@ def test_a_timeout_on_a_sliver_of_the_deadline_is_not_dial_silence(
 
     The budget is ``min(connect_cap, deadline - now)``, so a late peer under one
     shared deadline times out at once; that keeps the base diagnostic, no evidence.
+
+    WHY THE CLOCK IS CONTROLLED: with the real clock this cell raced the
+    scheduler. ``deadline=time.monotonic() + 0.002`` left 2 ms of WALL time
+    between building the deadline and the worker's budget read; a loaded runner
+    lost those 2 ms (gate run 44661304902, job 136040160777, ``test (3.12, 5)``),
+    the budget read came out ``<= 0`` and the worker recorded ``not_attempted``
+    without dialling — so the R3-1 path this test names was never exercised.
+    Accepting ``not_attempted`` would stop testing that path, and a wider sliver
+    is still a race, so instead ``relay.time`` (the module ``probe_candidates``
+    reads ``time.monotonic`` through) is replaced by a fake clock that stands
+    still until the dial: the budget is exactly the 2 ms sliver on every run.
+
+    The fake connect then advances the clock by the timeout it was GIVEN, as a
+    real 2 ms SYN timeout would, so ``waited`` is the sliver, not zero. The
+    collector's ``results.get(timeout=remaining)`` still blocks on REAL time
+    (``queue`` is untouched), so a clock frozen at T cannot spin its loop: at
+    worst it stops waiting after a real 2 ms and reports ``no_answer``, which
+    the assertion allows. Only ``relay.time`` is patched — threading, queue and
+    pytest keep the real clock.
     """
-    _dial_with(monkeypatch, _time_out_after(None))
+    clock = _Clock()
+    sliver = 0.002
+    dialled = threading.Event()
+    given: list[float | None] = []
+
+    def time_out_after_the_given_timeout(sock: _FakeDialSocket) -> None:
+        given.append(sock.timeout)
+        clock.now += sock.timeout or 0.0
+        dialled.set()
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(relay, "time", clock)
+    _dial_with(monkeypatch, time_out_after_the_given_timeout)
     probe = relay.probe_candidates(
-        ["192.0.2.1:9"], deadline=time.monotonic() + 0.002, connect_cap=3.0, wait_all=True
+        ["192.0.2.1:9"], deadline=clock.now + sliver, connect_cap=3.0, wait_all=True
     )
+    # The worker may still be dialling when a frozen-clock collector stops
+    # waiting; wait for the dial itself so "the sliver was really attempted"
+    # is asserted, not assumed.
+    assert dialled.wait(5.0), "rig: the sliver budget never reached the dial"
+    assert given == [pytest.approx(sliver)]
     assert probe.attempts[0].detail in {"connect_failed:TimeoutError", "no_answer"}
     assert probe.attempts[0].dial_silent is False
 
