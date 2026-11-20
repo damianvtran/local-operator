@@ -489,8 +489,10 @@ def is_role(agent: "AgentData") -> bool:
       not a specialist. This is the ONLY marker a hub pull can carry: the
       publication document strips ``role`` as a local profile encoding
       (``agents.PROFILE_ENCODING_TAG_KEYS``) and publishes ``kind: role`` for
-      every non-specialist row instead (``instruction_set_fields``), so the
-      archive a pull imports never holds the ``role`` tag. Without this arm a
+      every non-specialist row instead (``instruction_set_fields``), so a
+      pulled role arrives without the ``role`` tag. (Import itself keeps an
+      archive's non-provenance tags; it is the publication step that drops
+      ``role``, so the tag cannot be relied on after a pull.) Without this arm a
       pulled role landed as an ordinary chat agent: ``task(agent=...)`` fell
       through to nothing and every team whose roster named it failed to
       validate (the desktop "model was not resolved" chip on a hub team).

@@ -2398,13 +2398,14 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # whose roster names a row that is not a role used to surface only as a
         # bare 404 that the desktop rendered as "model was not resolved", with
         # nothing anywhere naming the member. Duck-typed so this ladder does not
-        # import the profile helpers at module load.
+        # import the profile helpers at module load; the ``isinstance(dict)``
+        # check keeps that duck typing honest for the type checker and refuses
+        # to merge anything but a mapping into the catalogued envelope.
         wire_fields = getattr(error, "wire_fields", None)
-        if callable(wire_fields):
+        fields = wire_fields() if callable(wire_fields) else None
+        if isinstance(fields, dict):
             logger.warning("desktop launch target refused: %s", error)
-            raise HTTPException(
-                404, {**_wd.requested_not_found().envelope(), **wire_fields()}
-            ) from None
+            raise HTTPException(404, {**_wd.requested_not_found().envelope(), **fields}) from None
         # A DELETED TEMPORARY CHAT answers its own 404 code on every session
         # route (snapshot, history, events, message, pin, archive, temporary),
         # so a client can say "this temporary chat was deleted" rather than
