@@ -8190,6 +8190,90 @@ def _scheme_specific_remedy(scheme: str, url: str) -> str | None:
     return None
 
 
+# A path whose FIRST component is a bare shell-variable reference, after an
+# optional ``~/``: ``$NAME/...`` or ``${NAME}/...``. Group ``brace``/``bare`` is
+# the name, ``rest`` everything after the separating slash(es).
+#
+# Deliberately narrow, because the cost of a false positive is refusing a file
+# someone really meant to name: a ``$`` anywhere else (``price$5.md``,
+# ``a$b.md``, ``notes/$draft/x``), a component that merely STARTS with a
+# reference (``$FOO.bak/x``, ``${FOO}bar/x``), a non-identifier (``$5/x``,
+# ``$$/x``) or a bare ``$FOO`` with nothing under it (a file name, not a root
+# that ``write`` would ``mkdir``) all stay literal and go through as before.
+_ENV_VAR_ROOT_RE = re.compile(
+    r"^(?:~/+)?\$(?:\{(?P<brace>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
+    r"/+(?P<rest>.*)$",
+    re.DOTALL,
+)
+
+
+def _env_var_root_refusal(tool_call_id: str, tool_name: str, raw: str) -> ToolResult | None:
+    """Refuse a path rooted at an unexpanded shell variable, or ``None`` to proceed.
+
+    File tools do not expand environment variables — :func:`_resolve_workspace_path`
+    applies ``expanduser`` and nothing else — so ``$LOCAL_OPERATOR_SCRATCHPAD/x.md``
+    resolves to ``<cwd>/$LOCAL_OPERATOR_SCRATCHPAD/x.md`` and ``write`` creates a
+    directory literally named ``$LOCAL_OPERATOR_SCRATCHPAD`` in the user's working
+    directory. That is silent litter (a fresh path inside the workspace needs no
+    approval), and it is what a model does from habit: the variable is how a SHELL
+    reaches the scratchpad, and briefs name it. One such directory under the home
+    had collected 36 entries from many sessions by the time it was audited
+    (2026-11-20).
+
+    It is a REFUSAL, never an expansion, on purpose:
+
+    * Expanding would hand ``write`` a second path resolution the credential guard
+      and the approval describer do not share (``normalise_path_argument``
+      documents why the guard and the reader must normalise identically), and
+      ``expandvars`` would happily substitute a secret-bearing variable into a
+      path that is then echoed in receipts and prompts. A refusal opens nothing,
+      so there is nothing for the guard and the tool to disagree about.
+    * An existing literal ``$NAME`` directory is left exactly as it is: other
+      sessions hold receipts naming it, and this check only stops new writes.
+
+    Only ``write`` and ``edit`` call this — they are the tools that create or
+    change a file under the mistaken root. Read-only tools on the same spelling
+    already answer "does not exist", which is truthful and mutates nothing.
+
+    Model-facing error text, so English by design (AGENTS.md i18n exception).
+    """
+    match = _ENV_VAR_ROOT_RE.match(normalise_path_argument(raw))
+    if match is None:
+        return None
+    name = match.group("brace") or match.group("bare")
+    rest = match.group("rest").strip("/")
+    spelled = f"${{{name}}}" if match.group("brace") else f"${name}"
+    under = (
+        "your home directory"
+        if normalise_path_argument(raw).startswith("~")
+        else "the working directory"
+    )
+    verb = "written" if tool_name == "write" else "changed"
+    if name == SCRATCHPAD_PATH_ENV:
+        target = f"{SCRATCHPAD_SCHEME}{rest or '<name>'}"
+        remedy = (
+            f"{SCRATCHPAD_PATH_ENV} is the shell's name for this session's scratch area; "
+            f'file tools reach the same directory as {tool_name}(path="{target}").'
+        )
+    elif name == "HOME":
+        # ``~`` IS expanded by the resolver, so the home spelling has an exact
+        # equivalent and the remedy can name it rather than describe it.
+        target = f"~/{rest}" if rest else "~/<name>"
+        remedy = f'Use {tool_name}(path="{target}") — "~" is expanded.'
+    else:
+        remedy = (
+            "Pass the absolute path instead (resolve the variable in bash first if you "
+            "need its value), or scratchpad://<name> for this session's scratch area."
+        )
+    return _invalid_arguments(
+        tool_call_id,
+        tool_name,
+        f"{tool_name} does not expand environment variables: '{raw.strip()}' would be "
+        f"taken literally, as a directory named '{spelled}' under {under}, "
+        f"so it was refused and nothing was {verb}. {remedy}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # scratchpad:// — the session's own scratch area
 # ---------------------------------------------------------------------------
@@ -11568,6 +11652,10 @@ async def execute_edit(
     # still goes to the resolver for every other path: " x.md" and "x.md" are
     # different files, and normalising names a file the caller did not ask for.
     refusal = _scheme_refusal(tool_call_id, "edit", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is None:
+        # Before any resolution: ``$NAME/x`` would otherwise become a literal
+        # ``$NAME`` path under the cwd (see ``_env_var_root_refusal``).
+        refusal = _env_var_root_refusal(tool_call_id, "edit", raw)
     if refusal is not None:
         return refusal
     url = raw.strip()
@@ -12806,6 +12894,11 @@ async def execute_write(
     # ``notes://x.py`` would create a literal ``notes:`` directory here.
     raw = params.path
     refusal = _scheme_refusal(tool_call_id, "write", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is None:
+        # Before resolution and before ``_write_file_result`` creates parents:
+        # ``$NAME/x`` would otherwise ``mkdir`` a literal ``$NAME`` directory
+        # under the cwd (see ``_env_var_root_refusal``).
+        refusal = _env_var_root_refusal(tool_call_id, "write", raw)
     if refusal is not None:
         return refusal
     url = raw.strip()
