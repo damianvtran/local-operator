@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "cli.team_bridge",
-  "history_sha256": "4cf8b69f7e86cecf7a373f69997bd7158b328e29b4e20b32ab6f2f0eebb2e143",
+  "history_sha256": "bf6173e287c2f9d15cff3f09ed9ab5cec3be9319b05244aabd09941f7c962139",
   "entries": [
     {
       "locale": "es",
@@ -131,6 +131,34 @@
       },
       "status": "passed",
       "note": "PR #4246 round 2, head 73dc05353 on base b941eb9dc, scope 7dac6d31a..73dc05353. Audited key: cli.team_bridge.setup.mesh_node_relay (en changed for QA Q1: 'with no `peer` field'), read against its en context note; other cli.team_bridge keys unchanged since their passed rows and not re-audited. Mechanical: no placeholders/ICU in en or locale; code spans `send` and `peer` byte-identical and untranslated; 'Team Bridge' verbatim; NFC; no Cf/bidi controls. es: tú register; jefa de gabinete matches setup.designation_missing; malla/nodo match corpus. Single independent semantic audit by reading; no rendered-frame or native-speaker review claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "c4a543064eb704d8636dcfd7c52f8114ee5517d9ab5c337651d19160b649fd7f",
+      "translator": {
+        "agent": "coder — PR #4246 translator (lopdev team; values at cb5aa864 for the D1 remediation)",
+        "model": "unrecorded — the translator's serving model is not stated in the PR or commits; not inferred",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 3 (lopdev team reviewer, task 4246-i18n-r3), independent of the translator; did not edit any value",
+        "session": "05713429fa2d",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "PR #4246 round 3, head 64bb33e3 on base b941eb9dc, scope 162955bb..64bb33e3 (fr re-audit cb5aa864..64bb33e3). Audited key: cli.team_bridge.setup.mesh_node_relay (en rewritten for design D1: agent route via the in-session `send` tool, person route asks the chief of staff on the primary device, `peer=<primary device>` optional, guide://network), read against its en context note; other cli.team_bridge keys unchanged since their passed rows and not re-audited. Mechanical: no placeholders/ICU; code spans `send`, `sessions`, `list`, `peer=<primary device>` byte-identical; 'Team Bridge' and guide://network verbatim; NFC; no Cf/bidi controls. es: tú register; 'nunca'; 'la herramienta `send`'; person route 'allí' (primary device). Single independent semantic audit by reading; no rendered-frame or native-speaker review claimed. Comments 7031156522 (round 3) and the fr re-audit comment on the PR."
     }
   ]
 }
