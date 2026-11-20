@@ -1030,7 +1030,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # aggregator's and why this route seeds a default where every other
     # aggregator id must not.
     router_levels = aggregator_router_effort_ladder(canonical, model_name)
-    fallback_levels = router_levels or direct_levels or supported_efforts(model_name)
+    # ``canonical`` gates hosting-restricted table arms: the Gemini 3+ arm's
+    # ``thinkingLevel`` key was verified on google/google-vertex only, so a
+    # reseller route serving the same id keeps its previous (empty) ladder
+    # unless its own listing states one (``EffortSupport.hostings``).
+    fallback_levels = router_levels or direct_levels or supported_efforts(model_name, canonical)
     # Whether requests to this model must echo reasoning back on every
     # assistant turn. Keyed on the MODEL FAMILY, on every route, and NOT on
     # ``direct_deepseek`` -- that flag also decides the effort ladder, and the
@@ -1160,7 +1164,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # membership guard is for a listing that NARROWS below the table's
         # default; seed nothing rather than clamping to a neighbouring rung no
         # source stated.
-        table_default = "high" if direct_deepseek else default_effort(model_name)
+        table_default = "high" if direct_deepseek else default_effort(model_name, canonical)
         if canonical == "deepseek" and info is not None and info.reasoning_default_effort:
             table_default = info.reasoning_default_effort
         reasoning_effort = table_default if table_default in effort_levels else None
@@ -3124,37 +3128,67 @@ def _listing_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
         return None
 
 
-#: ``(provider, model_id, ttl bucket) -> ladder or None`` for
+#: ``(provider, model_id, document identity) -> ladder or None`` for
 #: :func:`_catalogue_effort`. Separate from :data:`_effort_memo` because it must
 #: remember a MISS too (``None`` there reads as "never looked"), or every repaint
-#: of a model models.dev does not list would re-read the ~140 KB document.
-_catalogue_effort_memo: dict[tuple[str, str, int], tuple[str, ...] | None] = {}
+#: of a model models.dev does not list would re-walk the projection.
+#:
+#: Keyed on the DOCUMENT (``prices.models_dev_document_identity``), not on a TTL
+#: bucket: an earlier revision memoised ``None`` for the whole 24 h bucket even
+#: when the ``None`` meant "no usable document yet" -- exactly the state right
+#: after a capture bump -- so a long-lived desktop/TUI process pinned the
+#: offline table ladder for the day while the picker already showed ``xhigh``.
+#: Only an answer read from a usable document is memoised now.
+_catalogue_effort_memo: dict[
+    tuple[str, str, tuple[str, int, int, int] | None], tuple[str, ...] | None
+] = {}
 
 
 def _catalogue_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
-    """models.dev's ladder for ``provider/model_id``, memoised per TTL bucket.
+    """models.dev's ladder for ``provider/model_id``, memoised per document.
 
     Total and non-raising like :func:`_listing_effort`, and DISK ONLY
     (``prices.catalogue_effort_ladder`` never fetches): ``build_model_spec``
     runs on paint paths. A provider outside ``CATALOGUE_EFFORT_PROVIDERS``
-    returns ``None`` before any read, so no other provider's spec changes.
+    returns ``None`` before any read, so no other provider's spec changes. An
+    absent, unreadable or wrong-capture document returns ``None`` WITHOUT being
+    remembered, so the first spec built after the document lands is live.
     """
     try:
         from local_operator.model.prices import (
             CATALOGUE_EFFORT_PROVIDERS,
             catalogue_effort_ladder,
+            models_dev_document_identity,
+            models_dev_providers,
         )
 
         if provider not in CATALOGUE_EFFORT_PROVIDERS:
             return None
-        bucket = int(time.time() // DEFAULT_TTL_S)
-        key = (provider, model_id, bucket)
-        if key in _catalogue_effort_memo:
+        # Identity BEFORE content: if the document is replaced between the two
+        # reads, the memo holds a newer ladder under the older key, which the
+        # next identity change retires -- never an older ladder that outlives
+        # its document.
+        identity = models_dev_document_identity()
+        key = (provider, model_id, identity)
+        if identity is not None and key in _catalogue_effort_memo:
             return _catalogue_effort_memo[key]
-        ladder = catalogue_effort_ladder(provider, model_id)
+        # Itself memoised on the same identity (a stat per call), so this costs
+        # a parse only when the document changed.
+        providers = models_dev_providers()
+        if providers is None or identity is None:
+            # No usable document (absent, unreadable, or a stale capture
+            # awaiting its off-loop repair): a transient miss, not an answer
+            # about the model, so it is NOT memoised -- the first spec built
+            # after the document lands gets the live ladder.
+            return (
+                catalogue_effort_ladder(provider, model_id, models_dev=providers)
+                if providers is not None
+                else None
+            )
+        ladder = catalogue_effort_ladder(provider, model_id, models_dev=providers)
         if len(_catalogue_effort_memo) >= _EFFORT_MEMO_MAX:
             # Same leak ceiling as the listing memo; a dropped entry costs one
-            # disk read on the next spec build.
+            # projection walk on the next spec build.
             _catalogue_effort_memo.clear()
         _catalogue_effort_memo[key] = ladder
         return ladder

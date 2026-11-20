@@ -4830,6 +4830,21 @@ def _refuses_thinking_level(response: httpx.Response) -> bool:
     return "thinking level is unsupported" in text.lower()
 
 
+#: ``(route, model_id, level)`` thinking levels Google has refused in THIS
+#: process (400 ``Thinking level is unsupported``). Without it the shed in
+#: ``GoogleClient._open_content_stream`` healed one request only: the session's
+#: ``reasoning_effort`` keeps the refused rung, so every later turn repaid a
+#: 400 round trip and re-logged the warning. Remembering the refusal lets
+#: ``_build_body`` omit the level up front -- the same request the retry sends
+#: -- so the warning is logged once per (route, model, level). In-process only
+#: on purpose: a refusal is evidence about the ladder source being stale, and a
+#: restart (typically after the catalogue is refreshed) should re-try it.
+_REFUSED_THINKING_LEVELS: set[tuple[str, str, str]] = set()
+#: Leak ceiling for :data:`_REFUSED_THINKING_LEVELS`; clearing costs at most
+#: one extra 400 per entry.
+_REFUSED_THINKING_LEVELS_MAX = 256
+
+
 async def _refuses_diagnostics(response: httpx.Response) -> bool:
     """Whether an error response is the API rejecting the ``diagnostics`` key.
 
@@ -6261,7 +6276,15 @@ class GoogleClient:
         # stale ladder that offers a rung the model refuses is healed in
         # ``stream`` (one retry without the key), not here.
         thinking_level = _reasoning_effort(request)
-        if thinking_level is not None:
+        if (
+            thinking_level is not None
+            and (
+                self._thinking_route(request),
+                request.model.model_id,
+                thinking_level,
+            )
+            not in _REFUSED_THINKING_LEVELS
+        ):
             generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
         if request.stop_sequences:
             generation_config["stopSequences"] = list(request.stop_sequences)
@@ -6348,6 +6371,14 @@ class GoogleClient:
         """
         return self._vertex or request.model.provider == "google-vertex"
 
+    def _thinking_route(self, request: ChatRequest) -> str:
+        """The key a thinking-level refusal is remembered under.
+
+        Vertex and AI Studio are separate backends that may disagree about one
+        model's ladder, so a refusal on one must not strip the level on the other.
+        """
+        return "google-vertex" if self._is_vertex(request) else "google"
+
     @contextlib.asynccontextmanager
     async def _open_content_stream(
         self,
@@ -6382,6 +6413,13 @@ class GoogleClient:
                 raise_for_status(response)
         generation_config = dict(body["generationConfig"])
         refused = generation_config.pop("thinkingConfig")
+        refused_level = refused.get("thinkingLevel") if isinstance(refused, Mapping) else None
+        if isinstance(refused_level, str):
+            if len(_REFUSED_THINKING_LEVELS) >= _REFUSED_THINKING_LEVELS_MAX:
+                _REFUSED_THINKING_LEVELS.clear()
+            _REFUSED_THINKING_LEVELS.add(
+                (self._thinking_route(request), request.model.model_id, refused_level)
+            )
         logger.warning(
             "google: %s refused thinking level %r (HTTP 400 'Thinking level is "
             "unsupported'); retrying once at the model's default depth",

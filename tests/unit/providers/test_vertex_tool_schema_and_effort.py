@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,9 +29,11 @@ from local_operator.harness.types import (
     TextContent,
     ToolResult,
 )
+from local_operator.model import catalogue as catalogue_mod
 from local_operator.model import configure as configure_mod
 from local_operator.model import discovery, prices
 from local_operator.model.effort import default_effort, supported_efforts
+from local_operator.providers import clients as clients_mod
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.providers.clients import (
     GOOGLE_API_URL,
@@ -386,3 +389,151 @@ def test_discovered_vertex_rows_carry_the_catalogue_ladder(
 def test_a_stated_listing_ladder_is_never_overwritten(models_dev: dict[str, Any]) -> None:
     row = discovery.DiscoveredModel(id="gemini-4-neon", reasoning_efforts=("high",))
     assert prices.with_catalogue_efforts("google-vertex", [row]) == [row]
+
+
+# -- round-1 remediation (PR #4323) -------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fresh_refusals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each test starts with no remembered thinking-level refusal."""
+    monkeypatch.setattr(clients_mod, "_REFUSED_THINKING_LEVELS", set())
+
+
+@pytest.fixture
+def disk_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the default catalogue cache at ``tmp_path`` with every memo cold.
+
+    The REAL disk path (``peek_listing`` -> ``_cache_path``), not a patched
+    ``models_dev_providers``, because the defect under test is a memo that
+    outlived the document it was derived from.
+    """
+    monkeypatch.setattr(catalogue_mod, "default_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(prices, "_providers_memo", None)
+    # A stale capture would schedule a real off-loop refetch; the repair is
+    # not under test here, only that its pending state is not memoised.
+    monkeypatch.setattr(prices, "_repair_unusable_capture", lambda _cache_dir: None)
+    configure_mod._catalogue_effort_memo.clear()
+    return tmp_path
+
+
+def _write_models_dev(cache: Path, *, capture: int | None = None) -> None:
+    payload = prices.project(_MODELS_DEV_BODY, None)
+    if capture is not None:
+        payload["capture"] = capture
+    catalogue_mod._write_cache(cache / f"{prices.PRICE_CATALOGUE_KEY}.json", payload)
+
+
+def test_catalogue_ladder_goes_live_once_the_document_lands(disk_cache: Path) -> None:
+    """Review #1: a miss caused by NO usable document must not be memoised.
+
+    Cold (no document) and stale-capture (the state every user is in right
+    after a capture bump) both answer the offline table ladder; the first spec
+    built after the real document lands, in the same process, is live.
+    """
+    try:
+        cold = configure_mod.build_model_spec("google-vertex", "gemini-4-neon")
+        assert cold.reasoning_efforts == ("low", "medium", "high")
+
+        _write_models_dev(disk_cache, capture=prices.PRICE_CATALOGUE_CAPTURE - 1)
+        stale = configure_mod.build_model_spec("google-vertex", "gemini-4-neon")
+        assert stale.reasoning_efforts == ("low", "medium", "high")
+
+        _write_models_dev(disk_cache)
+        warm = configure_mod.build_model_spec("google-vertex", "gemini-4-neon")
+        assert warm.reasoning_efforts == ("low", "medium", "high", "xhigh")
+    finally:
+        configure_mod._catalogue_effort_memo.clear()
+
+
+def test_models_dev_providers_parses_once_per_document(
+    disk_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #4: the paint path reuses the parse until the document changes."""
+    _write_models_dev(disk_cache)
+    reads: list[str] = []
+    real_peek = prices.peek_listing
+
+    def counting_peek(key: str, **kwargs: Any) -> Any:
+        reads.append(key)
+        return real_peek(key, **kwargs)
+
+    monkeypatch.setattr(prices, "peek_listing", counting_peek)
+    first = prices.models_dev_providers()
+    assert first is not None
+    assert prices.models_dev_providers() is first
+    assert len(reads) == 1
+    # A rewrite (refetch, capture repair, 304 restamp) is picked up at once.
+    _write_models_dev(disk_cache)
+    assert prices.models_dev_providers() is not None
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("provider", ["google", "google-vertex"])
+def test_offline_gemini_ladder_on_google_hostings(disk_cache: Path, provider: str) -> None:
+    """Review #2: the verified hostings keep the offline family ladder."""
+    spec = configure_mod.build_model_spec(provider, "gemini-5-x")
+    assert spec.reasoning_efforts == ("low", "medium", "high")
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [("github-copilot", "gemini-3-pro"), ("radient", "google/gemini-3-pro")],
+)
+def test_offline_gemini_ladder_is_not_offered_on_other_routes(
+    disk_cache: Path, provider: str, model_id: str
+) -> None:
+    """Review #2: ``thinkingLevel`` was verified on Google's own hostings only;
+    a reseller route keeps its previous behaviour (no ladder from the table)."""
+    assert supported_efforts(model_id, provider) == ()
+    spec = configure_mod.build_model_spec(provider, model_id)
+    assert spec.reasoning_efforts == ()
+    # The provider-agnostic table answer is unchanged for other callers.
+    assert supported_efforts(model_id) == ("low", "medium", "high")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_thinking_level_is_remembered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review #3 / QA Q1: with a stale ladder, only the FIRST call pays the 400
+    and logs; the next request omits the refused level up front."""
+    refused = httpx.Response(
+        400,
+        json={"error": {"code": 400, "message": "Thinking level is unsupported: X"}},
+    )
+    request = _request(model_id="gemini-3.8-flash", efforts=("low", "xhigh"), effort="xhigh")
+    statuses: list[int] = []
+    bodies: list[dict[str, Any]] = []
+    queued = [refused]
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        response = queued.pop(0) if queued else _sse_ok()
+        statuses.append(response.status_code)
+        return response
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.providers.clients"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = _vertex(http)
+            for _ in range(2):
+                _ = [e async for e in client.stream(request, api_key="k")]
+    assert statuses == [400, 200, 200]
+    assert "thinkingConfig" not in bodies[2]["generationConfig"]
+    warnings = [r for r in caplog.records if "refused thinking level" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_on_vertex_does_not_strip_ai_studio() -> None:
+    """Vertex and AI Studio are separate backends: a refusal is per route."""
+    refused = httpx.Response(
+        400, json={"error": {"code": 400, "message": "Thinking level is unsupported: X"}}
+    )
+    vertex_request = _request(model_id="gemini-3.8-flash", efforts=("xhigh",), effort="xhigh")
+    await _bodies(_vertex, vertex_request, api_key="k", responses=[refused])
+    studio_request = _request(
+        "google", model_id="gemini-3.8-flash", efforts=("xhigh",), effort="xhigh"
+    )
+    (body,) = await _bodies(_studio, studio_request, api_key="k")
+    assert body["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "xhigh"}

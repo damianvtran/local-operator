@@ -260,6 +260,16 @@ class EffortSupport:
 
     levels: tuple[str, ...]
     default: str | None = None
+    #: The provider routes this arm was VERIFIED on, or ``None`` for every
+    #: route. Most arms are a model family whose effort key every client we
+    #: ship spells the same way, so they apply wherever the id appears. An arm
+    #: whose wire key was probed on specific hostings only (Gemini's
+    #: ``thinkingLevel``, verified on ``google``/``google-vertex``) names them,
+    #: so a reseller route (``github-copilot/gemini-3-pro``,
+    #: ``radient/google/gemini-3-pro``) keeps offering nothing rather than a
+    #: level its client sends under a key nobody verified there. A caller that
+    #: passes no provider gets the provider-agnostic answer, unchanged.
+    hostings: frozenset[str] | None = None
 
 
 # Anthropic's three ladders (see the doc link above). Written as generation
@@ -301,7 +311,9 @@ _KIMI_K3 = EffortSupport(("low", "high", "max"))
 # gemini-3.8-flash, so offering it family-wide would break one model to serve
 # another. Richer ladders (gemini-4-neon's ``xhigh``) arrive live from
 # models.dev, which outranks this offline fallback in ``build_model_spec``.
-_GEMINI_3_PLUS = EffortSupport(("low", "medium", "high"))
+_GEMINI_3_PLUS = EffortSupport(
+    ("low", "medium", "high"), hostings=frozenset({"google", "google-vertex"})
+)
 
 #: First match wins, so the narrower Anthropic generations are listed before the
 #: forward-reading ``5 and above`` arm. Patterns are ``search``ed against the
@@ -388,26 +400,38 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
 )
 
 
-def effort_support(model_id: str) -> EffortSupport | None:
-    """What ``model_id`` accepts, or ``None`` when it exposes no effort knob."""
+def effort_support(model_id: str, provider: str | None = None) -> EffortSupport | None:
+    """What ``model_id`` accepts, or ``None`` when it exposes no effort knob.
+
+    ``provider`` is the canonical route. When given, an arm restricted to other
+    hostings (see :attr:`EffortSupport.hostings`) answers ``None`` -- first
+    match still wins, so a restricted arm never falls through to a broader one.
+    """
     lowered = model_id.lower()
     for pattern, support in _EFFORT_TABLE:
         if pattern.search(lowered):
+            if (
+                provider is not None
+                and support.hostings is not None
+                and provider not in support.hostings
+            ):
+                return None
             return support
     return None
 
 
-def supported_efforts(model_id: str) -> tuple[str, ...]:
+def supported_efforts(model_id: str, provider: str | None = None) -> tuple[str, ...]:
     """The levels ``model_id`` accepts, ascending; empty when it accepts none.
 
     Empty is what makes the control honest on a non-reasoning model: there is
     nothing to cycle, ``/effort`` says so, and no key reaches the wire.
+    ``provider`` gates hosting-restricted arms (see :func:`effort_support`).
     """
-    support = effort_support(model_id)
+    support = effort_support(model_id, provider)
     return support.levels if support is not None else ()
 
 
-def default_effort(model_id: str) -> str | None:
+def default_effort(model_id: str, provider: str | None = None) -> str | None:
     """The level ``model_id`` runs at when nothing is set, if it documents one.
 
     Seeded onto the spec so the band can state a real level from boot rather
@@ -417,7 +441,7 @@ def default_effort(model_id: str) -> str | None:
     no behaviour and only stops the band from understating what is already
     happening.
     """
-    support = effort_support(model_id)
+    support = effort_support(model_id, provider)
     return support.default if support is not None else None
 
 

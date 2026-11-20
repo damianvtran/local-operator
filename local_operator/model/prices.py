@@ -69,6 +69,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import os
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -78,6 +79,7 @@ from local_operator.model.catalogue import (
     DEFAULT_TTL_S,
     MISS_REFETCH_MIN_AGE_S,
     SOFT_TTL_S,
+    _cache_path,
     _schedule_revalidate,
     invalidate,
     note_unavailable,
@@ -890,6 +892,35 @@ def openrouter_rows(
     return rows
 
 
+#: ``(document identity, providers map)`` of the last USABLE projection
+#: :func:`models_dev_providers` parsed. Keyed on the file's identity (see
+#: :func:`models_dev_document_identity`) rather than on a clock, so a document
+#: that is rewritten -- the off-loop capture repair, a refetch, a 304 restamp --
+#: is re-read on the very next call, while a paint path that calls this every
+#: frame (``cached_available_models`` -> ``with_catalogue_efforts``) stops
+#: re-parsing ~140 KB of JSON per call. Only a usable document is remembered:
+#: an absent, unreadable or wrong-capture one is never cached, which is what
+#: lets the first read after the repair lands see the live ladder.
+_providers_memo: tuple[tuple[str, int, int, int], Mapping[str, Any]] | None = None
+
+
+def models_dev_document_identity(
+    cache_dir: Path | None = None,
+) -> tuple[str, int, int, int] | None:
+    """``(path, mtime_ns, size, inode)`` of the models.dev document, or ``None``.
+
+    A ``stat`` only -- cheap enough for a paint path. Callers key memos on it so
+    a memo can never outlive the document it was derived from. ``None`` when the
+    document is absent or the cache directory is unreadable.
+    """
+    try:
+        path = _cache_path(PRICE_CATALOGUE_KEY, cache_dir)
+        st = os.stat(path)
+        return (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return None
+
+
 def models_dev_providers(
     *, ttl_s: float = DEFAULT_TTL_S, cache_dir: Path | None = None
 ) -> Mapping[str, Any] | None:
@@ -901,11 +932,18 @@ def models_dev_providers(
     this reader cannot use reads as absent, and is dropped so the next read
     finds a repairable state — see :func:`_repair_unusable_capture`.
     """
+    global _providers_memo
     try:
+        identity = models_dev_document_identity(cache_dir)
+        memo = _providers_memo
+        if identity is not None and memo is not None and memo[0] == identity:
+            return memo[1]
         payload = peek_listing(PRICE_CATALOGUE_KEY, cache_dir=cache_dir).payload
         providers = _usable(payload)
         if providers is None and payload is not None:
             _repair_unusable_capture(cache_dir)
+        if providers is not None and identity is not None:
+            _providers_memo = (identity, providers)
         return providers
     except Exception as exc:  # noqa: BLE001 — a price is never worth a failed paint
         logger.debug("models.dev catalogue unreadable: %s", exc)
