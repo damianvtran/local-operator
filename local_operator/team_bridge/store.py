@@ -3895,11 +3895,24 @@ class Store:
         only — no body, label or digest of content. ADDITIVE AND NULLABLE like
         :meth:`_ensure_card_posted_column`, so no schema stamp moves and an older
         binary never names it.
+
+        ``card_handoff_card`` (PR #4348 r2: R5/S-4/Q2) is the WRITE-ONCE record
+        of the card first sent under that id: its CONTENTLESS presentation
+        metadata (ids, seq, closed-vocabulary kinds, flags, counts and the
+        fixed-template withheld notes; never a body, never the conversation
+        subject or a sender label, which the rebuild takes live — see
+        ``conversation._card_record``). The table stays contentless (B1).
+        It is written only in the same UPDATE that mints the id and never
+        rewritten, so any later replay of the id — whichever subset of its
+        members re-entered a flush — re-sends the identical card with the
+        identical membership. NULL = bound before the record existed.
         """
 
         columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
         if "card_handoff_id" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_handoff_id TEXT")
+        if "card_handoff_card" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN card_handoff_card TEXT")
 
     @staticmethod
     def _ensure_receipt_rendered_template_column(conn: sqlite3.Connection) -> None:
@@ -4220,6 +4233,7 @@ class Store:
         *,
         designated_session: str,
         minted_id: str,
+        card_record: str | None = None,
     ) -> tuple[str, bool]:
         """Bind ONE card's identity to its exact membership, before dispatch.
 
@@ -4228,19 +4242,23 @@ class Store:
         rows already bound to the SAME id AND they are every still-owed row
         bound to it → that id, ``replay`` True; the membership is whatever rows
         carry it, so a replay can never re-label a different logical card. A
-        STRICT SUBSET of an id's still-owed rows is moved to ``minted_id`` in
-        this same transaction (``replay`` False) so the id is never sent without
-        a member it still owes (see the comment in the body). Anything else
+        STRICT SUBSET of an id's still-owed rows also replays that id, and the
+        caller must WIDEN the card to the original one recorded at mint time
+        (``card_record``, read back via :meth:`card_handoff_record`); no row is
+        ever rebound to another id (see the comment in the body). Anything else
         REFUSES with a closed code and nothing is dispatched:
 
         * ``card_provenance_unknown`` — a legacy (NULL) row: its earlier card,
           if any, went out under an id nothing recorded, so a new id proves
-          nothing and no automatic replay may run on its behalf;
+          nothing and no automatic replay may run on its behalf; also a strict
+          subset of an id whose original card was never recorded;
         * ``card_handoff_split`` — mixed bindings (the caller partitions first);
         * ``card_binding_mismatch`` — a row missing, not this owner's live
           credential/generation, not designated to ``designated_session``, no
-          longer ``pending``, or already posted. The CURRENT bindings are checked
-          here, at bind time, not trusted from when the card was buffered.
+          longer ``pending``, or already posted — or a still-owed SIBLING of a
+          bound id that fails the same fence (widening may not carry it). The
+          CURRENT bindings are checked here, at bind time, not trusted from
+          when the card was buffered.
 
         ``minted_id`` must already be a valid ``peer-<32 hex>``; the store does
         not import the transport, so it enforces the same closed grammar itself.
@@ -4279,63 +4297,93 @@ class Store:
             (current,) = bound
             placeholders = ",".join("?" for _ in message_ids)
             if current:
-                # A BOUND ID IS NEVER SENT WITH FEWER OF ITS STILL-OWED MEMBERS
-                # (PR #4348 review r1: R1/R2, S-1, Q1). The receiver dedups on
-                # the id alone, so whichever card first COMMITS under it decides
-                # what it means. If the earlier send's outcome was uncertain
-                # (timeout, queued busy, in flight) and a re-drive now carries a
-                # strict subset, a fresh accept would commit the id for the
-                # subset and every omitted sibling's later replay would be
-                # answered duplicate -> marked posted with no card ever naming
-                # it: a silent lost wake. Re-grouping cannot be relied on (holds
-                # are re-driven one at a time, bounded per pass, and a sibling
-                # may sit in a different hold class), so waiting for the full
-                # group could stall forever.
+                # WIDEN, NEVER SPLIT OR REKEY (PR #4348 r2: R5 / S-4 / Q2; r1:
+                # R1/R2, S-1, Q1). The receiver dedups on the id alone and the
+                # sender cannot know whether an earlier send under ``current``
+                # committed (a refused posted marker, a kill between accept and
+                # marker, a queued/timeout answer). Both earlier remedies failed
+                # one side of that unknown: replaying the id for a subset could
+                # commit it WITHOUT the omitted siblings (lost wake, r1), and
+                # rekeying the subset to a fresh id re-sent members the first
+                # card already carried (duplicate, r2). The only move that is
+                # correct in BOTH worlds is to re-send the ORIGINAL card under
+                # its ORIGINAL id with its ORIGINAL membership, whatever subset
+                # re-entered this flush: committed -> the receiver answers
+                # duplicate, truthfully covering every member; never committed
+                # -> the first accept carries every member. The caller rebuilds
+                # that card from the immutable ``card_handoff_card`` record
+                # written when the id was minted (see
+                # :meth:`card_handoff_record`), so it never waits for siblings
+                # to re-buffer (a held group of 20 against a retry batch of 8
+                # could otherwise never re-form) and never re-derives anything
+                # from body content.
                 #
-                # So the subset is moved, in THIS transaction and before any
-                # dispatch, to its own fresh id; the omitted siblings keep the
-                # original id, which now names exactly them. Every outcome of
-                # the original send then stays loss-free: committed -> the
-                # siblings' replay is a truthful duplicate (that card carried
-                # them) and the subset gets a second card (at-least-once, the
-                # base behaviour, never a loss); never committed -> each id is
-                # first committed by a card carrying all of its owed members.
-                # Because the move is part of the bind, there is no post-send
-                # write whose failure or a kill could strand a sibling (the old
-                # ``narrow_card_handoff`` window, now removed).
-                owed = {
-                    str(r["message_id"])
-                    for r in conn.execute(
-                        "SELECT message_id FROM body_reservations WHERE owner_key = ? "
-                        "AND conversation_id = ? AND card_handoff_id = ? "
-                        "AND state = 'pending' AND card_posted_at IS NULL "
-                        "AND credential_id = ? AND enrollment_generation = ?",
-                        (
-                            _owner_key(owner),
-                            conversation_id,
-                            current,
-                            owner.credential_id,
-                            owner.enrollment_generation,
-                        ),
-                    )
-                }
-                if owed <= set(message_ids):
-                    return current, True
-                conn.execute(
-                    "UPDATE body_reservations SET card_handoff_id = ? WHERE owner_key = ? "
-                    f"AND conversation_id = ? AND message_id IN ({placeholders}) "
-                    "AND card_handoff_id = ?",
-                    (minted_id, _owner_key(owner), conversation_id, *message_ids, current),
-                )
-                logger.info("bridge: card handoff subset rebound code=card_handoff_regrouped")
-                return minted_id, False
+                # Widening must not replay a member this owner no longer has
+                # authority for: every still-pending, unposted row bound to the
+                # id must pass the SAME current-authority fence the requested
+                # rows just passed, or the whole card is refused (an honest
+                # hold, nothing dispatched). Rows that left ``pending`` need no
+                # card and do not block it; posted rows are already settled.
+                siblings = conn.execute(
+                    "SELECT message_id, credential_id, enrollment_generation, "
+                    "designated_session, card_handoff_card FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND card_handoff_id = ? "
+                    "AND state = 'pending' AND card_posted_at IS NULL",
+                    (_owner_key(owner), conversation_id, current),
+                ).fetchall()
+                for sib in siblings:
+                    if (
+                        sib["credential_id"] != owner.credential_id
+                        or sib["enrollment_generation"] != owner.enrollment_generation
+                        or sib["designated_session"] != designated_session
+                    ):
+                        raise StoreRefused("card_binding_mismatch")
+                owed = {str(sib["message_id"]) for sib in siblings}
+                records = {sib["card_handoff_card"] for sib in siblings}
+                if not owed <= set(message_ids) and (len(records) != 1 or None in records):
+                    # A strict subset whose original card cannot be rebuilt (a
+                    # row bound before the record existed): neither replaying a
+                    # narrower card nor minting a replacement is provably safe,
+                    # so hold it visibly for the owner instead of guessing.
+                    raise StoreRefused("card_provenance_unknown")
+                return current, True
             conn.execute(
-                "UPDATE body_reservations SET card_handoff_id = ? WHERE owner_key = ? "
-                f"AND conversation_id = ? AND message_id IN ({placeholders}) "
+                "UPDATE body_reservations SET card_handoff_id = ?, card_handoff_card = ? "
+                f"WHERE owner_key = ? AND conversation_id = ? AND message_id IN ({placeholders}) "
                 "AND card_handoff_id = ''",
-                (minted_id, _owner_key(owner), conversation_id, *message_ids),
+                (minted_id, card_record, _owner_key(owner), conversation_id, *message_ids),
             )
             return minted_id, False
+
+    def card_handoff_record(
+        self, owner: OwnerSnapshot, conversation_id: str, handoff_id: str
+    ) -> str | None:
+        """The immutable card recorded when ``handoff_id`` was minted, or None.
+
+        Read AFTER :meth:`bind_card_handoff` answered ``replay`` (a separate
+        read is safe: the record is written once, in the minting UPDATE, and no
+        code path rewrites it). None when no row carries a record, or when rows
+        bound to the id disagree \u2014 drift the caller must not paper over.
+        Live-owner fenced like the bind itself.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_card_handoff_column(conn)
+            values = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT card_handoff_card FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND card_handoff_id = ?",
+                    (_owner_key(owner), conversation_id, handoff_id),
+                )
+            }
+        if len(values) != 1 or None in values:
+            return None
+        (value,) = values
+        return str(value)
 
     def mark_body_card_posted(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float

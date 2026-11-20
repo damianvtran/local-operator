@@ -32,10 +32,11 @@ because the legacy ``bridge send`` path never reaches a conversation.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -946,10 +947,24 @@ async def _deliver_card(
 
     from .wake import CARD_HANDOFF, CardHandoff
 
-    card = build_conversation_card(metadata)
     members = list(metadata.coalesced_message_ids or (metadata.message_id,))
     store = Store(config_dir)
-    bound = _bind_card_handoff(store, owner, metadata.conversation_id, members, session_id)
+    bound = _bind_card_handoff(
+        store, owner, metadata.conversation_id, members, session_id, _card_record(metadata)
+    )
+    if bound is not None and bound[1]:
+        # A REPLAY RE-SENDS THE ORIGINAL CARD (PR #4348 r2: R5/S-4/Q2): the
+        # id's first card, rebuilt from the record written when it was minted,
+        # so a re-driven subset is widened back to every original member
+        # instead of being split off under a new id (a duplicate when the first
+        # card had committed) or sent alone under the old one (a lost sibling
+        # when it had not). No record (bound before the record existed) is only
+        # reachable here when the requested rows are the whole owed set, which
+        # the bind has already checked; then the live card is that same set.
+        record = store.card_handoff_record(owner, metadata.conversation_id, bound[0])
+        if record is not None:
+            metadata = _card_from_record(record, metadata, members)
+    card = build_conversation_card(metadata)
     handoff = CardHandoff(bound[0]) if bound is not None else None
     token = CARD_HANDOFF.set(handoff)
     try:
@@ -965,8 +980,80 @@ async def _deliver_card(
     return detail
 
 
+#: The free-text display fields a card carries. They are NEVER written to the
+#: card record: ``body_reservations`` is contentless by contract (B1, guarded by
+#: ``test_admission_records_exactly_one_contentless_reservation``, which scans
+#: every column for the conversation subject and sender label). A rebuilt card
+#: takes them from the live metadata of the members re-driven now instead.
+_CARD_RECORD_LABELS = ("conversation_label", "sender_label")
+#: ``merge_metadata``'s label for a group whose senders differ.
+_SEVERAL_SENDERS = "several members"
+
+
+def _card_record(metadata: ConversationCardMetadata) -> str:
+    """The write-once, CONTENTLESS record of a card, stored at mint time.
+
+    The fields of :class:`ConversationCardMetadata` (a type that by
+    construction cannot carry a body) minus its two free-text labels: ids,
+    seq, closed-vocabulary kinds, flags, counts and the fixed-template withheld
+    notes. ``sender_several`` keeps the one fact about the labels the rebuild
+    needs: whether the card named one sender or ``several members``. Output-
+    equivalent even for a sender literally named that, since both arms then
+    render the same text.
+    """
+
+    raw = asdict(metadata)
+    for name in _CARD_RECORD_LABELS:
+        raw.pop(name, None)
+    raw["sender_several"] = metadata.sender_label == _SEVERAL_SENDERS
+    return json.dumps(raw, sort_keys=True, separators=(",", ":"))
+
+
+def _card_from_record(
+    record: str, live: ConversationCardMetadata, members: list[str]
+) -> ConversationCardMetadata:
+    """Rebuild the id's original card; refuse (hold) on any drift.
+
+    Membership, ordering, locator, flags and counts come from the record; the
+    conversation label and (for a one-sender card) the sender label come from
+    ``live``, the metadata of the members re-driven now — the same
+    conversation, and for a one-sender card the same sender. The requested
+    members must all be members of the recorded card and it must name this
+    conversation; otherwise the record and the bindings disagree, and sending
+    either would be a guess.
+    """
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    try:
+        raw = json.loads(record)
+        known = {f.name for f in fields(ConversationCardMetadata)} - set(_CARD_RECORD_LABELS)
+        if not isinstance(raw, dict):
+            raise ValueError("record shape")
+        several = raw.pop("sender_several")
+        if not isinstance(several, bool) or not set(raw) <= known:
+            raise ValueError("record shape")
+        raw["coalesced_message_ids"] = tuple(raw.get("coalesced_message_ids") or ())
+        rebuilt = ConversationCardMetadata(
+            **raw,
+            conversation_label=live.conversation_label,
+            sender_label=_SEVERAL_SENDERS if several else live.sender_label,
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        raise StoreRefused("card_binding_mismatch", "handoff record") from exc
+    recorded = set(rebuilt.coalesced_message_ids or (rebuilt.message_id,))
+    if rebuilt.conversation_id != live.conversation_id or not set(members) <= recorded:
+        raise StoreRefused("card_binding_mismatch", "handoff record")
+    return rebuilt
+
+
 def _bind_card_handoff(
-    store: Any, owner: Any, conversation_id: str, members: list[str], session_id: str
+    store: Any,
+    owner: Any,
+    conversation_id: str,
+    members: list[str],
+    session_id: str,
+    card_record: str | None = None,
 ) -> tuple[str, bool] | None:
     """``(handoff_id, replay)`` for this card, ``None`` for an unreserved card.
 
@@ -1000,6 +1087,7 @@ def _bind_card_handoff(
         members,
         designated_session=session_id,
         minted_id=mint_peer_message_id(),
+        card_record=card_record,
     )
 
 
@@ -1025,11 +1113,13 @@ def _card_handoff_settled(
       the card posted. No second card exists.
     * ``delivered`` — accepted as NEW: the id was never committed before, so
       no earlier card under it reached anyone, and this card carried EVERY
-      still-owed member bound to it — :meth:`Store.bind_card_handoff` moves a
-      strict subset to its own fresh id before dispatch, so no sibling can be
-      left bound to an id that a card without it committed. Nothing to write
-      after the send, hence no post-send window a refused write or a kill
-      could turn into a lost wake (PR #4348 review r1: R2/S-1/Q1).
+      member bound to it — a replay always re-sends the id's ORIGINAL card
+      (``_card_from_record``), widened back to its full membership whatever
+      subset was re-driven, so no sibling can be left bound to an id that a
+      card without it committed, and no member is ever re-sent under a second
+      id. Nothing to write after the send, hence no post-send window a refused
+      write or a kill could turn into a lost wake (PR #4348 r1 R2/S-1/Q1, r2
+      R5/S-4/Q2).
     * ``unconfirmed`` (in flight at the receiver, queued, or no answer) —
       truthfully unknown: raise ``card_unconfirmed`` so the reservation stays
       owed and held. The retry re-sends the SAME id (deduplicated), never a
