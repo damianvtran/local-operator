@@ -272,13 +272,39 @@ def run_command(
             return 128 + received[0]
         if start_by is not None:
             # Wall clock, not monotonic: the deadline is a calendar time stated
-            # by another host. A heavy-lease audit log (heavy_audit, #4264) is
-            # not on main yet, so the breach is recorded by this stderr line
-            # only; wire a `late_start` event here once that module lands.
+            # by another host.
             now = clock()
             if now > start_by:
                 from local_operator.i18n.keys import cli_services_heavy as copy
                 from local_operator.i18n.text import tr
+
+                # The breach goes on the lease trail as well as stderr, so
+                # "did my 08:05Z window run?" is answered from the file the
+                # granting host reads (`heavy status`), not a lost terminal.
+                # Same field names as take/timeout; `slot` only when one was
+                # taken (queue off has none). record() swallows every error:
+                # the trail is evidence, and a failed write must never turn
+                # the 79 below into anything else. Written BEFORE the finally
+                # releases the slot, so the trail reads take → late_start →
+                # release for a run that queued past its window.
+                # Queue off never took a slot, so the lease dir (which
+                # acquire() creates) may not exist yet and record() would drop
+                # the row; create it the way acquire() does, best effort.
+                directory = heavy_lease.lease_dir()
+                try:
+                    directory.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+                heavy_audit.record(
+                    directory,
+                    "late_start",
+                    slot=lease.slot if lease is not None else None,
+                    pid=os.getpid(),
+                    session=os.environ.get("LOCAL_OPERATOR_SESSION_ID") or None,
+                    label=heavy_audit.command_label(shlex.join(argv)),
+                    start_by=round(start_by, 3),
+                    late_s=round(now - start_by, 3),
+                )
 
                 line = copy.late_start(
                     start_by=bounded_contract.utc_stamp(start_by),

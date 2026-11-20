@@ -76,7 +76,13 @@ AUDIT_MAX_BYTES = 1024 * 1024
 #: Rotated generations kept after the live file (``heavy-lease.jsonl.1`` newest).
 AUDIT_GENERATIONS = 3
 
-EVENTS = ("take", "release", "timeout", "stale-reclaim")
+#: The event names this trail writes. Documentation, not a whitelist: record()
+#: accepts any name and describe() renders any event, so a reader built before
+#: a name existed still shows the row. ``late_start`` is ``heavy run
+#: --start-by`` refusing a run whose window passed while it queued (PR #4279);
+#: the underscore matches that PR's lane spec and its `late-start` siblings in
+#: run_bounded's ``termination_cause`` are a different vocabulary.
+EVENTS = ("take", "release", "timeout", "stale-reclaim", "late_start")
 
 #: The longest label part kept. Subcommands are short words; a long token in
 #: subcommand position is far more likely to be an identifier or a secret.
