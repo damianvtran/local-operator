@@ -13135,7 +13135,9 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             # the state round trip and the apply's summary), printed rather than
             # re-derived here — the definitions verb's rule.
             lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
-            for outcome in ("installed", "updated"):
+            # ``withdrawn``: a mirror the peer removed because this device turned
+            # the server off — the peer's own answer, never what was asked.
+            for outcome in ("installed", "updated", "withdrawn"):
                 for row in item.get(outcome) or []:
                     if isinstance(row, dict):
                         lines.append(f"  {outcome} server {row.get('name')!r}")
@@ -13192,6 +13194,11 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         withheld = str(row.get("withheld") or "")
         if withheld:
             line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
+        # A server this device turned off is not sent; its name goes out as a
+        # withdrawal instead (mcpdefs' explicit-withdrawal exception). Only for
+        # the device's own rows: a mirror is never sent from here either way.
+        if row.get("disabled") and not origin:
+            line += " — disabled: not sent; peers withdraw an unedited mirror of it"
         lines.append(line)
     if not lines:
         lines = ["no user-scope MCP servers on this device"]
