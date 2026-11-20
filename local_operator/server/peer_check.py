@@ -84,7 +84,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -174,9 +174,12 @@ class PeerLookup(Protocol):
     # Optional, discovered with ``getattr`` so a minimal lookup (Linux, tests)
     # need not provide them:
     #
-    # * ``hinted_owner_uid(client, server) -> int | None`` -- a cheap, bounded
-    #   check of recently matched owners only; ``None`` means "ask the full
-    #   scan". Run on the gate's hint lane, outside the full-scan cap.
+    # * ``hinted_owner_uids(pairs) -> list[int | None]`` -- a cheap, bounded
+    #   check of recently matched owners only, for a BATCH of ``(client,
+    #   server)`` pairs answered from ONE walk of those owners (one answer per
+    #   pair, in order); ``None`` means "ask the full scan". Run on the gate's
+    #   hint lane, outside the full-scan cap. Batched so the lane's cost scales
+    #   per pass, not per connection (agent review round 2, R6).
     # * ``stoppable = True`` -- ``owner_uid`` accepts ``should_stop=`` and raises
     #   ``LookupAbandoned`` once it returns True, so a timed-out scan stops.
 
@@ -376,12 +379,19 @@ class MacLibprocLookup:
             raise OSError(ctypes.get_errno(), "proc_listpids failed")
         return [p for p in pids[: got // 4] if p > 0]
 
-    def _pid_owns(self, pid: int, client: Endpoint, server: Endpoint) -> bool:
+    def _pid_tcp_pairs(
+        self, pid: int, ports: set[tuple[int, int]] | frozenset[tuple[int, int]]
+    ) -> Iterator[tuple[Endpoint, Endpoint]]:
+        """Yield ``(local, remote)`` of ``pid``'s TCP sockets whose port pair is in ``ports``.
+
+        The port pre-filter runs before any address is decoded, so a pid's
+        unrelated sockets cost one ``proc_pidfdinfo`` each and nothing more.
+        """
         fds, sbuf = self._buffers()
         while True:
             got = self._pidinfo(pid, _PROC_PIDLISTFDS, 0, fds, ctypes.sizeof(fds))
             if got <= 0:
-                return False  # gone, a zombie, or not ours (EPERM)
+                return  # gone, a zombie, or not ours (EPERM)
             if got < ctypes.sizeof(fds):
                 break
             fds = (ctypes.c_uint32 * 2 * (len(fds) * 2))()  # table full: grow, re-read
@@ -400,15 +410,19 @@ class MacLibprocLookup:
                 continue
             lport = socket.ntohs(struct.unpack_from("<I", raw, _OFF_LPORT)[0] & 0xFFFF)
             fport = socket.ntohs(struct.unpack_from("<I", raw, _OFF_FPORT)[0] & 0xFFFF)
-            if lport != client[1] or fport != server[1]:
+            if (lport, fport) not in ports:
                 continue
             vflag = raw[_OFF_VFLAG]
-            if (
-                _mac_addr(raw, _OFF_LADDR, vflag) == client[0]
-                and _mac_addr(raw, _OFF_FADDR, vflag) == server[0]
-            ):
-                return True
-        return False
+            yield (
+                (_mac_addr(raw, _OFF_LADDR, vflag), lport),
+                (_mac_addr(raw, _OFF_FADDR, vflag), fport),
+            )
+
+    def _pid_owns(self, pid: int, client: Endpoint, server: Endpoint) -> bool:
+        want = (client, server)
+        return any(
+            pair == want for pair in self._pid_tcp_pairs(pid, frozenset({(client[1], server[1])}))
+        )
 
     def _scan_hints(self, client: Endpoint, server: Endpoint) -> tuple[int | None, set[int]]:
         with self._hints_lock:
@@ -419,15 +433,38 @@ class MacLibprocLookup:
                 return self._uid, set(hints)
         return None, set(hints)
 
-    def hinted_owner_uid(self, client: Endpoint, server: Endpoint) -> int | None:
-        """Check only the recently matched pids: ``None`` means "not a hint", not "foreign".
+    def hinted_owner_uids(self, pairs: Sequence[tuple[Endpoint, Endpoint]]) -> list[int | None]:
+        """Check only the recently matched pids, for many connections in ONE walk.
 
-        At most ``_HINT_LRU_SIZE`` pids, so it is cheap and bounded whatever the
-        caller; ``PeerGate`` runs it on its own lane, ahead of the full scan, so
-        the desktop's and TUI's repeat connections never queue behind a flood of
-        not-found scans (agent review round 1, R2).
+        ``None`` for a pair means "not a hint", not "foreign". The walk visits at
+        most ``_HINT_LRU_SIZE`` pids once, collects their sockets on the wanted
+        port pairs, and answers every pair from that one walk -- so a pass costs
+        the same whether it carries one queued connection or hundreds. Without
+        the batch, every foreign connection walked all saved pids on its own
+        (5.7-23.5 ms each on the review host), and at 300-1000 foreign
+        connections/s the one-worker lane fell behind until same-user checks
+        waited out the timeout (agent review round 2, R6). The walk stops early
+        once every pair is answered, so a same-user-only pass stays short.
         """
-        return self._scan_hints(client, server)[0]
+        with self._hints_lock:
+            hints = list(reversed(self._hints))
+        unresolved = set(pairs)
+        ports = frozenset((c[1], s[1]) for c, s in unresolved)
+        owners: dict[tuple[Endpoint, Endpoint], int] = {}
+        for pid in hints:
+            if not unresolved:
+                break
+            for pair in self._pid_tcp_pairs(pid, ports):
+                if pair in unresolved:
+                    unresolved.discard(pair)
+                    owners[pair] = pid
+        for pid in dict.fromkeys(owners.values()):
+            self._remember(pid)
+        return [self._uid if pair in owners else None for pair in pairs]
+
+    def hinted_owner_uid(self, client: Endpoint, server: Endpoint) -> int | None:
+        """One-pair convenience form of :meth:`hinted_owner_uids`."""
+        return self.hinted_owner_uids([(client, server)])[0]
 
     def owner_uid(
         self,
@@ -612,6 +649,12 @@ class PeerGate:
         # production; tests drive the same gate from several asyncio.run loops).
         self._slots: asyncio.Semaphore | None = None
         self._slots_loop: asyncio.AbstractEventLoop | None = None
+        # Hint-lane batching (agent review round 2, R6): connections waiting
+        # for the NEXT pass, and whether a pass is running. Touched only on the
+        # event loop thread, and re-bound when the loop changes (as the slots).
+        self._hint_queue: list[tuple[tuple[Endpoint, Endpoint], asyncio.Future[Any]]] = []
+        self._hint_pass_running = False
+        self._hint_loop: asyncio.AbstractEventLoop | None = None
         self._live_full_scans = 0  # queued or running, not abandoned-and-finished
         self._last_logged: dict[str, float] = {}
         self._last_error = ""
@@ -647,21 +690,76 @@ class PeerGate:
         Never an error: any fault or timeout here just means "ask the full scan",
         which re-checks the hints anyway, so the lane can only make admission
         faster, never refuse.
+
+        Batched (agent review round 2, R6). Every connection, foreign ones
+        included, passes through this lane, so one hint walk per connection let
+        a foreign flood outrun the single worker and starve same-user checks. A
+        connection instead joins the queue for the next PASS; each pass takes
+        everything queued, walks the saved pids once and answers them all. Why
+        same-user latency stays well under ``LOOKUP_TIMEOUT_S`` under any flood
+        rate: a waiter waits for at most the remainder of the running pass plus
+        its own pass, and a pass costs one walk of <= ``_HINT_LRU_SIZE`` pids
+        (tens of ms) plus a set lookup per queued pair -- the arrival rate only
+        changes how many pairs share a pass, not how many walks a waiter sits
+        behind. The queue holds only connections still awaiting their check.
         """
-        hinted = getattr(self.lookup, "hinted_owner_uid", None)
-        if hinted is None:
+        batch = getattr(self.lookup, "hinted_owner_uids", None)
+        if batch is None:
             return None
-        _, hint_executor = self._executors()
-        fut = hint_executor.submit(hinted, client, server)
+        loop = asyncio.get_running_loop()
+        if self._hint_loop is not loop:
+            # A new loop (tests); a pass from a closed loop can never report.
+            self._hint_loop, self._hint_queue, self._hint_pass_running = loop, [], False
+        fut: asyncio.Future[Any] = loop.create_future()
+        self._hint_queue.append(((client, server), fut))
+        if not self._hint_pass_running:
+            self._start_hint_pass(loop, batch)
         try:
-            uid = await asyncio.wait_for(asyncio.wrap_future(fut), LOOKUP_TIMEOUT_S)
+            uid = await asyncio.wait_for(fut, LOOKUP_TIMEOUT_S)
         except asyncio.CancelledError:
-            fut.cancel()
             raise
         except Exception:  # noqa: BLE001 -- fall through to the full scan
-            fut.cancel()
             return None
         return uid if uid == self._uid else None
+
+    def _start_hint_pass(self, loop: asyncio.AbstractEventLoop, batch: Callable[..., Any]) -> None:
+        """Hand every still-waiting queued pair to ONE hint pass (loop thread only)."""
+        queued, self._hint_queue = self._hint_queue, []
+        # A waiter that timed out or was cancelled has a done future: drop it.
+        live = [(pair, f) for pair, f in queued if not f.done()]
+        if not live:
+            self._hint_pass_running = False
+            return
+        self._hint_pass_running = True
+        _, hint_executor = self._executors()
+        cf = hint_executor.submit(batch, [pair for pair, _ in live])
+
+        def _done(_cf: concurrent.futures.Future[Any]) -> None:
+            try:  # worker thread: hop back onto the loop
+                loop.call_soon_threadsafe(self._finish_hint_pass, loop, batch, live, cf)
+            except RuntimeError:
+                pass  # loop closed (shutdown): nobody is waiting
+
+        cf.add_done_callback(_done)
+
+    def _finish_hint_pass(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        batch: Callable[..., Any],
+        live: list[tuple[tuple[Endpoint, Endpoint], asyncio.Future[Any]]],
+        cf: concurrent.futures.Future[Any],
+    ) -> None:
+        try:
+            results = list(cf.result())
+            if len(results) != len(live):
+                raise ValueError("hint batch answered the wrong number of pairs")
+        except Exception:  # noqa: BLE001 -- a faulty pass means "ask the full scan"
+            results = [None] * len(live)
+        for (_, f), uid in zip(live, results):
+            if not f.done():
+                f.set_result(uid)
+        if self._hint_loop is loop:
+            self._start_hint_pass(loop, batch)  # whatever queued during this pass
 
     async def _attempt(self, client: Endpoint, server: Endpoint) -> tuple[bool, int | None]:
         """One full lookup; ``(ok, uid)`` where ``ok`` is False on ERROR/timeout.

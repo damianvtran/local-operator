@@ -177,6 +177,45 @@ class HintedFakeLookup(FakeLookup):
         self.hint_calls.append(client)
         return MY_UID if client in self.hinted else None
 
+    def hinted_owner_uids(self, pairs: list[tuple[pc.Endpoint, pc.Endpoint]]) -> list[int | None]:
+        return [self.hinted_owner_uid(c, s) for c, s in pairs]
+
+
+class SlowHintWalkLookup:
+    """32 saved hint pids that each cost ``per_pid_s`` to inspect, like libproc.
+
+    Offers the hint lane both ways so the same test runs against the old
+    per-connection lane (``hinted_owner_uid``, one walk per call) and the batched
+    one (``hinted_owner_uids``, one walk per pass). ``walks`` counts walks.
+    """
+
+    mechanism = "fake"
+    admits_root = False
+
+    def __init__(self, me: pc.Endpoint, per_pid_s: float = 0.001, hints: int = 32) -> None:
+        self.me, self.per_pid_s, self.hints = me, per_pid_s, hints
+        self.walks = 0
+        self.full_scans: list[pc.Endpoint] = []
+
+    def _walk(self) -> None:
+        self.walks += 1
+        # One sleep for the whole walk, not one per pid: each wake must retake
+        # the GIL from the flood-busy loop thread (up to the 5 ms switch
+        # interval), which would make the fake's cost the convoy, not the pids.
+        time.sleep(self.per_pid_s * self.hints)
+
+    def hinted_owner_uid(self, client: pc.Endpoint, server: pc.Endpoint) -> int | None:
+        self._walk()
+        return MY_UID if client == self.me else None
+
+    def hinted_owner_uids(self, pairs: list[tuple[pc.Endpoint, pc.Endpoint]]) -> list[int | None]:
+        self._walk()
+        return [MY_UID if c == self.me else None for c, _ in pairs]
+
+    def owner_uid(self, client: pc.Endpoint, server: pc.Endpoint) -> int | None:
+        self.full_scans.append(client)
+        return MY_UID if client == self.me else None  # foreign: not found, at once
+
 
 async def _gather_checks(gate: pc.PeerGate, ports: range) -> list[pc.Decision]:
     server = _ep("127.0.0.1", 1111)
@@ -215,6 +254,61 @@ def test_hinted_same_user_is_admitted_while_slow_scans_saturate_the_pool(
     # Behind 40 x 2 queued 300 ms scans the old FIFO path waited seconds.
     assert elapsed < 0.25, elapsed
     assert me not in [c for c, _ in lookup.calls]  # never needed a full scan
+
+
+def test_hinted_same_user_is_admitted_fast_under_a_sustained_foreign_flood(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6 regression: a foreign flood must not starve the hint lane itself.
+
+    Every connection passes through the hint lane. When each foreign miss walked
+    all 32 saved pids on its own (~35 ms here), ~1000 foreign connections/s
+    outran the one worker, the lane's FIFO grew without bound and a hinted
+    same-user connection waited out the whole timeout. Batched, a pass answers
+    everything queued from one walk, so the same-user wait is ~2 walks.
+    """
+    monkeypatch.setattr(pc, "LOOKUP_TIMEOUT_S", 1.0)
+    me = _ep("127.0.0.1", 40000)
+    server = _ep("127.0.0.1", 1111)
+    lookup = SlowHintWalkLookup(me)
+    gate = pc.PeerGate(pc.GateStatus("enforcing", mechanism="fake"), lookup)
+
+    async def scenario() -> tuple[pc.Decision, float, int, int]:
+        tasks: list[asyncio.Task[pc.Decision]] = []
+        stop = asyncio.Event()
+
+        async def flood() -> None:
+            port = 20000
+            while not stop.is_set():  # ~1000/s: 10 new foreign connections per 10 ms
+                for _ in range(10):
+                    tasks.append(asyncio.ensure_future(gate.check(_ep("127.0.0.1", port), server)))
+                    port += 1
+                await asyncio.sleep(0.01)
+
+        flooder = asyncio.ensure_future(flood())
+        await asyncio.sleep(0.8)  # let a backlog build, if the lane can build one
+        walks_before, started = lookup.walks, time.monotonic()
+        decision = await gate.check(me, server)
+        elapsed = time.monotonic() - started
+        waited_walks = lookup.walks - walks_before
+        stop.set()
+        await flooder
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return decision, elapsed, len(tasks), waited_walks
+
+    decision, elapsed, foreign, waited_walks = asyncio.run(scenario())
+    assert decision.admit
+    # Old lane: ~1.0 s (the timeout), then a full scan. Batched: the running
+    # pass, its own pass, and at most the next one starting before it resumes.
+    # Counting walks keeps this exact on a loaded host, where the fake's 32 ms
+    # sleep was measured at 150-190 ms (load average ~34).
+    assert waited_walks <= 3, waited_walks
+    assert elapsed < pc.LOOKUP_TIMEOUT_S / 2, elapsed
+    assert me not in lookup.full_scans  # answered by the hint lane
+    # Cost scales per pass: far fewer walks than foreign connections.
+    assert lookup.walks < foreign / 4, (lookup.walks, foreign)
 
 
 def test_same_user_burst_wider_than_the_cap_gets_no_503() -> None:
@@ -401,6 +495,16 @@ def test_proc_finder_ignores_orphaned_fin_wait2_rows() -> None:
     # A live FIN_WAIT2 socket a process still holds (not orphaned) keeps its uid.
     held = _proc_row(("127.0.0.1", 50000), ("127.0.0.1", 1111), 1001, state="05")
     assert pc.find_uid_in_proc_net("\n".join([_HEADER, held]), client, server) == 1001
+
+
+def test_proc_finder_ignores_orphaned_tcp6_fin_wait2_and_time_wait_rows() -> None:
+    """R7: the inode-0 rule holds for IPv6 ``tcp6`` rows too (``::1`` clients)."""
+    client, server = _ep("::1", 50000), _ep("::1", 1111)
+    for state in ("05", "06"):  # FIN_WAIT2, TIME_WAIT
+        orphan = _proc_row(("::1", 50000), ("::1", 1111), 0, state=state, inode=0)
+        assert pc.find_uid_in_proc_net("\n".join([_HEADER, orphan]), client, server) is None
+        live = _proc_row(("::1", 50000), ("::1", 1111), 1001, state="01")
+        assert pc.find_uid_in_proc_net("\n".join([_HEADER, orphan, live]), client, server) == 1001
 
 
 def test_linux_lookup_rereads_its_preopened_tables(tmp_path: Path) -> None:
@@ -786,6 +890,9 @@ def test_macos_hint_lane_answers_only_recent_owners(
     assert lookup.owner_uid(client, server) == MY_UID
     assert lookup.hinted_owner_uid(client, server) == MY_UID
     assert lookup.hinted_owner_uid((client[0], 0), server) is None
+    # One batched walk answers each pair on its own merits, in order.
+    stranger = (client[0], 0)
+    assert lookup.hinted_owner_uids([(stranger, server), (client, server)]) == [None, MY_UID]
     # A caller that already gave up stops the full scan before any pid.
     with pytest.raises(pc.LookupAbandoned):
         lookup.owner_uid((client[0], 0), server, should_stop=lambda: True)
