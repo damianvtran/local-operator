@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import urllib.parse
 import uuid
 from contextlib import closing
@@ -74,8 +75,11 @@ from local_operator.remote_compute.errors import (
     retry_after_seconds,
 )
 from local_operator.remote_compute.request import RunCreateRequest
+from local_operator.remote_compute.tiers import tier_from_server
 from local_operator.tunnels import api as tunnels_api
 from local_operator.tunnels.errors import LoginRequired
+
+logger = logging.getLogger(__name__)
 
 #: Where the run endpoints live, relative to the API host.
 RUNS_PATH = "/v1/remote-compute/runs"
@@ -488,7 +492,7 @@ class RemoteComputeClient:
         # answered with another network's run would otherwise be reported as this
         # network's receipt.
         _confirm_network(run, expected=request.network_id)
-        return CreatedRun(run=run, replayed=reply.status == REPLAY_STATUS)
+        return CreatedRun(run=_tier_mapped_run(run), replayed=reply.status == REPLAY_STATUS)
 
     async def get_run(
         self, identifier: str, *, expected_network: str | None = None
@@ -545,29 +549,43 @@ class RemoteComputeClient:
         runs = page.get("runs") if isinstance(page, dict) else None
         if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
             raise RemoteComputeError("Radient returned an invalid remote-compute run list.")
-        return runs
+        return [_tier_mapped_run(run) for run in runs]
 
     async def capacity(self) -> list[dict[str, Any]]:
         """Every tier this deployment can provision, and whether each is ready now.
 
-        PASSED THROUGH, because the answer is the deployment's own config: a row
-        is ``{tier, ready, detail}`` and carries no rate, so a surface renders
-        readiness and never a price (there is no money in this answer to read).
+        THE SERVER'S ENVELOPE, IN THE SERVER'S VOCABULARY, TRANSLATED ONCE. The
+        read answers ``result["providers"]`` — one row per provider the deployment
+        can provision on — and each row's ``tier`` is the server's name for WHERE
+        the work runs (``fargate``, ``kubernetes``), not the id a surface offers
+        (``cloud_run``, ``dedicated``). Both are normalised HERE, at the one boundary
+        every caller crosses, through
+        :data:`~local_operator.remote_compute.tiers.SERVER_TIER_TO_TIER`: a surface
+        comparing the server's word paints a ready tier as unavailable.
 
-        THE TWO SPELLINGS ARE BOTH THE TIER LIST. The runs page answers
-        ``result["runs"]``, so a sibling read that answered ``result["tiers"]``
-        is the same body one level in, and a bare list is the same rows
-        unwrapped. Accepting both rather than picking one is deliberate: a
-        stricter reader would blank a surface's readiness over a wrapping choice
-        the contract does not settle, and the rows are what a caller uses either
-        way. A body that is neither is refused, as an invalid run page is.
+        A ROW WHOSE TIER THIS BUILD CANNOT NAME IS DROPPED, at debug. There is no
+        row to render — a surface matches an id it knows — and guessing one would
+        offer capacity under a word the server does not admit. A deployment that
+        grew a third tier is then a line in a log rather than a mislabelled row.
+
+        ``ready`` and ``detail`` are PASSED THROUGH: the answer is the deployment's
+        own config, and it carries no rate, so a surface renders readiness and never
+        a price (there is no money in this answer to read).
         """
         reply = await self._request("GET", CAPACITY_PATH)
         page = reply.payload
-        rows = page.get("tiers") if isinstance(page, dict) else page
+        rows = page.get("providers") if isinstance(page, dict) else None
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise RemoteComputeError("Radient returned an invalid remote-compute capacity list.")
-        return rows
+        tiers: list[dict[str, Any]] = []
+        for row in rows:
+            wire = row.get("tier")
+            tier = tier_from_server(wire) if isinstance(wire, str) else None
+            if tier is None:
+                logger.debug("remote compute: capacity row carries tier %r, dropped", wire)
+                continue
+            tiers.append({**row, "tier": tier})
+        return tiers
 
     async def cancel_run(self, identifier: str) -> dict[str, Any]:
         """Cancel a run. Idempotent: cancelling a finished run is not an error.
@@ -614,7 +632,32 @@ def _single_run(payload: Any, asked_for: str) -> dict[str, Any]:
     answered = run_id(payload)
     if answered != asked_for:
         raise RunIdentityMismatch(asked_for=asked_for, answered=answered)
-    return payload
+    return _tier_mapped_run(payload)
+
+
+def _tier_mapped_run(payload: dict[str, Any]) -> dict[str, Any]:
+    """The run with the server's tier word replaced by this build's tier id.
+
+    A run row carries the SERVER's tier (``fargate``/``kubernetes``) — where the
+    deployment runs the work — and not the id a surface offers. The join is
+    :data:`~local_operator.remote_compute.tiers.SERVER_TIER_TO_TIER`, applied here
+    so every run this client hands back (a create's receipt, a per-run read, a
+    listing) speaks the one vocabulary a surface matches; a surface comparing the
+    server's word would find no tier it can label.
+
+    A TIER THIS BUILD CANNOT NAME LOSES THE FIELD AND THE ROW IS KEPT. A run is
+    work in flight: hiding it would make a running task vanish from the panel
+    exactly when the server's vocabulary moved ahead of this build, and the rest of
+    the row still says how to cancel it.
+    """
+    if "tier" not in payload:
+        return payload
+    wire = payload["tier"]
+    tier = tier_from_server(wire) if isinstance(wire, str) else None
+    if tier is None:
+        logger.debug("remote compute: a run carries tier %r, which this build cannot name", wire)
+        return {key: value for key, value in payload.items() if key != "tier"}
+    return {**payload, "tier": tier}
 
 
 def run_status(payload: dict[str, Any]) -> str:

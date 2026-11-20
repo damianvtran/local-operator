@@ -33,6 +33,7 @@ from local_operator.remote_compute import RunCreateRequest, RunSpec
 from local_operator.remote_compute import config as config_module
 from local_operator.remote_compute import resolve_network
 from local_operator.remote_compute.client import (
+    CAPACITY_PATH,
     KNOWN_RUN_STATUSES,
     MAX_IDEMPOTENCY_KEY_BYTES,
     RUNS_PATH,
@@ -1227,3 +1228,122 @@ async def test_a_hostile_retry_after_is_capped_on_the_error(
         with pytest.raises(CapacityUnavailable) as caught:
             await client.create_run(request_for(), idempotency_key="k")
     assert caught.value.retry_after == RETRY_AFTER_MAX_S
+
+
+# ---------------------------------------------------------------------------
+# The tier vocabulary: the server's words, and the ids a surface matches
+# ---------------------------------------------------------------------------
+
+#: The server's ``detail`` is a free string map naming its own infrastructure. The
+#: values are SYNTHETIC because this repository is public.
+DETAIL = {
+    "cluster": "example-cluster",
+    "region": "example-region",
+    "task_definition": "example-task",
+}
+
+
+def _capacity_body(*rows: dict[str, Any]) -> dict[str, Any]:
+    """A capacity body as the REAL server answers it: one envelope around ``providers``."""
+    return {"msg": "ok", "result": {"providers": list(rows)}}
+
+
+@pytest.mark.asyncio
+async def test_capacity_maps_the_servers_providers_envelope_to_this_builds_tier(
+    credential: int,
+) -> None:
+    """The live contract: ``result["providers"]``, and ``fargate`` is ``cloud_run``.
+
+    Pinned to the shape the real server answered, not to a stand-in: a stand-in that
+    spelled ``tiers`` with ``cloud_run`` is how the reader and the server drifted.
+    """
+    origin = _Origin(
+        httpx.Response(
+            200, json=_capacity_body({"tier": "fargate", "ready": True, "detail": DETAIL})
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    assert rows == [{"tier": "cloud_run", "ready": True, "detail": DETAIL}]
+    assert str(origin.requests[0].url) == DEFAULT_API_URL + CAPACITY_PATH
+
+
+@pytest.mark.asyncio
+async def test_capacity_maps_the_dedicated_provider_word(credential: int) -> None:
+    """``kubernetes`` is the dedicated-workload tier, not a third tier."""
+    origin = _Origin(
+        httpx.Response(200, json=_capacity_body({"tier": "kubernetes", "ready": False}))
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    # ``ready`` and ``detail`` are the server's own values, passed through unmapped.
+    assert rows == [{"tier": "dedicated", "ready": False}]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_tier_this_build_cannot_name_is_dropped(credential: int) -> None:
+    """An unknown word costs its row and nothing else: no guess, no crash."""
+    origin = _Origin(
+        httpx.Response(
+            200,
+            json=_capacity_body(
+                {"tier": "example-provider", "ready": True, "detail": DETAIL},
+                {"tier": "fargate", "ready": True, "detail": DETAIL},
+            ),
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    assert rows == [{"tier": "cloud_run", "ready": True, "detail": DETAIL}]
+
+
+@pytest.mark.asyncio
+async def test_the_old_tiers_spelling_is_not_a_capacity_page(credential: int) -> None:
+    """``tiers`` was this suite's own invention; the server never answered it."""
+    origin = _Origin(
+        httpx.Response(200, json={"msg": "ok", "result": {"tiers": [{"tier": "cloud_run"}]}})
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError):
+            await client.capacity()
+
+
+@pytest.mark.asyncio
+async def test_a_run_carrying_the_servers_tier_is_returned_with_this_builds_id(
+    credential: int,
+) -> None:
+    """A run row crosses the wire with the server's word too, and is mapped once."""
+    origin = _Origin(
+        httpx.Response(200, json=_read(_run("run_1", "running", tier="fargate"))),
+        httpx.Response(
+            200,
+            json={"msg": "Runs", "result": {"runs": [_run("run_1", "running", tier="fargate")]}},
+        ),
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        read = await client.get_run("run_1")
+        listed = await client.list_runs()
+
+    assert read["tier"] == "cloud_run"
+    assert [row["tier"] for row in listed] == ["cloud_run"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_a_tier_this_build_cannot_name_keeps_its_row(
+    credential: int,
+) -> None:
+    """The run is work in flight: an unnameable tier costs the FIELD, not the row."""
+    origin = _Origin(httpx.Response(200, json=_read(_run("run_1", "running", tier="example-tier"))))
+    client, http = _client(origin, credential)
+    async with http:
+        read = await client.get_run("run_1")
+
+    assert read == {"id": "run_1", "status": "running"}
