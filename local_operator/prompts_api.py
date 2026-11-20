@@ -254,11 +254,98 @@ TOOL_GATED_PROSE_FLAGS: dict[str, frozenset[str]] = {
     "has_ask": frozenset({"ask"}),
 }
 
+_FILE_TOOLS = frozenset({"read", "write", "edit", "glob", "grep"})
+_SHELL_TOOLS = frozenset({"bash", "eval"})
+
+#: ``system.md`` flags that gate prose ABOUT A CAPABILITY CLASS on the session
+#: holding any tool of that class. Same derivation, same default and the same
+#: deferred-counts-as-held rule as :data:`TOOL_GATED_PROSE_FLAGS`; kept in a
+#: separate table only because a class names no single tool, so a reader of the
+#: per-tool table is not left wondering which tool ``has_files`` is.
+#:
+#: WHY: #4318 gated prose about ONE tool, but most of what an MCP-only or
+#: web-only session still paid for was prose about a whole capability it did not
+#: have. Measured on the head-to-head benchmark's configuration (``lop exec
+#: --tools mcp__bd_search,mcp__bd_fetch``, Bedrock Haiku 5.5, first request
+#: captured on the wire): block 0 was 8,304 characters, 2,826 of which told the
+#: model how to edit files, read ``guide://``/``skill://``/``tool://``/``spill://``
+#: URLs, use a scratchpad, treat bang-mode commands, or not delete paths; the tool
+#: inventory added 921 characters forbidding a browser engine / terminal
+#: emulator install "via `bash`"; and the tail shipped a 69-character ``<mcps>``
+#: hint pointing at ``mcp://`` URLs. Together 3,816 of the 10,666 system
+#: characters (~1,470 tokens at 2.6 chars/token), re-read on every one of the
+#: benchmark's 5-7 calls (Bedrock served its 3,620-token stable prefix as a
+#: cache read on each); a model told about URLs it cannot open also risks
+#: spending a call on one.
+#:
+#: THE CLASSES:
+#: - ``has_files``: file tools; prose about editing, specific-tool preference and
+#:   the scratchpad (whose ``scratchpad://`` paths the file tools accept).
+#: - ``has_shell``: a command runner; bang-mode, and the "do not install a
+#:   browser engine / terminal emulator" notes (there is nothing to install with).
+#: - ``has_resources``: ``read``, the ONE tool that opens ``guide://``,
+#:   ``skill://``, ``mcp://``, ``tool://`` and ``spill://`` URLs, so every
+#:   pointer to one, and the knowledge-tail catalogues, need it.
+#: - ``has_workspace``: files OR shell, i.e. the session can touch the local
+#:   filesystem at all. The overwrite/delete safety rules and deliverable
+#:   callouts ride this, NOT ``has_files``, so a ``bash``-only session keeps
+#:   "never delete or move a path you did not create" (``rm`` needs no file tool).
+#: - ``has_web``: ``web_search``/``web_fetch``; without them the always-on
+#:   "look it up" principle names "your web search tools" (an MCP search server)
+#:   instead of two tools the session does not hold (``no_web`` derives).
+#:
+#: CONSTRAINTS: membership over BUILT-IN names only. An MCP server's tool cannot
+#: be classified by name (``mcp__fs_write`` might delete files), so a session
+#: whose file access comes only through MCP is treated as having none; the
+#: always-on destructive-operation approval rule still binds it. Every class
+#: absent from the data dict means True, so a session holding the interactive
+#: tool set renders byte-identical to the tree before this table (tested).
+CAPABILITY_CLASS_FLAGS: dict[str, frozenset[str]] = {
+    "has_files": _FILE_TOOLS,
+    "has_shell": _SHELL_TOOLS,
+    "has_resources": frozenset({"read"}),
+    "has_workspace": _FILE_TOOLS | _SHELL_TOOLS,
+    "has_web": frozenset({"web_search", "web_fetch"}),
+}
+
 
 def tool_gated_prose_flags(tool_names: Collection[str]) -> dict[str, bool]:
-    """``TOOL_GATED_PROSE_FLAGS`` evaluated against one session's tool names."""
+    """``TOOL_GATED_PROSE_FLAGS`` and ``CAPABILITY_CLASS_FLAGS`` against one
+    session's tool names."""
     held = set(tool_names)
-    return {flag: bool(names & held) for flag, names in TOOL_GATED_PROSE_FLAGS.items()}
+    return {
+        flag: bool(names & held)
+        for flag, names in (TOOL_GATED_PROSE_FLAGS | CAPABILITY_CLASS_FLAGS).items()
+    }
+
+
+def _capability_layout_flags(seed: dict[str, Any]) -> dict[str, Any]:
+    """Default the capability classes and derive the joins their gating needs.
+
+    Absent class means True, the historical unconditional render (see
+    ``CAPABILITY_CLASS_FLAGS``). The derived flags exist because ``{{#if}}``
+    has no ``else``/``or``: the ``## Tools`` lead paragraph is a chain of
+    inline sentences that each used to start with a separating space, which
+    was safe only while the first sentence was unconditional. Now that it is
+    gated, a sentence's space renders only when an earlier one did (the
+    #4318-review R3 rule: no leading, trailing or double space), and each
+    paragraph's blank-line break renders only when the paragraph has a body.
+    A caller may state any of them; derivation fills only what is absent.
+    """
+    for flag in CAPABILITY_CLASS_FLAGS:
+        seed.setdefault(flag, True)
+    seed.setdefault("no_web", not seed["has_web"])
+    if seed["has_web"] and seed["no_web"]:
+        raise ValueError(
+            "system.md: has_web and no_web cannot both be true — that names "
+            "`web_search`/`web_fetch` and the generic search wording together."
+        )
+    seed.setdefault("wake_joins", bool(seed["has_files"] or seed["has_resources"]))
+    seed.setdefault("no_reply_joins", bool(seed["wake_joins"] or seed["has_wake_monitor"]))
+    seed.setdefault("notify_joins", bool(seed["no_reply_joins"] or seed["has_no_reply"]))
+    seed.setdefault("has_tools_lead", bool(seed["notify_joins"] or seed.get("has_notify")))
+    seed.setdefault("has_spill_line", bool(seed["has_eval"] or seed["has_resources"]))
+    return seed
 
 
 def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
@@ -320,6 +407,7 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
     # caller stating one member cannot leave a stray blank line behind.
     for flag in TOOL_GATED_PROSE_FLAGS:
         seed.setdefault(flag, True)
+    seed = _capability_layout_flags(seed)
     seed.setdefault("no_ask", not seed["has_ask"])
     if seed["has_ask"] and seed["no_ask"]:
         raise ValueError(
@@ -495,6 +583,14 @@ def render_tool_inventory_block(
     block (and costs no ``[session-state]`` delta).
     """
     block = f"{TOOL_INVENTORY_HEADING}\n\n{_render_tool_inventory(tools, deferred)}"
+    if not (CAPABILITY_CLASS_FLAGS["has_shell"] & {tool.name for tool in tools}):
+        # Every absence note below forbids SUBSTITUTING a browser engine or a
+        # terminal emulator — an install only a command runner can attempt — and
+        # redirects to `bash`. A session with no shell can do neither, so the
+        # notes (921 of the 973 characters of this block on the MCP-only
+        # benchmark session) only name a tool it does not hold; the names list
+        # above already says what exists. See CAPABILITY_CLASS_FLAGS.
+        return block
     # Membership, not visibility, for both capabilities; see the docstring.
     if host_has_browser is None:
         host_has_browser = _host_browser_backend_available()
@@ -1480,7 +1576,15 @@ def build_system_blocks(
         # rather than only seeing a different static line.
         env_block = f"{env_block}\n\nModel: {model_label.strip()}"
 
-    tail = skills_block or "<skills/>"
+    # The knowledge piece (selected ``<guides>``/``<skills>``, the ``<mcps>``
+    # hint, ``<resource_recommendations>``) is a list of ``guide://`` /
+    # ``skill://`` / ``mcp://`` / ``tool://`` URLs; only ``read`` opens them, so
+    # a session without it gets none (see CAPABILITY_CLASS_FLAGS). The block
+    # list stays fixed-arity (bd19aafbcbd3): the leading separator the first
+    # later section adds is dropped below, and an otherwise-empty tail keeps the
+    # historical placeholder.
+    has_resources = bool(CAPABILITY_CLASS_FLAGS["has_resources"] & {t.name for t in tools})
+    tail = (skills_block or "<skills/>") if has_resources else ""
     if goal and goal_status != "done":
         # Phrased as a standing objective so the model carries it as context
         # for every turn instead of re-acknowledging a fresh instruction. A
@@ -1589,6 +1693,8 @@ def build_system_blocks(
             f"{listed}\n"
             "</session-credentials>"
         )
+    if not has_resources:
+        tail = tail.removeprefix("\n\n") or "<skills/>"
 
     return [instructions, inventory, env_block, tail]
 
