@@ -407,12 +407,15 @@ def _shape_from_content(
     # is inlined up to the larger bound (``result_inline_limit``) with no route
     # named. The page is still stored, so a ``query`` below ranks passages from
     # it in every session; only the footer and the ``read`` hint are withheld.
-    body, spill_details = spill_truncate(content, tool_name, context, result_inline_limit(context))
-    preview = f"{header}\n\n{body}" if body else header
-    details = dict(result_like)
     wants_passages = (
         bool(query and query.strip()) and result_like.get("render_method") in _RANKABLE_METHODS
     )
+    # Ranking is harness-side, so read reachability must not change when it
+    # starts. Keep the larger no-read inline allowance only for plain fetches.
+    inline_limit = TOOL_OUTPUT_LIMIT_CHARS if wants_passages else result_inline_limit(context)
+    body, spill_details = spill_truncate(content, tool_name, context, inline_limit)
+    preview = f"{header}\n\n{body}" if body else header
+    details = dict(result_like)
     if wants_passages and spill_details is not None:
         shaped = _query_preview(
             header,

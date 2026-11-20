@@ -18,7 +18,8 @@ bounded, only while some declared ``mcp__`` name (``lop exec --tools``, the
 SDK's ``ApprovalPolicy.declared``) is not reachable yet AND a server that could
 provide it is still ``connecting``. The wait re-reads the inventory as each
 awaited server settles (``McpManager.wait_settled(first=True)``) and ends the
-moment every declared name is reachable. A tool name cannot be split back into (server, tool):
+moment every declared name is reachable. A tool name cannot be split back into
+(server, tool):
 ``mcp__bd_x_search`` is server ``bd`` + ``x_search`` or server ``bd_x`` +
 ``search``, so every configured server whose prefix matches is a candidate.
 Deciding on reachability is what keeps a wedged ``bd`` from holding, or
@@ -59,7 +60,7 @@ contract is exactly that distinction.
 CANCELLABLE. The wait runs before the turn's ``AbortSignal`` exists, so it
 polls the caller's ``cancelled`` predicate (``Session._abort_requested``)
 between short slices and returns early on an abort; the turn admission then
-drops the aborted turn exactly as it would have after the wait.
+interrupts the aborted turn exactly as it would have after the wait.
 """
 
 from __future__ import annotations
@@ -119,7 +120,7 @@ class DeclaredMcpToolsUnavailable(RuntimeError):
         self.elapsed_s = elapsed_s
         bound_reached = elapsed_s >= timeout_s
         detail = "; ".join(
-            f"{name} {_failure_reason(status, timeout_s, bound_reached)}"
+            f"server {name} {_failure_reason(status, timeout_s, bound_reached)}"
             for name, status in sorted(servers.items())
         )
         super().__init__(
@@ -128,7 +129,7 @@ class DeclaredMcpToolsUnavailable(RuntimeError):
             # tool identifiers, never prose to translate.
             # i18n: ignore technical diagnostic (identifiers in exec's ignored prefix)
             f"declared MCP tools unreachable after {elapsed_s:.1f} s: {', '.join(self.tools)} "
-            f"(server {detail})"
+            f"({detail})"
         )
 
 
