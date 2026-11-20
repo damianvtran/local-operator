@@ -35,6 +35,7 @@ import hashlib
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -1744,6 +1745,248 @@ def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:
     return {"action": "badge_only", "message_id": message_id, "code": CODE_NO_DESIGNATION}
 
 
+@dataclass(frozen=True)
+class _RecoveredDelivery:
+    """The recovery branch's outcome, plus the terminal flag the caller reads.
+
+    The branch always returns, so ``result`` IS the caller's return value; the
+    flag rides alongside because the caller's ``finally`` retires the durable
+    retry row from ``terminal`` (``_clear_terminal_hold``), and a buffered card
+    is not a delivered one.
+    """
+
+    result: dict[str, Any]
+    terminal: bool
+
+
+async def _deliver_recovered(
+    owner: Any,
+    ref: ConversationFeedRef,
+    *,
+    config_dir: Path,
+    access: Any,
+    settings: Any,
+    store: Any,
+    client: Any,
+    held: Callable[[str], Awaitable[dict[str, Any]]],
+    designation: str,
+    recovery: str,
+    terminal: bool,
+    metadata: ConversationCardMetadata,
+    display: Mapping[str, Any],
+    body_text: str,
+    body_hash: str,
+    served_digest: str,
+    sender: Mapping[str, Any],
+    descriptors: Any,
+    fetched: _Fetched,
+    files_descriptors: Any,
+    screened_files: Any,
+) -> _RecoveredDelivery:
+    """Deliver the card a verdict this machine already concluded owns (R1-01).
+
+    ``recovery`` names what the hub and the local receipt already decided; NONE
+    of those paths re-screens. Everything the branch used to close over is
+    passed in explicitly -- including ``held``, whose publication semantics stay
+    the caller's -- so it is a plain subroutine: inside
+    ``handle_conversation_available`` this much conditional weight is more than
+    pyright will analyse (reportGeneralTypeIssues, "code is too complex to
+    analyze").
+    """
+
+    from ..store import CARD_POSTED, CARD_SETTLED, StoreRefused
+
+    message_id = ref.message_id
+    if recovery in ("images_admitted", "text_admitted"):
+        fence_code = _producer_fence(store, owner, access, settings)
+        if fence_code:
+            return _RecoveredDelivery(await held(fence_code), terminal)
+        # A lost admit response can leave a real local screen receipt but
+        # no reservation. Recovery must commit the SAME body obligation
+        # before waking, just like the ordinary admission path. A hub
+        # context grant alone is not a local receipt and cannot mint one.
+        proof = store.receipt_for_message(owner, message_id)
+        if (
+            proof is None
+            or proof.get("verdict") != "allow"
+            or proof.get("body_sha256") != served_digest
+            or proof.get("creator_generation") != owner.enrollment_generation
+        ):
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        if recovery == "text_admitted":
+            # A closed image screen is also returned for a reject or a
+            # missing blob. Only the admitted history read proves text;
+            # the classification body read above intentionally cannot.
+            page = await client.conversation_messages(
+                ref.conversation_id,
+                tenant_id=owner.tenant_id,
+                endpoint_id=owner.endpoint_id,
+                after_seq=ref.conversation_seq - 1,
+                limit=1,
+                access=access,
+            )
+            rows = page.get("messages") if isinstance(page, Mapping) else None
+            if not isinstance(rows, list) or len(rows) != 1:
+                return _RecoveredDelivery(await held("admission_unverified"), terminal)
+            row = rows[0]
+            if (
+                not isinstance(row, Mapping)
+                or row.get("id") != message_id
+                or row.get("seq") != ref.conversation_seq
+                or row.get("body") != body_text
+            ):
+                return _RecoveredDelivery(await held("admission_unverified"), terminal)
+        # Recompute the canonical LOCAL envelope, not a fingerprint made
+        # from the old row. A context grant proves remote admission only:
+        # it cannot upgrade a text-only or different-image local verdict.
+        # Fetch/verify the context bytes without dispatching a screener.
+        from ..screening import ScreeningAttachments, validate_envelope
+
+        recovery_item = _screening_item(
+            owner=owner,
+            conversation_id=ref.conversation_id,
+            message_id=message_id,
+            body=body_text,
+            body_hash=body_hash,
+            sender=sender,
+            **screening_routing(ref, display),
+        )
+        if recovery == "images_admitted":
+            if not descriptors or fetched.attachments_hash is None:
+                return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+            try:
+                recovery_images = await _screen_images(
+                    client, ref, owner, access, descriptors, purpose="context"
+                )
+            except AttachmentRejected:
+                return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+            recovery_item["attachments"] = ScreeningAttachments(
+                attachments_hash=str(fetched.attachments_hash),
+                images=tuple(recovery_images),
+            )
+        # A file grant is independent of the image grant. If the exact
+        # file carrier cannot be verified, historical file authority must
+        # not be reconstructed from a remote image/text grant either.
+        if files_descriptors:
+            if screened_files is None:
+                return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+            recovery_item["files"] = screened_files
+        elif files_descriptors is None:
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        envelope, _error = validate_envelope(owner, recovery_item)
+        if envelope is None or proof.get("envelope_digest") != envelope.envelope_digest:
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        # These awaits can outlive a disk disable, credential rotation,
+        # revocation or shutdown. The readonly reservation guard below
+        # does not replace the fresh producer authority check.
+        fence_code = _producer_fence(store, owner, access, settings)
+        if fence_code:
+            return _RecoveredDelivery(await held(fence_code), terminal)
+        if store.designated_session_for(owner) != designation:
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        recorded = _record_body_reservation(
+            store, owner, ref, body_hash=body_hash, designation=designation
+        )
+        if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
+            return _RecoveredDelivery(await held(recorded), terminal)
+        # WHO MAY READ IT. The reservation names the session this body
+        # belongs to, and the block above may be the one that just
+        # committed it: a lost admit response leaves a real receipt with
+        # no reservation row, and that block fills the gap with a fresh
+        # row carrying no stored route -- designated session, correct for
+        # a message no routing decision ever ran on. Read the route AFTER
+        # that commit and never before, so an already-routed recovery
+        # whose row survived still finds its routed session: recomputing
+        # the decision here would replay a choice made against facts (who
+        # was live, who posted) that have moved on.
+        recovered = _stored_route(store, owner, ref, config_dir)
+        # Reuse the reply guard's exact live owner/session/consent fence;
+        # a replay can neither revive a retired row nor change its owner.
+        # It is asked about the session the ROW belongs to, not the
+        # designated one: the guard refuses a routed row to the
+        # designated session by design (it is blind to that body), so
+        # passing ``designation`` unconditionally would hold every routed
+        # recovery as ``receipt_unavailable`` forever. For an unrouted row
+        # this is ``designation`` exactly as before.
+        if (
+            store.admitted_inbound_reservation_readonly(
+                owner,
+                in_reply_to_message_id=message_id,
+                designated_session=recovered.target or designation,
+            )
+            is None
+        ):
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        if store.body_card_status(owner, ref.conversation_id, message_id) in (
+            CARD_POSTED,
+            CARD_SETTLED,
+        ):
+            return _RecoveredDelivery(
+                {
+                    "action": "duplicate",
+                    "message_id": message_id,
+                    "conversation_id": ref.conversation_id,
+                    "reservation": "already_recorded",
+                },
+                True,
+            )
+    else:
+        # A bounce card is not an admitted body, so no reservation had to
+        # exist and the fence above never ran; read the route here instead
+        # (a row can only be there from an earlier admission). ``else``, not a
+        # second membership test: the two are complements, and pyright cannot
+        # prove that, leaving ``recovered`` possibly unbound below.
+        recovered = _stored_route(store, owner, ref, config_dir)
+    if recovered.target is not None:
+        metadata = replace(
+            metadata,
+            routed=True,
+            routed_ask_ref=recovered.ask_ref,
+            routed_via_thread=recovered.via_thread,
+        )
+    detail = await _hand_off_card(
+        owner,
+        metadata,
+        ref,
+        session_id=recovered.target or designation,
+        config_dir=config_dir,
+    )
+    # A BUFFERED card is not a delivered one (review M1): the durable
+    # ``wake_coalescing`` hold is the only trace between this ref's
+    # delete and the flush, so the coalescer's ``_settle`` retires it,
+    # never this cleanup.
+    terminal = not card_is_buffered(detail)
+    if recovery in ("images_admitted", "text_admitted") and terminal:
+        try:
+            store.mark_body_card_posted(owner, ref.conversation_id, message_id, now=time.time())
+        except StoreRefused:
+            logger.warning("bridge: card posted mark refused code=store_refused")
+    if recovery in ("rejected", "unadmitted"):
+        return _RecoveredDelivery(
+            {
+                "action": "delivered_unadmitted",
+                "message_id": message_id,
+                "code": ("screening_bounce" if recovery == "rejected" else "admission_unverified"),
+                "session": recovered.target or designation,
+                "detail": detail,
+            },
+            terminal,
+        )
+    return _RecoveredDelivery(
+        {
+            "action": "delivered",
+            "message_id": message_id,
+            "conversation_id": ref.conversation_id,
+            "conversation_seq": ref.conversation_seq,
+            "mention": ref.mention,
+            "session": recovered.target or designation,
+            "detail": detail,
+            "recovered": recovery,
+        },
+        terminal,
+    )
+
+
 async def handle_conversation_available(
     owner: Any,
     ref: ConversationFeedRef,
@@ -2005,188 +2248,33 @@ async def handle_conversation_available(
                     )
 
         if recovery is not None:
-            if recovery in ("images_admitted", "text_admitted"):
-                fence_code = _producer_fence(store, owner, access, settings)
-                if fence_code:
-                    return await held(fence_code)
-                # A lost admit response can leave a real local screen receipt but
-                # no reservation. Recovery must commit the SAME body obligation
-                # before waking, just like the ordinary admission path. A hub
-                # context grant alone is not a local receipt and cannot mint one.
-                proof = store.receipt_for_message(owner, message_id)
-                if (
-                    proof is None
-                    or proof.get("verdict") != "allow"
-                    or proof.get("body_sha256") != served_digest
-                    or proof.get("creator_generation") != owner.enrollment_generation
-                ):
-                    return await held("receipt_unavailable")
-                if recovery == "text_admitted":
-                    # A closed image screen is also returned for a reject or a
-                    # missing blob. Only the admitted history read proves text;
-                    # the classification body read above intentionally cannot.
-                    page = await client.conversation_messages(
-                        ref.conversation_id,
-                        tenant_id=owner.tenant_id,
-                        endpoint_id=owner.endpoint_id,
-                        after_seq=ref.conversation_seq - 1,
-                        limit=1,
-                        access=access,
-                    )
-                    rows = page.get("messages") if isinstance(page, Mapping) else None
-                    if not isinstance(rows, list) or len(rows) != 1:
-                        return await held("admission_unverified")
-                    row = rows[0]
-                    if (
-                        not isinstance(row, Mapping)
-                        or row.get("id") != message_id
-                        or row.get("seq") != ref.conversation_seq
-                        or row.get("body") != body_text
-                    ):
-                        return await held("admission_unverified")
-                # Recompute the canonical LOCAL envelope, not a fingerprint made
-                # from the old row. A context grant proves remote admission only:
-                # it cannot upgrade a text-only or different-image local verdict.
-                # Fetch/verify the context bytes without dispatching a screener.
-                from ..screening import ScreeningAttachments, validate_envelope
-
-                recovery_item = _screening_item(
-                    owner=owner,
-                    conversation_id=ref.conversation_id,
-                    message_id=message_id,
-                    body=body_text,
-                    body_hash=body_hash,
-                    sender=sender,
-                    **screening_routing(ref, display),
-                )
-                if recovery == "images_admitted":
-                    if not descriptors or fetched.attachments_hash is None:
-                        return await held("receipt_unavailable")
-                    try:
-                        recovery_images = await _screen_images(
-                            client, ref, owner, access, descriptors, purpose="context"
-                        )
-                    except AttachmentRejected:
-                        return await held("receipt_unavailable")
-                    recovery_item["attachments"] = ScreeningAttachments(
-                        attachments_hash=str(fetched.attachments_hash),
-                        images=tuple(recovery_images),
-                    )
-                # A file grant is independent of the image grant. If the exact
-                # file carrier cannot be verified, historical file authority must
-                # not be reconstructed from a remote image/text grant either.
-                if files_descriptors:
-                    if screened_files is None:
-                        return await held("receipt_unavailable")
-                    recovery_item["files"] = screened_files
-                elif files_descriptors is None:
-                    return await held("receipt_unavailable")
-                envelope, _error = validate_envelope(owner, recovery_item)
-                if envelope is None or proof.get("envelope_digest") != envelope.envelope_digest:
-                    return await held("receipt_unavailable")
-                # These awaits can outlive a disk disable, credential rotation,
-                # revocation or shutdown. The readonly reservation guard below
-                # does not replace the fresh producer authority check.
-                fence_code = _producer_fence(store, owner, access, settings)
-                if fence_code:
-                    return await held(fence_code)
-                if store.designated_session_for(owner) != designation:
-                    return await held("receipt_unavailable")
-                recorded = _record_body_reservation(
-                    store, owner, ref, body_hash=body_hash, designation=designation
-                )
-                if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
-                    return await held(recorded)
-                # WHO MAY READ IT. The reservation names the session this body
-                # belongs to, and the block above may be the one that just
-                # committed it: a lost admit response leaves a real receipt with
-                # no reservation row, and that block fills the gap with a fresh
-                # row carrying no stored route -- designated session, correct for
-                # a message no routing decision ever ran on. Read the route AFTER
-                # that commit and never before, so an already-routed recovery
-                # whose row survived still finds its routed session: recomputing
-                # the decision here would replay a choice made against facts (who
-                # was live, who posted) that have moved on.
-                recovered = _stored_route(store, owner, ref, config_dir)
-                # Reuse the reply guard's exact live owner/session/consent fence;
-                # a replay can neither revive a retired row nor change its owner.
-                # It is asked about the session the ROW belongs to, not the
-                # designated one: the guard refuses a routed row to the
-                # designated session by design (it is blind to that body), so
-                # passing ``designation`` unconditionally would hold every routed
-                # recovery as ``receipt_unavailable`` forever. For an unrouted row
-                # this is ``designation`` exactly as before.
-                if (
-                    store.admitted_inbound_reservation_readonly(
-                        owner,
-                        in_reply_to_message_id=message_id,
-                        designated_session=recovered.target or designation,
-                    )
-                    is None
-                ):
-                    return await held("receipt_unavailable")
-                if store.body_card_status(owner, ref.conversation_id, message_id) in (
-                    CARD_POSTED,
-                    CARD_SETTLED,
-                ):
-                    terminal = True
-                    return {
-                        "action": "duplicate",
-                        "message_id": message_id,
-                        "conversation_id": ref.conversation_id,
-                        "reservation": "already_recorded",
-                    }
-            if recovery not in ("images_admitted", "text_admitted"):
-                # A bounce card is not an admitted body, so no reservation had to
-                # exist and the fence above never ran; read the route here instead
-                # (a row can only be there from an earlier admission).
-                recovered = _stored_route(store, owner, ref, config_dir)
-            if recovered.target is not None:
-                metadata = replace(
-                    metadata,
-                    routed=True,
-                    routed_ask_ref=recovered.ask_ref,
-                    routed_via_thread=recovered.via_thread,
-                )
-            detail = await _hand_off_card(
+            # The branch always returns; its terminal bookkeeping has to be back
+            # in this frame before the ``finally`` retires the durable retry row.
+            recovered_delivery = await _deliver_recovered(
                 owner,
-                metadata,
                 ref,
-                session_id=recovered.target or designation,
                 config_dir=config_dir,
+                access=access,
+                settings=settings,
+                store=store,
+                client=client,
+                held=held,
+                designation=designation,
+                recovery=recovery,
+                terminal=terminal,
+                metadata=metadata,
+                display=display,
+                body_text=body_text,
+                body_hash=body_hash,
+                served_digest=served_digest,
+                sender=sender,
+                descriptors=descriptors,
+                fetched=fetched,
+                files_descriptors=files_descriptors,
+                screened_files=screened_files,
             )
-            # A BUFFERED card is not a delivered one (review M1): the durable
-            # ``wake_coalescing`` hold is the only trace between this ref's
-            # delete and the flush, so the coalescer's ``_settle`` retires it,
-            # never this cleanup.
-            terminal = not card_is_buffered(detail)
-            if recovery in ("images_admitted", "text_admitted") and terminal:
-                try:
-                    store.mark_body_card_posted(
-                        owner, ref.conversation_id, message_id, now=time.time()
-                    )
-                except StoreRefused:
-                    logger.warning("bridge: card posted mark refused code=store_refused")
-            if recovery in ("rejected", "unadmitted"):
-                return {
-                    "action": "delivered_unadmitted",
-                    "message_id": message_id,
-                    "code": (
-                        "screening_bounce" if recovery == "rejected" else "admission_unverified"
-                    ),
-                    "session": designation,
-                    "detail": detail,
-                }
-            return {
-                "action": "delivered",
-                "message_id": message_id,
-                "conversation_id": ref.conversation_id,
-                "conversation_seq": ref.conversation_seq,
-                "mention": ref.mention,
-                "session": designation,
-                "detail": detail,
-                "recovered": recovery,
-            }
+            terminal = recovered_delivery.terminal
+            return recovered_delivery.result
 
         item = _screening_item(
             owner=owner,
