@@ -504,16 +504,74 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
         # and never too many.
         for _ in range(len(view._selectable())):
             view.action_move(-1)
-        await pilot.pause()
+        # Settled on the deferred scroll itself, not on one pause: CI job
+        # 136088027109 read the offset before the refresh that applies it.
+        await _settle_deferred_scrolls(pilot, view)
         assert view._selected == view._selectable()[0]
         assert view._body.scroll_offset.y == 0, "the owning section header is scrolled off"
 
         # `home` agrees with holding `up`.
         view.action_jump(1)
-        await pilot.pause()
+        await _settle_deferred_scrolls(pilot, view)
         view.action_jump(0)
-        await pilot.pause()
+        await _settle_deferred_scrolls(pilot, view)
         assert view._body.scroll_offset.y == 0
+
+
+async def _settle_deferred_scrolls(pilot: Any, view: SettingsView) -> None:
+    """Pump until every after-refresh callback queued so far has run.
+
+    The condition, not a count: one ``pilot.pause()`` drains widget queues and
+    requests a refresh, but the screen invokes its after-refresh callbacks from
+    a LATER turn, and under load that turn is not promised inside a fixed
+    number of pauses. Reading ``screen._callbacks`` (Textual's own queue of
+    ``call_after_refresh`` work) makes the wait independent of the code under
+    test: the pre-fix view's stale deferred scroll still lands, and still
+    fails the assertion that follows. The bound is a wedge backstop only.
+    """
+    await pilot.pause()
+    for _ in range(200):
+        if not view.screen._callbacks:
+            return
+        await pilot.pause()
+    raise AssertionError("after-refresh callbacks never drained")
+
+
+@pytest.mark.asyncio
+async def test_home_right_after_end_lands_at_the_top_before_any_refresh() -> None:
+    """`end` then `home` in one batch must leave the viewport on the top row.
+
+    Regression for main-red run 44674031880 (job 136088027109, ``305 == 0``).
+    Cursor moves defer their scroll to the next refresh, and
+    `_scroll_to_selection` used to decide against the APPLIED offset. When the
+    second key arrived before that refresh (one `pilot.pause()` does not
+    promise one on a loaded runner; a fast typist or a remote terminal batches
+    keys the same way), `home` read the stale 0, judged the top row already in
+    view and scheduled nothing, and then the queued `end` scroll landed: cursor
+    on the first row, viewport parked on the last page. Driven here with NO
+    pause between the keys, so it is deterministic rather than load-dependent.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await _settle_deferred_scrolls(pilot, view)
+        assert view._body.max_scroll_y > 0, "premise: the page must be taller than the viewport"
+        assert view._body.scroll_offset.y == 0
+
+        view.action_jump(1)
+        view.action_jump(0)
+        await _settle_deferred_scrolls(pilot, view)
+        assert view._selected == view._selectable()[0]
+        assert view._body.scroll_offset.y == 0, "a stale deferred scroll outlived the newer move"
+
+        # And the mirror: `home` then `end` must end on the last page.
+        view.action_jump(0)
+        view.action_jump(1)
+        await _settle_deferred_scrolls(pilot, view)
+        assert view._selected == view._selectable()[-1]
+        assert view._body.scroll_offset.y == view._body.max_scroll_y
 
 
 @pytest.mark.asyncio
