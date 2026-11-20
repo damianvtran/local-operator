@@ -437,11 +437,13 @@ def test_run_start_by_uses_the_clock_at_the_spawn_point(monkeypatch: pytest.Monk
     assert "1.0s late" in out.getvalue()
 
 
-# -- run --start-by: the late_start audit row ----------------------------------
+# -- run --start-by: the late-start audit row ----------------------------------
 #
 # The lane spec wants an audit line on every breach, on the same trail
-# (heavy_audit, #4264) that `heavy status` tails, so the host that granted the
-# window can see the refusal without the refused run's terminal.
+# (heavy_audit, #4264) that `heavy status` tails while the queue is enabled
+# (with it off, status returns before reading the trail, but the row is still
+# written), so the host that granted the window can see the refusal without the
+# refused run's terminal.
 
 
 def test_late_start_writes_one_audit_row_and_no_take_when_unqueued(
@@ -458,14 +460,14 @@ def test_late_start_writes_one_audit_row_and_no_take_when_unqueued(
     assert rc == heavy_cli.EXIT_LATE_START
     assert spawned == []
     events = heavy_audit.tail(heavy_lease.lease_dir(), 50)
-    assert [e["event"] for e in events] == ["late_start"]
+    assert [e["event"] for e in events] == ["late-start"]
     row = events[0]
     assert row["pid"] == os.getpid()
     assert row["session"] == "sess-synthetic-1"
     assert row["label"] == "make test"
     assert row["start_by"] == 100.0 and row["late_s"] == 2.5
     assert "slot" not in row
-    assert heavy_audit.describe(row).startswith("late_start pid=")
+    assert heavy_audit.describe(row).startswith("late-start pid=")
 
 
 def test_late_start_audit_write_failure_keeps_exit_79_and_never_spawns(
@@ -490,8 +492,8 @@ def test_queued_late_start_is_on_the_trail_between_its_take_and_release(
     env: dict[str, str], tmp_path: Path
 ) -> None:
     # Queued past the window: the slot WAS taken (and freed by the finally), so
-    # the honest trail for this pid is take → late_start → release, with
-    # exactly one late_start and the command never run.
+    # the honest trail for this pid is take → late-start → release, with
+    # exactly one late-start and the command never run.
     marker = tmp_path / "ran"
     holder = _hold(env, tmp_path / "holder.log", 4.0)
     try:
@@ -512,7 +514,7 @@ def test_queued_late_start_is_on_the_trail_between_its_take_and_release(
     assert proc.returncode == 79, err
     assert not marker.exists()
     mine = [e for e in heavy_audit.tail(heavy_lease.lease_dir(), 50) if e.get("pid") == proc.pid]
-    assert [e["event"] for e in mine] == ["take", "late_start", "release"]
+    assert [e["event"] for e in mine] == ["take", "late-start", "release"]
     late = mine[1]
     assert late["slot"] == mine[0]["slot"] == 0
     assert late["label"] == "touch" and late["late_s"] > 0
@@ -521,9 +523,12 @@ def test_queued_late_start_is_on_the_trail_between_its_take_and_release(
 def test_status_renders_a_late_start_row(env: dict[str, str]) -> None:
     heavy_lease.lease_dir().mkdir(parents=True, exist_ok=True)
     heavy_audit.record(
-        heavy_lease.lease_dir(), "late_start", pid=4242, label="make", start_by=1.0, late_s=3.5
+        heavy_lease.lease_dir(), "late-start", pid=4242, label="make", start_by=1.0, late_s=3.5
     )
     proc = _lop(env, "status")
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 0, err
-    assert "late_start pid=4242 label=make start_by=1.0 late_s=3.5" in out + err
+    # start_by renders as ISO UTC like the time column; the file keeps the epoch.
+    assert "late-start pid=4242 label=make start_by=1970-01-01T00:00:01Z late_s=3.5" in out + err
+    rows = heavy_audit.tail(heavy_lease.lease_dir(), 50)
+    assert rows[-1]["start_by"] == 1.0

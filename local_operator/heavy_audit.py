@@ -78,11 +78,13 @@ AUDIT_GENERATIONS = 3
 
 #: The event names this trail writes. Documentation, not a whitelist: record()
 #: accepts any name and describe() renders any event, so a reader built before
-#: a name existed still shows the row. ``late_start`` is ``heavy run
+#: a name existed still shows the row. ``late-start`` is ``heavy run
 #: --start-by`` refusing a run whose window passed while it queued (PR #4279);
-#: the underscore matches that PR's lane spec and its `late-start` siblings in
-#: run_bounded's ``termination_cause`` are a different vocabulary.
-EVENTS = ("take", "release", "timeout", "stale-reclaim", "late_start")
+#: hyphenated like ``stale-reclaim`` and like run_bounded's
+#: ``termination_cause=late-start`` for the same breach, so one grep for
+#: ``late-start`` finds it on either trail. Event names are trail VALUES that
+#: readers match on, so they change only with every reader.
+EVENTS = ("take", "release", "timeout", "stale-reclaim", "late-start")
 
 #: The longest label part kept. Subcommands are short words; a long token in
 #: subcommand position is far more likely to be an identifier or a secret.
@@ -288,6 +290,10 @@ _DESCRIBE_ORDER = (
 )
 
 
+#: Keys whose value is an epoch instant rather than a count or duration.
+_EPOCH_KEYS = frozenset({"start_by"})
+
+
 def describe(entry: dict[str, Any]) -> str:
     """One event as ``<event> key=value …`` (logfmt), for status surfaces.
 
@@ -296,12 +302,18 @@ def describe(entry: dict[str, Any]) -> str:
     prose: the surrounding sentence is the localized part.
     """
     parts = [str(entry.get("event", "?"))]
+    # Absolute instants render as ISO UTC (``…Z``), the format the time column
+    # beside each row already uses, so a reader compares ``start_by`` with that
+    # column by eye. Only the excerpt changes: the JSONL keeps the raw epoch.
+    # Durations (``*_s``) stay numbers.
     keys = [k for k in _DESCRIBE_ORDER if k in entry]
     keys += [k for k in entry if k not in keys and k not in ("ts", "event")]
     for key in keys:
         value = entry[key]
         if isinstance(value, list):
             text = ",".join(str(v) for v in value) or "-"
+        elif key in _EPOCH_KEYS:
+            text = iso_time(value)
         else:
             text = str(value)
         if not text or any(c.isspace() for c in text) or '"' in text:

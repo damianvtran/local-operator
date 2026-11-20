@@ -279,13 +279,16 @@ def run_command(
                 from local_operator.i18n.text import tr
 
                 # The breach goes on the lease trail as well as stderr, so
-                # "did my 08:05Z window run?" is answered from the file the
-                # granting host reads (`heavy status`), not a lost terminal.
+                # "did my 08:05Z window run?" is answered from the trail file
+                # (`<config>/run/heavy-jobs/heavy-lease.jsonl`), not a lost
+                # terminal. `heavy status` shows the row only while the queue
+                # is enabled: with it off, status returns before reading the
+                # trail (pre-existing behaviour), but the row is still written.
                 # Same field names as take/timeout; `slot` only when one was
                 # taken (queue off has none). record() swallows every error:
                 # the trail is evidence, and a failed write must never turn
                 # the 79 below into anything else. Written BEFORE the finally
-                # releases the slot, so the trail reads take → late_start →
+                # releases the slot, so the trail reads take → late-start →
                 # release for a run that queued past its window.
                 # Queue off never took a slot, so the lease dir (which
                 # acquire() creates) may not exist yet and record() would drop
@@ -297,7 +300,7 @@ def run_command(
                     pass
                 heavy_audit.record(
                     directory,
-                    "late_start",
+                    "late-start",
                     slot=lease.slot if lease is not None else None,
                     pid=os.getpid(),
                     session=os.environ.get("LOCAL_OPERATOR_SESSION_ID") or None,
