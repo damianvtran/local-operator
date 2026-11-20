@@ -669,6 +669,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # no input reaches the path, and unlink refuses a directory.
         "Drops <config>/operator/authority-setup.running, the marker this attempt wrote",
     ),
+    (
+        "local_operator/providers/bedrock/converse.py::project_conversation",
+        "<path>.remove",
+        # pending_calls is a set[str] built from assistant tool-call IDs; removing
+        # a matched ID tracks the in-memory pairing, never a filesystem path.
+        "set.remove on the in-memory pending tool-call IDs; no filesystem path",
+    ),
     # The effective-access listener registry is a module-level ``list`` of
     # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
     # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).

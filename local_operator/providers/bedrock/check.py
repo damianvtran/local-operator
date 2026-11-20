@@ -4,7 +4,7 @@
 ``base_url`` Bedrock does not have, so Bedrock branches here (design §5.5).
 
 Probe: ``GET https://bedrock.{region}.amazonaws.com/inference-profiles
-?typeEquals=SYSTEM_DEFINED&maxResults=1`` — no inference, no cost, and it
+?type=SYSTEM_DEFINED&maxResults=1`` — no inference, no cost, and it
 exercises exactly the credential + Region the runtime will use. CountTokens is
 deliberately NOT used: some cross-Region-only Claude models do not support it,
 so it would reject good credentials.
@@ -74,7 +74,7 @@ async def check_connection(
     url = str(
         httpx.URL(
             f"{bconn.control_base(resolved.region)}/inference-profiles",
-            params={"typeEquals": "SYSTEM_DEFINED", "maxResults": "1"},
+            params={"type": "SYSTEM_DEFINED", "maxResults": "1"},
         )
     )
     headers = bauth.sign_headers(resolved, "GET", url, b"", {"Accept": "application/json"})

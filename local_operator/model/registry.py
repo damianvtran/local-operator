@@ -1,5 +1,5 @@
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -285,6 +285,7 @@ class ModelInfo(BaseModel):
     # Unknown differs from a provider's explicit denial; the spec builder must
     # not manufacture tool/reasoning support after a live listing denies it.
     supports_tools: Optional[bool] = None
+    bedrock_metadata: dict[str, Any] | None = None
     reasoning: Optional[bool] = None
     reasoning_default_effort: Optional[str] = None
     supports_prompt_cache: bool = False
@@ -1343,7 +1344,20 @@ _BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:global|us|eu|apac|jp|au|us-gov|ca)\.)?a
 _BEDROCK_VERSION_SUFFIX_RE = re.compile(r"-v\d+(?::\d+)?$")
 
 
+def _bedrock_route_id(model_id: str) -> str:
+    # Only syntactically recognised Bedrock resources may project to a route;
+    # an ARN containing a Claude substring elsewhere is not a Claude selector.
+    if model_id.startswith("arn:"):
+        parts = model_id.split(":", 5)
+        if len(parts) == 6 and parts[2] == "bedrock":
+            kind, _, resource = parts[5].partition("/")
+            if kind in {"foundation-model", "inference-profile"}:
+                return resource
+    return model_id
+
+
 def _bedrock_price_multiplier(model_id: str) -> float:
+    model_id = _bedrock_route_id(model_id)
     return (
         BEDROCK_GLOBAL_PRICE_MULTIPLIER
         if model_id.startswith("global.")
@@ -1382,7 +1396,7 @@ def _bedrock_display_name(name: str, model_id: str) -> str:
 
     A bare in-Region id (no profile prefix) is labelled ``Bedrock in-Region``.
     """
-    prefix, _, rest = model_id.partition(".")
+    prefix, _, rest = _bedrock_route_id(model_id).partition(".")
     label = _BEDROCK_ROUTE_LABELS.get(prefix) if rest.startswith("anthropic.") else None
     return f"{name} ({label or 'Bedrock in-Region'})"
 
@@ -1418,6 +1432,27 @@ def _build_bedrock_models() -> Dict[str, ModelInfo]:
         for prefix in BEDROCK_PROFILE_PREFIXES:
             model_id = f"{prefix}.{base_id}" if prefix else base_id
             rows[model_id] = _bedrock_priced(row, model_id, overrides)
+    # AWS model cards, 2026-11-19; sources and capability constraints live in
+    # bedrock.models. Static fallback is not proof of account/region access.
+    # No verified exact regional tariff: the registry's zero sentinel is
+    # UNKNOWN (the picker must not mark it free). Negative rates would be truthy.
+    from local_operator.providers.bedrock.models import CAPABILITIES
+
+    for model_id, caps in CAPABILITIES.items():
+        rows[model_id] = ModelInfo(
+            id=model_id,
+            name=model_id,
+            description="Amazon Bedrock Converse",
+            input_price=0.0,
+            output_price=0.0,
+            context_window=caps.context_window,
+            max_tokens=caps.max_output,
+            supports_images=caps.images,
+            supports_tools=caps.tools,
+            supports_prompt_cache=bool(caps.cache_locations),
+            reasoning=(caps.reasoning_config is not None or model_id == "deepseek.r1-v1:0"),
+            recommended=False,
+        )
     return rows
 
 
@@ -1429,8 +1464,9 @@ def bedrock_anthropic_id(model_id: str) -> Optional[str]:
 
     ``us.anthropic.claude-haiku-4-5-20251001-v1:0`` -> ``claude-haiku-4-5-20251001``.
     """
-    stripped = _BEDROCK_PREFIX_RE.sub("", model_id, count=1)
-    if stripped == model_id or not stripped.startswith("claude-"):
+    route_id = _bedrock_route_id(model_id)
+    stripped = _BEDROCK_PREFIX_RE.sub("", route_id, count=1)
+    if stripped == route_id or not stripped.startswith("claude-"):
         return None
     return _BEDROCK_VERSION_SUFFIX_RE.sub("", stripped)
 
@@ -1454,6 +1490,15 @@ def bedrock_family_model_info(model_id: str) -> Optional[ModelInfo]:
     :func:`anthropic_family_model_info`, and re-prices for the prefix (a newer
     unshipped generation keeps its "unknown" zero price there already).
     """
+    from local_operator.providers.bedrock.models import (
+        capabilities_for,
+        foundation_identity,
+    )
+
+    identity = foundation_identity(model_id)
+    known = bedrock_models.get(identity or "")
+    if known is not None and capabilities_for(model_id).protocol != "anthropic":
+        return known.model_copy(deep=True, update={"id": model_id})
     anthropic_id = bedrock_anthropic_id(model_id)
     if anthropic_id is None:
         return None

@@ -31,6 +31,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
@@ -66,6 +67,7 @@ from local_operator.model.registry import (
     anthropic_default_model_info,
     anthropic_family_model_info,
     bedrock_family_model_info,
+    bedrock_supports_1h_cache,
     get_model_info,
     meta_muse_family_model_info,
     unknown_model_info,
@@ -160,7 +162,6 @@ _FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
 #: ``unknown_model_info``.
 _UNKNOWN_MODEL_TEMPLATES: dict[str, ModelInfo] = {
     "anthropic": anthropic_default_model_info,
-    "bedrock": anthropic_default_model_info,
 }
 
 
@@ -1274,6 +1275,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     return ModelSpec(
         provider=canonical,
         model_id=model_name,
+        bedrock_metadata=getattr(info, "bedrock_metadata", None),
         context_window=context_window,
         default_context_window=getattr(info, "default_context_window", None),
         max_context_window=getattr(info, "max_context_window", None),
@@ -2267,6 +2269,7 @@ def info_from_discovered_model(
         "cache_write_price": "cache_writes_price",
         "supports_prompt_cache": "supports_prompt_cache",
     }
+    info.bedrock_metadata = row.bedrock_metadata
     for field in row.authoritative_fields:
         if field in native_fields:
             setattr(info, native_fields[field], getattr(row, field))
@@ -2555,6 +2558,11 @@ def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
         return family
 
     template = _UNKNOWN_MODEL_TEMPLATES.get(provider)
+    if provider == "bedrock":
+        from local_operator.providers.bedrock.models import capabilities_for
+
+        if capabilities_for(model_id).protocol == "anthropic":
+            template = anthropic_default_model_info
     if template is not None:
         return template.model_copy(deep=True, update={"id": model_id, "name": model_id})
     if info is not None:
@@ -3034,20 +3042,17 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
     """
     bucket = int(time.time() // DEFAULT_TTL_S)
     info = _paint_memo.get((provider, model_id, bucket))
-    # SHALLOW copies, and the isolation they give is exactly what a deep copy
-    # gave: every ``ModelInfo`` field is a scalar (float/int/str/bool/None --
-    # ``test_paint_resolution_isolates_the_memo_with_a_shallow_copy`` pins that),
-    # so a caller assigning a field on its copy still cannot reach the memo or
-    # the registry row, and there is no nested container to share. What the
-    # deep copy cost was pydantic's ``__deepcopy__`` walk on every call, and
-    # this is called once per usage COMPONENT on every roster tick: at 16
-    # children the parent's 50 ms coalescer priced ~113 components per tick,
-    # and the deep copies were ~0.2 s of every second of that loop's CPU
-    # (``scripts/bench_subagent_fanout.py --profile``), paid on the same
-    # thread that runs every child's turn.
+    hit = info is not None
     if info is None:
-        return _registry_fallback(provider, model_id).model_copy(), False
-    return info.model_copy(), True
+        info = _registry_fallback(provider, model_id)
+    # Keep pydantic's whole-model deep walk off the roster tick: scalar-only
+    # providers still take exactly the shallow-copy path. Bedrock carries nested
+    # discovery/profile facts, however, and sharing those would let one caller
+    # corrupt the memo's capability decisions. Copy only that payload, without
+    # normalising unknown models into invented Claude capabilities.
+    if info.bedrock_metadata is not None:
+        return info.model_copy(update={"bedrock_metadata": deepcopy(info.bedrock_metadata)}), hit
+    return info.model_copy(), hit
 
 
 #: The effort ladder the PROVIDER'S OWN listing stated for a model, keyed the
@@ -8437,6 +8442,9 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     )
 
     definition = get_provider_definition(provider)
+    # Bedrock's legacy grouping includes native Converse deliberately: BOTH
+    # Converse and Anthropic InvokeModel report disjoint cache buckets. This
+    # accounting predicate is not authority to select a model's request schema.
     return not (definition is not None and is_anthropic_messages_wire(definition.wire))
 
 
@@ -8597,7 +8605,9 @@ def cost_for_usage(
     price_moment = tariff.moment_for(effective_info, usage, moment)
     cost = calculate_cost(effective_info, plain, output, read, written, moment=price_moment)
     cost *= fast_multiplier
-    if provider in ("anthropic", "bedrock"):
+    if provider == "anthropic" or (
+        provider == "bedrock" and bedrock_supports_1h_cache(model_info.id)
+    ):
         # Bedrock carries the same Messages receipt (``cache_creation`` split)
         # and bills the 1h write at the same 2x base (AWS Price List,
         # 2026-11-18: e.g. Opus 5.5 regional 8.80 = 2 x 4.40).

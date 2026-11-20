@@ -137,7 +137,15 @@ class DocumentForm:
     table name it keeps provider renames out of the serializers.
     """
 
-    wire: Literal["anthropic", "openai_responses", "openai_chat", "google", "openrouter", "mistral"]
+    wire: Literal[
+        "anthropic",
+        "openai_responses",
+        "openai_chat",
+        "google",
+        "openrouter",
+        "mistral",
+        "bedrock_converse",
+    ]
     max_bytes: int
     max_pages: int | None
     provider_id: str
@@ -274,6 +282,7 @@ def document_form(
     *,
     supports_images: bool = True,
     context_window: int | None = None,
+    model_id: str | None = None,
 ) -> DocumentForm | None:
     """The native form for this provider ON THIS WIRE, or ``None`` for fallback.
 
@@ -294,6 +303,21 @@ def document_form(
     natively only when the ruler's per-page charge fits its share of the
     window.
     """
+    if provider == "bedrock":
+        from local_operator.providers.bedrock.models import capabilities_for
+
+        caps = capabilities_for(model_id or "")
+        if caps.protocol != "anthropic":
+            if wire == "bedrock-converse" and "pdf" in caps.document_formats:
+                # DocumentForm budgets ENCODED request bytes. Converse admits
+                # five 4.5 MB raw documents: 5 * 4.5 MB * 4/3 = 30 MB base64.
+                # document_native_ok separately keeps the 6 MB encoded/file
+                # ceiling; confusing raw/file with encoded/request falsely
+                # labels a valid 4 MB PDF as extracted at admission.
+                return DocumentForm(
+                    "bedrock_converse", 30_000_000, _window_page_cap(context_window), "bedrock"
+                )
+            return None
     form = DOCUMENT_FORMS.get(provider)
     if provider == "openai" and wire == "openai-responses":
         # Not an early return: the Responses row is a different wire for the
@@ -358,6 +382,7 @@ def document_text_cap(context_window: int | None) -> int | None:
 #: row: their part shapes differ, which is why the mapping is explicit.
 _WIRE_FOR_REQUEST = {
     "anthropic": "anthropic-messages",
+    "bedrock_converse": "bedrock-converse",
     "openai_responses": "openai-responses",
     "openai_chat": "openai-chat",
     "google": "google-content",
@@ -366,7 +391,9 @@ _WIRE_FOR_REQUEST = {
 }
 
 
-def admission_wire(provider: str, *, supports_responses_api: bool = False) -> str:
+def admission_wire(
+    provider: str, *, supports_responses_api: bool = False, model_id: str | None = None
+) -> str:
     """The request wire a provider is MOST LIKELY to be called on.
 
     Used ONLY to stamp ``DocumentContent.injection`` at admission, which is
@@ -377,7 +404,15 @@ def admission_wire(provider: str, *, supports_responses_api: bool = False) -> st
     OpenAI is the only provider with two wires this harness ships, so it is
     the only one that needs the spec's Responses capability to choose.
     """
-    if provider in {"anthropic", "anthropic-key", "bedrock"}:
+    if provider == "bedrock":
+        from local_operator.providers.bedrock.models import capabilities_for
+
+        return (
+            "anthropic-messages"
+            if capabilities_for(model_id or "").protocol == "anthropic"
+            else "bedrock-converse"
+        )
+    if provider in {"anthropic", "anthropic-key"}:
         return "anthropic-messages"
     if provider in ("google", "google-vertex"):
         return "google-content"
@@ -482,6 +517,8 @@ def document_native_ok(
     encoded = _encoded_length(block, raw)
     if encoded > form.max_bytes:
         return False
+    if form.wire == "bedrock_converse" and encoded > 6_000_000:
+        return False  # AWS Message: 4.5 MB raw/file, exactly 6 MB base64.
     if budget is not None and not budget.take(encoded):
         return False
     return True

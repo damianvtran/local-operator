@@ -1,4 +1,4 @@
-# Amazon Bedrock (Claude)
+# Amazon Bedrock
 
 Provider id: `bedrock`. Model ids: `bedrock/<inference-profile-or-model-id>`,
 for example `bedrock/global.anthropic.claude-opus-5-5` or
@@ -10,6 +10,21 @@ AWS event-stream framing). The request body is the same one the first-party
 Anthropic client builds, so streaming, tool use, adaptive thinking/effort,
 prompt caching (including the 1-hour TTL on models that support it) and
 cache-aware usage and cost all work as they do on Anthropic.
+
+Other text/chat models use **native Converse / ConverseStream** on the same
+connection. No OpenAI loopback bridge is required. Streaming text and client
+tool loops share the normal harness path. Llama 3.3 tool requests use JSON
+`Converse` because its tool use and streaming cannot be combined. Unknown
+streaming models may fall back once, before any output, only when AWS explicitly
+rejects streaming; validation/auth errors are never retried as capability guesses.
+
+Native reasoning (including opaque signatures/redacted data) is preserved, but
+replayed only for the same model, endpoint, credential and unchanged preceding
+conversation. Unsupported image placements fail explicitly; unsupported native
+documents use the existing retained-byte extraction/reference policy. Nova
+supports user images/documents and image tool results; document tool results are
+not inferred from ordinary document input support. Audio/video/generation APIs
+are not added by this chat transport.
 
 Code: `local_operator/providers/bedrock/`. The design record lives with the
 pull request that added it.
@@ -43,8 +58,16 @@ Only on an explicit signal, first match wins:
    `AWS_LAMBDA_FUNCTION_NAME` or `ECS_CONTAINER_METADATA_URI_V4`.
 
 A plain `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` in a laptop shell does **not**
-enable Bedrock, since those usually belong to unrelated work. A stored
-connection always outranks the environment.
+enable Bedrock in the global provider census or default-model suggestions,
+since those usually belong to unrelated work. **Explicitly selecting Bedrock**
+(`lop exec --hosting bedrock` or `SessionSpec(hosting="bedrock", ...)`) does
+use the ordinary AWS default credential chain when no stored or environment
+Bedrock connection exists: access keys and session token, `AWS_PROFILE`, and
+EC2 IMDSv2 roles all work without `LOP_BEDROCK_AUTH` or compute markers. This
+last-resort connection belongs only to that invocation; it is not saved and
+does not make Bedrock globally available. Existing stored/environment
+connections retain their normal precedence. Credential lookup is bounded and
+fails with a classified pre-wire credential error if the chain is empty.
 
 An explicit profile connection ignores ambient `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`.
 
@@ -73,42 +96,87 @@ All configuration comes from the environment:
 
 ```sh
 export AWS_REGION=us-east-1
-export LOP_BEDROCK_AUTH=ambient        # or rely on the container/web-identity markers
+# The ordinary AWS default chain is used; no extra LOP auth switch is required.
 lop exec --hosting bedrock --model us.anthropic.claude-sonnet-5-5 "…"
 ```
 
 SDK: `SessionSpec(hosting="bedrock", model="us.anthropic.claude-sonnet-5-5")`.
-No SDK code changes are needed.
+No SDK code changes are needed. Non-Claude workers use that same native path:
+
+```python
+from pathlib import Path
+from local_operator.sdk import SessionRoots, SessionSpec, open_session
+
+async def worker():
+    # Dedicated durable worker roots, not the operator's ambient store.
+    home = Path("/var/lib/lop-worker")
+    roots = SessionRoots(config_dir=home / "config", agent_home=home / "agent", cwd=home / "work")
+    spec = SessionSpec(hosting="bedrock", model="us.amazon.nova-2-lite-v1:0")
+    async with open_session(spec, roots=roots) as session:
+        return await session.prompt("Summarize this task.")
+```
+
+Choose an inference-profile ID actually listed for your source Region; this
+example is a selector, not a claim of regional availability. Qwen3 Coder Next
+(`qwen.qwen3-coder-next`) is an active text/tool seed. Nova Pro is another
+multimodal seed. Legacy Llama 3.3 and DeepSeek R1 remain directly selectable;
+R1 has reasoning output but no invented configurable effort/tool support.
 
 Minimum IAM actions:
 
-- `bedrock:InvokeModelWithResponseStream` (inference)
+- `bedrock:InvokeModelWithResponseStream` (streaming inference)
+- `bedrock:InvokeModel` (Converse JSON, including Llama tools and capability fallback)
 - `bedrock:ListInferenceProfiles` and `bedrock:ListFoundationModels` (optional,
   for discovery; without them the built-in model list is used)
 - Bedrock API keys also need `bedrock:CallWithBearerToken`
 
 ## Models and discovery
 
-Discovery lists the ACTIVE system-defined Claude inference profiles your source
-Region can call (`global.`, `us.`, `eu.`, `apac.`, `jp.`, `au.` …), plus the
-on-demand in-Region Claude models. Which prefixes exist depends on the source
-Region; routing is never inferred from the prefix alone. Listings are cached
-per Region and connection. If listing fails, the built-in rows are used.
+Discovery lists ACTIVE TEXT models from all vendors, on-demand foundation IDs
+and paginated system/application inference profiles. Backing foundation metadata
+supplies stated modalities/streaming and known model capabilities; an opaque
+application profile does not become Claude by substring matching. Which profiles
+exist depends on the source Region; routing prefixes are never invented from a
+listing failure. Listings are cached per Region and connection. A complete live
+inventory limits the picker; a denied/partial listing retains static fallback
+rather than claiming absent model entitlement. Listing requires its own IAM
+permissions, including for bearer API keys; list denial is not bad credentials.
 
 Built-in rows cover Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5, Opus 4.8,
 Opus 4.7, Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5 under every prefix,
 with the first-party context windows. Models found by discovery but not built
-in get the Claude family's limits, and their cost shows as unavailable.
+in get a model-aware fallback: known Claude families retain their limits, while
+unknown non-Claude models do not inherit Claude windows, images or caching.
+Non-Claude static windows/capabilities are transcribed from the AWS model cards
+cited in `providers/bedrock/models.py`; no synthetic regional profiles are added.
 
 ### Pricing
 
-Rows built from the first-party prices, checked against the AWS Price List
+**Claude rows only** are built from the first-party prices, checked against the AWS Price List
 (`AmazonBedrockFoundationModels`, us-east-1, publication 2026-11-09, read 2026-11-18):
 
 - `global.` profiles are billed at the first-party Anthropic rate.
 - Geographic profiles (`us.`, `eu.` …) and in-Region ids cost **1.10×**.
 - Sonnet 5.5's cache read on Bedrock is $0.10/MTok global ($0.11 regional).
-- The 1-hour cache write is 2× base input, as on Anthropic.
+- The 1-hour cache write is 2× base input, only for the positively known Claude tariff.
+
+Other-vendor Bedrock rates remain **unknown**, not zero/free and not a Claude
+1.10× multiplier. Provider receipts do not contain a dollar cost. Converse input
+accounting is disjoint: context = noncached input + cache read + cache write;
+TTL detail subdivides writes and is not added again. Missing counts remain
+incomplete rather than reported zero. Nova emits supported system/frozen-prefix
+cache points (5m, without the TTL field), never tools points or checkpoints beyond
+its documented 20K-token maximum. Nova 2 Lite exposes none/low/medium/high effort;
+high excludes sampling parameters as required by Nova's API.
+
+### Offline validation
+
+`scripts/bedrock_fake_server.py` serves native Converse JSON and CRC-framed
+ConverseStream as well as the unchanged Claude InvokeModel fixture.
+`scripts/bedrock_converse_smoke.py` drives real SDK and `lop exec` tool loops for
+Nova and Llama with isolated HOME/config, synthetic bearer/SigV4, a fake `aws`
+negative control and a real harmless tool side effect. This is protocol evidence,
+**not live AWS entitlement, cache-hit, signature-echo or modality validation**.
 
 ## Errors
 

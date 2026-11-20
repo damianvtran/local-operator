@@ -91,6 +91,9 @@ FOUNDATION = {
             "modelId": "anthropic.claude-haiku-4-5-20251001-v1:0",
             "modelName": "Claude Haiku 4.5",
             "responseStreamingSupported": True,
+            "inputModalities": ["TEXT", "IMAGE"],
+            "outputModalities": ["TEXT"],
+            "inferenceTypesSupported": ["ON_DEMAND"],
             "modelLifecycle": {"status": "ACTIVE"},
         }
     ]
@@ -126,9 +129,88 @@ def _last_user_text(body: dict[str, Any]) -> str:
         if isinstance(content, str):
             return content
         for block in content or []:
-            if isinstance(block, dict) and block.get("type") == "text":
+            if isinstance(block, dict) and (block.get("type") == "text" or "text" in block):
                 return str(block.get("text") or "")
     return ""
+
+
+CONVERSE_PROOF_COMMAND = "printf 'converse-tool-side-effect\\n' > converse-tool-proof.txt"
+
+
+def _converse_fixture(
+    body: dict[str, Any], model_id: str
+) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+    """Deterministic native tool loop; only synthetic fixture data is recorded.
+
+    With TOOL_LOOP and bash exposed, the first reply asks for a harmless file
+    write in the smoke's isolated cwd. The second verifies a native toolResult
+    reached the provider. No bridge, alternate loop or tool dispatcher is used.
+    """
+    results = [
+        part["toolResult"]
+        for row in body.get("messages", [])
+        for part in row.get("content", [])
+        if "toolResult" in part
+    ]
+    prompt = _last_user_text(body)
+    tools = body.get("toolConfig", {}).get("tools", [])
+    names = [tool.get("toolSpec", {}).get("name") for tool in tools]
+    blocks: list[dict[str, Any]]
+    if "TOOL_LOOP" in prompt and not results and "bash" in names:
+        blocks = [
+            {
+                "toolUse": {
+                    "toolUseId": "fixture-tool-1",
+                    "name": "bash",
+                    "input": {
+                        "i": "Writing synthetic smoke proof",
+                        "command": CONVERSE_PROOF_COMMAND,
+                    },
+                }
+            }
+        ]
+        reason = "tool_use"
+    else:
+        blocks = [{"text": f"fake-bedrock says hi ({model_id}); tool results={len(results)}"}]
+        reason = "end_turn"
+    usage = {
+        "inputTokens": 100,
+        "outputTokens": 10,
+        "cacheReadInputTokens": 1000,
+        "cacheWriteInputTokens": 200,
+        "cacheDetails": [{"ttl": "5m", "inputTokens": 200}],
+    }
+    value = {
+        "output": {"message": {"role": "assistant", "content": blocks}},
+        "stopReason": reason,
+        "usage": usage,
+    }
+    events: list[tuple[str, dict[str, Any]]] = [("messageStart", {"role": "assistant"})]
+    for index, block in enumerate(blocks):
+        if "toolUse" in block:
+            tool = block["toolUse"]
+            events.append(
+                (
+                    "contentBlockStart",
+                    {
+                        "contentBlockIndex": index,
+                        "start": {
+                            "toolUse": {"toolUseId": tool["toolUseId"], "name": tool["name"]}
+                        },
+                    },
+                )
+            )
+            delta = {"toolUse": {"input": json.dumps(tool["input"])}}
+        else:
+            delta = block
+        events.extend(
+            [
+                ("contentBlockDelta", {"contentBlockIndex": index, "delta": delta}),
+                ("contentBlockStop", {"contentBlockIndex": index}),
+            ]
+        )
+    events.extend([("messageStop", {"stopReason": reason}), ("metadata", {"usage": usage})])
+    return value, events
 
 
 def make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
@@ -185,6 +267,16 @@ def make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                     "anthropic_beta": body.get("anthropic_beta"),
                     "cache_control_present": _has_cache_control(body),
                     "accept": self.headers.get("X-Amzn-Bedrock-Accept"),
+                    "tool_results": sum(
+                        "toolResult" in part
+                        for row in body.get("messages", [])
+                        for part in row.get("content", [])
+                        if isinstance(part, dict)
+                    ),
+                    "tool_names": [
+                        tool.get("toolSpec", {}).get("name")
+                        for tool in body.get("toolConfig", {}).get("tools", [])
+                    ],
                 }
             )
             if not self._auth_scheme():
@@ -231,6 +323,27 @@ def make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                 )
                 return
             prompt = _last_user_text(body)
+            if raw_path.endswith(("/converse", "/converse-stream")):
+                value, native_events = _converse_fixture(body, model_id)
+                if raw_path.endswith("/converse"):
+                    self._json(200, value)
+                    return
+                payload = b"".join(
+                    es.frame(
+                        {":message-type": "event", ":event-type": name}, json.dumps(data).encode()
+                    )
+                    for name, data in native_events
+                )
+                if "MIDSTREAM" in prompt:
+                    payload = payload[:-1] + es.exception(
+                        "modelStreamErrorException", "fake failure"
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.amazon.eventstream")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             usage = {
                 "input_tokens": 12,
                 "cache_read_input_tokens": 900 if cached else 0,
@@ -276,6 +389,8 @@ def _isolated_env(home: Path, endpoint: str) -> dict[str, str]:
             "LOCAL_OPERATOR_CONFIG_DIR": str(home / ".local-operator"),
             "TERM": "xterm-256color",
             "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "LOCAL_OPERATOR_PATH_PRIMED": "1",
             "AWS_EC2_METADATA_DISABLED": "true",
             "AWS_BEARER_TOKEN_BEDROCK": "fake-bedrock-api-key",
             "AWS_REGION": "us-east-1",
@@ -322,7 +437,11 @@ def smoke(model: str, lop: str) -> int:
         posts = [e for e in entries if e["method"] == "POST"]
         if not posts or any(e["auth_scheme"] != "Bearer" for e in posts):
             failures += 1
-        if any(e["anthropic_version"] != "bedrock-2023-05-31" for e in posts):
+        if any(
+            e["anthropic_version"] != "bedrock-2023-05-31"
+            for e in posts
+            if e["path"].endswith("/invoke-with-response-stream")
+        ):
             failures += 1
         print("SMOKE", "PASS" if failures == 0 else f"FAIL ({failures})")
         return 0 if failures == 0 else 1

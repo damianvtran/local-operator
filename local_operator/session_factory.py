@@ -5298,6 +5298,9 @@ async def _prepare(
     auth_store = build_auth_store(
         config_manager.config_dir, db_path=config_manager.config_dir / "auth.db"
     )
+    from local_operator.providers.bedrock.connection import configure_invocation_auth
+
+    configure_invocation_auth(auth_store, hosting)
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.

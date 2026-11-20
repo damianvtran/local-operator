@@ -17946,6 +17946,9 @@ def _preflight_api_key(
         import asyncio
 
         from local_operator.network.credentials import build_auth_store
+        from local_operator.providers.bedrock.connection import (
+            configure_invocation_auth,
+        )
         from local_operator.providers.registry import credential_provider_id
 
         # THE STORE THE SESSION WILL USE, not a plain ``AuthStore`` (mesh credentials,
@@ -17957,6 +17960,7 @@ def _preflight_api_key(
         # row for a borrowable key otherwise; either way this stays a presence check
         # with no network call, which is the rule this function's docstring states.
         auth_store = build_auth_store(config_dir)
+        configure_invocation_auth(auth_store, canonical)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
