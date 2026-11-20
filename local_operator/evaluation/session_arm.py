@@ -4199,6 +4199,10 @@ async def run_session_episode(
         # command is refused while nothing is provisioned (QA round 1, Q2 --
         # the check had run after prepare + reset, i.e. after an AWS VM was up).
         assert_action_server_timeout_nests()
+        # The Session arm has no manifest carrying EpisodeSpec metadata. Keep
+        # the launcher's disclosure beside the observed accounting in the record.
+        if (session_budget := spec.metadata.get("session_budget")) is not None:
+            record.write("session_budget", session_budget)
         # --- launch + prepare (mirrors EpisodeRunner._launch_and_prepare) ----
         supervisor = launch(selector)
         handshake: Handshake = await supervisor.handshake(timeout=config.handshake_timeout)
