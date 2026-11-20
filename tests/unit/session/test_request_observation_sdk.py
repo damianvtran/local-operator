@@ -322,8 +322,9 @@ async def test_ordinary_unset_is_allocation_free_and_turn_output_unchanged(
 @pytest.mark.parametrize(
     ("cap", "receipt", "admitted", "reason"),
     [
-        (None, 0.000001, 3, None),  # no-hook control with the same wire script
+        (None, 0.000001, 4, None),  # no-hook control with the same wire script
         (2, 0.000001, 2, "budget-cap"),
+        (1, 0.0000004, 3, "budget-cap"),  # 0.8µ admits; 1.2µ refuses the next request
         (0, 0.000001, 0, "budget-cap"),
         (2, None, 1, "cost-unreported"),
     ],
@@ -345,7 +346,7 @@ async def test_episode_recorded_spend_admission_uses_the_sdk_wire(
         usage = Usage(input_tokens=1, usd_cost=receipt)
         return [StreamUsageEvent(usage=usage), *text_turn("recorded spend", usage=usage)]
 
-    wire.script("parent", turn, turn, turn)
+    wire.script("parent", turn, turn, turn, turn)
     ends: list[AgentEndEvent] = []
 
     def observe(event: Any) -> None:
@@ -356,7 +357,7 @@ async def test_episode_recorded_spend_admission_uses_the_sdk_wire(
         spec=_spec(), roots=scratch, on_event=observe, max_recorded_spend_micros=cap
     )
     try:
-        for _ in range(min(admitted + 1, 3)):
+        for _ in range(min(admitted + 1, 4)):
             await handle.session.prompt(f"{_PARENT_MARKER}: reply")
         assert len(wire.scoped("parent")) == admitted
         assert len(handle.request_rows) == admitted, "refusals are not billable requests"
@@ -818,8 +819,9 @@ async def test_served_route_and_upstream_host_are_distinct_facts(scratch: Any, w
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cap", [None, 120_000])
 async def test_partial_usage_then_fail_keeps_reported_receipt_never_fabricated(
-    scratch: Any, wire: Wire
+    scratch: Any, wire: Wire, cap: int | None
 ) -> None:
     """A failed attempt that DID report usage keeps that reported receipt --
     faithful capture, never fabricated, never re-priced.
@@ -828,7 +830,10 @@ async def test_partial_usage_then_fail_keeps_reported_receipt_never_fabricated(
     retry/fallback attempts below the stream wrapper may carry bills it never
     saw, so invoice totals must not be claimed from request-final rows. The
     no-receipt-at-all shape (usage=None, unknown) is pinned by the
-    ``missing_usage`` case."""
+    ``missing_usage`` case. With admission enabled, the failed request's
+    reported receipt still counts against the cap."""
+    from local_operator.evaluation.session_arm import open_episode_session
+
     wire.script(
         "parent",
         [
@@ -849,20 +854,28 @@ async def test_partial_usage_then_fail_keeps_reported_receipt_never_fabricated(
         ],
     )
 
-    async with _opened(scratch) as session:
-        seen: list[RequestFinalObservation] = []
-        session.subscribe_requests(seen.append)
+    handle = await open_episode_session(spec=_spec(), roots=scratch, max_recorded_spend_micros=cap)
+    seen: list[RequestFinalObservation] = []
+    handle.session.subscribe_requests(seen.append)
+    try:
         try:
-            await session.prompt(f"{_PARENT_MARKER}: partial")
+            await handle.session.prompt(f"{_PARENT_MARKER}: partial")
         except Exception:  # noqa: BLE001 -- the ROW is the contract, not the raise
             pass
-        await session.prompt(f"{_PARENT_MARKER}: follow-up")
+        await handle.session.prompt(f"{_PARENT_MARKER}: follow-up")
+    finally:
+        await handle.aclose()
 
-    first, second = seen
+    assert len(seen) == len(wire.scoped("parent")) == (2 if cap is None else 1)
+    first = seen[0]
     assert first.ok is False and first.usage_reported is True
     assert first.usage is not None and first.usage.usd_cost == 0.12, "the reported receipt is kept"
     assert first.usage_coverage == "reported_final"
     assert first.outcome != "stop"
+    if cap is not None:
+        assert handle.admission_refusal == "budget-cap"
+        return
+    second = seen[1]
     assert second.usage is not None and second.usage.usd_cost == 0.03
     from local_operator.model.costs import cost_summary
 

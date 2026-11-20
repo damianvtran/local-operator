@@ -41,6 +41,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # The annotation is all that is needed — ``from __future__ import
     # annotations`` above makes every annotation in this file a string, and a
     # Protocol member's type is never evaluated at runtime.
+    # The owning observation/shutdown surface (``subscribe_requests`` /
+    # ``shutdown_owned_work``), which the runtime implements and a viewer
+    # genuinely cannot — so it lives on its own ``OwningSessionProtocol``
+    # extension, NOT on the shared ``SessionProtocol`` (review round 1, R1:
+    # widening the shared protocol forced every conformer — including the
+    # shared/base FakeSessions the viewer and TUI suites rely on — to grow
+    # stubs it should never have needed). Both signatures name these types, and
+    # importing them at runtime here would pull the session package into the
+    # protocol module for no reader's gain.
+    from local_operator.harness.request_admission import RequestAdmission
     from local_operator.session.frontend_state import (
         FrontendSessionState,
         FrontendStateStore,
@@ -53,17 +63,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # too: the judge's own record is what ``GoalRecordProtocol.goal_judge_state``
     # hands the driver beside the wire shape.
     from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState
-
-    # The owning observation/shutdown surface (``subscribe_requests`` /
-    # ``shutdown_owned_work``), which the runtime implements and a viewer
-    # genuinely cannot — so it lives on its own ``OwningSessionProtocol``
-    # extension, NOT on the shared ``SessionProtocol`` (review round 1, R1:
-    # widening the shared protocol forced every conformer — including the
-    # shared/base FakeSessions the viewer and TUI suites rely on — to grow
-    # stubs it should never have needed). Both signatures name these types, and
-    # importing them at runtime here would pull the session package into the
-    # protocol module for no reader's gain.
-    from local_operator.harness.request_admission import RequestAdmission
     from local_operator.session.request_observation import (
         OwnedShutdownResult,
         RequestObserver,

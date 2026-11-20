@@ -92,8 +92,11 @@ from local_operator.session.spec import (
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from contextlib import AbstractAsyncContextManager
 
+    from local_operator.harness.request_admission import (
+        RequestAdmission,
+        RequestAdmissionRefused,
+    )
     from local_operator.harness.types import AgentEvent, EventHandler
-    from local_operator.harness.request_admission import RequestAdmission, RequestAdmissionRefused
     from local_operator.harness.verifier_evidence import (
         VerifierEvidence,
         VerifierEvidenceItem,

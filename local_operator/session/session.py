@@ -22481,8 +22481,13 @@ class Session:
             # the pump before it executes a single statement; a wrapper makes
             # "the stream was iterated" the observable, so the pre-aborted path
             # leaves the flag False while every dispatched round-trip sets it.
-            base_stream_fn = self._stream_fn
+            from local_operator.model.configure import SessionStreamFn
             from local_operator.providers.turn_state import CodexTurnState
+
+            base_stream_fn = self._stream_fn
+            admission_stream = (
+                base_stream_fn if isinstance(base_stream_fn, SessionStreamFn) else None
+            )
 
             # This wrapper belongs to one attention turn, including tool rounds
             # and provider retries. Helpers use the base stream directly and
@@ -22507,20 +22512,8 @@ class Session:
                     )
                     request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
-                inner = base_stream_fn(request, stream_signal)
-                # The context this request was built from, taken before any
-                # later boundary can extend it.
-                carried = (
-                    {id(message) for message in self._context.messages}
-                    if self._bridge_cards_owed_wake
-                    else set()
-                )
 
-                async def witness() -> AsyncIterator[StreamEvent]:
-                    # Lazy provider generators may start only after another
-                    # await. Carry the same guard to that first I/O boundary.
-                    if frame is not None and not frame.binding_intact():
-                        raise RuntimeError("bridge body authority changed before dispatch")
+                def mark_dispatch() -> None:
                     self._attention_run_request_dispatched = True
                     from local_operator.team_bridge.card_projection import (
                         presented_bridge_ref,
@@ -22539,6 +22532,29 @@ class Session:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.
                         self._settle_bridge_card_wakes(carried)
+
+                inner = (
+                    admission_stream(request, stream_signal, on_admitted=mark_dispatch)
+                    if admission_stream is not None
+                    else base_stream_fn(request, stream_signal)
+                )
+                # The context this request was built from, taken before any
+                # later boundary can extend it.
+                carried = (
+                    {id(message) for message in self._context.messages}
+                    if self._bridge_cards_owed_wake
+                    else set()
+                )
+
+                async def witness() -> AsyncIterator[StreamEvent]:
+                    # Lazy provider generators may start only after another
+                    # await. Keep authority validation ahead of dispatch.
+                    if frame is not None and not frame.binding_intact():
+                        raise RuntimeError("bridge body authority changed before dispatch")
+                    if admission_stream is None:
+                        # Injected streams keep the original first-iteration
+                        # witness and need not accept an extra argument.
+                        mark_dispatch()
                     async for event in inner:
                         yield event
 

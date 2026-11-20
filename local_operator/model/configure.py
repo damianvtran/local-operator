@@ -7305,7 +7305,11 @@ class SessionStreamFn:
         return health, shared_remaining, tier_binding, access
 
     async def __call__(
-        self, request: ChatRequest, signal: AbortSignal | None
+        self,
+        request: ChatRequest,
+        signal: AbortSignal | None,
+        *,
+        on_admitted: Callable[[], None] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         root = getattr(self, "_observation_root", None) or self
         policy = getattr(root, "_request_admission", None)
@@ -7323,6 +7327,10 @@ class SessionStreamFn:
         # owned identity cleanup also works when an old generator is closed
         # after a newer boundary replaced it; no ContextVar spans a yield.
         try:
+            # Session's dispatch evidence must not commit on refusal, but it
+            # still precedes provider preparation even on the no-policy path.
+            if on_admitted is not None:
+                on_admitted()
             begin = getattr(self._auth_store, "begin_account_request", None)
             end = getattr(self._auth_store, "end_account_request", None)
             boundary = (

@@ -82,6 +82,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
@@ -152,7 +153,6 @@ from local_operator.evaluation.runner.completion import (
     challenge_kind,
     finish_claim,
 )
-from local_operator.evaluation.runner.dispatch_account import DispatchAccount, DispatchBlocked
 from local_operator.evaluation.runner.episode import (
     _PROVISIONAL_CLEANUP_ACTION,
     EpisodeConfig,
@@ -185,6 +185,7 @@ from local_operator.evaluation.runner.step_budget import (
     enforced_position,
     restate_step_budget,
 )
+from local_operator.harness.request_admission import RequestAdmissionRefused
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -195,7 +196,6 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     TurnEndEvent,
 )
-from local_operator.harness.request_admission import RequestAdmissionRefused
 from local_operator.headless_print import printable_event
 from local_operator.incidents import classify_incident, render_cut_off_reason
 from local_operator.mcp.config import load_all_mcp_configs
@@ -3527,30 +3527,35 @@ class _RecordedSpendAdmission:
     """
 
     def __init__(self, cap: int) -> None:
-        self.account = DispatchAccount(max_cost_micros=cap, max_cycle_cost_micros=None)
+        self.cap = cap
+        self._recorded_micros = Fraction(0)
+        self._cost_known = True
         self.pending: set[str] = set()
         self.stop: _RecordedSpendStop | None = None
 
     def admit(self, request_id: str) -> Callable[[], None]:
         if self.stop is not None:
             raise RequestAdmissionRefused(self.stop.reason)
-        try:
-            self.account.before_dispatch()
-        except DispatchBlocked as exc:
+        reason = None
+        if not self._cost_known:
+            reason = "cost-unreported"
+        elif self._recorded_micros >= self.cap:
+            reason = "budget-cap"
+        if reason is not None:
             self.stop = _RecordedSpendStop(
-                reason=str(exc),
-                recorded_micros=self.account.cost_micros,
+                reason=reason,
+                recorded_micros=round(self._recorded_micros),
                 in_flight=len(self.pending),
             )
-            raise RequestAdmissionRefused(self.stop.reason) from exc
+            raise RequestAdmissionRefused(reason)
         self.pending.add(request_id)
 
         def finish() -> None:
             # The recorder normally settles first. Do not leave a preparation
             # failure or a missing final pending (and therefore free) forever.
             if request_id in self.pending:
-                self.account.record(request_id, cost_micros=0, cost_known=False)
-                self.pending.remove(request_id)
+                self._cost_known = False
+                self.pending.discard(request_id)
 
         return finish
 
@@ -3562,14 +3567,14 @@ class _RecordedSpendAdmission:
             # Duplicate or a request begun before this policy was installed.
             return
         cost = _recorded_cost(observation.usage)
-        micros = None if cost is None else cost * 1_000_000
-        known = micros is not None and math.isfinite(micros)
-        self.account.record(
-            request_id,
-            cost_micros=round(micros) if micros is not None and known else 0,
-            cost_known=known,
-        )
-        self.pending.remove(request_id)
+        if cost is None or not math.isfinite(cost):
+            self._cost_known = False
+        else:
+            # Compare the recorded total, not per-request rounded micros. Use
+            # the recorded USD value's decimal spelling so a sum at the cap
+            # cannot drift below it through binary floating-point addition.
+            self._recorded_micros += Fraction(str(cost)) * 1_000_000
+        self.pending.discard(request_id)
 
 
 @dataclass
@@ -4748,9 +4753,13 @@ async def run_session_episode(
                 # nameless ``aborted`` (QA round 1, Q-1). The wall is read
                 # again AFTER the answer (``halted``), because obtaining it
                 # can outlast the wall (review round 1, R1-1).
-                while not wall_fired and handle.admission_refusal is None and (
-                    _turn_ended_cleanly(last_turn_end)
-                    or _budget_cancelled_the_turn(last_turn_end, budget_stop_sent)
+                while (
+                    not wall_fired
+                    and handle.admission_refusal is None
+                    and (
+                        _turn_ended_cleanly(last_turn_end)
+                        or _budget_cancelled_the_turn(last_turn_end, budget_stop_sent)
+                    )
                 ):
                     continuation = await bridge.text_only_continuation(
                         halted=lambda: "wall-bound" if wall_fired else handle.admission_refusal
@@ -4876,8 +4885,12 @@ async def run_session_episode(
             # The runner's guard truncation: a scored partial whose reason is
             # the guard's stable code (``truncation_reason`` on the reply arm).
             status = "truncated"
-        elif spend_stop is not None and not wall_fired and not (
-            last_turn_end is not None and (last_turn_end.error or last_turn_end.cut_off_cause)
+        elif (
+            spend_stop is not None
+            and not wall_fired
+            and not (
+                last_turn_end is not None and (last_turn_end.error or last_turn_end.cut_off_cause)
+            )
         ):
             status = "truncated"
             terminal_reason = spend_stop.reason
