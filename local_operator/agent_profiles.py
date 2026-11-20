@@ -481,9 +481,35 @@ def is_role(agent: "AgentData") -> bool:
     One implementation, because two readers that disagree about what a role is
     are how ``op='list'`` came to hide a row that ``task(agent=...)`` would
     happily run.
+
+    Two markers qualify, and nothing weaker:
+
+    * the explicit ``role`` tag (``agent(op='create')``, ``install_seed``);
+    * hub pull provenance (a well-formed ``hub:<id>`` tag) on a row that is
+      not a specialist. This is the ONLY marker a hub pull can carry: the
+      publication document strips ``role`` as a local profile encoding
+      (``agents.PROFILE_ENCODING_TAG_KEYS``) and publishes ``kind: role`` for
+      every non-specialist row instead (``instruction_set_fields``), so the
+      archive a pull imports never holds the ``role`` tag. Without this arm a
+      pulled role landed as an ordinary chat agent: ``task(agent=...)`` fell
+      through to nothing and every team whose roster named it failed to
+      validate (the desktop "model was not resolved" chip on a hub team).
+
+    Why provenance is not a coincidental marker: ``hub:`` is EARNED, never
+    imported — ``strip_provenance_tags`` drops it from every archive and only
+    ``AgentRegistry._stamp_hub_provenance`` (a real pull) writes it — so a
+    private chat agent cannot become a role by name or by importing a file.
+    Reading it here, rather than repairing rows on disk, keeps already-pulled
+    rows working with no migration and keeps the one classifier the only
+    source of truth for every reader (list, attach, delegation, teams).
     """
 
-    return any(str(tag).strip().lower() == ROLE_TAG for tag in (agent.tags or []))
+    if any(str(tag).strip().lower() == ROLE_TAG for tag in (agent.tags or [])):
+        return True
+    # Lazy: ``agents`` imports this module at load time.
+    from local_operator.agents import hub_origin
+
+    return hub_origin(agent) is not None and not is_specialist(agent)
 
 
 def is_specialist(agent: "AgentData") -> bool:
