@@ -220,3 +220,24 @@ fleet statistics, and no savings figure is claimed. A run cancelled by hand or
 lost to a startup failure can leave a main commit without a full verdict until
 the nightly run, which is the backstop; no extra daemon or cancel API exists.
 A red tip verdict is a legitimate result for superseded commits, not a gap.
+
+## Matrix axes: PR merge gate vs `main` / nightly / `workflow_dispatch`
+
+`full-suite.yml` keeps the `shard` lists literal (`[0..5]` for `test`, `[0, 1]`
+for `tui-e2e`) and varies `python-version`, `os`, and `fail-fast` by
+`github.event_name`:
+
+| Job | `pull_request` (merge gate) | `push` (`main`), `schedule` (nightly), `workflow_dispatch` |
+|---|---|---|
+| `test` | Python `3.13` × 6 shards (`fail-fast: true`) | Python `3.12` + `3.13` × 6 shards (`fail-fast: false`) |
+| `coverage-report` | Python `3.13` (`fail-fast: true`, skipped on `affected` lane) | Python `3.12` + `3.13` (`fail-fast: false`) |
+| `tui-e2e` | `ubuntu-latest` × 2 shards (`fail-fast: true`) | `ubuntu-latest` + `macos-latest` × 2 shards (`fail-fast: false`) |
+
+Why this split: Python 3.12 compatibility is already verified on every PR push
+by `ci.yml` (`guards`, `install-smoke`, `pyright`) and before every release by
+`release-gate.yml`, while Python 3.13 is where strict upper-version regressions
+surface; dropping `macos-latest` from PR merge gates removes the 10× macOS cost
+multiplier and the 5-job account-wide macOS concurrency bottleneck while keeping
+the Darwin `#401` freeze guard active post-merge on `main`, nightly, and on
+demand via `workflow_dispatch` (including `WIDE:` branch dispatches).
+`tui-e2e` still runs on every non-inert PR (no `github.*` job `if:` condition).

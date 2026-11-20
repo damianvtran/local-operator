@@ -444,13 +444,18 @@ jobs:
       gate_base: ${{ needs.changes.outputs.gate_base }}
       lane: ${{ needs.changes.outputs.lane }}
     strategy:
-      fail-fast: false
+      # Stop burning sibling PR shards once one fails; keep false on push,
+      # schedule, and workflow_dispatch so main/nightly/dispatches collect the
+      # full failure picture and complete junit timing artifacts across shards.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        # BOTH ends of `requires-python`, always: this workflow runs only on
-        # `main` (post-merge, nightly, dispatch), so the version-class
-        # regressions a 3.12-only PR run cannot see (a 3.13-only deterministic
-        # failure was caught exactly this way) are caught here.
-        python-version: ["3.12", "3.13"]
+        # PR merge gates run Python 3.13 only (the strict upper version where
+        # 3.13-only regressions surface; Python 3.12 compatibility is already
+        # verified on every PR push by ci.yml `guards`/`install-smoke` and
+        # before every release by release-gate.yml). Main pushes, nightly
+        # schedules, and workflow_dispatch runs keep BOTH ends of
+        # `requires-python` (["3.12", "3.13"]).
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.13"]' || '["3.12", "3.13"]') }}
         shard: [0, 1, 2, 3, 4, 5]
     env:
       # AFFECTED LANE (#4074): the six-shard matrix stays static, so on an
@@ -860,16 +865,18 @@ jobs:
   # single shard-0 artifact per Python would fail `--fail-under=80` on a lane
   # that deliberately ran a handful of files, and publishing that partial
   # figure as the suite's coverage would be dishonest. Only an exact
-  # 'affected' skips; empty/unknown/full combines all twelve receipts as before.
+  # 'affected' skips; empty/unknown/full combines every shard receipt for each
+  # Python in the active matrix (3.13 on pull_request; 3.12 + 3.13 on main,
+  # nightly, and workflow_dispatch).
   coverage-report:
     if: needs.test.outputs.lane != 'affected'
     runs-on: ubuntu-latest
     needs: test
     timeout-minutes: 10
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.13"]' || '["3.12", "3.13"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -952,14 +959,19 @@ jobs:
     # (boot, the write-turn artifacts, the transcript replay and the
     # interactivity assertion) and it is the faster, always-available runner.
     #
-    # `fail-fast: false` so a macOS queue delay or a Linux-only regression each
-    # report on their own rather than cancelling the other leg's evidence.
+    # On main, nightly, and workflow_dispatch runs, `fail-fast: false` ensures
+    # a macOS queue delay or a Linux-only regression each report on their own
+    # rather than cancelling the other leg's evidence; PR merge gates enable
+    # `fail-fast` so a red Linux shard stops burning its sibling.
     #
     # TWO axes, and each one answers a different requirement.
     #
     # `os` is the guard's own requirement: macOS is the only platform where the
     # #401 event-loop freeze can go red at all (see the long note above), so
-    # dropping the leg disarms the stage. Both OSes run every shard.
+    # main pushes, nightly schedules, and workflow_dispatch runs keep BOTH
+    # `ubuntu-latest` and `macos-latest` across every shard. Pull-request merge
+    # gates run `ubuntu-latest` only to eliminate the 10x macOS billing
+    # multiplier and the 5-job account-wide macOS concurrency bottleneck on PRs.
     #
     # `shard` is how this stage stopped being the longest job in the run. The
     # whole tree ran serially on each leg — `-n0` is required (a hang cannot be
@@ -1019,9 +1031,18 @@ jobs:
     # does. The coverage is unchanged either way: the same e2e tree, the same
     # two platforms, the same test files -- only the partition differs.
     strategy:
-      fail-fast: false
+      # Fail fast on PR merge gates to avoid burning the sibling shard after
+      # a failure; keep false on push/schedule/workflow_dispatch so Linux and
+      # macOS each report their own evidence independently.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # PR merge gates run ubuntu-latest only (10x macOS cost multiplier +
+        # 5-job account-wide macOS concurrency cap that starved PR queues).
+        # Main pushes, nightly schedules, and workflow_dispatch runs keep BOTH
+        # ["ubuntu-latest", "macos-latest"] so the Darwin #401 freeze guard
+        # runs post-merge, nightly, and on-demand via workflow_dispatch
+        # (including WIDE: branch dispatches).
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
         shard: [0, 1]
     runs-on: ${{ matrix.os }}
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
@@ -1030,10 +1051,8 @@ jobs:
     # — so it runs on every pull request whose diff is NOT INERT, forks included.
     # It still carries no fork gate; what changed with scope gating is only that
     # a diff touching nothing but `docs/**` (or the mobile-web subproject) does
-    # not run it — and because the matrix includes macOS, a fork contributor
-    # reintroducing the deadlock sees it go red on their own PR on the macOS
-    # leg. Both halves are load-bearing: a secrets-gated job could not reach
-    # forks at all, and a Linux-only job would reach them and report green.
+    # not run it. PR merge gates run ubuntu-latest across both shards; macOS
+    # runs post-merge on main, nightly, and via workflow_dispatch.
     #
     # Headless in the sense this job depends on: no display server, no window
     # and no `xvfb`. Most of the stage drives Textual's `run_test()` pilot into
