@@ -5783,6 +5783,46 @@ class SessionStreamFn:
     async def _on_route_change(self, target: Any, reason: str) -> None:
         effort = f" ({target.effort} effort)" if target.effort else ""
         await self._notice(f"{reason} — falling back to {target.selector}{effort}")
+        if reason.startswith("provider failure: auth"):
+            await self._announce_sign_in_required()
+
+    async def _announce_sign_in_required(self) -> None:
+        """Tell the user ONCE, in their language, that the primary needs a sign-in.
+
+        The fallback line above only says ``provider failure: auth``. When the
+        primary's every stored login is a grant its IdP refused for good (a dead
+        refresh token, or Google Cloud session control forcing a Vertex sign-in
+        to expire), that is not a failure the user can wait out, and the turn
+        silently serving from another model is exactly what made the expired
+        Vertex sign-in look like a quota problem. So the exact next step is
+        named here, from the store's persisted verdict (no refresh is sent).
+
+        Deduped through the quota latch on its own ``auth:`` token, so a sticky
+        fallback does not repeat it every message and a re-login (which clears
+        the latch on the healthy edge) re-arms it for a real recurrence. Never
+        fails the turn: a notice is advisory.
+        """
+        primary = self._primary_selector
+        if not primary:
+            return
+        provider = primary.split("/", 1)[0]
+        try:
+            from local_operator.i18n.resolve import resolve_language
+            from local_operator.providers.failover import (
+                dead_grant_reason,
+                sign_in_required_text,
+            )
+
+            dead, cause = await asyncio.to_thread(dead_grant_reason, self._auth_store, provider)
+            if not dead:
+                return
+            # The CONFIGURED language, not ``text.active_locale``: only the TUI
+            # moves the process locale live, and this also runs in `serve` and
+            # `lop exec` (see ``messages.render_resolved``).
+            text = sign_in_required_text(provider, cause, locale=resolve_language())
+            await self._announce_quota_change(primary, "auth:sign-in-required", text)
+        except Exception as exc:  # noqa: BLE001 - a notice must never fail the turn
+            logger.debug("sign-in notice failed (%s)", type(exc).__name__)
 
     async def _on_route_settle(self, target: Any, reason: str) -> None:
         """Forward the effective-route edge (fallback pinned / primary back)."""

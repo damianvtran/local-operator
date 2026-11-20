@@ -6402,6 +6402,9 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         return _mark_prewire_refusal(
             ProviderError(None, f"No API key configured for provider '{provider}'", retryable=False)
         )
+    dead = _dead_grant_error(auth, provider)
+    if dead is not None:
+        return dead
     kinds = {row.credential_type for row in rows}
     what = "OAuth sign-in" if "oauth" in kinds else "API key"
     count = len(rows)
@@ -6431,6 +6434,96 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
             ),
             retryable=True,
             kind="quota",
+            request_sent=False,
+        )
+    )
+
+
+def dead_grant_reason(auth: Any, provider: str) -> tuple[bool, str | None]:
+    """``(dead, reason)`` for a provider whose every usable row is a dead grant.
+
+    ``dead`` is True only when at least one row is configured and EVERY enabled
+    row carries the store's dead-grant tombstone: one live sibling means the
+    provider can still serve, and naming a sign-in there would be wrong.
+    ``reason`` is the recorded cause when the rows agree on one (today only
+    Google Cloud session control's ``session_policy``), else ``None``.
+
+    Duck-typed on ``grant_is_dead`` / ``grant_dead_reason`` like
+    :func:`_no_credential_error`'s other probes: the structural store protocol
+    promises neither, and a store without them simply answers "not dead". Any
+    error reading them also answers "not dead" -- diagnosis must never mask the
+    real failure, and the generic sentence is still true.
+    """
+    is_dead = getattr(auth, "grant_is_dead", None)
+    if not callable(is_dead) or not isinstance(auth, CredentialLister):
+        return False, None
+    try:
+        rows = [row for row in auth.list_credentials(provider) if row.disabled_cause is None]
+        if not rows or not all(row.credential_type == "oauth" and is_dead(row.id) for row in rows):
+            return False, None
+        reason_of = getattr(auth, "grant_dead_reason", None)
+        reasons: set[str | None] = {None}
+        if callable(reason_of):
+            reasons = {
+                value if isinstance(value, str) else None
+                for value in (reason_of(row.id) for row in rows)
+            }
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return False, None
+    return True, (reasons.pop() if len(reasons) == 1 else None)
+
+
+def sign_in_required_text(provider: str, reason: str | None, *, locale: str) -> str:
+    """The keyed "sign in again" sentence for ``provider``, rendered in ``locale``.
+
+    One rendering for the failover error (English: it is persisted and can reach
+    the model) and the session's one-shot notice (the user's active locale), so
+    the two cannot drift. ``reason`` selects the Google Workspace session-policy
+    wording, which is the only cause worth naming: it explains why a sign-in that
+    worked this morning stopped working with nothing revoked.
+    """
+    from local_operator.i18n.keys import wire_providers_reauth
+    from local_operator.i18n.messages import render
+    from local_operator.providers.login_catalog import picker_label
+    from local_operator.providers.oauth.callback_server import (
+        REAUTH_REASON_SESSION_POLICY,
+    )
+
+    # The short product name the login picker shows ("Vertex AI"), not the
+    # registry's long descriptive name, so the sentence reads naturally.
+    label = picker_label(provider, provider)
+    if reason == REAUTH_REASON_SESSION_POLICY:
+        message = wire_providers_reauth.session_policy(label=label, provider=provider)
+    else:
+        message = wire_providers_reauth.sign_in_expired(label=label, provider=provider)
+    return render(message.code, dict(message.params), locale=locale)
+
+
+def _dead_grant_error(auth: Any, provider: str) -> ProviderError | None:
+    """An ``auth``-kind refusal when every row is a grant the IdP refused for good.
+
+    WHY: without this a Google Vertex sign-in that its Workspace's Google Cloud
+    session control had forced to expire (``invalid_grant`` / ``invalid_rapt``)
+    resolved to no bearer and fell through to the generic sentence below, which
+    is ``kind="quota"`` -- so the fallback notice read ``provider failure:
+    quota`` and sent the user to wait out a limit that did not exist, when the
+    only remedy is a fresh sign-in. The tombstone is the store's own recorded
+    verdict, so this is a statement of fact, not a guess from wording.
+
+    Retryable and pre-wire exactly like the quota sentence it replaces, so the
+    walk's behaviour (advance to the fallback, revisit on the loop-back sweep,
+    which finds a sign-in made in another window meanwhile) is unchanged; only
+    the classification and the words differ.
+    """
+    dead, reason = dead_grant_reason(auth, provider)
+    if not dead:
+        return None
+    return _mark_prewire_refusal(
+        ProviderError(
+            None,
+            sign_in_required_text(provider, reason, locale="en"),
+            retryable=True,
+            kind="auth",
             request_sent=False,
         )
     )

@@ -36,10 +36,12 @@ import httpx
 from local_operator.harness.types import AbortSignal
 from local_operator.providers.oauth.callback_server import (
     CallbackFlowOptions,
+    ConfigurationError,
     LoginCallbacks,
     LoginCancelledError,
     LoginError,
     OAuthCallbackFlow,
+    RefreshNotSentError,
     maybe_await,
     raise_for_refresh_failure,
     report_safely,
@@ -152,14 +154,103 @@ def validate_location(location: str) -> str:
     return value
 
 
+#: Env / secret-store names for an organisation's OWN OAuth desktop client.
+CLIENT_ID_ENV = "GOOGLE_VERTEX_OAUTH_CLIENT_ID"
+CLIENT_SECRET_ENV = "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET"
+#: ``config.yml`` home of the client id: ``values.providers.google-vertex``.
+_CONFIG_PROVIDER_KEY = "google-vertex"
+_CONFIG_CLIENT_ID_KEY = "oauth_client_id"
+
+
+def _configured_client_id() -> str | None:
+    """``providers.google-vertex.oauth_client_id`` from ``config.yml``, if set.
+
+    Read straight from the file (``read_config_values`` never writes or moves
+    anything) rather than through a registered setting: the id is not secret,
+    and an org that registers its own client sets it once by hand. Any read
+    problem answers "not set" so a damaged config can never block a sign-in
+    that the default client would have served.
+    """
+    try:
+        from local_operator.config import read_config_values
+        from local_operator.paths import config_dir
+
+        values = read_config_values(config_dir()) or {}
+    except Exception:  # noqa: BLE001 - config is optional here; fall through
+        return None
+    providers = values.get("providers")
+    section = providers.get(_CONFIG_PROVIDER_KEY) if isinstance(providers, dict) else None
+    value = section.get(_CONFIG_CLIENT_ID_KEY) if isinstance(section, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _stored_value(env_key: str) -> str | None:
+    """A provider-class secret-store row (``lop credential update <NAME>``)."""
+    try:
+        from local_operator.providers.registry import provider_secret_value
+
+        value = provider_secret_value(env_key)
+    except Exception:  # noqa: BLE001 - the store is optional; fall through
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _client_id() -> str:
-    return (os.environ.get("GOOGLE_VERTEX_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
+    """The OAuth client this machine signs in with.
 
+    WHY an override exists at all: Google Cloud session control (Workspace
+    admin console; https://support.google.com/a/answer/9368756) forces every
+    app holding a Cloud scope to re-authenticate every 1-24 h, and its only
+    per-app escape is marking the app's OAuth client Trusted and ticking
+    "Exempt Trusted apps". gcloud's public client is shared with gcloud itself,
+    so exempting it exempts gcloud for the whole org; an org that wants lop
+    exempt without that registers its own desktop client and points lop at it.
 
-def _client_secret() -> str:
+    Precedence: the environment (one shell), then the secret store, then
+    ``config.yml``, then gcloud's public client.
+    """
     return (
-        os.environ.get("GOOGLE_VERTEX_OAUTH_CLIENT_SECRET") or ""
-    ).strip() or DEFAULT_CLIENT_SECRET
+        (os.environ.get(CLIENT_ID_ENV) or "").strip()
+        or _stored_value(CLIENT_ID_ENV)
+        or _configured_client_id()
+        or DEFAULT_CLIENT_ID
+    )
+
+
+def _client_secret(client_id: str | None = None) -> str:
+    """The secret paired with ``client_id`` (default: the active client).
+
+    gcloud's public secret is only ever sent with gcloud's public client id: a
+    custom desktop client has its own secret, and pairing it with gcloud's
+    would fail at the token endpoint as ``invalid_client``, which this store
+    reads as a dead grant and answers with a sign-in that can never work. So a
+    custom id without its secret is refused up front, before any request.
+    """
+    client_id = client_id or _client_id()
+    explicit = (os.environ.get(CLIENT_SECRET_ENV) or "").strip() or _stored_value(CLIENT_SECRET_ENV)
+    if explicit:
+        return explicit
+    if client_id == DEFAULT_CLIENT_ID:
+        return DEFAULT_CLIENT_SECRET
+    raise ConfigurationError(
+        f"Google Vertex AI is set to use OAuth client {client_id!r}, but no client "
+        f"secret is configured for it. Store it with `lop credential update "
+        f"{CLIENT_SECRET_ENV}` (or export {CLIENT_SECRET_ENV}), or remove the custom "
+        "client id to use the Google Cloud SDK client."
+    )
+
+
+def _refresh_token_url() -> str:
+    """Where an OAuth refresh is POSTed: Google's endpoint unless pinned by env.
+
+    ``GOOGLE_VERTEX_TOKEN_URI`` already names an operator-trusted token endpoint
+    for service-account keys (private Google endpoints, test doubles). Honouring
+    it here too is what lets a local stub answer a refresh, e.g. to reproduce a
+    Workspace session-control refusal end to end. Only the environment can set
+    it -- never a stored credential -- so a forged payload cannot redirect the
+    refresh token to another host.
+    """
+    return (os.environ.get("GOOGLE_VERTEX_TOKEN_URI") or "").strip() or TOKEN_URL
 
 
 def _configured_project() -> str | None:
@@ -514,6 +605,12 @@ class VertexOAuthFlow(OAuthCallbackFlow):
             "project_id": project_id,
             "location": location,
         }
+        client_id = _client_id()
+        if client_id != DEFAULT_CLIENT_ID:
+            # A refresh token is bound to the client that minted it, so the
+            # refresh must present the SAME client even if the configured one
+            # changes later. Recorded only when custom: absent means gcloud's.
+            credential["client_id"] = client_id
         if isinstance(refresh_token, str) and refresh_token:
             credential["refresh"] = refresh_token
         return credential
@@ -716,17 +813,30 @@ async def refresh_vertex_token(
     if not isinstance(refresh_token, str) or not refresh_token:
         raise LoginError("Google Vertex AI credential has no refresh token.")
 
+    stored_client = credential.get("client_id")
+    client_id = (
+        stored_client.strip()
+        if isinstance(stored_client, str) and stored_client.strip()
+        else DEFAULT_CLIENT_ID
+    )
+    try:
+        client_secret = _client_secret(client_id)
+    except ConfigurationError as exc:
+        # Nothing has been sent: say so, so the store does not hold the token
+        # in doubt for a request that never left this machine.
+        raise RefreshNotSentError(str(exc)) from exc
     form = {
         "grant_type": "refresh_token",
-        "client_id": _client_id(),
-        "client_secret": _client_secret(),
+        "client_id": client_id,
+        "client_secret": client_secret,
         "refresh_token": refresh_token,
     }
+    token_url = _refresh_token_url()
     if http_client is not None:
-        response = await http_client.post(TOKEN_URL, data=form)
+        response = await http_client.post(token_url, data=form)
     else:
         async with httpx.AsyncClient(timeout=30.0) as http:
-            response = await http.post(TOKEN_URL, data=form)
+            response = await http.post(token_url, data=form)
 
     if response.status_code != 200:
         raise_for_refresh_failure("Google Vertex AI", response.status_code, response.text)

@@ -1261,6 +1261,19 @@ def format_retained_radient_logins(
     ]
 
 
+def _sign_in_required_state(reason: str | None) -> str:
+    """The ``login-status`` state word for a dead grant, in the user's language."""
+    from local_operator.i18n.keys import wire_providers_reauth as k
+    from local_operator.i18n.messages import render_resolved
+    from local_operator.providers.oauth.callback_server import (
+        REAUTH_REASON_SESSION_POLICY,
+    )
+
+    if reason == REAUTH_REASON_SESSION_POLICY:
+        return render_resolved(k.status_session_policy())
+    return render_resolved(k.status_sign_in_required())
+
+
 def format_logins(
     auth_store: "AuthStore",
     config_dir: "Path | None" = None,
@@ -1302,6 +1315,14 @@ def format_logins(
             if row.credential_type == "oauth":
                 expires = row.data.get("expires")
                 state = "expired" if expires is not None and int(expires) < now_ms else "active"
+                # "expired" is the ACCESS token's clock, which every OAuth row
+                # passes hourly and the next refresh fixes. A grant the IdP
+                # refused for good (tombstoned by the refresh path) is a
+                # different state that only a sign-in fixes, and Google Cloud
+                # session control is named because it explains why a working
+                # Vertex sign-in died with nothing revoked.
+                if auth_store.grant_is_dead(row.id):
+                    state = _sign_in_required_state(auth_store.grant_dead_reason(row.id))
                 detail = f"oauth, {state}"
             else:
                 source = row.data.get("source") or "stored"

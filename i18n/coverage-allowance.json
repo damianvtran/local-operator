@@ -1,5 +1,97 @@
 {
   "schema": 1,
   "note": "Shrink-only coverage allowance. Each entry records the exact, sorted, duplicate-free set of English key IDs that its (locale, namespace) does not yet carry, plus the owner and payoff date for that debt. tests/unit/i18n/test_language_manifest.py fails on any missing key NOT listed here — including a new key added to an already-incomplete namespace — and on any listed key that is no longer missing, so this file can only shrink. Adding an entry is a reviewed decision: it must name an owner and a payoff (ticket reference or ISO date) and reviewers must reject growth not tied to a real plan.",
-  "pairs": []
+  "pairs": [
+    {
+      "locale": "es",
+      "namespace": "wire.providers.reauth",
+      "reason": "New Google Vertex sign-in-required copy (fix/vertex-reauth). Kept English-only so no locale carries an unaudited namespace; implementer drafts are the i18n-translator's input, and an independent i18n-auditor must pass them before merge.",
+      "owner": "lopdev fix/vertex-reauth lane",
+      "payoff": "2026-11-27",
+      "missing": [
+        "wire.providers.reauth.session_policy",
+        "wire.providers.reauth.sign_in_expired",
+        "wire.providers.reauth.status_session_policy",
+        "wire.providers.reauth.status_sign_in_required"
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.providers.reauth",
+      "reason": "New Google Vertex sign-in-required copy (fix/vertex-reauth). Kept English-only so no locale carries an unaudited namespace; implementer drafts are the i18n-translator's input, and an independent i18n-auditor must pass them before merge.",
+      "owner": "lopdev fix/vertex-reauth lane",
+      "payoff": "2026-11-27",
+      "missing": [
+        "wire.providers.reauth.session_policy",
+        "wire.providers.reauth.sign_in_expired",
+        "wire.providers.reauth.status_session_policy",
+        "wire.providers.reauth.status_sign_in_required"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.providers.reauth",
+      "reason": "New Google Vertex sign-in-required copy (fix/vertex-reauth). Kept English-only so no locale carries an unaudited namespace; implementer drafts are the i18n-translator's input, and an independent i18n-auditor must pass them before merge.",
+      "owner": "lopdev fix/vertex-reauth lane",
+      "payoff": "2026-11-27",
+      "missing": [
+        "wire.providers.reauth.session_policy",
+        "wire.providers.reauth.sign_in_expired",
+        "wire.providers.reauth.status_session_policy",
+        "wire.providers.reauth.status_sign_in_required"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.providers.reauth",
+      "reason": "New Google Vertex sign-in-required copy (fix/vertex-reauth). Kept English-only so no locale carries an unaudited namespace; implementer drafts are the i18n-translator's input, and an independent i18n-auditor must pass them before merge.",
+      "owner": "lopdev fix/vertex-reauth lane",
+      "payoff": "2026-11-27",
+      "missing": [
+        "wire.providers.reauth.session_policy",
+        "wire.providers.reauth.sign_in_expired",
+        "wire.providers.reauth.status_session_policy",
+        "wire.providers.reauth.status_sign_in_required"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.providers.reauth",
+      "reason": "New Google Vertex sign-in-required copy (fix/vertex-reauth). Kept English-only so no locale carries an unaudited namespace; implementer drafts are the i18n-translator's input, and an independent i18n-auditor must pass them before merge.",
+      "owner": "lopdev fix/vertex-reauth lane",
+      "payoff": "2026-11-27",
+      "missing": [
+        "wire.providers.reauth.session_policy",
+        "wire.providers.reauth.sign_in_expired",
+        "wire.providers.reauth.status_session_policy",
+        "wire.providers.reauth.status_sign_in_required"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.providers.reauth",
+      "reason": "New Google Vertex sign-in-required copy (fix/vertex-reauth). Kept English-only so no locale carries an unaudited namespace; implementer drafts are the i18n-translator's input, and an independent i18n-auditor must pass them before merge.",
+      "owner": "lopdev fix/vertex-reauth lane",
+      "payoff": "2026-11-27",
+      "missing": [
+        "wire.providers.reauth.session_policy",
+        "wire.providers.reauth.sign_in_expired",
+        "wire.providers.reauth.status_session_policy",
+        "wire.providers.reauth.status_sign_in_required"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.providers.reauth",
+      "reason": "New Google Vertex sign-in-required copy (fix/vertex-reauth). Kept English-only so no locale carries an unaudited namespace; implementer drafts are the i18n-translator's input, and an independent i18n-auditor must pass them before merge.",
+      "owner": "lopdev fix/vertex-reauth lane",
+      "payoff": "2026-11-27",
+      "missing": [
+        "wire.providers.reauth.session_policy",
+        "wire.providers.reauth.sign_in_expired",
+        "wire.providers.reauth.status_session_policy",
+        "wire.providers.reauth.status_sign_in_required"
+      ]
+    }
+  ]
 }
