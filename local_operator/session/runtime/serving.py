@@ -3787,9 +3787,8 @@ class ServingSessionHandle(SessionHandle):
         Gates opened AFTER this answer immediately too, without parking: the
         model's next step after a denial is often another gated call, and a
         fresh card would hold the drain open exactly as the first one did.
-        One-way for the life of the process — it is only called on an exit
-        that has already been committed to — with ONE exception,
-        :meth:`reopen_gates_after_yield`. Returns how many parked gates were
+        One-way except for :meth:`reopen_gates_after_yield` — it is only called
+        on an exit that has already been committed to. Returns how many parked gates were
         settled, for the log.
         """
         self._gates_closed_for_exit = True

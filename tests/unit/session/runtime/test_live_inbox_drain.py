@@ -83,6 +83,65 @@ async def test_a_spooled_copy_of_an_admitted_prompt_is_not_run_twice(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_the_signal_yield_never_consumes_a_row_an_in_flight_prompt_still_reserves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2 on #4355, Q3: the yield's drain must not eat a reserved row.
+
+    The race: a socket ``prompt`` arriving during an unattended signal drain is
+    inside ``_spool_for_successor`` — its inbox row is written, its reservation
+    is not yet released — when the yield releases the latch and drains. The
+    yield's pass used to skip the reservation guard (it was live-only), so
+    ``prompt`` answered "already admitted", the row counted as delivered and was
+    deleted, and the operator's prompt never ran anywhere (1 in 13 QA runs).
+    Held deterministically here: the reservation is taken by hand, exactly as
+    the in-flight admission holds it, and released as the spool's return does.
+    """
+    directory = tmp_path / "sess"
+    stream = ScriptedStream([text_turn(f"reply {i}") for i in range(4)])
+    session = build_session(directory, stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    stop = asyncio.Event()
+    watcher: asyncio.Future[None] | None = None
+    try:
+        assert handle.begin_drain("signal", "SIGTERM"), "the signal drain latched"
+        # The in-flight socket prompt: reserved, and its spool row already written.
+        assert handle._command_reservations.reserve("q3-1", kind="prompt")
+        append_inbox(directory, _owner_row("are you there?", "q3-1"))
+
+        assert await asyncio.wait_for(child_mod._yield_signal_drain_to_owner(handle, "SIGTERM"), 10)
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert [r.command_id for r in peek_inbox(directory)] == [
+            "q3-1"
+        ], "the yield consumed a row whose prompt it did not run"
+        assert not _landed(directory, "q3-1"), "nothing ran it yet either"
+
+        # The spool returns: the leaving-path admission drops its reservation
+        # (``serving.prompt`` rejects it once ``_spool_for_successor`` lands).
+        handle._command_reservations.reject("q3-1")
+        # The live watcher (which resumes once ``end_drain`` cleared the cause)
+        # is what retries the row; a short poll keeps the test fast.
+        monkeypatch.setattr(child_mod, "LIVE_INBOX_POLL_S", 0.05)
+        watcher = asyncio.ensure_future(child_mod._watch_live_inbox(handle, stop))
+
+        async def _ran() -> None:
+            while not _landed(directory, "q3-1"):
+                await asyncio.sleep(0.02)
+
+        await asyncio.wait_for(_ran(), 10)
+        await asyncio.wait_for(_idle(session, handle), 10)
+        # Let a few more ticks pass: a second delivery would show up as a second row.
+        await asyncio.sleep(0.3)
+        assert peek_inbox(directory) == [], "the row is consumed once it has run"
+        assert _user_rows(directory, "are you there?") == 1, "ran exactly once"
+    finally:
+        stop.set()
+        if watcher is not None:
+            await asyncio.wait_for(watcher, 5)
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_queued_prompt_is_held_in_the_inbox_until_the_turn_ends(tmp_path: Path) -> None:
     """LIVE drain: a queued PROMPT stays durable in the inbox while a turn runs.
 

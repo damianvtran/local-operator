@@ -5035,12 +5035,17 @@ async def _drain_for_signal(
         at = time.monotonic()
         verdict = bound.sample(handle, at)
         if verdict == _SignalDrainBound.REAP and yielded and _owner_turn_live(handle):
-            # The operator's own turn, admitted by the yield, is never cut by the
-            # silence bound: a long parent-only provider request moves neither
-            # progress signal (the bound's documented blind spot), and before the
-            # yield this prompt would have run uncut on the successor (agent
-            # review round 1 on #4355, R2). Mirrors ``_abandon_move`` keeping
-            # serving; the bound applies again once the turn ends.
+            # After the yield, ANY active conversational turn holds off the
+            # silence bound (``_owner_turn_live`` reads
+            # ``is_conversationally_active``, so a wake- or peer-driven turn
+            # counts too, not only the operator's prompt). The case it exists
+            # for is the operator's turn: a long parent-only provider request
+            # moves neither progress signal (the bound's documented blind spot),
+            # and before the yield this prompt would have run uncut on the
+            # successor (agent review round 1 on #4355, R2). The width is
+            # bounded: every turn ends, and ``_drain_for`` still retires at the
+            # first idle instant. Mirrors ``_abandon_move`` keeping serving; the
+            # bound applies again once no turn is active.
             verdict = _SignalDrainBound.WAIT
         if verdict == _SignalDrainBound.REAP:
             break
@@ -5281,7 +5286,11 @@ async def _drain_inbox_into_claimed(handle: object, batch, *, live: bool = False
     hold_owner_prompts = False
     for line in lines:
         owner_row = getattr(line, "source", "") == SOURCE_USER
-        if live and owner_row and hold_owner_prompts and getattr(line, "mode", "") != "steer":
+        # Not live-only: a non-live pass on a LISTENING runtime (the signal
+        # yield, an update's drain-back) can now hold a row back too (see the
+        # reservation guard in ``_run_owner_prompt``), and a row behind it must
+        # not overtake it. A boot pass never sets the flag, so it is unchanged.
+        if owner_row and hold_owner_prompts and getattr(line, "mode", "") != "steer":
             continue
         try:
             if getattr(line, "custom_type", "") == "profile_save_result":
@@ -5501,7 +5510,7 @@ async def _run_owner_prompt(
     if command_id and callable(admitted) and admitted(command_id):
         logger.info("spooled prompt already in the transcript; not running it twice")
         return
-    if live and _reserved_by_owner(handle, command_id):
+    if _reserved_by_owner(handle, command_id):
         # THE ROW IS INSURANCE, NOT A MESSAGE TO DELIVER (PR #3447 review B1).
         # ``ServingSessionHandle._admit_steer`` spools every accepted steer BEFORE
         # acknowledging it, and that row is the only durable copy until
@@ -5513,6 +5522,21 @@ async def _run_owner_prompt(
         # row is left; whoever makes it durable removes it (``remove_owner_row``),
         # and a successor's boot drain dedupes it by the transcript index if that
         # removal is lost.
+        #
+        # EVERY PASS, NOT ONLY THE LIVE ONE (QA round 2 on #4355, Q3). Three
+        # non-live passes run while the control socket listens: the signal
+        # drain's yield (``_yield_signal_drain_to_owner``) and an update's two
+        # re-admissions. A socket ``prompt`` that is mid-``_spool_for_successor``
+        # has already appended this row but still holds its reservation (it is
+        # released only once the append returns), so ``prompt`` below answered
+        # "already admitted", the row counted as delivered and the commit
+        # deleted it — while the socket prompt went on to tell the operator
+        # "queued for the next runtime". Measured: 1 lost prompt in 13 QA runs.
+        # Left here instead, the live watcher (``_watch_live_inbox``, which
+        # resumes once the drain/update latch is released) runs it on its next
+        # tick, after the spool has released the reservation — exactly once,
+        # because the durable index dedupes any socket copy. A boot pass holds
+        # no reservations (the socket is not listening yet), so it is unchanged.
         raise _LeaveQueued()
     if live and getattr(line, "mode", "") != "steer" and _turn_in_flight(handle):
         # Held back until the turn ends; see :func:`_turn_in_flight`.
