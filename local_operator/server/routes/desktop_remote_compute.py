@@ -32,6 +32,13 @@ drops ``run_token`` and ``tunnel`` from every run body this module answers with.
 The client binds neither, so there is nothing here to remember to redact; the
 filter is defence in depth.
 
+ONE STATUS VOCABULARY, AND IT IS PUBLISHED HERE. The server ends every run as
+``status: "stopped"`` plus an ``outcome``, while the desktop's renderer settles on
+a STATUS. :func:`desktop_status` is the one join (see
+:data:`STOPPED_OUTCOME_TO_STATUS`), applied to every run row this module answers
+with — and deliberately not in the client, whose ``--remote-status`` must keep
+printing the server's own words.
+
 THE FLAG IS READ PER REQUEST, from the app's config root. ``is_enabled`` reads
 ``config.yml`` on every call precisely so a live toggle reaches a running daemon.
 WITH THE FLAG OFF, NOTHING ABOUT THE USER'S WORK LEAVES THE DEVICE — for the two
@@ -55,8 +62,9 @@ import asyncio
 import contextlib
 import functools
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -75,9 +83,9 @@ from local_operator.remote_compute.api import (
     repository_for,
 )
 from local_operator.remote_compute.client import (
+    TERMINAL_RUN_STATUSES,
     RemoteComputeClient,
     check_idempotency_key,
-    is_terminal,
     new_idempotency_key,
     without_secrets,
 )
@@ -139,6 +147,56 @@ TIER_NOT_AVAILABLE_MESSAGE = (
 #: build cannot describe.
 TIER_CLOUD_RUN = "cloud_run"
 TIER_DEDICATED = "dedicated"
+
+#: The server's ``outcome`` on a stopped run → the status this plane publishes.
+#:
+#: THE SERVER SPELLS EVERY ENDING THE SAME WAY: ``status: "stopped"`` plus an
+#: ``outcome`` that says which one. The desktop's renderer branches on a STATUS
+#: (``remote-compute-types.ts``'s ``remoteRunPhase``), so a raw ``stopped`` row
+#: settled on nothing: the card kept counting the clock, kept offering Cancel, kept
+#: painting the hold instead of the charge, and never drew the artifact controls
+#: while the deployment had finished the run minutes earlier (live end-to-end
+#: round 2, Q-1).
+#:
+#: THE SECOND JOIN between the server's vocabulary and this plane's, and it lives
+#: HERE rather than in the client for the reason the first one is a join at all:
+#: ``remote_compute.tiers.SERVER_TIER_TO_TIER`` translates the tier word at the
+#: surface that publishes it, and the CLI's ``lop exec --remote-status`` must keep
+#: printing the server's OWN status and outcome. A client-level rewrite would make
+#: that command report a ``succeeded`` the server never wrote.
+#:
+#: ``expired`` IS DELIBERATELY ABSENT. The contract's fourth ending keeps the row
+#: ``stopped`` and travels beside it as ``outcome: "expired"``: this plane has no
+#: settled word the renderer paints for it, and folding it into ``failed`` would
+#: report an ending the server did not name. An outcome outside the table does the
+#: same, which is also how a status the contract grows stays readable — ``stopped``,
+#: with its own word beside it.
+#:
+#: IMMUTABLE, for the reason the tier table gives: a mutable module-level table is
+#: one ``[...] = ...`` away from a second vocabulary, and nothing fails until two
+#: surfaces describe the same run differently.
+STOPPED_OUTCOME_TO_STATUS: Mapping[str, str] = MappingProxyType(
+    {
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }
+)
+
+#: The published statuses a run has SETTLED at: the client's own terminal words,
+#: plus the three outcomes :data:`STOPPED_OUTCOME_TO_STATUS` promotes out of
+#: ``stopped``.
+#:
+#: DERIVED, never restated, and that is the point: once a finished run is published
+#: as ``succeeded``, the client's terminal set no longer matches it — so a terminal
+#: test left on the raw word would list finished work as live in ``active``. The
+#: set is built from the two tables above so a third outcome cannot be added without
+#: the summary read following. ``stopped`` and ``deleted`` stay settled: an
+#: outcome-less or ``expired`` ending keeps ``stopped``, and a deleted record is
+#: gone.
+SETTLED_STATUSES: frozenset[str] = TERMINAL_RUN_STATUSES | frozenset(
+    STOPPED_OUTCOME_TO_STATUS.values()
+)
 
 #: The longest prompt this surface accepts, in characters.
 #:
@@ -580,9 +638,7 @@ async def list_runs(
             except RemoteComputeError as failure:
                 logger.info("remote compute: runs listing fell back to records (%s)", failure)
                 server_state = SERVER_UNAVAILABLE
-    merged: list[dict[str, Any]] = [
-        {**without_secrets(run), "source": "server"} for run in server_runs
-    ]
+    merged: list[dict[str, Any]] = [_published_run(run, source="server") for run in server_runs]
     seen = {run.get("id") for run in server_runs}
     for record in records.load(root):
         if record.run_id in seen:
@@ -626,7 +682,7 @@ async def get_run(
             if record is None:
                 raise
             return {"run": _record_row(record)}
-    return {"run": {**without_secrets(run), "source": "server"}}
+    return {"run": _published_run(run, source="server")}
 
 
 # -- the writes --------------------------------------------------------------
@@ -720,7 +776,7 @@ async def create_run(
                 size=spec.size,
             ),
         )
-    run = without_secrets(submitted.run)
+    run = _published_run(submitted.run)
     logger.info(
         "remote-compute run submitted run_id=%s idempotency_key=%s replayed=%s",
         run.get("id"),
@@ -757,7 +813,10 @@ async def cancel_run(
     credential_id = _require_pin(await _pin(auth))
     async with _runs(_config_dir(request, manager), credential_id) as runs:
         run = await runs.cancel_run(identifier)
-    return {"run": without_secrets(run) or None}
+    # A BODY THE SERVER OMITTED STAYS NULL: ``_published_run`` stamps ``source``, so
+    # an empty answer has to be tested for BEFORE it is shaped or it would come back
+    # a row claiming a run this response never carried.
+    return {"run": _published_run(run) if run else None}
 
 
 @router.delete("/v1/desktop/remote-compute/runs/{identifier}")
@@ -777,7 +836,7 @@ async def delete_run(
     credential_id = _require_pin(await _pin(auth))
     async with _runs(_config_dir(request, manager), credential_id) as runs:
         run = await runs.delete_run(identifier)
-    return {"run": without_secrets(run) or None}
+    return {"run": _published_run(run) if run else None}
 
 
 # -- the pieces the routes read ----------------------------------------------
@@ -917,6 +976,56 @@ def _recorded(root: Path, identifier: str) -> records.RunRecord | None:
     return next((row for row in records.load(root) if row.run_id == identifier), None)
 
 
+def desktop_status(payload: Mapping[str, Any]) -> str | None:
+    """The status this plane publishes for a server run row, or ``None``.
+
+    THE ONE NORMALISATION. Every run row this module answers with — the create
+    receipt, the merged listing, the summary's ``active``, the detail read and the
+    cancel/delete echo — passes through :func:`_published_run`, which calls this.
+
+    A ``stopped`` row TAKES ITS OUTCOME'S WORD when the outcome is one
+    :data:`STOPPED_OUTCOME_TO_STATUS` names. Every other status is published AS THE
+    SERVER SENT IT: in flight, ``error`` (the server retries those), ``stopped``
+    with no outcome or an outcome this build has no word for, and a status the
+    contract grew. A status this build does not recognise is reported, never
+    mapped — the same rule ``client.run_outcome`` keeps for outcomes.
+
+    ``None`` when the row carries no readable status. Not ``"unknown"``: this plane
+    has learned not to invent a status, and the caller then leaves the field exactly
+    as the server did.
+    """
+    status = payload.get("status")
+    if not isinstance(status, str) or not status:
+        return None
+    if status != "stopped":
+        return status
+    outcome = payload.get("outcome")
+    if not isinstance(outcome, str):
+        return status
+    return STOPPED_OUTCOME_TO_STATUS.get(outcome, status)
+
+
+def _published_run(run: dict[str, Any], *, source: str | None = None) -> dict[str, Any]:
+    """One server run as this plane publishes it.
+
+    ``without_secrets`` is the filter shared with the CLI; ``desktop_status`` is the
+    status join. ``outcome`` travels UNTOUCHED beside the published status, because a
+    renderer settles a ``stopped`` row this build has no word for on the raw word,
+    and because the ending is the server's fact rather than this plane's summary of
+    it.
+
+    ``source`` is written only when a caller names it: ``active`` never carried one,
+    and a summary row that grew a field would be a shape change nothing asked for.
+    """
+    row = without_secrets(run)
+    if source is not None:
+        row["source"] = source
+    status = desktop_status(run)
+    if status is not None:
+        row["status"] = status
+    return row
+
+
 def _record_row(record: records.RunRecord) -> dict[str, Any]:
     """One recorded run as a row of this surface's vocabulary.
 
@@ -926,9 +1035,18 @@ def _record_row(record: records.RunRecord) -> dict[str, Any]:
     made every renderer try ``id or run_id`` on every row — and a row that failed
     both rendered as a nameless run with no error. Nothing reads ``run_id`` here:
     the CLI reads the record's own JSON, not this route's rows.
+
+    THE STATUS GOES THROUGH :func:`desktop_status` TOO, so the listing has ONE join
+    and not one per half. It is identity for a record today — the record stores the
+    server's ``status`` and no ``outcome`` at all, so a stopped record stays
+    ``stopped`` — and that is the honest answer rather than a guess: this plane must
+    not claim a result the server did not state.
     """
     row = {**record.to_json(), "source": "record"}
     row["id"] = row.pop("run_id")
+    status = desktop_status(row)
+    if status is not None:
+        row["status"] = status
     return row
 
 
@@ -1019,6 +1137,13 @@ def _capacity_row(row: dict[str, Any]) -> dict[str, Any]:
 async def _active_runs(root: Path, credential_id: int) -> list[dict[str, Any]]:
     """The server's runs that have not finished.
 
+    SETTLED IS TESTED ON THE PUBLISHED STATUS (``SETTLED_STATUSES``), not on the
+    server's word: once a finished run is published as ``succeeded``, the client's
+    own terminal set no longer matches it, and a check left on ``stopped`` would list
+    work that ended as though it were still in flight. Before this join, ``stopped``
+    was the only word a finished run carried, and a stopped row was already excluded
+    here; the set keeps that.
+
     A ROW THIS BUILD CANNOT READ IS KEPT: a run without a status is not evidence that
     it stopped, and hiding it would make work in flight vanish from the dropdown
     exactly when the contract drifts.
@@ -1031,12 +1156,9 @@ async def _active_runs(root: Path, credential_id: int) -> list[dict[str, Any]]:
             return []
     active: list[dict[str, Any]] = []
     for run in listed:
-        try:
-            finished = is_terminal(run)
-        except RemoteComputeError:
-            finished = False
-        if not finished:
-            active.append(without_secrets(run))
+        if desktop_status(run) in SETTLED_STATUSES:
+            continue
+        active.append(_published_run(run))
     return active
 
 

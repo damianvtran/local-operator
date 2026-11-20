@@ -13,6 +13,12 @@ WHAT IS PINNED HERE, one test per property the GUI's brief depends on:
   before any request;
 * **one identifier vocabulary** — every row of ``runs[]``, and both arms of the
   detail read, carry ``id`` and not the record's ``run_id``;
+* **a finished run is published as a STATUS** — the server ends every run as
+  ``stopped`` plus an ``outcome``, so ``succeeded``/``failed``/``cancelled`` become
+  the status on every row this plane answers with (the create receipt, the listing,
+  ``active``, the detail read, the cancel and delete echoes) while ``outcome``
+  travels beside it; a ``stopped`` row with no outcome, or with an ending this build
+  has no word for, keeps ``stopped``, and ``active`` lists nothing that has settled;
 * **the account states are the plane's own three** — ``signed-out`` is a real
   empty ``AuthStore``, ``expired`` is ``desktop_radient``'s own
   ``_credential_refusal(grant_invalid)``, and a transient unrefreshable row still
@@ -648,6 +654,213 @@ async def test_a_run_row_is_published_with_this_builds_tier_id(api: Api) -> None
 
     assert listing["runs"][0]["tier"] == "cloud_run"
     assert detail["run"]["tier"] == "cloud_run"
+
+
+# ---------------------------------------------------------------------------
+# The status join: the server's ``stopped`` + outcome, published as a status
+# ---------------------------------------------------------------------------
+
+#: ``(case, the server's row overrides, the status this plane must publish)``.
+#:
+#: THE THREE TERMINAL SHAPES ARE THE LIVE DEPLOYMENT'S, read off a real
+#: non-production server by the end-to-end round that found this defect: every
+#: ending arrives as ``status: "stopped"`` plus an ``outcome``. Every value here is
+#: SYNTHETIC — no cluster, task, host, account or path of the real deployment — and
+#: the three shapes beside them are the edges the join must not guess on: a stopped
+#: row with no outcome, one whose ending this build has no word for, and a run still
+#: in flight.
+_PUBLISHED_STATUS_CASES: tuple[tuple[str, dict[str, Any], str], ...] = (
+    (
+        "succeeded",
+        {
+            "status": "stopped",
+            "desired": "running",
+            "outcome": "succeeded",
+            "stop_reason": "Essential container in task exited",
+            "metered_seconds": 64,
+            "charged_usd": 0,
+            "hold_usd": 0,
+        },
+        "succeeded",
+    ),
+    (
+        "cancelled",
+        {
+            "status": "stopped",
+            "desired": "stopped",
+            "outcome": "cancelled",
+            "stop_reason": "remote-compute cancel",
+            "metered_seconds": 0,
+            "charged_usd": 0,
+            "hold_usd": 0,
+        },
+        "cancelled",
+    ),
+    ("failed", {"status": "stopped", "outcome": "failed"}, "failed"),
+    ("stopped with no outcome", {"status": "stopped"}, "stopped"),
+    (
+        "stopped with an ending this build has no word for",
+        {"status": "stopped", "outcome": "expired"},
+        "stopped",
+    ),
+    ("in flight", {"status": "pending", "desired": "running"}, "pending"),
+)
+
+#: The same cases as pytest ids, so a failure names the shape rather than an index.
+_STATUS_CASE_IDS = [case for case, _row, _status in _PUBLISHED_STATUS_CASES]
+
+
+def _shaped_rows() -> list[dict[str, Any]]:
+    """One page holding every shape, each with its own id."""
+    return [
+        _run(run_id=f"run-{index}", **row)
+        for index, (_case, row, _status) in enumerate(_PUBLISHED_STATUS_CASES)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case, row, published", _PUBLISHED_STATUS_CASES, ids=_STATUS_CASE_IDS)
+async def test_a_finished_run_is_published_under_the_status_its_outcome_names(
+    api: Api, case: str, row: dict[str, Any], published: str
+) -> None:
+    """The server's ``stopped`` + outcome, published as the status a renderer reads.
+
+    Q-1: every finished run reached the GUI as ``stopped``, which its phase map does
+    not know, so the card kept counting the clock, kept offering Cancel, painted the
+    hold instead of the charge and never drew the artifact controls — while the
+    deployment had finished the run minutes earlier. Rows this build has no word
+    for keep the server's own token rather than being mapped to a result it did not
+    report.
+    """
+    api.configure()
+    api.radient.add(
+        "GET", f"/v1/remote-compute/runs/{RUN_ID}", payload={"msg": "ok", "result": _run(**row)}
+    )
+
+    body = (await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}")).json()
+
+    assert body["run"]["status"] == published
+    # ``outcome`` travels with it untouched, so a row this plane cannot settle still
+    # carries the server's own word for how it ended.
+    assert body["run"].get("outcome") == row.get("outcome")
+
+
+@pytest.mark.asyncio
+async def test_the_listing_publishes_every_ending_through_the_same_join(api: Api) -> None:
+    """All five shapes in one page, plus a local record: one join, one vocabulary."""
+    api.configure()
+    _record(api, OTHER_RUN_ID, status="stopped")
+    api.radient.add(
+        "GET",
+        "/v1/remote-compute/runs",
+        payload={"msg": "ok", "result": {"runs": _shaped_rows(), "limit": 50, "offset": 0}},
+    )
+
+    body = (await api.client.get("/v1/desktop/remote-compute/runs")).json()
+
+    published = {run["id"]: run for run in body["runs"]}
+    for index, (_case, row, status) in enumerate(_PUBLISHED_STATUS_CASES):
+        assert published[f"run-{index}"]["status"] == status
+        assert published[f"run-{index}"].get("outcome") == row.get("outcome")
+        assert published[f"run-{index}"]["source"] == "server"
+    # A record stores a status and no outcome at all, so the join is identity for it:
+    # this plane must not claim an ending the server never stated.
+    assert published[OTHER_RUN_ID]["status"] == "stopped"
+    assert "outcome" not in published[OTHER_RUN_ID]
+
+
+@pytest.mark.asyncio
+async def test_the_summarys_active_list_drops_every_finished_run(api: Api) -> None:
+    """A settled run is not live work, whichever word settled it.
+
+    Every shape is on the server's page; only the run still in flight may be
+    reported as active. The two rows that keep ``stopped`` — no outcome, and an
+    ending this build has no word for — are excluded exactly as the raw word was
+    excluded before the join, so the summary cannot start listing finished work.
+    """
+    api.configure()
+    _network(api.root)
+    api.radient.add("GET", "/v1/remote-compute/capacity", payload=_capacity())
+    api.radient.add(
+        "GET",
+        "/v1/remote-compute/runs",
+        payload={"msg": "ok", "result": {"runs": _shaped_rows(), "limit": 50, "offset": 0}},
+    )
+
+    body = (await api.client.get("/v1/desktop/remote-compute")).json()
+
+    assert [run["id"] for run in body["active"]] == ["run-5"]
+    assert body["active"][0]["status"] == "pending"
+    # ``active`` never carried ``source`` and still does not: the join changed the
+    # status, not the shape of the summary.
+    assert "source" not in body["active"][0]
+
+
+@pytest.mark.asyncio
+async def test_the_create_receipt_publishes_a_run_that_already_ended(api: Api) -> None:
+    """A replay, or a run that ended within the wait, comes back finished."""
+    api.configure()
+    directory = _repository(api.root)
+    _network(api.root)
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=201,
+        payload={
+            "msg": "submitted",
+            "result": {
+                "run": _run(status="stopped", outcome="succeeded", metered_seconds=64),
+            },
+        },
+    )
+
+    answer = await api.client.post(
+        "/v1/desktop/remote-compute/runs",
+        json={
+            "directory": str(directory),
+            "prompt": "fix the failing test",
+            "tier": "cloud_run",
+            "size": "l",
+            "max_hours": 1,
+        },
+    )
+
+    assert answer.status_code == 201, answer.text
+    assert answer.json()["run"]["status"] == "succeeded"
+    assert answer.json()["run"]["outcome"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_the_cancel_and_delete_echoes_publish_the_ending(api: Api) -> None:
+    """Both writes answer the row they were given, and it gets the same join."""
+    api.configure()
+    _record(api, RUN_ID)
+    api.radient.add(
+        "POST",
+        f"/v1/remote-compute/runs/{RUN_ID}/cancel",
+        payload={
+            "msg": "cancelled",
+            "result": _run(
+                status="stopped",
+                outcome="cancelled",
+                stop_reason="remote-compute cancel",
+                metered_seconds=0,
+            ),
+        },
+    )
+    api.radient.add(
+        "DELETE",
+        f"/v1/remote-compute/runs/{RUN_ID}",
+        payload={"msg": "deleted", "result": _run(status="stopped", outcome="failed")},
+    )
+
+    cancelled = (await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/cancel")).json()
+    deleted = (await api.client.delete(f"/v1/desktop/remote-compute/runs/{RUN_ID}")).json()
+
+    assert cancelled["run"]["status"] == "cancelled"
+    assert cancelled["run"]["outcome"] == "cancelled"
+    assert deleted["run"]["status"] == "failed"
+    assert deleted["run"]["outcome"] == "failed"
 
 
 @pytest.mark.asyncio
