@@ -723,6 +723,20 @@ def _failure_text(failure: BaseException) -> str:
     this a content-free projection rather than a second decoder.
     """
 
+    footer = _refusal_footer(failure)
+    return f"{failure} {footer}" if footer else str(failure)
+
+
+def _refusal_footer(failure: BaseException) -> str:
+    """The closed ``[refusal code=… field=… rule=…]`` footer, or ``""``.
+
+    Split out of :func:`_failure_text` (unchanged output) so a caller that must
+    NOT quote ``str(failure)`` — the agent-file arm, whose exceptions can name
+    user paths — can still carry the coded half. Every rule documented on
+    :func:`_failure_text` about when a footer appears and what it may hold
+    lives here.
+    """
+
     field_rule: list[str] = []
     details = getattr(failure, "details", None)
     if isinstance(details, Mapping):
@@ -734,7 +748,7 @@ def _failure_text(failure: BaseException) -> str:
     # hub having answered at all (a 400 with only a code still diagnoses more
     # than the sentence alone). Neither means there is nothing to add.
     if not field_rule and getattr(failure, "http_status", None) is None:
-        return str(failure)
+        return ""
     pairs: list[str] = []
     code = _refusal_token(getattr(failure, "code", ""))
     if code:
@@ -777,8 +791,42 @@ def _failure_text(failure: BaseException) -> str:
                 if value and value == raw and " " not in value:
                     pairs.append(f"{label}={value}")  # i18n: ignore machine footer token
     if not pairs:
-        return str(failure)
-    return f"{failure} [refusal {' '.join(pairs)}]"
+        return ""
+    return f"[refusal {' '.join(pairs)}]"
+
+
+def _file_stage_failure_text(failure: BaseException) -> str:
+    """A failed agent-FILE stage: the fixed sentence plus the hub's coded footer.
+
+    WHY (incident 2026-11-19, two DM file sends from one endpoint): both
+    attempts read only "the file upload did not confirm; nothing was sent".
+    Whatever the hub answered — 415 ``file_class_disabled`` (a ``.tar`` is
+    class ``other``), 409 ``attachment_stage_conflict`` (identical bytes still
+    staged), 403 ``agent_not_permitted`` — was dropped here while the image
+    arm beside it already quoted :func:`_failure_text`. Each of those needs a
+    different human decision (tenant class policy, a stale twin expiring,
+    membership), and none of them is "retry", so the code is the actionable
+    half.
+
+    WHY NOT :func:`_failure_text` VERBATIM. Its prefix is ``str(failure)``:
+    the hub's free-text ``error`` sentence for a refusal, and for anything
+    else an arbitrary exception string (a transport error, a local ``OSError``
+    that can name a path). File sends carry user file names and paths, so this
+    arm quotes ONLY the closed footer (:func:`_refusal_footer`) built from
+    ``code`` and ``details.field``/``rule`` (``[refusal code=… …]``), and only
+    under the same rule that makes it print one at all: the hub answered
+    (``http_status``) or named a field/rule pair.
+
+    WHAT STAYS EXACT. A timeout, a lost response or any exception without a
+    hub answer reads byte-identically to before: still "did not confirm",
+    never "refused" and never "safe to retry". "nothing was sent" stays true on
+    every path into here: staging precedes the message POST in both ``dm`` and
+    ``channel_post``, so no message can have been committed when this runs.
+    """
+
+    sentence = "the file upload did not confirm; nothing was sent"
+    footer = _refusal_footer(failure)
+    return f"{sentence} {footer}" if footer else sentence
 
 
 #: The conversation id family, shared with the desktop routes' S-RSA-5 guard:
@@ -1526,9 +1574,16 @@ async def _direct_message(
     except Exception as failure:
         if file_batch:
             await file_batch.cleanup(conversation_id)
+            # The batch's own closed refusals (``owner_changed``, a duplicate
+            # staged id, an unconfirmed receipt) keep their code, exactly as
+            # ``channel_post``'s ``AttachmentRefused`` arm already does; before
+            # this the DM path flattened them into the generic sentence. Gated
+            # on ``file_batch`` so an image-only DM reads as it always has.
+            if isinstance(failure, agent_attachments.AttachmentRefused):
+                return _error(failure.message, code=failure.code)
         return _error(
             (
-                "the file upload did not confirm; nothing was sent"
+                _file_stage_failure_text(failure)
                 if file_batch
                 else (
                     "the image upload did not confirm; nothing was sent: "
@@ -3031,7 +3086,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 await file_batch.cleanup(channel_id)
             return _error(
                 (
-                    "the file upload did not confirm; nothing was sent"
+                    _file_stage_failure_text(failure)
                     if file_batch
                     else (
                         "the image upload did not confirm; nothing was sent: "

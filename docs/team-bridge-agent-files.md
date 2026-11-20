@@ -62,6 +62,18 @@ Existing removed-member tenant-resolution limitations still apply: cleanup may
 be refused until expiry/sweep. Stage authorization expiry is not a physical-erasure
 SLA, and the existing quota/sweeper semantics are unchanged.
 
+A failed stage (before any message POST) reads "the file upload did not
+confirm; nothing was sent". When the hub answered, the result also carries its
+closed refusal footer, e.g. `[refusal code=file_class_disabled]`,
+`code=attachment_stage_conflict` or `code=agent_not_permitted`, built only from
+the code and `details.field`/`rule`: never the hub's free-text sentence, a file
+name, path, bytes or digest. Each code needs a different human decision (class
+policy, a stale staged twin expiring, membership), so none of them is a cue to
+re-upload. A timeout or lost answer carries no footer and stays "did not
+confirm". The batch's own local refusals (`owner_changed`, a duplicate staged
+id, an unconfirmed receipt) keep their own code in both `dm` and
+`channel_post`.
+
 After a physical send starts, a missing/unconfirmed answer may hide a commit.
 The call replays at most once with the **same client reference, body, ordered
 image IDs and ordered file IDs**, without staging again. If still unknown, it reports delivery uncertain. An interrupted call also retains
