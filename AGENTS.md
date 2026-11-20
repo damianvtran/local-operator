@@ -942,10 +942,12 @@ RECORD section for the schema.
 `--start-by <epoch | ISO-8601 with offset/Z>` (also on `lop services heavy run`)
 enforces a granted window's latest start ("start by 08:05Z"): checked after any
 queue/lease wait, immediately before spawn; if it has passed the command is
-never started and the status is **79**. Only `run_bounded.py` writes a
-completion record for it (`cause=late-start`, `spawned=no`); `heavy run` prints
-a stderr line and writes no record (its audit event waits on #4264). An
-unreadable or out-of-range value is a usage error (2) before any wait;
+never started and the status is **79**. `run_bounded.py` writes a completion
+record for it (`cause=late-start`, `spawned=no`); `heavy run` prints a stderr
+line and appends a `late-start` row to the lease trail
+(`<config>/run/heavy-jobs/heavy-lease.jsonl`), which `heavy status` shows only
+while the queue is enabled. An unreadable or out-of-range value is a usage
+error (2) before any wait;
 `--timeout` and runtime are untouched.
 
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
