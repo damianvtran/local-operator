@@ -1,0 +1,30 @@
+[
+  {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+    "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+  },
+  {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+    "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+  },
+  {
+    "path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/wire.session_status.zh-CN.json",
+    "sha256": "6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649"
+  },
+  {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/zh-CN.md",
+    "sha256": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  },
+  {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+    "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  },
+  {
+    "path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/zh-status-translator-receipt.json",
+    "sha256": "8c8583ce1b467365cf3ac4fcdde0042d454cb2bf55c635af77600716b8c85d0d"
+  },
+  {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/zh-CN/wire.session_status.json",
+    "sha256": "e0bdabbddffaa4519e5fa6680f099b1d383cd48145ddbe5e891846d16ead6e88"
+  }
+]

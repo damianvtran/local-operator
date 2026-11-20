@@ -91,6 +91,11 @@ from local_operator.server.models.desktop_sessions import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.retire import RETIRING_STATE_ATTR, DaemonRetiring
+from local_operator.server.utils.browser_owner_status import (
+    BrowserOwnerQuery,
+    BrowserOwnerStatus,
+    read_browser_owner_status,
+)
 from local_operator.server.utils.desktop_commands import OWNER_COMMANDS, native_action
 from local_operator.server.utils.desktop_feed import DesktopFeed
 from local_operator.server.utils.desktop_receipts import (
@@ -2854,6 +2859,14 @@ async def ack_delegated_cleanup_notice(request: Request):
     return reply({"acknowledged": True})
 
 
+@router.post("/v1/desktop/browser/owner-status", response_model=CRUDResponse[BrowserOwnerStatus])
+async def browser_owner_status(request: Request, body: BrowserOwnerQuery):
+    """Read generation-fenced owner evidence, independently of the sidebar roster."""
+    return reply(
+        await asyncio.to_thread(read_browser_owner_status, store_root(request), body.session_ids)
+    )
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
@@ -4328,6 +4341,43 @@ async def child_attachment_waveform(
 
 
 @router.get(
+    "/v1/desktop/sessions/{session_id}/bridge-cards/{entry_id}/body",
+    response_model=CRUDResponse[Any],
+)
+async def bridge_card_body(
+    session_id: str,
+    request: Request,
+    response: Response,
+    entry_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")],
+):
+    """What one inbound Team Bridge card's messages are to THIS viewer.
+
+    ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
+    reason?}], more}`` (bridge-body design §4; feature key
+    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
+    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
+    markdown, present only when admitted. A READ: keyed by the transcript row
+    the caller can already page, so it cannot be used to probe message ids.
+    The display store and the hub's admitted-only history read are the only
+    sources; the screener's classification fetch (``/messages/{id}/body``) is
+    never used. Caching, SET vs SERVED (the same split as the owner-audit and
+    owner-invitation routes in ``desktop_team_bridge.py``): the route SETS
+    ``private, no-store`` (design §4) so it carries the body's contract
+    wherever the router is mounted, but the running core's app-wide
+    ``managed_desktop_boundary`` (server/app.py) rewrites every
+    ``/v1/desktop/`` answer to plain ``no-store``, which is what is SERVED.
+    That is no weaker -- ``no-store`` keeps third-party text out of every
+    cache, shared or private. The boundary is deliberately not taught to keep
+    a route's own value: that would change the served header of every
+    existing route that sets ``private, no-store``.
+    """
+    async with errors(request):
+        answer = reply(await host(request).bridge_card_body(session_id, entry_id))
+    response.headers["Cache-Control"] = "private, no-store"
+    return answer
+
+
+@router.get(
     "/v1/desktop/sessions/{session_id}/attachments/{digest}",
     # The image's own mime type is the response type, so the published contract
     # must not claim the CRUD JSON envelope its neighbours return. Declaring the
@@ -5721,7 +5771,34 @@ async def delete_session_route(session_id: str, body: ConfirmDeletion, request: 
         )
         if remote is not None:
             return reply(remote)
-        return reply(await host(request).delete(session_id))
+        result = await host(request).delete(session_id)
+    if result.get("deleted"):
+        await _release_voice_slot(request, session_id)
+    return reply(result)
+
+
+async def _release_voice_slot(request: Request, session_id: str) -> None:
+    """Clear the voice slot if the conversation just deleted held it.
+
+    Best effort, never the answer: the delete already happened, and the voice
+    routes treat a slot naming a missing directory as empty anyway. Clearing
+    the file is what moves the machine feed's ``voice`` frame, so other windows
+    learn voice is off without polling.
+    """
+    from local_operator.voice import slot as voice_slot
+
+    config_dir = request.app.state.config_manager.config_dir
+    # An unlocked read first, and the common answer ends here: on a machine that
+    # never used voice this creates no ``voice/`` directory or lock file, and a
+    # delete never waits on the slot lock (up to ``LOCK_WAIT_S``) for a session
+    # that does not hold it. ``disable`` re-reads under the lock, so a slot that
+    # moved after this read is left alone.
+    if not voice_slot.is_voice_session(config_dir, session_id):
+        return
+    try:
+        await asyncio.to_thread(voice_slot.disable, config_dir, session_id)
+    except Exception:  # noqa: BLE001 - a busy or unreadable slot must not fail a delete
+        logger.warning("voice slot not cleared after deleting %s", session_id, exc_info=True)
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])

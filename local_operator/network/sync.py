@@ -383,6 +383,9 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    # Authority is local routing policy, not portable session content. Even a
+    # same-id replica must not inherit permission to interrupt on another host.
+    "notification-authority.json": "operator notification grant applies only on the issuing device",
     ".file-provenance": "owner-local witnesses; replicas/imports cannot issue proofs",
     ".file-provenance.initialized.json": "origin-local incarnation; never copied/rebuilt",
     "profile-backups": "origin-local before-images; never portable approval or action authority",
@@ -394,6 +397,11 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # them lazily, so they are never copied.
     ".inbox-write.lock": "a transport lock owned by this device's spool writers",
     ".inbox-reader.lock": "a transport lock owned by this device's spool reader",
+    # ``mobility.ARRIVAL_NOTE_MARKER``: "this device already spooled the arrival
+    # note for move <epoch>". A fact about THIS device's inbox, keyed by one move's
+    # lease epoch; carried on, it would only be a stale epoch the next device's own
+    # delivery ignores, so it never travels.
+    "move-arrival-note.json": "this device's once-per-move arrival-note fence",
     # Session-scoped role definitions (``profile_scope.SESSION_ROLES_DIRNAME``).
     # v1 deliberately does not carry them: S3's move path refuses by default and
     # names the roles, with ``--drop-session-roles`` as the explicit escape. S1

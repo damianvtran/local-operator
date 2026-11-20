@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from local_operator.guardrails.check import (
+    BUILTIN_HOLD_CLEANUP,
     BUILTIN_JUDGE,
     BUILTIN_PASS,
     BUILTIN_REFUSE_CREDENTIAL,
@@ -52,6 +53,7 @@ from local_operator.guardrails.check import (
     _targets_text,
     build_delete_case,
     builtin_branch,
+    cleanup_hold_text,
     credential_path_masks,
     credential_refusal_text,
     escalate_asked_targets,
@@ -77,7 +79,14 @@ from local_operator.guardrails.rules import call_text, load_rules
 #: ``builtin_branch`` says "judge", but the checkpoint refuses these paths
 #: before any model when only a non-consenting ask points at them.
 BUILTIN_REFUSE_LAPSED = "refuse-lapsed-ask"
-_REFUSING = frozenset({BUILTIN_REFUSE_CRITICAL, BUILTIN_REFUSE_CREDENTIAL, BUILTIN_REFUSE_LAPSED})
+_REFUSING = frozenset(
+    {
+        BUILTIN_REFUSE_CRITICAL,
+        BUILTIN_REFUSE_CREDENTIAL,
+        BUILTIN_REFUSE_LAPSED,
+        BUILTIN_HOLD_CLEANUP,
+    }
+)
 
 _LIMITS = (
     "not proven: this is ONE call against the rule files this preview loaded "
@@ -286,6 +295,7 @@ _EFFECT_WORDS = {
     BUILTIN_REFUSE_LAPSED: (
         "refused outright, no model call — an ask names it and no operator answer approves it"
     ),
+    BUILTIN_HOLD_CLEANUP: "refused outright, no model call — worktree cleanup not verified",
 }
 
 
@@ -364,6 +374,8 @@ def preview_tool_call(
                     builtin_text = _critical_text(verdict)
                 elif effect == BUILTIN_REFUSE_CREDENTIAL:
                     builtin_text = credential_refusal_text(command)
+                elif effect == BUILTIN_HOLD_CLEANUP:
+                    builtin_text = cleanup_hold_text(verdict)
                 elif effect == BUILTIN_JUDGE:
                     case = build_delete_case(verdict, context)
                     builtin_facts = (*case.facts, *case.evidence.describe())

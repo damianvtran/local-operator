@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "Google Cloud پروجیکٹ ID",
+  "providers.vertex_prompts.field.service_account": "سروس اکاؤنٹ کا JSON یا JSON فائل کا پاتھ",
+  "providers.vertex_prompts.hint.required": "بھیجنے کے لیے Enter دبائیں؛ خالی چھوڑ کر Enter یا Esc دبانے سے لاگ ان منسوخ ہو جائے گا۔",
+  "providers.vertex_prompts.prompt.field": "{field} درج کریں (منسوخ کرنے کے لیے خالی چھوڑیں): "
+}

@@ -4271,6 +4271,10 @@ def test_no_login_flavour_is_in_the_chat_registry() -> None:
         # whose own login is a subscription sign-in (audit Q1).
         "openai-api-key",
         "anthropic-key",
+        # Google Vertex AI's API-key and service-account sign-ins: both write
+        # the one `google-vertex` credential slot.
+        "google-vertex-key",
+        "google-vertex-sa",
     }
     assert flavours & _chat_ids() == set()
 

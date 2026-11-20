@@ -85,7 +85,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, redial, store, wire
+from local_operator.network import projection, redial, store, uplink, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -104,6 +104,7 @@ from local_operator.network.handshake import (
     pair_result_frame,
     pair_timeout_seconds,
     sas_matches,
+    set_pair_keepalive,
 )
 from local_operator.network.identity import (
     DeviceIdentity,
@@ -130,7 +131,10 @@ from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NET_PAIR_OPS,
+    PAIR_STAGE_AWAITING_CONFIRMATION,
+    PAIR_STAGE_AWAITING_JOINER,
     ControlRequestTimeout,
+    ControlRequestUnsent,
     Granted,
     LinkContext,
     LinkPhase,
@@ -144,6 +148,7 @@ from local_operator.network.types import (
     Refusal,
     SecretState,
     capabilities_for_role,
+    new_pairing_nonce,
     trust_state,
 )
 from local_operator.notifications.remote_attention import (
@@ -791,6 +796,23 @@ MEMBERSHIP_READ_CLIENT_TIMEOUT_S = 5.0
 #: a CAP, not a share: see :func:`probe_candidates`.
 PROBE_CONNECT_TIMEOUT_S = 3.0
 
+#: How long a literal-address connect must have WAITED, unanswered, before the
+#: probe calls it dial silence (``CandidateAttempt.dial_silent``; code review
+#: R3-1, PR #4260). The connect budget is ``min(connect_cap, deadline - now)``
+#: and one deadline is shared by peers probed in turn (``ready``'s 12 s,
+#: ``doctor``'s), so a late peer can be handed milliseconds: a connect that
+#: times out after 2 ms, or is still pending 20 ms into its life when the report
+#: stops waiting, has NOT BEEN ATTEMPTED LONG ENOUGH to say anything about the
+#: peer (reproduced: 192.0.2.1 with 2 ms or 20 ms left read as silent). 1.0 s is
+#: over 6x the slowest healthy connect measured above (~0.15 s transatlantic;
+#: loopback 0.03 s) and equals TCP's initial retransmission timeout (RFC 6298
+#: section 2.1), so a SYN unanswered that long has had its full first chance.
+#: The effective floor is ``min(connect_cap, SILENT_MIN_WAIT_S)``: a caller
+#: whose cap is shorter still gets silence when the connect used its whole cap.
+#: A shorter wait keeps its base diagnostic (``no_answer`` /
+#: ``connect_failed:TimeoutError``) with no silence evidence.
+SILENT_MIN_WAIT_S = 1.0
+
 #: The one reason a member row carries when nothing was even attempted. Its own
 #: spelling because "we could not try" and "we tried and nothing answered" are
 #: different operator actions, and a budget that ran out must never be reported as
@@ -880,6 +902,16 @@ class CandidateAttempt:
     connected: bool
     detail: str
     latency_ms: float | None = None
+    #: ATTEMPT EVIDENCE OF SILENCE (security review U3, PR #4260): True only when
+    #: a TCP connect to an IP LITERAL was actually issued and nothing answered —
+    #: the probe's own connect timed out, or the connect was still blocked (no
+    #: SYN-ACK, RST or ICMP error yet) when the collector stopped waiting. A
+    #: ``detail`` cannot carry this: ``no_answer`` is also the closing pass's name
+    #: for a worker that never reached its connect, and ``connect_failed:OSError``
+    #: covers local-stack errors (EADDRNOTAVAIL, EACCES, ENOBUFS) raised before any
+    #: SYN. Only the uplink "<peer> isn't answering" reading consumes it; every
+    #: existing reader keeps reading ``detail``.
+    dial_silent: bool = False
 
 
 @dataclass(frozen=True)
@@ -921,6 +953,7 @@ class _AttemptOutcome:
     sock: socket.socket | None
     detail: str
     latency_ms: float
+    dial_silent: bool = False
 
 
 def probe_candidates(
@@ -969,27 +1002,93 @@ def probe_candidates(
     opened_lock = threading.Lock()
     stop = threading.Event()
     started_at = time.monotonic()
+    #: ONE state per endpoint, guarded by ``opened_lock`` (U3b / R3-1, PR #4260):
+    #: absent = not started; ``("issued", t0)`` = the connect syscall is about to
+    #: run on a socket already built; ``("done", outcome)`` = the worker's
+    #: terminal answer, written under the same lock that queues it. The collector
+    #: reads this once under the lock at the cutoff, so an outcome that completed
+    #: just before the cutoff is never lost to it, and an issued-but-pending
+    #: connect stays ambiguous: it keeps ``no_answer`` and carries no evidence.
+    states: dict[str, tuple[str, Any]] = {}
+    #: R3-1: the wait a timed-out literal dial needs before its silence counts.
+    silent_floor = min(connect_cap, SILENT_MIN_WAIT_S)
+
+    def finish(outcome: _AttemptOutcome) -> None:
+        with opened_lock:
+            states[outcome.endpoint] = ("done", outcome)
+            results.put(outcome)
 
     def attempt(endpoint: str) -> None:
         budget = connect_cap
         if deadline is not None:
             budget = min(connect_cap, max(0.0, deadline - time.monotonic()))
         if budget <= 0:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
             return
         address, _, port_text = endpoint.rpartition(":")
         try:
             port = int(port_text)
         except ValueError:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
             return
+        literal = _is_ip_literal(address)
         started = time.monotonic()
+        #: U4 (PR #4260): the timeout this connect was GIVEN, and the instant it
+        #: gave up, stamped before any cleanup. See the ``dial_silent`` gate below.
+        assigned = budget
+        ended: float | None = None
         try:
-            sock = socket.create_connection((address or endpoint, port), timeout=budget)
+            if literal:
+                # Build the socket ourselves for a literal so a creation error
+                # (EMFILE, EAFNOSUPPORT) is a local error raised BEFORE the dial
+                # is marked issued, and ``t0`` is stamped right before the one
+                # syscall that sends a SYN (U3b). A hostname keeps
+                # create_connection: its blocked call may be the resolver.
+                host = address.strip("[]")
+                sock = _new_dial_socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+                try:
+                    sock.settimeout(budget)
+                    with opened_lock:
+                        started = time.monotonic()
+                        states[endpoint] = ("issued", started)
+                    sock.connect((host, port))
+                except BaseException:
+                    # Stamp first: a slow close must not count as time spent
+                    # waiting for an answer (U4).
+                    ended = time.monotonic()
+                    _close_quietly(sock)
+                    raise
+            else:
+                sock = socket.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
-            results.put(
+            waited = (ended if ended is not None else time.monotonic()) - started
+            with opened_lock:
+                issued = states.get(endpoint, ("",))[0] == "issued"
+            finish(
                 _AttemptOutcome(
-                    endpoint, None, f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}", 0.0
+                    endpoint,
+                    None,
+                    f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}",
+                    0.0,
+                    # Silence only for an ISSUED literal connect that hit its OWN
+                    # timeout (every other OSError is a local or remote answer,
+                    # U3) after waiting at least the floor: a timeout on a sliver
+                    # of a shared deadline is "not attempted long enough" (R3-1).
+                    # U4 requires BOTH halves of "waited the floor": the timeout
+                    # the connect was given must itself reach the floor (a short
+                    # timeout that completed proves only a short wait, however
+                    # the clock reads afterwards), and the wait measured up to
+                    # the moment connect gave up — before the close above —
+                    # must reach it too. Either alone can be inflated: elapsed
+                    # by a slow cleanup or a descheduled thread, the assignment
+                    # by a connect that returned early.
+                    dial_silent=(
+                        literal
+                        and issued
+                        and isinstance(exc, TimeoutError)
+                        and assigned >= silent_floor
+                        and waited >= silent_floor
+                    ),
                 )
             )
             return
@@ -1001,7 +1100,9 @@ def probe_candidates(
                 _close_quietly(sock)
                 return
             opened.append(sock)
-        results.put(_AttemptOutcome(endpoint, sock, DETAIL_OK, latency))
+            outcome = _AttemptOutcome(endpoint, sock, DETAIL_OK, latency)
+            states[endpoint] = ("done", outcome)
+            results.put(outcome)
 
     threads = [
         threading.Thread(target=attempt, args=(endpoint,), name="mesh-probe", daemon=True)
@@ -1009,6 +1110,17 @@ def probe_candidates(
     ]
     for thread in threads:
         thread.start()
+
+    def record(outcome: _AttemptOutcome) -> None:
+        attempts.append(
+            CandidateAttempt(
+                endpoint=outcome.endpoint,
+                connected=outcome.sock is not None,
+                detail=outcome.detail,
+                latency_ms=outcome.latency_ms or None,
+                dial_silent=outcome.dial_silent,
+            )
+        )
 
     attempts: list[CandidateAttempt] = []
     winner_sock: socket.socket | None = None
@@ -1023,20 +1135,40 @@ def probe_candidates(
         except queue.Empty:
             break
         settled += 1
-        attempts.append(
-            CandidateAttempt(
-                endpoint=outcome.endpoint,
-                connected=outcome.sock is not None,
-                detail=outcome.detail,
-                latency_ms=outcome.latency_ms or None,
-            )
-        )
+        record(outcome)
         if outcome.sock is not None and winner_sock is None:
             winner_sock, winner = outcome.sock, outcome.endpoint
             if not wait_all:
                 break
 
-    stop.set()
+    # The cutoff: one read of every endpoint's state, under the lock the workers
+    # write it under. After ``stop`` is set no worker can append a socket, so the
+    # snapshot is the probe's final knowledge (U3b). There is deliberately no
+    # further drain at the cutoff (R4-1, deferred as a MINOR): a worker that has
+    # not written its terminal state by now reads ``no_answer`` with no silence
+    # evidence, which errs toward caution — never a false "isn't answering".
+    reported = {row.endpoint for row in attempts}
+    with opened_lock:
+        stop.set()
+        final = dict(states)
+    late: list[_AttemptOutcome] = []
+    if wait_all or winner_sock is None:
+        # A terminal outcome written before the cutoff but not yet dequeued is
+        # still that endpoint's answer (a completed timeout must not turn into
+        # ``no_answer``). The early-return path (winner, not wait_all) asked for
+        # one answer only and stays as it was.
+        for endpoint in endpoints:
+            state = final.get(endpoint)
+            if endpoint not in reported and state is not None and state[0] == "done":
+                late.append(state[1])
+                reported.add(endpoint)
+    for outcome in late:
+        # Not counted in ``settled``: ``complete`` keeps its meaning — every
+        # answer arrived before the collector stopped waiting — and a late
+        # read only stops a terminal outcome from being renamed ``no_answer``.
+        record(outcome)
+        if outcome.sock is not None and winner_sock is None:
+            winner_sock, winner = outcome.sock, outcome.endpoint
     with opened_lock:
         for sock in opened:
             if sock is not winner_sock:
@@ -1048,14 +1180,19 @@ def probe_candidates(
     # cannot mistake "we stopped waiting" for "this address is fine". WHICH name
     # depends on whether anything was tried at all — a probe handed a deadline that
     # had already passed has not dialled anything and must say so, rather than
-    # report a reachability result it never established.
+    # report a reachability result it never established. An issued connect still
+    # pending here is AMBIGUOUS (U3b): it supports only "no answer during this
+    # check", so it keeps the base ``no_answer`` and never carries ``dial_silent``.
     starved = deadline is not None and deadline <= started_at
-    reported = {row.endpoint for row in attempts}
     for endpoint in endpoints:
         if endpoint not in reported:
+            reported.add(endpoint)
             attempts.append(
                 CandidateAttempt(
-                    endpoint, False, DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER, None
+                    endpoint,
+                    False,
+                    DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER,
+                    None,
                 )
             )
 
@@ -1066,6 +1203,26 @@ def probe_candidates(
         complete=settled == len(threads),
         reason="" if winner_sock is not None else probe_reason(attempts),
     )
+
+
+def _new_dial_socket(family: int) -> socket.socket:
+    """The bare TCP socket a literal-address probe dials on (U3b, PR #4260).
+
+    Its own function so a creation failure is testable as what it is — a local
+    error raised before any dial was issued — without patching the socket type.
+    """
+    return socket.socket(family, socket.SOCK_STREAM)
+
+
+def _is_ip_literal(address: str) -> bool:
+    """Whether ``address`` is an IP literal, so a blocked connect cannot be a lookup."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(address.strip("[]"))
+    except ValueError:
+        return False
+    return True
 
 
 def _dial_candidates(member: MemberRecord) -> list[str]:
@@ -1166,13 +1323,26 @@ def _is_loopback_endpoint(endpoint: str) -> bool:
 
 
 def peer_link_state(
-    link: PeerLink | None, reason: str, attempts: Sequence[CandidateAttempt]
+    link: PeerLink | None,
+    reason: str,
+    attempts: Sequence[CandidateAttempt],
+    *,
+    route_reader: Callable[[str], bool | None] | None = None,
 ) -> str:
     """Keep host refusal, address black holes and handshake rejection distinct.
 
     A refused TCP connection proves the host answered but no relay listened;
     a timeout proves neither. A connected socket rejected during handshake is
     a third state that the aggregate reason alone cannot reliably distinguish.
+
+    ``local_offline`` (2026-11-18: a Mac on an IPv6-only network dialling an
+    IPv4-only node2) is the fourth: THIS device has no route to ANY of the
+    peer's own dialled endpoints, so the failure is ours, not the peer's. It
+    wins over ``address_unreachable`` only, and only when a passive lookup of
+    each endpoint PROVES the missing route (``uplink.no_route_for``). Asked per
+    endpoint, never inferred from the public-route reading (review R1): a LAN
+    or loopback peer keeps its route without a default route. No reader, a
+    hostname or an unreadable lookup keeps today's ``address_unreachable``.
     """
     if link is not None:
         return "reachable"
@@ -1196,6 +1366,10 @@ def peer_link_state(
     ):
         return "relay_down"
     if any(attempt.detail != DETAIL_NOT_ATTEMPTED for attempt in attempts):
+        if route_reader is not None and uplink.no_route_for(
+            [attempt.endpoint for attempt in attempts], route_reader
+        ):
+            return "local_offline"
         return "address_unreachable"
     if reason in ("no_endpoint", "not_a_member"):
         return reason
@@ -5866,11 +6040,21 @@ class RelayServer:
         #: (``network.redial``). Fed by link admission and close; read by
         #: ``_redial_loop`` and ``peer_status``.
         self.redial = redial.RedialTracker()
+        # The passive per-endpoint route lookup (``network.uplink``). An attribute
+        # so a test can inject a scripted reader; a relay built without
+        # ``__init__`` has none, so no ``local_offline`` and no recovery kick.
+        self._route_reader: Callable[[str], bool | None] | None = uplink.endpoint_has_route
         #: Collapses repeats of one identical handshake refusal into one audit row
         #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
         self._refusal_rows = redial.RefusalCoalescer()
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
+        #: How many inviter ceremonies are PARKED on this relay right now (from the
+        #: listener's entry to its exit) — the count :data:`PAIR_PARKED_CEREMONY_CAP`
+        #: bounds. A plain int under its own lock: the listener runs one thread per
+        #: accepted pair socket, so the check-and-increment must be one step.
+        self._pair_parked = 0
+        self._pair_parked_lock = threading.Lock()
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
         self._control_key = wire.b64u(os.urandom(32))
@@ -7170,7 +7354,18 @@ class RelayServer:
                     continue
                 if self._redial_candidates(member):
                     self.redial.seed(member.device_id)
+        # Peers whose last failed redial had NO route to any of their own
+        # endpoints. Watched for a route to appear; see ``_kick_routed_peers``.
+        unroutable: set[str] = set()
         while not self._stop.wait(REDIAL_TICK_S):
+            # ADVISORY, NEVER A PAUSE (security U1, review R1): the baseline
+            # backoff below runs for every peer whatever the route reading says,
+            # so a wrong reading can delay nobody and starve nobody. The reading
+            # only ADDS a retry: a peer proven unroutable is redialled the
+            # moment a route to ITS endpoints appears (U2), instead of waiting
+            # out a backoff grown while there was no route to it at all.
+            if unroutable:
+                self._kick_routed_peers(unroutable)
             for device_id in self.redial.due():
                 if self._stop.is_set():
                     return
@@ -7195,6 +7390,42 @@ class RelayServer:
                     link, reason = None, f"error:{type(exc).__name__}"
                 if link is None:
                     self.redial.failed(device_id, cause=reason or "unreachable")
+                    if self._peer_route(device_id) is False:
+                        unroutable.add(device_id)
+
+    def _peer_route(self, device_id: str) -> bool | None:
+        """Whether this device has a route to any of ``device_id``'s dial candidates.
+
+        ``None`` (no claim) without a reader, without candidates, or for any
+        hostname/unreadable lookup — see ``uplink.endpoints_route``.
+        """
+        reader = getattr(self, "_route_reader", None)
+        if reader is None:
+            return None
+        endpoints = [
+            endpoint
+            for member in self._members_named(device_id)
+            for endpoint in self._redial_candidates(member)
+        ]
+        return uplink.endpoints_route(endpoints, reader)
+
+    def _kick_routed_peers(self, unroutable: set[str]) -> None:
+        """Kick each watched peer whose own endpoints have a route again (U2).
+
+        CONFIRMED RECOVERY ONLY: ``True`` from a fresh per-endpoint lookup. An
+        ``unknown`` answer is not recovery — it kicks nothing and the peer stays
+        watched; its baseline retry still runs regardless. A peer that linked
+        up meanwhile (a surface dial, or it dialled us) needs no kick. The
+        lookup sends nothing (``network.uplink``), so doing it once per tick
+        for the few unroutable peers costs syscalls, not traffic.
+        """
+        for device_id in list(unroutable):
+            if self._link_for(device_id) is not None:
+                unroutable.discard(device_id)
+                continue
+            if self._peer_route(device_id) is True:
+                unroutable.discard(device_id)
+                self.redial.kick(device_id)
 
     def _members_named(self, device_id: str) -> list[MemberRecord]:
         """Every active member row for ``device_id``, across this device's networks."""
@@ -12911,6 +13142,8 @@ class RelayServer:
         peer_addr: str,
         offer: list[dict[str, Any]],
         offer_detail: dict[str, Any],
+        expires_at: float,
+        ceremony: str,
     ) -> PairDecision:
         """Design §5.3's second half: a person on the INVITING device confirms the code.
 
@@ -12929,7 +13162,10 @@ class RelayServer:
         """
         invite = record.invite(invite_id)
         role = (invite.role if invite is not None else "read") or "read"
-        window = pair_timeout_seconds(_remaining_of(record, invite_id))
+        # WHAT IS LEFT OF THE CEREMONY'S ONE DEADLINE (S-R1-4), never a fresh window:
+        # stage 2 must not outlive what stage 1 showed. ``expires_at`` was fixed by the
+        # listener at the ceremony's start as min(invite expiry, start + ceiling).
+        window = max(0.0, expires_at - time.time())
         from local_operator.network.credentials import offers as offers_mod
 
         # §4.2's state rides the record so EVERY surface (the relay's inline
@@ -12951,7 +13187,7 @@ class RelayServer:
             fingerprint=wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash)),
             transcribed=transcribed,
             peer_addr=peer_addr,
-            expires_at=time.time() + window,
+            expires_at=expires_at,
             prompt=inviter_prompt_for(
                 network_name=record.name,
                 role=role,
@@ -12964,8 +13200,58 @@ class RelayServer:
             ),
             offer=list(offer),
             offer_state=offer_state,
+            stage=PAIR_STAGE_AWAITING_CONFIRMATION,
+            role=role,
+            nonce=new_pairing_nonce(),
+            ceremony=ceremony,
         )
-        store.save_pending_pairing(pending, self.root)
+        # THE STALE-DECISION RACE GUARD. The decision poll below reads ANY decision
+        # file for this invite, so a decision written while the row was still stage 1
+        # (an out-of-band file write, or a confirm racing the flip) would admit a
+        # device whose person never compared the transcription. The clear runs BEFORE
+        # the record flips, and both run under the network record's write lock — the
+        # same lock ``_ctl_pair_confirm`` holds while it checks the stage and writes —
+        # so no answer can land between "cleared" and "now stage 2" and survive.
+        #
+        # EVERY generic decision goes, stamped or not (security review round 2,
+        # S-R2-1). An unstamped file cannot say who wrote it or for which ceremony
+        # (a terminal confirm with no relay running, a decision left by an earlier
+        # ceremony on this invite whose cleanup has not run yet), so none is ever
+        # read as an answer to this one; the poll below takes only decisions stamped
+        # with ``ceremony``. The previous "unstamped and written before this
+        # ceremony started" exception compared wall clocks and could not tell the
+        # two apart, so it is gone.
+        #
+        # THE ONE STAND-IN FOR A PERSON is onboarding's :class:`PairPreApproval`, a
+        # separate record bound to this invite and to the joiner it was minted for.
+        # It is consumed HERE, inside the same lock as the flip: deleted, and turned
+        # into a decision stamped with this ceremony, so it answers exactly one
+        # ceremony through the one decision path and the latch refuses any later
+        # card answer. A different joiner (or invite, or network) leaves it alone.
+        # This runs only after the wire code compare above, so a pre-approval never
+        # admits a mismatched transcription.
+        with store.mutate(record.network_id, self.root):
+            store.clear_pair_decision(invite_id, self.root)
+            approval = store.pre_approval(invite_id, self.root)
+            if approval is not None and approval.matches(
+                invite_id=invite_id, network_id=record.network_id, joiner_device_id=joiner_id
+            ):
+                store.clear_pre_approval(invite_id, self.root)
+                store.save_pair_decision(
+                    PairDecision(
+                        invite_id=invite_id,
+                        decision="admit",
+                        matched=True,
+                        reason="",
+                        answered_by=approval.answered_by,
+                        # An approval shares nothing: credentials are a person's
+                        # choice on the card, never an automated default.
+                        shares=[],
+                        ceremony=ceremony,
+                    ),
+                    self.root,
+                )
+            store.save_pending_pairing(pending, self.root)
         self.audit.record(
             AuditEvent(
                 event="pairing_awaiting_confirmation",
@@ -12985,9 +13271,9 @@ class RelayServer:
             decision = self._await_pairing_decision(pending, window)
         finally:
             # Cleared either way: the code must not outlive the ceremony it belongs
-            # to, and a leftover decision must never be read by the NEXT pairing.
-            store.clear_pending_pairing(invite_id, self.root)
-            store.clear_pair_decision(invite_id, self.root)
+            # to, and a leftover decision must never be read by the NEXT pairing. Only
+            # THIS ceremony's records, though (S-R1-3): see ``_clear_ceremony``.
+            self._clear_ceremony(record.network_id, invite_id, ceremony)
         self.audit.record(
             AuditEvent(
                 event="pairing_confirmed" if decision.matched else "pairing_refused",
@@ -13045,7 +13331,11 @@ class RelayServer:
         deadline = time.monotonic() + window
         while time.monotonic() < deadline:
             decision = store.pair_decision(pending.invite_id, self.root)
-            if decision is not None:
+            # ONLY a decision stamped with THIS ceremony answers it (S-R1-3, S-R2-1):
+            # every relay ingress stamps ``live.ceremony`` under the record lock, and
+            # onboarding's pre-approval is stamped when the flip consumes it. An
+            # unstamped file (an out-of-band write) is never an answer.
+            if decision is not None and _answers_ceremony(decision, pending.ceremony):
                 return decision
             time.sleep(0.2)
         return PairDecision(
@@ -13111,13 +13401,44 @@ class RelayServer:
         # one ceremony disagreed about how long a human has. `pair_timeout_seconds`
         # is the one owner of that number, and `invite.joiner_prompt` prints the same
         # number to the person, so the promise and the wait cannot drift again.
-        deadline = wire.deadline_in(pair_timeout_seconds(_remaining_of(record, invite_id)))
+        window = pair_timeout_seconds(_remaining_of(record, invite_id))
+        deadline = wire.deadline_in(window)
+        # ONE ABSOLUTE DEADLINE FOR THE WHOLE CEREMONY (security review round 1, S-R1-4):
+        # min(invite expiry, start + ceiling), fixed HERE, at the ceremony's start. Both
+        # card stages, their ``expires_at`` (which also bounds an app attestation's
+        # deadline, ``desktop_mesh_pairings.answer``) and the stage-2 decision poll use
+        # this one wall-clock instant. Recomputing a fresh ``pair_timeout_seconds`` at
+        # the stage-2 flip gave a ceremony up to two windows end to end.
+        ceremony_expires_at = time.time() + window
+        # WHICH CEREMONY THIS IS (S-R1-3): stamped on both stage records and on every
+        # decision written for them, so this thread's cleanup removes only what belongs
+        # to it, never a record a later ceremony on the same invite parked.
+        ceremony = new_pairing_nonce()
+        # KERNEL KEEPALIVE ON THE PARKED SOCKET (see ``set_pair_keepalive``): the window
+        # above can now be ten minutes, which outlives many NAT idle timers. No app-level
+        # heartbeat — an older joiner would not expect one.
+        set_pair_keepalive(sock)
+        holds_slot = False
         member_row: MemberRecord | None = None
         #: WHICH STATEMENT BOUNDARY THE PAIR LISTENER WAS AT when a socket-class
         #: failure landed — the field that turns "the pairing was refused" into
         #: "the first sealed read failed". Local record only, never on the wire.
         stage = "offer_send"
         try:
+            # THE PARKED-CEREMONY CAP, checked before anything is sent or parked. A
+            # pairing can now hold a socket (and a thread) for up to the whole invite
+            # life, so an unbounded number of token holders dialling at once would be
+            # an unbounded number of parked threads and Mesh approvals cards. The
+            # refusal is ``pairing_busy``: retryable, spends no attempt and does not
+            # consume the invite (``_RETRYABLE_PAIRING_REASONS``), so an honest joiner
+            # simply tries again.
+            holds_slot = self._take_pair_slot()
+            if not holds_slot:
+                raise PairingRefusal(
+                    "pairing_busy",
+                    "the inviting device is already handling as many pairings as it allows "
+                    "at once; nothing was spent — try again in a minute with the same token",
+                )
             # THE SHARE LIST IS THE FIRST SEALED RECORD (§2.3): sent before anything
             # waits on a human, so both ends can show the same list before either
             # person commits. Inside this try on purpose — a socket that dies sending
@@ -13148,6 +13469,30 @@ class RelayServer:
                         )
                     )
                 )
+            # STAGE 1 OF THE MESH APPROVALS CARD (``awaiting_joiner``). The inviter's
+            # person has nothing to type yet — the joiner's person must first type the
+            # code THIS card shows — so the record exists only so the app can show the
+            # code ("type this on <joiner>"); there is nothing to answer on it, and its
+            # expiry is the ceremony's one deadline. ``_ctl_pair_confirm``
+            # refuses any answer to a stage-1 row (``pairing_not_ready``), and the
+            # stage-2 flip in ``_inviter_human_step`` clears any decision written in
+            # the meantime, so an early answer can never admit.
+            self._save_awaiting_joiner(
+                record=record,
+                invite_id=invite_id,
+                result=result,
+                joiner_id=joiner_id,
+                joiner_name=joiner_name,
+                peer_addr=peer_addr,
+                expires_at=ceremony_expires_at,
+                ceremony=ceremony,
+                offer=list(offer_items) if send_offer else [],
+                offer_state=(
+                    offers_mod.OWNER_SKIPPED
+                    if str(offer_detail.get("offer_skip") or "") == offers_mod.OWNER_SKIPPED
+                    else offers_mod.OWNER_SENT
+                ),
+            )
             stage = "ready_read"
             try:
                 ready = codec.open(reader.read_record_payload(deadline))
@@ -13196,7 +13541,31 @@ class RelayServer:
                 peer_addr=peer_addr,
                 offer=offer_items,
                 offer_detail=offer_detail,
+                expires_at=ceremony_expires_at,
+                ceremony=ceremony,
             )
+            if (
+                decision.reason == "sas_mismatch"
+                and decision.decision != "admit"
+                and _budget_spent(result.network_id, invite_id, self.root)
+            ):
+                # THE CARD'S LAST WRONG CODE. ``_ctl_pair_confirm`` only writes this
+                # decision once the invite's attempt budget is spent, so it refuses by
+                # the wire's own name and the handler below CONSUMES (the budget is
+                # exhausted, so ``_pairing_retryable`` is false) — no second attempt is
+                # charged, because the confirm op already counted this one.
+                #
+                # THE REASON IS ONLY BELIEVED WHEN THE BUDGET SAYS SO (review round 1,
+                # N2): a legacy ``lop network confirm`` frame copies its caller's
+                # ``reason`` verbatim, and taking ``sas_mismatch`` at its word would
+                # turn that decline into a retryable, attempt-spending refusal. Any
+                # other decline falls through to ``declined_remote`` and consumes, as
+                # it did before this path existed.
+                raise PairingRefusal(
+                    "sas_mismatch",
+                    "the code typed on the inviting device did not match, and the "
+                    "invitation's attempts are spent",
+                )
             if not (decision.decision == "admit" and decision.matched):
                 # A timeout and a decline are both refusals: an unanswered question
                 # must never admit a device, and §5.4 makes every one of these
@@ -13371,6 +13740,9 @@ class RelayServer:
             self.contact_peers()
         except (MeshRefusal, wire.LinkCryptoError, OSError) as exc:
             reason = getattr(exc, "code", "error")
+            #: Whether THIS refusal consumed the invite: the abort frame says so, so the
+            #: joiner's remedy stops offering the SAME token (QA round 1, Q3).
+            spent = False
             try:
                 # THE REFUSAL'S CONSUME RE-READS TOO, for the same reason the
                 # admission does: this handler runs after the human step and after the
@@ -13403,6 +13775,7 @@ class RelayServer:
                                 )
                             else:
                                 consume(current, invite_id, outcome=reason)
+                                spent = True
                             store.save(current, self.root)
                 except FileNotFoundError:
                     pass
@@ -13416,6 +13789,7 @@ class RelayServer:
                             req=0,
                             reason=reason,
                             detail=getattr(exc, "sentence", "") or str(exc),
+                            spent=spent,
                         )
                     )
                 )
@@ -13463,6 +13837,105 @@ class RelayServer:
             # cannot silently reintroduce the batching lag.
             self.audit.flush()
             _close_quietly(sock)
+        finally:
+            # EVERY EXIT CLEARS THE CARD AND FREES THE SLOT: an expiry (``timeout``),
+            # a refusal, an admission. The record must not outlive its socket — the app
+            # would show a card nobody can answer — and a decision left behind must never
+            # be read by the next ceremony on this invite. Idempotent with the stage-2
+            # ``finally`` in ``_inviter_human_step``. Membership is untouched here: only
+            # the admission block above writes members. ONLY THIS CEREMONY'S records
+            # (S-R1-3): the refusal handler above may already have released the invite,
+            # so a new ceremony can have parked the same key by the time this runs.
+            if holds_slot:
+                self._clear_ceremony(result.network_id, invite_id, ceremony)
+                self._free_pair_slot()
+
+    def _take_pair_slot(self) -> bool:
+        """Reserve one parked-ceremony slot; ``False`` when the cap is reached."""
+        with self._pair_parked_lock:
+            if self._pair_parked >= PAIR_PARKED_CEREMONY_CAP:
+                return False
+            self._pair_parked += 1
+            return True
+
+    def _free_pair_slot(self) -> None:
+        with self._pair_parked_lock:
+            self._pair_parked = max(0, self._pair_parked - 1)
+
+    def _save_awaiting_joiner(
+        self,
+        *,
+        record: NetworkRecord,
+        invite_id: str,
+        result: Any,
+        joiner_id: str,
+        joiner_name: str,
+        peer_addr: str,
+        expires_at: float,
+        ceremony: str,
+        offer: list[dict[str, Any]],
+        offer_state: str,
+    ) -> None:
+        """Write the stage-1 (``awaiting_joiner``) record the Mesh approvals card reads.
+
+        ``transcribed`` is empty and ``prompt`` is empty on purpose: there is nothing
+        to compare yet, and every CLI surface (``net_pair_pending`` without
+        ``include_stages``) filters this stage out, so an older ``lop network confirm``
+        never sees a row it could not answer. A FRESH nonce: the stage-2 flip mints
+        another, so an attestation made against this card can never answer the next.
+        """
+        invite = record.invite(invite_id)
+        pending = PendingPairing(
+            invite_id=invite_id,
+            network_id=record.network_id,
+            network_name=record.name,
+            joiner_device_id=joiner_id,
+            joiner_name=joiner_name,
+            sas=result.sas,
+            fingerprint=wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash)),
+            peer_addr=peer_addr,
+            expires_at=expires_at,
+            offer=offer,
+            offer_state=offer_state,
+            stage=PAIR_STAGE_AWAITING_JOINER,
+            role=(invite.role if invite is not None else "read") or "read",
+            nonce=new_pairing_nonce(),
+            ceremony=ceremony,
+        )
+        # Under the record lock, like every other write of this key, so the identity
+        # check in ``_clear_ceremony`` cannot interleave with the park it protects.
+        with _pairing_lock(record.network_id, self.root):
+            store.save_pending_pairing(pending, self.root)
+
+    def _clear_ceremony(self, network_id: str, invite_id: str, ceremony: str) -> None:
+        """Remove THIS ceremony's card and decision, and nothing else (S-R1-3).
+
+        The files are keyed by invite only. A retryable refusal releases the invite
+        before the refusing thread reaches its cleanup, so another dial can park the
+        same key in between; an unconditional delete then removed the NEW ceremony's
+        card (the app lost a live pairing) or its decision (a person's answer vanished).
+        So: the card goes only when its ``ceremony`` is ours; the decision goes when it
+        is stamped with ours, or is an unstamped out-of-band write while no other
+        ceremony owns the key (no ceremony ever honours an unstamped decision; the
+        stage-2 flip clears them all). Checked and deleted under the record lock that
+        every park, flip and answer of this key also holds.
+
+        NEVER the onboarding :class:`PairPreApproval` (S-R2-1, the reverse case of
+        agent review round 2, m1): it lives in its own file, so a ceremony that fails
+        at stage 1 leaves it for the invite's automated retry. It is removed only by
+        the flip that consumes it, by its writer's cleanup, or by expiring with the
+        invite.
+        """
+        with _pairing_lock(network_id, self.root):
+            live = store.pending_pairing(invite_id, self.root)
+            ours_or_none = live is None or live.ceremony == ceremony
+            if live is not None and live.ceremony == ceremony:
+                store.clear_pending_pairing(invite_id, self.root)
+            decided = store.pair_decision(invite_id, self.root)
+            if decided is not None and (
+                decided.ceremony == ceremony or (not decided.ceremony and ours_or_none)
+            ):
+                store.clear_pair_decision(invite_id, self.root)
 
     # -- fan-out and the durable outbox -------------------------------------
 
@@ -14327,15 +14800,24 @@ class RelayServer:
             )
         return {"network_id": record.network_id, "trust": record.trust}
 
-    def _ctl_pair_pending(self, _frame: dict[str, Any]) -> list[dict[str, Any]]:
+    def _ctl_pair_pending(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
         """The pairings parked for a human, oldest first. A list is the answer.
 
         A method rather than a lambda in the handler table: the CLI and the harness
         drive this path, and a missing method would fail as an `AttributeError`
         inside whatever is waiting for the answer — which is how a two-sided test
         ends up waiting for a timeout instead of reporting the real fault.
+
+        STAGE FILTER (version skew). Only stage-2 rows (``awaiting_confirmation``)
+        are returned unless the caller sends ``include_stages: true`` — the desktop
+        server's Mesh approvals read does. An older ``lop network confirm`` would
+        otherwise list a stage-1 row whose transcription is empty and offer a y/N
+        nobody can meaningfully answer (and that this op now refuses anyway).
         """
-        return [pending.to_json() for pending in store.pending_pairings(self.root)]
+        rows = store.pending_pairings(self.root)
+        if not bool((frame or {}).get("include_stages")):
+            rows = [row for row in rows if row.stage == PAIR_STAGE_AWAITING_CONFIRMATION]
+        return [pending.to_json() for pending in rows]
 
     def _ctl_pair_confirm(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Record the inviter's human answer to a parked pairing.
@@ -14348,8 +14830,20 @@ class RelayServer:
         """
         invite_id = str(frame.get("invite_id") or "")
         pending = store.pending_pairing(invite_id, self.root) if invite_id else None
+        if pending is None and "code" in frame:
+            # A CODE-CARRYING ANSWER NAMES ITS CEREMONY. The fallback below (answer
+            # the oldest open pairing) is the legacy CLI's convenience; a card answer
+            # for an invite that is no longer parked must not land on another one.
+            raise MeshRefusal(
+                "no_pending_pairing",
+                "that pairing is no longer waiting on this device, so nothing was answered",
+            )
         if pending is None:
-            open_pairings = store.pending_pairings(self.root)
+            open_pairings = [
+                row
+                for row in store.pending_pairings(self.root)
+                if row.stage == PAIR_STAGE_AWAITING_CONFIRMATION
+            ]
             if not open_pairings:
                 raise MeshRefusal(
                     "no_pending_pairing",
@@ -14359,6 +14853,62 @@ class RelayServer:
                 )
             pending = open_pairings[0]
         admit = str(frame.get("decision") or "admit") == "admit"
+        if "code" in frame:
+            return self._pair_confirm_by_code(pending, frame, admit=admit)
+        # A LEGACY FRAME (no ``code``): ``lop network confirm``'s y/N, which asserts
+        # ``matched`` itself after its person compared the two codes on screen. Kept
+        # byte-compatible as the same-user terminal fallback; it is only refused on a
+        # stage-1 row, where there is nothing to have compared yet.
+        with _pairing_lock(pending.network_id, self.root):
+            return self._pair_confirm_legacy(pending, frame, admit=admit)
+
+    def _refuse_if_decided(self, live: PendingPairing, *, spent: bool) -> None:
+        """THE TERMINAL-DECISION LATCH (security review round 1, S-R1-2; review M1).
+
+        Caller holds the record lock. Once this ceremony has a decision on disk, or the
+        invite's attempt budget is spent, EVERY later answer — card, legacy y/N, any
+        ingress — is refused and nothing is overwritten. Without it the exhausting
+        decline sat on disk until the listener's next 0.2 s poll, and a correct code in
+        that gap replaced it with an admit. ``pairing_expired`` is the refusal: the
+        ceremony is no longer open to answers, which is the sentence the card shows.
+
+        A SECOND ANSWER GETS ITS OWN CODE, ``pairing_answered`` (security review round
+        2, S-R2-2): the decision already on disk may be an admit, so the card's
+        sentence must not claim "nothing was approved" the way ``pairing_expired``'s
+        does; it says only that this answer was not recorded.
+        """
+        decided = store.pair_decision(live.invite_id, self.root)
+        # The poll's own rule (``_answers_ceremony``): a decision the poll would
+        # never act on must not shut the ceremony to a live answer either.
+        if _answers_ceremony(decided, live.ceremony):
+            raise MeshRefusal(
+                "pairing_answered",
+                "that pairing is no longer open, and this answer was not recorded",
+            )
+        if spent:
+            raise MeshRefusal(
+                "pairing_expired",
+                "that pairing's attempts are spent, so this answer was not recorded and "
+                "the invitation is used up",
+            )
+
+    def _pair_confirm_legacy(
+        self, pending: PendingPairing, frame: dict[str, Any], *, admit: bool
+    ) -> dict[str, Any]:
+        """``lop network confirm``'s y/N frame (no ``code``). Caller holds the lock."""
+        live = store.pending_pairing(pending.invite_id, self.root)
+        if live is None:
+            raise MeshRefusal(
+                "no_pending_pairing",
+                "that pairing is no longer waiting on this device, so nothing was answered",
+            )
+        pending = live
+        if pending.stage != PAIR_STAGE_AWAITING_CONFIRMATION:
+            raise MeshRefusal(
+                "pairing_not_ready",
+                "the joining device has not typed this device's code yet, so there is "
+                "nothing to confirm; wait until it has",
+            )
         matched = bool(frame.get("matched")) and admit
         # THE SHARE DECISION, REDUCE-ONLY (§3.3). The offered set is the list this
         # relay SENT (``PendingPairing.offer``, state ``"sent"``); a frame with no
@@ -14392,6 +14942,12 @@ class RelayServer:
             reason="" if matched else str(frame.get("reason") or "declined"),
             answered_by=str(frame.get("answered_by") or "human"),
             shares=sorted(shares) if matched else [],
+            ceremony=pending.ceremony,
+        )
+        # The latch sits after the frame's own validation (a widening is refused by its
+        # own name either way) and before the only write.
+        self._refuse_if_decided(
+            pending, spent=_budget_spent(pending.network_id, pending.invite_id, self.root)
         )
         store.save_pair_decision(decision, self.root)
         return {
@@ -14404,6 +14960,170 @@ class RelayServer:
             # answers without this key, and the CLI says so by name rather than
             # silently admitting more than the operator chose.
             "shares": list(decision.shares),
+        }
+
+    def _pair_confirm_by_code(
+        self, pending: PendingPairing, frame: dict[str, Any], *, admit: bool
+    ) -> dict[str, Any]:
+        """A code-carrying answer (the Mesh approvals card): the RELAY compares.
+
+        WHY THE RELAY OWNS THE COMPARISON. A caller-asserted ``matched`` is a claim,
+        and the desktop route that relays the card's answer is reachable by anything
+        holding the desktop bearer. With a ``code`` present this compares it against
+        THIS relay's own derivation (``pending.sas``) and ignores ``matched``
+        entirely, so the strongest thing a caller can do is type digits.
+
+        ONE TRANSACTION. Re-reading the pending record, checking its stage and nonce,
+        comparing, spending an attempt and writing the decision all happen under the
+        network record's write lock — the same lock the stage-2 flip in
+        ``_inviter_human_step`` takes — so a mismatch is counted exactly once, cannot
+        interleave with the flip, and survives a relay restart (the count lives on
+        the invite row: ``invite.attempts``, the 3-budget the wire path spends).
+
+        A mismatch writes NO decision: the listener keeps polling and the socket stays
+        open while attempts and time remain. The attempt that exhausts the budget
+        writes a ``decline`` with reason ``sas_mismatch``, which the listener turns
+        into today's consuming refusal. A decline (``decision: "decline"``) is never
+        compared and spends nothing.
+        """
+        from local_operator.network.credentials import offers as offers_mod
+
+        invite_id = pending.invite_id
+        typed = str(frame.get("code") or "")
+        nonce = str(frame.get("nonce") or "")
+        if not nonce:
+            # A CODE-CARRYING ANSWER NAMES ITS CEREMONY AND STAGE (review round 1, N3).
+            # The only such caller (the desktop route) always sends the card's nonce;
+            # refusing the nonce-less shape means no control-socket frame can land a
+            # code on whichever ceremony happens to be parked under this invite now.
+            raise MeshRefusal(
+                "pairing_expired",
+                "that answer does not name the pairing card it is for, so nothing was "
+                "answered; reopen Mesh approvals and answer the current one",
+            )
+        with store.mutate(pending.network_id, self.root) as record:
+            live = store.pending_pairing(invite_id, self.root)
+            if live is None or not live.is_open():
+                raise MeshRefusal(
+                    "pairing_expired",
+                    "that pairing ran out of time before it was answered, so nothing was "
+                    "admitted",
+                )
+            if nonce != live.nonce:
+                # The card answered is not the ceremony now parked (a retry re-parked
+                # the invite, or stage 1 became stage 2): never let it answer this one.
+                raise MeshRefusal(
+                    "pairing_expired",
+                    "that pairing card is out of date; reopen Mesh approvals and answer "
+                    "the current one",
+                )
+            if live.stage != PAIR_STAGE_AWAITING_CONFIRMATION:
+                raise MeshRefusal(
+                    "pairing_not_ready",
+                    "the joining device has not typed this device's code yet, so there is "
+                    "nothing to confirm; wait until it has",
+                )
+            invite = record.invite(invite_id)
+            if invite is None:
+                raise MeshRefusal("no_pending_pairing", "that invite was never minted here")
+            self._refuse_if_decided(live, spent=failures_exhausted(record, invite_id))
+            if not admit:
+                decision = PairDecision(
+                    invite_id=invite_id,
+                    decision="decline",
+                    matched=False,
+                    # Never the caller's word for it: a card decline is a decline, and
+                    # ``sas_mismatch`` is only ever written by the exhausting compare.
+                    reason="declined",
+                    answered_by=str(frame.get("answered_by") or "human"),
+                    ceremony=live.ceremony,
+                )
+                store.save_pair_decision(decision, self.root)
+                return self._pair_confirm_reply(live, decision, record)
+            wanted = frame.get("shares")
+            if not isinstance(wanted, list):
+                # THE CARD'S SELECTION IS EXPLICIT (security review round 1, S-R1-1).
+                # A card admit carries exactly the list the person left ticked, and the
+                # app attested that list; "absent = the whole offer" is the legacy
+                # y/N convenience and must never be how a card answer grants, or a
+                # body that attested ``[]`` and then omitted the key would serve every
+                # offered credential. ``[]`` grants nothing; absent is refused.
+                # Judged BEFORE the code compare (agent review round 2, n1): a
+                # malformed frame is not a guess at the code and must spend no attempt.
+                raise MeshRefusal(
+                    "bad_request",
+                    "a code answer must name the credentials to share (an empty list "
+                    "shares none), so nothing was answered",
+                )
+            if not sas_matches(live.sas, typed):
+                invite.attempts += 1
+                exhausted = failures_exhausted(record, invite_id)
+                store.save(record, self.root)
+                if exhausted:
+                    decision = PairDecision(
+                        invite_id=invite_id,
+                        decision="decline",
+                        matched=False,
+                        reason="sas_mismatch",
+                        answered_by=str(frame.get("answered_by") or "human"),
+                        ceremony=live.ceremony,
+                    )
+                    store.save_pair_decision(decision, self.root)
+                    reply = self._pair_confirm_reply(live, decision, record)
+                    reply["status"] = "refused"
+                    return reply
+                # A REPLY, NOT A REFUSAL: the ceremony and its socket stay open, and the
+                # caller needs ``attempts_left`` to say so — a control refusal carries
+                # only a code and a sentence.
+                return {
+                    "invite_id": invite_id,
+                    "decision": "",
+                    "matched": False,
+                    "joiner_device_id": live.joiner_device_id,
+                    "shares": [],
+                    "status": "sas_mismatch",
+                    "attempts_left": self._attempts_left(record, invite_id),
+                }
+            offered = list(live.offer) if live.offer_state == offers_mod.OWNER_SENT else []
+            servable = offers_mod.served_keys(offered)
+            shares = sorted(str(key) for key in wanted)
+            unoffered = [key for key in shares if key not in servable]
+            if unoffered:
+                raise MeshRefusal(
+                    "shares_not_offered",
+                    f"{unoffered[0]!r} is not being served in this ceremony, so it cannot "
+                    "be granted by it — the list can only be reduced here",
+                )
+            decision = PairDecision(
+                invite_id=invite_id,
+                decision="admit",
+                matched=True,
+                answered_by=str(frame.get("answered_by") or "human"),
+                shares=shares,
+                ceremony=live.ceremony,
+            )
+            store.save_pair_decision(decision, self.root)
+            return self._pair_confirm_reply(live, decision, record)
+
+    @staticmethod
+    def _attempts_left(record: NetworkRecord, invite_id: str) -> int:
+        from local_operator.network.invite import PAIRING_MAX_FORGIVEN_FAILURES
+
+        invite = record.invite(invite_id)
+        spent = invite.attempts if invite is not None else PAIRING_MAX_FORGIVEN_FAILURES
+        return max(0, PAIRING_MAX_FORGIVEN_FAILURES - spent)
+
+    def _pair_confirm_reply(
+        self, pending: PendingPairing, decision: PairDecision, record: NetworkRecord
+    ) -> dict[str, Any]:
+        return {
+            "invite_id": pending.invite_id,
+            "decision": decision.decision,
+            "matched": decision.matched,
+            "joiner_device_id": pending.joiner_device_id,
+            "shares": list(decision.shares),
+            "status": "sent",
+            "attempts_left": self._attempts_left(record, pending.invite_id),
         }
 
     # -- incident fan-out: what the PEERS report -----------------------------
@@ -15793,6 +16513,9 @@ class RelayServer:
         """
         peers: list[dict[str, Any]] = []
         deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
+        # Per-endpoint passive route lookups (no traffic) are what let a row say
+        # ``local_offline`` instead of blaming the peer.
+        route_reader = getattr(self, "_route_reader", None)
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
@@ -15819,7 +16542,7 @@ class RelayServer:
                     if tracker is not None and link is None
                     else {"state": redial.CONNECTED, "attempts": 0}
                 )
-                state = peer_link_state(link, reason, attempts)
+                state = peer_link_state(link, reason, attempts, route_reader=route_reader)
                 peers.append(
                     {
                         "device_id": member.device_id,
@@ -16129,6 +16852,9 @@ class RelayServer:
                         "ok": False,
                         "latency_ms": attempt.latency_ms,
                         "detail": attempt.detail,
+                        # Present only when True, so every other row's shape is
+                        # exactly today's (U3; read by uplink._answered_by_silence).
+                        **({"dial_silent": True} if attempt.dial_silent else {}),
                     }
                 )
         # SCOPE FIRST, THEN INFORMATIONAL (F9; design round 1, D3): the same
@@ -16559,6 +17285,44 @@ def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
     }
 
 
+def _answers_ceremony(decision: PairDecision | None, ceremony: str) -> bool:
+    """Whether ``decision`` is THE answer to the live ``ceremony`` — the one rule.
+
+    ONE HELPER, TWO READERS (security review round 3, S-R3-1 / QA Q-R3-1). The
+    pairing poll and the terminal-answer latch must agree on what counts as an
+    answer: when the latch also honoured an UNSTAMPED decision file (an
+    out-of-band write, or a stale CLI fallback) while the poll ignored it, a stray
+    file blocked every live answer with ``pairing_answered`` and then let the
+    ceremony time out — refused on one side, never seen on the other. Every relay
+    ingress stamps ``live.ceremony`` under the record lock, so only a stamp that
+    matches the current ceremony is an answer; an empty stamp never matches, even
+    against an (unstamped) empty live ceremony.
+    """
+    return decision is not None and bool(decision.ceremony) and decision.ceremony == ceremony
+
+
+@contextmanager
+def _pairing_lock(network_id: str, root: Path | None) -> Iterator[None]:
+    """The network record's write lock, WITHOUT loading the record.
+
+    The same per-target lock ``store.mutate`` holds (``store._write_lock`` on the
+    record path), so a card park, the stage-2 flip, an answer and an identity-checked
+    cleanup are serialised against each other — and, unlike ``mutate``, it still
+    works for a cleanup that runs after the network record was forgotten.
+    """
+    with store._write_lock(store.record_path(network_id, root)):  # noqa: SLF001
+        yield
+
+
+def _budget_spent(network_id: str, invite_id: str, root: Path | None) -> bool:
+    """Whether the invite's forgiving SAS budget is spent, read fresh from disk."""
+    try:
+        record = store.load(network_id, root)
+    except FileNotFoundError:
+        return False
+    return failures_exhausted(record, invite_id)
+
+
 def _remaining_of(record: NetworkRecord | None, invite_id: str) -> float:
     """What is LEFT of this invite's life, for a wait that belongs to a person.
 
@@ -16618,13 +17382,30 @@ def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
 #: ``timeout`` is bounded instead by what remains of the invite's own life — the
 #: listener and the parked question both wait `_remaining_of`, and the join path
 #: refuses an expired token locally before it dials anything.
-_RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch"})
+#:
+#: ``pairing_busy`` (the parked-ceremony cap, :data:`PAIR_PARKED_CEREMONY_CAP`) is a
+#: refusal about THIS relay's load, decided before any code was shown, so it spends
+#: nothing and leaves the token standing exactly like a delay.
+_RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch", "pairing_busy"})
+
+#: At most this many inviter ceremonies parked on one relay at once (stage 1 or 2).
+#: WHY A CAP: the person window is now up to ``PAIR_PARK_CEILING_S`` (ten minutes)
+#: per ceremony, and each parked ceremony holds a thread, a socket and a Mesh
+#: approvals card; a token holder (or several) dialling repeatedly must not turn that
+#: into unbounded parked state. WHY 4: a person answers one pairing at a time, and
+#: the realistic concurrent case is "a couple of devices joining the same afternoon";
+#: the security review (60334a0b4c12) set four, the same depth the attestation table
+#: keeps per card (``asks.app_attest.MAX_PENDING_PER_ASK``). The fifth gets
+#: ``pairing_busy``, which spends nothing.
+PAIR_PARKED_CEREMONY_CAP = 4
 
 
 def _pairing_retryable(reason: str, record: NetworkRecord, invite_id: str) -> bool:
     """Whether a pairing refusal may leave its invite usable. See the table above."""
     if reason not in _RETRYABLE_PAIRING_REASONS:
         return False
+    if reason == "pairing_busy":
+        return True
     if reason == "timeout":
         # A delay is bounded by the invite's OWN REMAINING life: the listener's wait and
         # the parked question's window are both `pair_timeout_seconds(_remaining_of(...))`,
@@ -16641,6 +17422,7 @@ def acquire_invite(record: NetworkRecord, invite_id: str) -> bool:
 
 _PAIR_CAUSE: dict[str, str] = {
     "sas_mismatch": "sas_mismatch",
+    "pairing_busy": "busy",
     "declined_local": "policy",
     "timeout": "timeout",
     "invite_already_used": "policy",
@@ -19399,6 +20181,7 @@ def control_request(
     *,
     timeout: float = 5.0,
     report_timeout: bool = False,
+    report_unsent: bool = False,
     **fields: Any,
 ) -> dict[str, Any] | None:
     """Dial the relay's loopback control socket and run one op.
@@ -19433,15 +20216,30 @@ def control_request(
     lower-bound byte count; a reply that is not a JSON object raises
     ``frame_unreadable``. Both reach the operator with the relay named as the
     component that answered, not as a component that stayed silent.
+
+    ``report_unsent`` SPLITS THAT ``None`` IN TWO for a caller that must not
+    over-claim (security review round 3, S-R3-1): when the op frame provably never
+    left this device — no connection, or the connection failed before the op line
+    was written — it raises :class:`ControlRequestUnsent`, and ``None`` then means
+    only "sent, but no reply came back", where the relay may have acted. The flag
+    defaults off so every existing caller (and every test double of this function)
+    sees exactly the old contract.
     """
     try:
         sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
     except TimeoutError as exc:
+        if report_unsent:
+            raise ControlRequestUnsent() from exc
         if report_timeout:
             raise ControlRequestTimeout(timeout) from exc
         return None
-    except OSError:
+    except OSError as exc:
+        if report_unsent:
+            raise ControlRequestUnsent() from exc
         return None
+    # Flipped just before the op line is written: a failure after that point may
+    # have delivered the op, so it is never reported as "unsent".
+    sent = False
     try:
         # The bound is read here rather than left to the reader's default: this call
         # CHOOSES the control socket's bound, and ``dial.MAX_SESSION_FRAME_BYTES`` is
@@ -19450,6 +20248,7 @@ def control_request(
             sock, session_dial.MAX_SESSION_FRAME_BYTES, report_bad_frames=True
         )
         sock.sendall(wire.encode_line({"key": record.control_key, "client": "cli"}))
+        sent = True
         sock.sendall(wire.encode_line({"op": op, "req": 1, **fields}))
         started = time.monotonic()
         reply = reader.read_frame(timeout)
@@ -19476,10 +20275,14 @@ def control_request(
             "not a relay that stayed silent.",
         ) from exc
     except TimeoutError as exc:
+        if report_unsent and not sent:
+            raise ControlRequestUnsent() from exc
         if report_timeout:
             raise ControlRequestTimeout(timeout) from exc
         return None
-    except (OSError, ConnectionError):
+    except (OSError, ConnectionError) as exc:
+        if report_unsent and not sent:
+            raise ControlRequestUnsent() from exc
         # Non-timeout no-answer cases retain their existing result.
         return None
     finally:

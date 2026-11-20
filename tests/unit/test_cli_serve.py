@@ -434,3 +434,47 @@ def test_a_serve_started_without_the_markers_is_unchanged(
     assert serve_command("127.0.0.1", 0, False) == 0
     assert os.environ.get("SERVE_ORDINARY") == "1"
     assert AGENT_SHELL_ENV not in os.environ
+
+
+def test_served_in_process_listener_uses_the_peer_uid_gated_protocol(
+    captured_server: dict[str, object],
+) -> None:
+    """``http=`` IS the whole same-OS-user wiring (follow-up D).
+
+    A refactor that rebuilds the ``uvicorn.Config`` without it would silently
+    reopen the cross-user hole (other local accounts reading files through
+    ``/v1/static``), so the real ``serve_command`` path is pinned here.
+    """
+    from uvicorn.protocols.http.auto import AutoHTTPProtocol
+
+    from local_operator.server import peer_check
+
+    assert serve_command("127.0.0.1", 0, False) == 0
+    config = captured_server["config"]
+    sockets = captured_server["sockets"]
+    try:
+        assert config.http is peer_check.gated_protocol_class()  # type: ignore[attr-defined]
+        assert issubclass(config.http, AutoHTTPProtocol)  # type: ignore[attr-defined]
+        config.load()  # type: ignore[attr-defined]
+        loaded = config.http_protocol_class  # type: ignore[attr-defined]
+        assert loaded is peer_check.gated_protocol_class()
+    finally:
+        for listener in cast(list[socket.socket], sockets):
+            listener.close()
+
+
+def test_reload_path_passes_the_gated_protocol_import_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``--reload`` child re-imports the protocol, so it gets a string."""
+    import uvicorn
+    from uvicorn.importer import import_from_string
+
+    from local_operator.server import peer_check
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs, app=app))
+
+    assert serve_command("127.0.0.1", 0, True) == 0
+    assert captured["http"] == peer_check.PROTOCOL_IMPORT_STRING
+    assert import_from_string(cast(str, captured["http"])) is peer_check.gated_protocol_class()

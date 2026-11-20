@@ -78,6 +78,7 @@ from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
+    DEFAULT_KEEP_ALIVE_SECONDS,
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_ON_SIGNAL,
@@ -137,7 +138,10 @@ DEFAULT_GRACE_S = 3.0
 #: window of 0 simply leaves the ordinary drain. It declines held engaged
 #: runtimes too, which is the reading of the preference an operator who set it
 #: meant: hold nothing warm.
-DEFAULT_KEEP_ALIVE_SECONDS = 300
+#:
+#: ``DEFAULT_KEEP_ALIVE_SECONDS`` (300) is imported from ``session.runtime.types``
+#: above and re-exported from here unchanged: the mesh relay reads the same window
+#: and may not import this module (it owns sessions).
 
 #: HOW MANY IDLE CLIENTLESS RUNTIMES ONE INSTALL KEEPS WARM
 #: (``runtime.keep_alive_max``).

@@ -19,7 +19,10 @@ import pytest
 
 from local_operator.harness import loop as loop_module
 from local_operator.harness.loop import AgentLoop, LoopContext
-from local_operator.harness.replay_bound import DEFAULT_REPLAY_BOUND_CHARS
+from local_operator.harness.replay_bound import (
+    DEFAULT_REPLAY_BOUND_CHARS,
+    DEFAULT_REPLAY_RESULT_BOUND_CHARS,
+)
 from local_operator.harness.types import (
     ChatRequest,
     LoopConfig,
@@ -145,7 +148,8 @@ async def test_the_request_goes_out_bounded():
     result = text_row(sent.messages)
     call = call_row(sent.messages).tool_calls[0]
 
-    assert len(block_text(result)) <= DEFAULT_REPLAY_BOUND_CHARS
+    # Results get footer room above the tools-layer cap; arguments do not.
+    assert len(block_text(result)) <= DEFAULT_REPLAY_RESULT_BOUND_CHARS
     assert "elided on replay" in block_text(result)
     assert len(call.arguments["content"]) <= DEFAULT_REPLAY_BOUND_CHARS
     assert len(json.loads(_replayable_tool_arguments_json(call))["content"]) <= (

@@ -93,7 +93,9 @@ def test_english_source_keeps_the_pre_extraction_bytes() -> None:
         "`lop sessions move <id> --to <to> --wait <seconds>`"
     )
     assert _refusal("--to x --force") == (
-        "/move --to takes only --keep, --queue and --drop-session-roles, not '--force'"
+        # --without-working-set joined the list (PR #4241 review D2/U2, round 1).
+        "/move --to takes only --keep, --queue, --drop-session-roles and "
+        "--without-working-set, not '--force'"
     )
 
 

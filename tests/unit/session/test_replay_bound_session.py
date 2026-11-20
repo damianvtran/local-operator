@@ -24,7 +24,10 @@ import pytest
 
 from local_operator.compaction import api as compaction_api
 from local_operator.compaction.api import CompactionSettings
-from local_operator.harness.replay_bound import DEFAULT_REPLAY_BOUND_CHARS
+from local_operator.harness.replay_bound import (
+    DEFAULT_REPLAY_BOUND_CHARS,
+    DEFAULT_REPLAY_RESULT_BOUND_CHARS,
+)
 from local_operator.harness.types import (
     AgentEvent,
     AgentTool,
@@ -151,7 +154,7 @@ async def test_the_second_request_is_bounded_and_the_model_keeps_the_ends(tmp_pa
     row = next(m for m in second.messages if m.role == "tool" and m.tool_name == "dump")
     text = text_at(row)
 
-    assert len(text) <= DEFAULT_REPLAY_BOUND_CHARS
+    assert len(text) <= DEFAULT_REPLAY_RESULT_BOUND_CHARS
     assert "elided on replay" in text, "the loss is stated, never silent"
     # The ends are what a model acts on: the first row says what came back, the
     # last says how it ended. Both survive, so "act on the truncated material"
@@ -265,7 +268,8 @@ async def test_a_bounded_request_still_serializes_to_a_provider_body(tmp_path):
     body = OpenAICompatClient("https://compat.example/v1")._build_body(stream.requests[1])
     rows = [m for m in body["messages"] if m.get("role") == "tool"]
     assert rows and all(
-        len(json.dumps(row.get("content"))) <= DEFAULT_REPLAY_BOUND_CHARS + 512 for row in rows
+        len(json.dumps(row.get("content"))) <= DEFAULT_REPLAY_RESULT_BOUND_CHARS + 512
+        for row in rows
     )
     await session.dispose()
 

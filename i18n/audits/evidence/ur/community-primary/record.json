@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "audit_id": "primary-c739715f0519-ur",
+  "audit_kind": "full_namespace_independent_semantic_audit",
+  "locale": "ur",
+  "namespaces": [
+    "tui.community",
+    "wire.community"
+  ],
+  "audit_date": "2026-11-18",
+  "audited_revision": {
+    "head": "bd219f20b928f570b0230bac1197173267f04a74",
+    "patch": "pr4221-i18n.patch (held, applied on head)",
+    "patch_sha256": "fcf8ed47f7d7fa28a4ab4ab4e728ac4efdc0da489d71911ed82ccdb68762a7c5",
+    "pr": "https://github.com/damianvtran/local-operator/pull/4221"
+  },
+  "key_count": {
+    "tui.community": 148,
+    "wire.community": 5
+  },
+  "auditor": {
+    "agent": "reviewer / i18n-auditor",
+    "session": "c739715f0519",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header; no fallback",
+    "independent_from_translator_session": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "guides": [
+    "i18n/style-guides/ur.md",
+    "i18n/glossary.md"
+  ],
+  "terminology_reference": "local-operator-ui origin/feat/community-ui @ 1b1c4d31875dcbc44cc76f82b9a339278d93419d src/i18n/catalogues/<loc>/ui.community.json",
+  "input_hashes": {
+    "en": {
+      "tui.community": "cf2cc44838daed3feee13561e45dac11ddce031ac3fa702854a3215536671ac1",
+      "wire.community": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff"
+    },
+    "context": {
+      "tui.community": "00a728518f28f592f4135c9bffd77617d187e96611e79b99f26166af6a40cc90",
+      "wire.community": "b0c568ca3380d372c4f2ca43f2046ccc9dd8bf19e4c22014e037dcb63518e769"
+    },
+    "target": {
+      "tui.community": {
+        "path": "local_operator/i18n/catalogues/ur/tui.community.json",
+        "sha256": "9435e686cebdbc3d765fbeb5fa262a5c45af018e12d1322dc3b197be2558f068"
+      },
+      "wire.community": {
+        "path": "local_operator/i18n/catalogues/ur/wire.community.json",
+        "sha256": "fde0737e968f461116ccf1255f5a8b4073dc265550ee030cf81484189b3c71ea"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/community-primary/report.md",
+      "sha256": "40c9144ec58ab3255a06c40a305e69ec087f6f6d6a2a299ab97b57dcb38152de"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/community-primary/audit.log",
+      "sha256": "adf08110a4ef2c1748929d196df4001571d70a94383b56532d9ae48b2fc6ea28"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "A-ur-N1",
+      "A-ur-M1"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 1
+    }
+  }
+}

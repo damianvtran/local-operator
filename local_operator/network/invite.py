@@ -212,7 +212,7 @@ def mint(
         epoch=record.epoch,
         material=material,
         inviter_device_id=record.self_device_id,
-        inviter_name=record.listen.get("name") or record.self_device_id,
+        inviter_name=_inviter_name(record),
         invite_id=invite_id or new_invite_id(),
         issued_at=time.time() if now is None else now,
         ttl_s=float(ttl_s),
@@ -228,6 +228,22 @@ def mint(
     )
     return MintedInvite(
         token=encode(envelope, material), envelope=envelope, record=envelope.to_record(record.epoch)
+    )
+
+
+def _inviter_name(record: NetworkRecord) -> str:
+    """The name the joiner's screens call this device (QA round 1, Q1).
+
+    ``listen.name`` when the operator set one, else this device's own member row —
+    which carries its identity name from ``init``/admission — and the device id only
+    when neither exists. It used to skip the member row, so a joiner's Mesh approvals
+    card named the inviter by its id on every network nobody had named a listener for.
+    """
+    self_row = record.member(record.self_device_id)
+    return str(
+        record.listen.get("name")
+        or (self_row.name if self_row is not None else "")
+        or record.self_device_id
     )
 
 

@@ -1,0 +1,8 @@
+{
+  "network.pairing.refusal.answered": "This pairing is no longer open. This answer wasn't recorded.",
+  "network.pairing.refusal.expired": "This pairing is no longer open, so nothing was approved. Start a new pairing from the other device.",
+  "network.pairing.refusal.mismatch": "{count, plural, =0 {That code doesn't match the one on the other device, and no attempts are left.} one {That code doesn't match the one on the other device. # attempt left.} other {That code doesn't match the one on the other device. # attempts left.}}",
+  "network.pairing.refusal.needs_app": "Approving a device pairing here needs the signed Local Operator app on a Mac. Nothing was approved. You can still answer it from a terminal on this device.",
+  "network.pairing.refusal.no_pending": "No device is waiting to pair with this one for that invitation.",
+  "network.pairing.refusal.not_ready": "The other device hasn't entered this device's code yet, so there is nothing to confirm. Wait for it, then try again."
+}

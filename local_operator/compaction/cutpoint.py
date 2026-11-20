@@ -46,11 +46,15 @@ __all__ = [
     "extract_preserved_user_turns",
     "task_boundary_floor",
     "cap_preserved_user_turns",
+    "collapse_relaunch_briefs",
+    "RELAUNCH_ID_PREFIX",
+    "RELAUNCH_ELISION_NOTE",
     "CappedPreservedTurns",
     "elision_notice_text",
     "CARRIED_TIER_ID_PREFIX",
     "CARRIED_TIER_KEY",
     "is_carried_tier",
+    "is_preserved_replay",
     "RESUME_CARD_ID",
     "RESUME_CARD_KEY",
     "is_resume_card",
@@ -191,6 +195,20 @@ def _is_preserved_user_turn(message: AgentMessage) -> bool:
         isinstance(message, Message)
         and bool(message.provider_payload)
         and bool(message.provider_payload.get(PRESERVED_USER_TURN_KEY))
+    )
+
+
+def is_preserved_replay(message: AgentMessage) -> bool:
+    """True for a row the previous pass's marker re-renders on every request.
+
+    A preserved operator turn, or the notice standing in for the ones the cap
+    elided. Both live in the marker payload and are replayed verbatim outside
+    the archive, so a caller deciding what a pass must still CARRY (rather
+    than what is worth cutting, which is :func:`find_cut_point`'s question)
+    can leave them out without losing anything.
+    """
+    return _is_preserved_user_turn(message) or (
+        isinstance(message, Message) and message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
     )
 
 
@@ -1259,6 +1277,93 @@ def _payload_int(payload: dict[str, object], key: str) -> int:
     """
     value = payload.get(key)
     return value if isinstance(value, int) and value > 0 else 0
+
+
+#: Id prefix of the user-role turn a SUBAGENT is launched (and re-launched) with.
+#: Minted by ``harness/subagent.py`` and defined once as
+#: ``session.frontend_state.LAUNCH_MESSAGE_ID_PREFIX``; mirrored here as a
+#: literal because this package must not import the session package (the
+#: session imports ``compaction`` lazily so that a missing package degrades to
+#: no compaction). ``tests/unit/compaction/test_cutpoint.py`` pins the two.
+RELAUNCH_ID_PREFIX = "subagent-launch:"
+
+#: The one line an older launch turn gains when lines were removed from it.
+#: Fixed text with no count, so re-collapsing a block the previous pass wrote
+#: is a fixpoint (a count would have to be re-derived from text that no longer
+#: exists, which is how an earlier notice here went 6 -> 7,167 in ten passes).
+RELAUNCH_ELISION_NOTE = (
+    "[launch brief repeated: lines identical to the latest launch brief further on "
+    "are omitted here]"
+)
+
+
+def collapse_relaunch_briefs(turns: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Carry a re-stamped subagent launch brief ONCE in the preserved block.
+
+    WHY THIS EXISTS. A subagent's launch prompt is ``resume context + role and
+    team preamble + task`` delivered as a user-role turn, and every resume of
+    that child mints a NEW such turn with the whole preamble stamped on again.
+    They are genuine user turns as far as provenance can tell (nobody injected
+    them into a running conversation; they ARE the conversation's prompts), so
+    :func:`extract_preserved_user_turns` rightly preserves each one verbatim.
+    The copies then fill the block: on the live session store, 8 of the 11
+    sessions whose preserved block exceeded 20k tokens were this shape. One
+    held 39 launch turns totalling 128k tokens of which 22.5k were distinct
+    (55 lines common to all 39, 54 of them in the original launch), and
+    :func:`cap_preserved_user_turns` then evicted nine DISTINCT resume notes to
+    keep the copies under the cap -- the opposite of what the cap is for.
+
+    WHAT IT DOES. Among turns whose id carries :data:`RELAUNCH_ID_PREFIX`, the
+    NEWEST is kept verbatim. Each older one keeps only its lines that the
+    newest does not contain (line-exact), followed by
+    :data:`RELAUNCH_ELISION_NOTE`. The newest is the full copy, not the first,
+    so the cap -- which evicts oldest-first -- can never leave a reduced turn
+    pointing at a copy that is gone.
+
+    WHAT IT CANNOT DO. It never touches a turn without the launch prefix: an
+    operator's own messages are byte-for-byte what they typed even when they
+    repeat themselves, because "the user said it twice" is information and
+    this function has no way to know otherwise. It keys on the id the harness
+    minted, never on wording. Nothing is deleted from the block as a whole:
+    every removed line is still present, verbatim, in the newest launch turn.
+
+    IDEMPOTENT, and it has to be: each pass re-harvests the preserved turns the
+    previous pass wrote and runs this again. Re-running on its own output is a
+    fixpoint, and when a newer launch has arrived the previous newest is
+    reduced against it without stacking notes.
+
+    Call it BEFORE :func:`cap_preserved_user_turns`, so the cap budgets the
+    collapsed block. The source is the mint site (``harness/subagent.py``
+    re-stamping the preamble on resume); this is the compaction-side bound that
+    holds whatever the mint site does.
+    """
+    launches = [
+        index
+        for index, turn in enumerate(turns)
+        if str(turn.get("id", "")).startswith(RELAUNCH_ID_PREFIX)
+    ]
+    if len(launches) < 2:
+        return list(turns)
+    newest = launches[-1]
+    latest_lines = {
+        line for line in str(turns[newest].get("text", "")).splitlines() if line.strip()
+    }
+    collapsed: list[Mapping[str, object]] = list(turns)
+    for index in launches[:-1]:
+        lines = str(turns[index].get("text", "")).splitlines()
+        distinct = [
+            line
+            for line in lines
+            if line.strip() and line != RELAUNCH_ELISION_NOTE and line not in latest_lines
+        ]
+        # Blank lines carry no content and are not compared, so "nothing was
+        # removed" is judged on the non-blank lines only; a turn the newest
+        # shares nothing with is returned as the very object it came in as.
+        unchanged = len(distinct) == sum(1 for line in lines if line.strip())
+        if unchanged:
+            continue
+        collapsed[index] = {**turns[index], "text": "\n".join([*distinct, RELAUNCH_ELISION_NOTE])}
+    return collapsed
 
 
 def cap_preserved_user_turns(
