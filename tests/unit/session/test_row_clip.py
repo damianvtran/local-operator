@@ -221,13 +221,13 @@ def test_a_range_boundary_inside_a_multibyte_character_rejoins_exactly() -> None
     content = canonical_row_bytes(_tool("m", "a€b😀c"))
     euro = content.index("€".encode())
     emoji = content.index("😀".encode())
-    parts: list[bytes] = []
     # Cut once inside the 3-byte character and once inside the 4-byte one.
     cuts = [0, euro + 1, emoji + 2, len(content)]
-    for start, stop in zip(cuts, cuts[1:]):
-        answer = row_range(content, offset=start, limit=stop - start)
-        parts.append(base64.b64decode(answer["data"]))
-    assert answer["eof"] is True
+    answers = [
+        row_range(content, offset=start, limit=stop - start) for start, stop in zip(cuts, cuts[1:])
+    ]
+    parts = [base64.b64decode(answer["data"]) for answer in answers]
+    assert answers[-1]["eof"] is True
     # The cuts really do split characters: a range alone is not valid UTF-8.
     for broken in parts[:2]:
         with pytest.raises(UnicodeDecodeError):
