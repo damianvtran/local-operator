@@ -69,10 +69,10 @@ from local_operator.server.utils.desktop_sessions import (
 )
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import (
-    WEDGED_STATUS,
     load_catalog,
     status_dedupe_key,
     status_of,
+    wedged_status,
 )
 from local_operator.session.creation import CREATED_AT_NAME
 from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
@@ -1924,7 +1924,7 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
     # so a second derivation of the label — the one string that is not a
     # constant — is compared against the list's own spelling.
     assert frames[wedged]["code"] == "wedged"
-    assert frames[wedged]["label"].startswith(WEDGED_STATUS), frames[wedged]["label"]
+    assert frames[wedged]["label"].startswith(wedged_status()), frames[wedged]["label"]
     # A session nothing happened to is not a candidate at all: no frame, because
     # its pair (``recent``) is what the client's own list already says.
     assert cold not in frames
@@ -2149,7 +2149,7 @@ def test_a_stale_heartbeat_publishes_wedged_with_no_write(tmp_path):
     assert [frame["payload"]["code"] for frame in wedged] == ["wedged"]
     # The label is the one home's sentence, with the measured age appended — the
     # same string the sidebar's tooltip shows.
-    assert wedged[0]["payload"]["label"].startswith(WEDGED_STATUS)
+    assert wedged[0]["payload"]["label"].startswith(wedged_status())
     asyncio.run(feed.close())
 
 
@@ -2218,7 +2218,7 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     _tick(feed)
     _queued(subscription)
 
-    # ALL SEVEN 1 Hz probes are gated shut, so what is measured is the
+    # ALL EIGHT 1 Hz probes are gated shut, so what is measured is the
     # DOORBELL's cost: the catalogue probe legitimately walks the sessions
     # directory, the authoring probe stats the profile and team rows, the
     # code-requests probe scans the code_requests directory, and any of them in
@@ -2255,6 +2255,9 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     # ``root/code_requests`` — under the store, so an expired clock puts a
     # product walk inside the window and fails ``scandir_scoped``.
     feed._code_requests_probed_at = future
+    # The eighth: the voice probe (per-session voice slot), also a 1 Hz gate that
+    # must not open inside the measured window.
+    feed._voice_probed_at = future
     with _io_watch(feed._registry_dir, stats_under=root) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
@@ -2592,6 +2595,7 @@ def test_the_status_probe_reads_only_the_records_and_never_walks_the_store(tmp_p
 
     feed._catalogue_probed_at = time.monotonic()  # see the note above
     feed._authoring_probed_at = time.monotonic()
+    feed._voice_probed_at = time.monotonic()
     feed._status_probed_at = 0.0
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)

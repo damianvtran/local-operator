@@ -113,9 +113,13 @@ async def test_without_read_a_large_page_is_inlined_and_names_no_spill_route(
         query=query,
     )
     assert is_error is False
-    assert "spill" not in details
     assert "spill://" not in preview and "read(" not in preview
-    assert len(preview) > TOOL_OUTPUT_LIMIT_CHARS, "inlined past the readable-session cap"
+    if query is None:
+        assert "spill" not in details
+        assert len(preview) > TOOL_OUTPUT_LIMIT_CHARS, "plain fetch keeps the wider inline cap"
+    else:
+        assert details["query_passages"], "query ranks even below the no-read inline cap"
+        assert len(preview) <= TOOL_OUTPUT_LIMIT_CHARS
     assert "Line number 42 " in preview
 
 
@@ -175,6 +179,32 @@ async def test_without_read_a_query_still_returns_the_focused_passage(tmp_path) 
     assert len(without) <= len(with_read) + 200, (len(without), len(with_read))
     # Stored for the harness's own use (ranking, monitors, renderers).
     assert details["spill"]["handle"].startswith("spill://")
+
+
+@pytest.mark.asyncio
+async def test_query_ranking_starts_at_same_threshold_without_read(tmp_path) -> None:
+    from local_operator.tools.builtin import TOOL_OUTPUT_LIMIT_CHARS
+
+    answer = "NEEDLE_TOKEN port 4318 is the deployment endpoint."
+    page = (
+        ("Ordinary article filler without an endpoint.\n" * 125)
+        + answer
+        + ("\nOrdinary article filler without an endpoint." * 125)
+    )
+    assert TOOL_OUTPUT_LIMIT_CHARS < len(page) < 24_000
+    readable = ToolContext(cwd=str(tmp_path), session_id="medium-read", spill_readable=True)
+    no_read = ToolContext(cwd=str(tmp_path), session_id="medium-no-read", spill_readable=False)
+    with_read, read_details, _ = await _fetch_md(page, readable, "NEEDLE_TOKEN port")
+    without, details, is_error = await _fetch_md(page, no_read, "NEEDLE_TOKEN port")
+    plain, plain_details, _ = await _fetch_md(page, no_read, None)
+
+    assert is_error is False and answer in with_read and answer in without
+    assert details["query_passages"] == read_details["query_passages"]
+    assert details["query_passages"]
+    assert len(without) <= TOOL_OUTPUT_LIMIT_CHARS
+    assert "spill://" not in without and "read(" not in without
+    assert page in plain, "no-query keeps the 24k inline allowance"
+    assert "query_passages" not in plain_details
 
 
 @pytest.mark.asyncio

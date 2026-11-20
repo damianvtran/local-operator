@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Потолок неадресованных в час",
   "wire.settings.team_bridge_session.help": "Сессия, которую можно пробудить при новых сообщениях; пусто = только индикатор.",
   "wire.settings.team_bridge_session.label": "Сессия CoS",
+  "wire.settings.team_bridge_hold_release.label": "Задерживать запросы на работу",
+  "wire.settings.team_bridge_hold_release.help": "Некоторые запросы на новую работу задерживаются, чтобы вы их доставили или отклонили. Без вашей доставки агент ничего не получит. Если выключено, им отказывают.",
   "wire.settings.tool_approval_mode.choice.ask.description": "спрашивать перед инструментами записи/выполнения",
   "wire.settings.tool_approval_mode.choice.ask.label": "спрашивать",
   "wire.settings.tool_approval_mode.choice.auto.description": "выполнять их, не спрашивая",

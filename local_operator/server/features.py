@@ -1420,6 +1420,16 @@ def live_feature_flags() -> dict[str, Any]:
         # Absent ⇒ no remote destination and no request to build — the
         # pre-feature state, not a degraded one.
         **({"remote_compute": 1} if remote_compute_enabled() else {}),
+        # PER-SESSION VOICE MODE (docs/design/qwen-voice.md): the three
+        # `/v1/desktop/voice*` routes and the `type: "voice"` frame on
+        # `/v1/desktop/events`. Its own key for the rule `code_requests` states:
+        # the routes are additive, and this is how a renderer learns they exist
+        # before it mounts the voice toggle. Absent, the renderer shows no
+        # voice affordance and makes no voice request.
+        # 2 (session-voice-groq D3): `/voice/text` returns `segments`, `/voice/speech`
+        # returns one WAV segment by `(source, segment)`, and 429s carry
+        # `voice_rate_limited`. A renderer on 1 has no speech route.
+        "voice": 2,
         # ``@path`` in an ordinary submitted message, which
         # :meth:`Session.prompt` expands into an
         # ``<operator-references>`` block before the model sees the turn

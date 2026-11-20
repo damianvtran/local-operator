@@ -67,10 +67,50 @@ their authors and contributors for building in the open.
 Inspiration drawn from these projects informed our own independent
 implementation; any mistakes here are our own.
 
+## Session voice
+
+Per-session voice (the hands-free mode in the desktop app) began as a local
+rig built around the projects and models below, and its design record
+([`docs/design/qwen-voice.md`](../design/qwen-voice.md)) is written against
+them. **The voice that ships today does not run any of the rig.** The app
+listens with Silero voice-activity detection in a hidden page, sends each
+recording to this backend, and speaks through the speech provider the user
+chose (Radient, or their own ElevenLabs key). The rig's launcher code stays in
+the desktop app's repository, never started, and none of the projects below is
+bundled or copied into this repository.
+
+- **[qwen-audio-agent](https://github.com/QwenAudio/qwen-audio-agent)**: by the
+  QwenAudio team (Apache-2.0). Its gateway and speech-provider contract shaped
+  the original rig and our design decisions about it. Not reviewed or endorsed
+  by them.
+- **[speech-to-speech](https://github.com/huggingface/speech-to-speech)**: by
+  [Hugging Face](https://huggingface.co) (Apache-2.0). The rig ran it as a
+  separate program. Not reviewed or endorsed by them.
+- **[Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice)**:
+  by the Qwen team at Alibaba Cloud (Apache-2.0). The rig's speaking model; the
+  weights were downloaded by the rig and are not part of this repository.
+- **[Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)**: by NVIDIA
+  (CC-BY-4.0). The rig's listening model, with the same arrangement. Not
+  reviewed or endorsed by NVIDIA.
+- **[Smart Turn](https://github.com/pipecat-ai/smart-turn)**: by the Pipecat
+  team at Daily (BSD-2-Clause). The rig's turn detector; the shipped path
+  detects turns from silence only.
+- **[Silero VAD](https://github.com/snakers4/silero-vad)**: by the Silero Team
+  (MIT), run in the desktop app through
+  [vad-web](https://github.com/ricky0123/vad) by ricky0123 (ISC) on
+  [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) by Microsoft
+  (MIT). These are redistributed in the desktop app and carry their licence
+  notices in that repository's `THIRD_PARTY_NOTICES.md`.
+
+Speech itself is provided by services the user signs in to or brings a key for:
+[Radient](https://radienthq.com) and [ElevenLabs](https://elevenlabs.io). They
+are called over their APIs; nothing of theirs is redistributed here.
+
 ## A note on reuse and credit
 
-All of the projects above are open source under permissive licenses (MIT; the
-Anthropic skills cited above are Apache-2.0), and Local Operator itself is
+The agent-harness projects above are open source under permissive licenses
+(MIT; the Anthropic skills cited above are Apache-2.0), the session-voice
+projects carry the licenses named beside each, and Local Operator itself is
 MIT. Under that license, you are free to draw inspiration from or reuse code
 from Local Operator in your own work. Verbatim reuse of the code requires
 retaining the copyright notice and license text, as the license states. Beyond that legal

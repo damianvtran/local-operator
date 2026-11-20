@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 import httpx
 
-from local_operator.clients._http import APIError
+from local_operator.clients._http import APIError, scrub_secrets
 from local_operator.stt.errors import api_error_from_httpx_response
 from local_operator.tts.adapters import Params
 from local_operator.tts.output_format import PREFERRED_OUTPUT_FORMAT
@@ -36,6 +36,8 @@ from local_operator.tts.output_format import (
 #: paths are ``/v1/...`` themselves).
 ELEVENLABS_TTS_BASE_URL = "https://api.elevenlabs.io"
 OPENAI_TTS_BASE_URL = "https://api.openai.com/v1"
+#: Groq serves the OpenAI audio wire at its own host (session-voice-groq D1).
+GROQ_TTS_BASE_URL = "https://api.groq.com/openai/v1"
 
 #: The ElevenLabs model the BYO leg runs. ``eleven_multilingual_v2`` is the
 #: hub's own default (docs/SPEECH.md: it pronounces foreign words inside mixed
@@ -93,8 +95,11 @@ async def _post_audio(
             )
         except httpx.HTTPError as exc:
             # A transport failure never reached the upstream: no status, no
-            # body; the client's own text is the whole diagnostic.
-            raise APIError(f"{label} request failed: {exc}", status_code=None) from exc
+            # body; the client's own text is the whole diagnostic, scrubbed of
+            # the key because h11 quotes a whole illegal header value in it.
+            raise APIError(
+                scrub_secrets(f"{label} request failed: {exc}", secrets), status_code=None
+            ) from exc
         if response.status_code >= 400:
             raise api_error_from_httpx_response(
                 response, fallback_message=f"{label} refused the request", secrets=secrets
@@ -200,10 +205,13 @@ class OpenAiTtsClient:
         *,
         base_url: str | None = None,
         client: Optional[httpx.AsyncClient] = None,
+        label: str = "OpenAI",
     ) -> None:
         self._api_key = api_key
         self._base_url = (base_url or OPENAI_TTS_BASE_URL).rstrip("/")
         self._client = client
+        # Names the vendor in failures (an OpenAI-compatible host is not OpenAI).
+        self._label = label
 
     async def synthesize(
         self,
@@ -242,10 +250,10 @@ class OpenAiTtsClient:
             payload=payload,
             params={},
             timeout_s=timeout_s,
-            label="OpenAI",
+            label=self._label,
             secrets=[self._api_key],
         )
-        return TtsClientResult(audio=audio, model=model_id, provider="openai")
+        return TtsClientResult(audio=audio, model=model_id, provider=self._label.lower())
 
 
 #: The platform constants, read from the artifact rather than restated: a map
@@ -274,10 +282,25 @@ OUTPUT_FORMAT = PREFERRED_OUTPUT_FORMAT
 #: :mod:`local_operator.tts.output_format`.
 DEFAULT_STABILITY = 0.5
 
+#: Groq's Orpheus model, its only response format for session voice, and the
+#: two voices the rung maps the descriptor's gender onto. Deliberately not in
+#: the vendored voicing map (D1): the map belongs to agent-server and refuses
+#: unknown providers, so tone/pace/accent are not applied on this rung.
+GROQ_TTS_MODEL = "canopylabs/orpheus-v1-english"
+GROQ_TTS_FORMAT = "wav"
+GROQ_TTS_VOICES = {"female": "hannah", "male": "troy"}
+#: Groq's per-request input limit for Orpheus.
+GROQ_TTS_MAX_CHARS = 200
+
 __all__ = [
     "DEFAULT_STABILITY",
     "DEFAULT_SYNTHESIZE_TIMEOUT_S",
     "ELEVENLABS_TTS_BASE_URL",
+    "GROQ_TTS_BASE_URL",
+    "GROQ_TTS_FORMAT",
+    "GROQ_TTS_MAX_CHARS",
+    "GROQ_TTS_MODEL",
+    "GROQ_TTS_VOICES",
     "ELEVENLABS_TTS_MODEL",
     "OPENAI_TTS_BASE_URL",
     "OPENAI_TTS_MODEL",
