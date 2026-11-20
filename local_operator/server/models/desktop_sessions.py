@@ -719,7 +719,8 @@ class RowTruncation(BaseModel):
     #: Byte length of the FULL row: what ``GET .../history/rows/{ref}``
     #: reassembles to (compact JSON of the desktop wire row, UTF-8).
     bytes_total: int = Field(ge=0)
-    #: Compact-JSON byte length of the row as served, without this marker.
+    #: UTF-8 byte length (same unit as ``bytes_total``) of the row as served,
+    #: compact JSON, without this marker. Budgets are measured on the wire.
     shown_bytes: int = Field(ge=0)
     #: Opaque and bound to this session; ``None`` when no ref could be minted
     #: (a peer's row clipped by its owner, which this device cannot fetch).

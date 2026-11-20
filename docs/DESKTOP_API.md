@@ -1701,12 +1701,14 @@ never larger than the wire form, so they are bounded too.
 
 A row over its budget stays on the page, at its position, with its id, and
 carries an ADDITIVE field (absent on every row that fits, so unclipped pages
-keep today's bytes):
+keep today's bytes). Both of its byte counts are UTF-8 (compact JSON, not
+escaped), so `shown_bytes < bytes_total` on every clipped row; only the
+budgets above are measured in wire bytes:
 
 ```
 truncated: {
   bytes_total: int,   // UTF-8 bytes of the FULL row: exactly what the rows route reassembles to
-  shown_bytes: int,   // WIRE bytes (see above) of the row as served, without `truncated`
+  shown_bytes: int,   // UTF-8 bytes (same unit as bytes_total) of the row as served, without `truncated`
   ref: str | null,    // opaque, bound to this session; null = not fetchable here
   reason: "open_frame_cap" | "history_cap",
   omitted?: true      // payload WITHHELD rather than cut (see below)

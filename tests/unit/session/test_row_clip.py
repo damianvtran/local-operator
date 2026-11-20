@@ -52,7 +52,7 @@ def test_two_huge_parts_both_keep_their_start_and_small_strings_survive() -> Non
     assert marker["bytes_total"] == len(canonical_row_bytes(row))
     assert ROW_CLIP_MAX_BYTES * 0.9 <= marker["shown_bytes"] <= ROW_CLIP_MAX_BYTES
     projection = {key: value for key, value in clipped.items() if key != "truncated"}
-    assert marker["shown_bytes"] == wire_size(projection)
+    assert marker["shown_bytes"] == len(canonical_row_bytes(projection))
 
 
 def test_multibyte_text_is_budgeted_in_bytes_not_characters() -> None:
@@ -60,7 +60,31 @@ def test_multibyte_text_is_budgeted_in_bytes_not_characters() -> None:
     row = _tool("a", "é" * 6_000_000)
     clipped = clip_row(row, session_id="s", reason="history_cap")
     assert "omitted" not in clipped["truncated"]
-    assert ROW_CLIP_MAX_BYTES * 0.9 <= clipped["truncated"]["shown_bytes"] <= ROW_CLIP_MAX_BYTES
+    # The budget is spent in wire bytes; ``shown_bytes`` reports UTF-8 (R2-1).
+    projection = {key: value for key, value in clipped.items() if key != "truncated"}
+    assert ROW_CLIP_MAX_BYTES * 0.9 <= wire_size(projection) <= ROW_CLIP_MAX_BYTES
+    assert clipped["truncated"]["shown_bytes"] == len(canonical_row_bytes(projection))
+
+
+@pytest.mark.parametrize("char", ["x", "ж", "😀"])
+def test_shown_bytes_is_utf8_like_bytes_total(char: str) -> None:
+    """R2-1: ``shown_bytes`` counted wire bytes while ``bytes_total`` counted UTF-8.
+
+    On 56b696259 a clipped 400k-character Cyrillic row reported
+    ``shown_bytes`` 1,572,687 against ``bytes_total`` 800,123 — showing ~2x
+    MORE than the whole row. Both now count UTF-8, so shown is a true
+    fraction of total; ``x`` is the ASCII control, where the units coincide.
+    """
+    row = _tool("a", char * 400_000) if char != "x" else _tool("a", char * 3_000_000)
+    clipped = clip_row(row, session_id="s", reason="history_cap")
+    marker = clipped["truncated"]
+    assert "omitted" not in marker
+    projection = {key: value for key, value in clipped.items() if key != "truncated"}
+    assert marker["shown_bytes"] == len(canonical_row_bytes(projection))
+    assert marker["bytes_total"] == len(canonical_row_bytes(row))
+    assert marker["shown_bytes"] < marker["bytes_total"]
+    # The budget itself is still enforced on the wire spelling.
+    assert wire_size(projection) <= ROW_CLIP_MAX_BYTES
 
 
 def test_a_checkpoint_is_withheld_not_cut() -> None:

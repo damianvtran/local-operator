@@ -19,8 +19,11 @@ carries ``truncated: {bytes_total, shown_bytes, ref, reason}`` —
 - ``bytes_total``: the UTF-8 byte length of the row's FULL content, i.e.
   exactly what ``GET .../history/rows/{ref}`` reassembles to
   (``canonical_row_bytes`` of the unclipped desktop wire row);
-- ``shown_bytes``: the WIRE byte length (``wire_size``, the SSE spelling every
-  budget counts) of the row as served, WITHOUT the ``truncated`` key itself;
+- ``shown_bytes``: the UTF-8 byte length (``canonical_row_bytes``, the same unit
+  as ``bytes_total``) of the row as served, WITHOUT the ``truncated`` key
+  itself — so ``shown_bytes / bytes_total`` is a true fraction. The BUDGETS
+  are still measured in wire bytes (``wire_size``); UTF-8 is never larger than
+  the wire spelling, so ``shown_bytes`` never exceeds the budget either;
 - ``ref``: opaque, session-bound (see ``row_ref``); ``None`` only when the
   producer had no session to bind it to (pure helpers in tests);
 - ``reason``: ``"open_frame_cap"`` or ``"history_cap"`` — which bound clipped
@@ -121,8 +124,10 @@ def canonical_row_bytes(row: Mapping[str, Any]) -> bytes:
     Deliberately NOT the wire spelling: the ref route ships these bytes as
     base64 ranges (never inside an SSE record), and unescaped UTF-8 is up to 3x
     smaller for non-Latin text, so a long row reassembles in fewer requests.
-    ``truncated.bytes_total`` counts THESE bytes — the exact length the joined
-    ranges reach — while every budget and ``shown_bytes`` count wire bytes.
+    ``truncated.bytes_total`` and ``shown_bytes`` count THESE bytes — the exact
+    length the joined ranges reach, and one unit for both so a reader's
+    "shown N of M" never reports more than the whole — while every budget
+    counts wire bytes.
     """
     return json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
@@ -289,7 +294,10 @@ def clip_row(
     projection = _withhold(row) if clipped is None else clipped
     marker: dict[str, Any] = {
         "bytes_total": total,
-        "shown_bytes": wire_size(projection),
+        # UTF-8, the unit of ``bytes_total`` (R2-1): the wire size of a
+        # non-Latin projection is up to 3x its UTF-8 size, which reported a
+        # clipped Cyrillic row as showing ~2x MORE bytes than the full row.
+        "shown_bytes": len(canonical_row_bytes(projection)),
         "ref": ref,
         "reason": reason,
     }
