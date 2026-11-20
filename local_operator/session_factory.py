@@ -813,6 +813,22 @@ def resolve_hosting_model_with_source(
         agent_model or flag_model or team_model or config_manager.get_config_value("model_name")
     )
     if not hosting:
+        # Nothing chose a hosting: let Bedrock's documented self-enable rule
+        # (``bedrock/<id>`` model id, or its explicit env signal with Bedrock
+        # the only credentialed provider) fill it in before giving up. Lives
+        # BELOW the whole precedence above, so it can never override a choice.
+        from local_operator.providers.bedrock.auto_select import implied_bedrock_hosting
+
+        # getattr, not attribute access: callers (the SDK and its tests) pass
+        # lighter config-shaped objects with only ``get_config_value``, and this
+        # preflight must reach its own HostingNotConfiguredError, never die on
+        # an AttributeError first. No dir means prefix-only inference.
+        implied = implied_bedrock_hosting(
+            model_name, config_dir=getattr(config_manager, "config_dir", None)
+        )
+        if implied is not None:
+            hosting, model_name = implied
+    if not hosting:
         raise HostingNotConfiguredError("Hosting platform is not configured.")
     # Validate the RESOLVED hosting here, in the same preflight that already
     # catches the not-configured case, rather than letting a garbage value sail

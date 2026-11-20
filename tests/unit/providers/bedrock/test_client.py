@@ -409,7 +409,6 @@ def test_1h_ttl_kept_only_for_known_bedrock_models(monkeypatch) -> None:
 @pytest.mark.parametrize(
     "model_id",
     [
-        "us.anthropic.claude-haiku-5-5",
         "global.anthropic.claude-fable-5-2",
         "anthropic.claude-fable-5-1",
         "eu.anthropic.claude-mythos-5-2",
@@ -424,6 +423,22 @@ def test_1h_ttl_for_aws_documented_models_without_a_static_row(model_id: str) ->
     from local_operator.model.registry import bedrock_supports_1h_cache
 
     assert bedrock_supports_1h_cache(model_id)
+
+
+def test_haiku_5_5_keeps_the_1h_ttl_now_that_it_has_a_static_row() -> None:
+    """Haiku 5.5 moved from the no-static-row set to BEDROCK_ANTHROPIC_MODEL_IDS
+    (it gained a priced first-party twin); the 1h TTL must survive the move on
+    every prefix, including ``ca.`` which has no static row of its own."""
+    from local_operator.model.registry import (
+        BEDROCK_1H_CACHE_EXTRA_ANTHROPIC_IDS,
+        BEDROCK_ANTHROPIC_MODEL_IDS,
+        bedrock_supports_1h_cache,
+    )
+
+    assert "claude-haiku-5-5" in BEDROCK_ANTHROPIC_MODEL_IDS
+    assert not (set(BEDROCK_ANTHROPIC_MODEL_IDS) & BEDROCK_1H_CACHE_EXTRA_ANTHROPIC_IDS)
+    for prefix in ("global.", "us.", "eu.", "apac.", "jp.", "au.", "ca.", ""):
+        assert bedrock_supports_1h_cache(f"{prefix}anthropic.claude-haiku-5-5")
 
 
 def test_1h_ttl_stays_off_for_ids_aws_does_not_list() -> None:
@@ -633,6 +648,52 @@ def test_iam_deny_names_action_and_resource_not_console_model_access() -> None:
         region="us-east-1",
     )
     assert "Amazon Bedrock console" in str(console) and console.kind == "request"
+
+
+#: Verbatim from the v0.108.0 live run (2026-11-20) with a truncated key in
+#: AWS_BEARER_TOKEN_BEDROCK: AWS answers a malformed bearer with AccessDenied.
+_MALFORMED_KEY = "Invalid API Key format: Base64 decoding failed"
+
+
+def test_malformed_api_key_is_an_invalid_key_not_an_iam_permission() -> None:
+    from local_operator.i18n.keys import wire_errors_bedrock
+    from local_operator.i18n.messages import render_resolved
+    from local_operator.providers.bedrock.errors import provider_error_for
+    from local_operator.providers.failover import is_rotation_eligible
+
+    err = provider_error_for(
+        "AccessDeniedException",
+        _MALFORMED_KEY,
+        403,
+        model="ca.anthropic.claude-haiku-5-5",
+        region="ca-central-1",
+    )
+    text = str(err)
+    expected = render_resolved(wire_errors_bedrock.invalid_api_key(region="ca-central-1"))
+    assert expected in text
+    assert "malformed or invalid" in text and "ca-central-1" in text
+    assert f"(AccessDeniedException: {_MALFORMED_KEY})" in text
+    access_denied = render_resolved(wire_errors_bedrock.access_denied(region="ca-central-1"))
+    assert access_denied not in text and "IAM" not in expected
+    assert err.kind == "auth" and err.auth_error and not err.retryable
+    assert is_rotation_eligible(err)
+
+
+def test_genuine_iam_access_denied_still_maps_to_access_denied() -> None:
+    from local_operator.i18n.keys import wire_errors_bedrock
+    from local_operator.i18n.messages import render_resolved
+    from local_operator.providers.bedrock.errors import provider_error_for
+
+    err = provider_error_for(
+        "AccessDeniedException",
+        "User: arn:aws:sts::123456789012:assumed-role/r/s is not authorized to perform: "
+        "bedrock:ListFoundationModels",
+        403,
+        region="us-east-1",
+    )
+    assert render_resolved(wire_errors_bedrock.access_denied(region="us-east-1")) in str(err)
+    assert "malformed or invalid" not in str(err)
+    assert err.kind == "auth" and err.auth_error
 
 
 def test_application_inference_profile_and_explicit_deny_are_iam_scoped() -> None:

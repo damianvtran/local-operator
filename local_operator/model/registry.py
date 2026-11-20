@@ -672,6 +672,54 @@ anthropic_models: Dict[str, ModelInfo] = {
         ),
         recommended=False,
     ),
+    # Claude Haiku 5.5 -- the fast tier of the 5.5 generation. Added so its
+    # Bedrock rows (derived from this one through BEDROCK_ANTHROPIC_MODEL_IDS)
+    # carry a price: without a first-party twin `ca./global.anthropic.
+    # claude-haiku-5-5` resolved through the family fallback, which zeroes the
+    # price of a newer generation, and every turn reported a null cost.
+    #
+    # Id, 1M window and 128k output from the models overview table at
+    # https://platform.claude.com/docs/en/about-claude/models/overview (read
+    # 2026-11-20). Prices from the "Model pricing" table at
+    # https://platform.claude.com/docs/en/about-claude/pricing read the same
+    # day. Unlike every other current Claude, Haiku 5.5 is TIERED by prompt
+    # length: a request whose prompt (input + cache reads + cache writes) is
+    # over 100,000 tokens bills the whole request at the higher row --
+    #   <=100k: $0.10 in / $0.125 5m write / $0.20 1h write / $0.01 hit / $0.50 out
+    #   >100k:  $0.50 in / $0.625 5m write / $1.00 1h write / $0.05 hit / $2.50 out
+    # which is exactly the `long_context_*` contract (`_cost_for_usage` compares
+    # the full prompt for Anthropic's disjoint cache buckets). The cache hit is
+    # the standard 0.1x and both 1h writes are 2x input, so the cost path's 1h
+    # surcharge (2x the tier's input) needs no per-model price.
+    # Cross-checked against the AWS Price List bulk offer
+    # https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/us-east-1/index.json
+    # (publicationDate 2026-11-19T13:30:17Z, read 2026-11-20): Global SKUs equal
+    # every figure above; regional SKUs are 1.10x (0.11/0.1375/0.22/0.011/0.55,
+    # long-context 0.55/0.6875/1.10/0.055/2.75) -- BEDROCK_REGIONAL_PRICE_MULTIPLIER.
+    "claude-haiku-5-5": ModelInfo(
+        id="claude-haiku-5-5",
+        name="Claude Haiku 5.5",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        limits_from_listing=True,
+        input_price=0.10,  # $0.10 / MTok (prompts <= 100k)
+        output_price=0.50,  # $0.50 / MTok
+        cache_writes_price=0.125,  # $0.125 / MTok (5m write)
+        cache_reads_price=0.01,  # $0.01 / MTok (0.1x input)
+        long_context_threshold=100_000,
+        long_context_input_price=0.50,  # $0.50 / MTok (prompts > 100k)
+        long_context_output_price=2.50,  # $2.50 / MTok
+        long_context_cache_writes_price=0.625,  # $0.625 / MTok (5m write)
+        long_context_cache_reads_price=0.05,  # $0.05 / MTok
+        description=(
+            "Claude Haiku 5.5: the fastest tier of the 5.5 generation, for "
+            "high-volume, latency-sensitive work, with a 1M-token context window "
+            "and 128k of output."
+        ),
+        recommended=False,
+    ),
     "claude-opus-5": ModelInfo(
         id="claude-opus-5",
         name="Claude Opus 5",
@@ -1303,6 +1351,9 @@ def anthropic_family_model_info(model_id: str) -> Optional[ModelInfo]:
 BEDROCK_ANTHROPIC_MODEL_IDS: Dict[str, str] = {
     "claude-opus-5-5": "anthropic.claude-opus-5-5",
     "claude-sonnet-5-5": "anthropic.claude-sonnet-5-5",
+    # Same table, same read ("5 minutes, 1 hour" TTL); moved here from
+    # BEDROCK_1H_CACHE_EXTRA_ANTHROPIC_IDS once it gained a first-party row.
+    "claude-haiku-5-5": "anthropic.claude-haiku-5-5",
     "claude-opus-5": "anthropic.claude-opus-5",
     "claude-sonnet-5": "anthropic.claude-sonnet-5",
     "claude-fable-5": "anthropic.claude-fable-5",
@@ -1420,6 +1471,14 @@ def _bedrock_priced(row: ModelInfo, model_id: str, overrides: Dict[str, float]) 
             "output_price": scaled(base.output_price) or 0.0,
             "cache_writes_price": scaled(base.cache_writes_price),
             "cache_reads_price": scaled(base.cache_reads_price),
+            # The tiered rows scale too: AWS bills a regional long-context
+            # request at 1.10x its global long-context price (Haiku 5.5's
+            # SKUs, see its first-party row), so copying them unscaled would
+            # under-bill every >100k regional request.
+            "long_context_input_price": scaled(base.long_context_input_price),
+            "long_context_output_price": scaled(base.long_context_output_price),
+            "long_context_cache_writes_price": scaled(base.long_context_cache_writes_price),
+            "long_context_cache_reads_price": scaled(base.long_context_cache_reads_price),
         },
     )
 
@@ -1475,7 +1534,7 @@ def bedrock_anthropic_id(model_id: str) -> Optional[str]:
 #: with "5 minutes, 1 hour" TTL but which have NO first-party row in
 #: ``anthropic_models`` — so they cannot join ``BEDROCK_ANTHROPIC_MODEL_IDS``
 #: (every entry there derives a priced static row from its first-party twin).
-#: Without this set a discovered ``us.anthropic.claude-haiku-5-5`` fell back to
+#: Without this set a discovered ``us.anthropic.claude-fable-5-2`` fell back to
 #: the 5m cache: a long agent session whose turns are >5 min apart re-wrote its
 #: whole prefix instead of reading it. Transcribed from
 #: https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
@@ -1483,7 +1542,6 @@ def bedrock_anthropic_id(model_id: str) -> Optional[str]:
 #: ``ttl`` on a 5m-only model is a ``ValidationException`` (design risk 10).
 BEDROCK_1H_CACHE_EXTRA_ANTHROPIC_IDS: frozenset[str] = frozenset(
     {
-        "claude-haiku-5-5",
         "claude-fable-5-2",
         "claude-fable-5-1",
         "claude-mythos-5-2",

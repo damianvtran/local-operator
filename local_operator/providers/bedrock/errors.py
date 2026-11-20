@@ -291,6 +291,23 @@ def _console_model_access(message: str) -> bool:
     )
 
 
+#: AccessDeniedException messages that mean "the Bedrock API key itself is
+#: unusable", not "the identity lacks a permission". Observed live on
+#: v0.108.0 (2026-11-20, a truncated key in ``AWS_BEARER_TOKEN_BEDROCK``):
+#: ``AccessDeniedException: Invalid API Key format: Base64 decoding failed``.
+#: AWS answers a malformed bearer with AccessDenied rather than
+#: UnrecognizedClient, so without this the reader was told to fix IAM -- a
+#: remedy that cannot help. Matched on the stable "invalid api key" phrase
+#: (case-insensitive) so a reworded suffix ("Base64 decoding failed") still
+#: classifies; deliberately NOT "api key" alone, which an IAM message could
+#: plausibly mention.
+_INVALID_API_KEY = re.compile(r"invalid\s+api\s+key", re.IGNORECASE)
+
+
+def _invalid_api_key(message: str) -> bool:
+    return bool(_INVALID_API_KEY.search(message))
+
+
 def _iam_model_deny(message: str, model: str) -> tuple[str, str] | None:
     """``(action, resource)`` for an IAM deny scoped to a model/profile ARN.
 
@@ -338,6 +355,16 @@ def provider_error_for(
             kind="auth",
         )
     if kind_key == "accessdeniedexception":
+        if _invalid_api_key(message):
+            # The key is malformed or not a key at all: a real auth failure
+            # (rotation-eligible, credential block), non-retryable, and the
+            # remedy is a new/whole key, never an IAM grant.
+            return ProviderError(
+                status or 403,
+                f"{_text(_keys().invalid_api_key(region=region))} ({shown})",
+                auth_error=True,
+                kind="auth",
+            )
         iam_scoped = _iam_model_deny(message, model)
         if iam_scoped is not None:
             # Scoped to one model/profile ARN: the same identity may still be

@@ -10,6 +10,7 @@
   "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock rejected these AWS credentials in {region}.",
   "wire.errors.bedrock.iam_denied": "Your AWS identity is not allowed to call {action} on {resource}. Ask your AWS admin to grant it in IAM; other models may still work.",
   "wire.errors.bedrock.input_invalid": "This Amazon Bedrock connection request is not valid: {field} is missing or malformed.",
+  "wire.errors.bedrock.invalid_api_key": "Amazon Bedrock rejected the API key in {region}: it is malformed or invalid. Check that the whole key was copied, or create a new one.",
   "wire.errors.bedrock.invalid_connection": "This Amazon Bedrock connection is not valid ({detail}). Connect Bedrock again.",
   "wire.errors.bedrock.model_access": "This AWS account has no access to {model} in {region}. Enable access to the model in the Amazon Bedrock console, or pick another model.",
   "wire.errors.bedrock.model_unavailable": "{model} is not available in {region}. Try its global. or regional inference profile (for example us.), or another Region.",
