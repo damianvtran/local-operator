@@ -679,8 +679,9 @@ async def test_a_run_row_is_published_with_this_builds_tier_id(api: Api) -> None
 #: ending arrives as ``status: "stopped"`` plus an ``outcome``. Every value here is
 #: SYNTHETIC — no cluster, task, host, account or path of the real deployment — and
 #: the shapes beside them are the edges the join must not guess on: a stopped row
-#: with no outcome, one whose ending this build has no word for, and the three
-#: statuses that are still work in flight.
+#: with no outcome, one whose ending this build has no word for, the three
+#: statuses that are still work in flight, and the one status the server states
+#: outright rather than through an outcome.
 _PUBLISHED_STATUS_CASES: tuple[tuple[str, dict[str, Any], str], ...] = (
     (
         "succeeded",
@@ -727,6 +728,10 @@ _PUBLISHED_STATUS_CASES: tuple[tuple[str, dict[str, Any], str], ...] = (
         "stopping",
     ),
     ("error, retried by the server", {"status": "error", "desired": "running"}, "error"),
+    # The state after the record is gone, and the one status the server says with
+    # its own word: it reaches the join as a status, not as an outcome, and it is
+    # settled (``TERMINAL_RUN_STATUSES``), so ``active`` must drop it too.
+    ("deleted, the state after the record is gone", {"status": "deleted"}, "deleted"),
 )
 
 #: The same cases as pytest ids, so a failure names the shape rather than an index.
@@ -755,7 +760,9 @@ async def test_a_finished_run_is_published_under_the_status_its_outcome_names(
     for keep the server's own token rather than being mapped to a result it did not
     report. ``expired`` is the one ending published under its OWN word: the phase map
     names it and settles it in the FAILED phase, so keeping the row ``stopped``
-    would have shown a deadline kill as Finished.
+    would have shown a deadline kill as Finished. ``deleted`` is the one case here
+    that is not an ending at all: the server states it, and the join republishes it
+    unchanged.
     """
     api.configure()
     api.radient.add(
@@ -823,6 +830,10 @@ async def test_the_summarys_active_list_drops_every_finished_run(api: Api) -> No
         ("run-7", "stopping"),
         ("run-8", "error"),
     ]
+    # ``deleted`` is settled by ``TERMINAL_RUN_STATUSES`` rather than by the outcome
+    # join, so the row the page carries is dropped from ``active`` on the other arm.
+    assert "deleted" in desktop_remote_compute.SETTLED_STATUSES
+    assert "run-9" not in {run["id"] for run in body["active"]}
     # ``active`` never carried ``source`` and still does not: the join changed the
     # status, not the shape of the summary.
     assert "source" not in body["active"][0]
@@ -1094,6 +1105,28 @@ async def test_a_deleted_run_stays_in_the_listing_marked(api: Api) -> None:
     body = (await api.client.get("/v1/desktop/remote-compute/runs")).json()
 
     assert body["runs"][0]["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_record_is_published_as_deleted_not_its_last_status(api: Api) -> None:
+    """The mark settles the row; the status beside it is the last one SEEN.
+
+    ``records.mark_deleted`` keeps the row and its last status on purpose, and the
+    server's own row for a deleted run says ``deleted`` outright. A record last seen
+    ``running`` therefore published live work — the panel polled it, offered Cancel
+    over a run that cannot be cancelled and painted its secret token — so the join
+    reads the mark first and publishes ``deleted``, the settled word the outcome
+    join never produces.
+    """
+    api.configure()
+    _record(api, RUN_ID, status="running")
+    records.mark_deleted(RUN_ID, config_dir=api.root)
+    api.radient.add("GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": []}})
+
+    body = (await api.client.get("/v1/desktop/remote-compute/runs")).json()
+
+    assert body["runs"][0]["deleted"] is True
+    assert body["runs"][0]["status"] == "deleted"
 
 
 @pytest.mark.asyncio
@@ -1732,6 +1765,9 @@ async def test_delete_marks_the_record_and_answers_the_run(api: Api) -> None:
 
     assert body["run"]["id"] == RUN_ID
     assert body["run"].keys().isdisjoint({"run_token", "tunnel"})
+    # The echo publishes the same join as every other read: the server sent
+    # ``deleted``, and that is the word the row carries out.
+    assert body["run"]["status"] == "deleted"
     assert records.load(api.root)[0].deleted is True
 
 

@@ -236,6 +236,12 @@ STOPPED_OUTCOME_TO_STATUS: Mapping[str, str] = MappingProxyType(
 #: set is built from the two tables above so a further outcome cannot be added
 #: without the summary read following. ``stopped`` and ``deleted`` stay settled: an
 #: outcome-less ending keeps ``stopped``, and a deleted record is gone.
+#:
+#: THE PUBLISHED SET IS DELIBERATELY A SUPERSET of ``client.KNOWN_RUN_STATUSES``:
+#: the outcome join publishes ``expired`` (an OUTCOME word, absent from the
+#: contract's status set) and the other endings under their own names, so the
+#: contract's set answers "what may the server send" and never "what may this
+#: plane publish" (review round 3, MINOR-1).
 SETTLED_STATUSES: frozenset[str] = TERMINAL_RUN_STATUSES | frozenset(
     STOPPED_OUTCOME_TO_STATUS.values()
 )
@@ -1281,7 +1287,7 @@ def _recorded(root: Path, identifier: str) -> records.RunRecord | None:
 
 
 def _desktop_status(payload: Mapping[str, Any]) -> str | None:
-    """The status this plane publishes for a server run row, or ``None``.
+    """The status this plane publishes for a run row, or ``None``.
 
     THE ONE NORMALISATION. Every run row this module answers with — the create
     receipt, the merged listing, the summary's ``active``, the detail read and the
@@ -1294,10 +1300,20 @@ def _desktop_status(payload: Mapping[str, Any]) -> str | None:
     contract grew. A status this build does not recognise is reported, never
     mapped — the same rule ``client.run_outcome`` keeps for outcomes.
 
+    A ROW MARKED DELETED IS PUBLISHED AS ``deleted`` — under either spelling. The
+    server's own row reaches that word through its status; this device's record
+    keeps its LAST status beside ``deleted: true`` (``records.mark_deleted``), so a
+    record last seen ``running`` would otherwise publish live work, and the GUI
+    would poll it, offer Cancel over it and paint its token. The mark is the fact
+    that settles it, and it is read BEFORE the status for exactly that reason: the
+    status beside a deleted record is history, not a state the run is in.
+
     ``None`` when the row carries no readable status. Not ``"unknown"``: this plane
     has learned not to invent a status, and the caller then leaves the field exactly
     as the server did.
     """
+    if payload.get("deleted") is True:
+        return "deleted"
     status = payload.get("status")
     if not isinstance(status, str) or not status:
         return None
@@ -1360,10 +1376,12 @@ def _record_row(record: records.RunRecord) -> dict[str, Any]:
     the CLI reads the record's own JSON, not this route's rows.
 
     THE STATUS GOES THROUGH :func:`_desktop_status` TOO, so the listing has ONE join
-    and not one per half. It is identity for a record today — the record stores the
-    server's ``status`` and no ``outcome`` at all, so a stopped record stays
-    ``stopped`` — and that is the honest answer rather than a guess: this plane must
-    not claim a result the server did not state.
+    and not one per half. It is identity for a record that is still there — the
+    record stores the server's ``status`` and no ``outcome`` at all, so a stopped
+    record stays ``stopped`` — and that is the honest answer rather than a guess:
+    this plane must not claim a result the server did not state. A record MARKED
+    DELETED is the one exception, and it is the mark the join reads: the status kept
+    beside it is the last one seen, not a state the run is still in.
     """
     row = {**record.to_json(), "source": "record"}
     row["id"] = row.pop("run_id")
