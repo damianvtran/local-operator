@@ -34,7 +34,7 @@ filter is defence in depth.
 
 ONE STATUS VOCABULARY, AND IT IS PUBLISHED HERE. The server ends every run as
 ``status: "stopped"`` plus an ``outcome``, while the desktop's renderer settles on
-a STATUS. :func:`desktop_status` is the one join (see
+a STATUS. :func:`_desktop_status` is the one join (see
 :data:`STOPPED_OUTCOME_TO_STATUS`), applied to every run row this module answers
 with — and deliberately not in the client, whose ``--remote-status`` must keep
 printing the server's own words.
@@ -203,12 +203,15 @@ TIER_DEDICATED = "dedicated"
 #: printing the server's OWN status and outcome. A client-level rewrite would make
 #: that command report a ``succeeded`` the server never wrote.
 #:
-#: ``expired`` IS DELIBERATELY ABSENT. The contract's fourth ending keeps the row
-#: ``stopped`` and travels beside it as ``outcome: "expired"``: this plane has no
-#: settled word the renderer paints for it, and folding it into ``failed`` would
-#: report an ending the server did not name. An outcome outside the table does the
-#: same, which is also how a status the contract grows stays readable — ``stopped``,
-#: with its own word beside it.
+#: ``expired`` IS MAPPED, AND IT IS THE ONE ENDING WHOSE PUBLISHED STATUS IS ITS
+#: OWN WORD. The contract's fourth ending is the stop the deadline drove; the
+#: desktop's ``remoteRunPhase`` names ``expired`` and settles it in the card's
+#: FAILED phase (``remote-compute-types.ts``), so leaving the row ``stopped``
+#: settled a deadline kill as Finished — indistinguishable from a clean exit, the
+#: same misreading Q-1 was about, reached from the other direction. An outcome
+#: OUTSIDE the table still publishes ``stopped`` with its own word beside it, which
+#: is how a status or ending the contract grows stays readable rather than being
+#: folded into a result the server did not name.
 #:
 #: IMMUTABLE, for the reason the tier table gives: a mutable module-level table is
 #: one ``[...] = ...`` away from a second vocabulary, and nothing fails until two
@@ -218,20 +221,19 @@ STOPPED_OUTCOME_TO_STATUS: Mapping[str, str] = MappingProxyType(
         "succeeded": "succeeded",
         "failed": "failed",
         "cancelled": "cancelled",
+        "expired": "expired",
     }
 )
 
 #: The published statuses a run has SETTLED at: the client's own terminal words,
-#: plus the three outcomes :data:`STOPPED_OUTCOME_TO_STATUS` promotes out of
-#: ``stopped``.
+#: plus every status :data:`STOPPED_OUTCOME_TO_STATUS` promotes out of ``stopped``.
 #:
 #: DERIVED, never restated, and that is the point: once a finished run is published
 #: as ``succeeded``, the client's terminal set no longer matches it — so a terminal
 #: test left on the raw word would list finished work as live in ``active``. The
-#: set is built from the two tables above so a third outcome cannot be added without
-#: the summary read following. ``stopped`` and ``deleted`` stay settled: an
-#: outcome-less or ``expired`` ending keeps ``stopped``, and a deleted record is
-#: gone.
+#: set is built from the two tables above so a further outcome cannot be added
+#: without the summary read following. ``stopped`` and ``deleted`` stay settled: an
+#: outcome-less ending keeps ``stopped``, and a deleted record is gone.
 SETTLED_STATUSES: frozenset[str] = TERMINAL_RUN_STATUSES | frozenset(
     STOPPED_OUTCOME_TO_STATUS.values()
 )
@@ -1270,7 +1272,7 @@ def _recorded(root: Path, identifier: str) -> records.RunRecord | None:
     return next((row for row in records.load(root) if row.run_id == identifier), None)
 
 
-def desktop_status(payload: Mapping[str, Any]) -> str | None:
+def _desktop_status(payload: Mapping[str, Any]) -> str | None:
     """The status this plane publishes for a server run row, or ``None``.
 
     THE ONE NORMALISATION. Every run row this module answers with — the create
@@ -1302,11 +1304,11 @@ def desktop_status(payload: Mapping[str, Any]) -> str | None:
 def _published_run(run: dict[str, Any], *, source: str | None = None) -> dict[str, Any]:
     """One server run as this plane publishes it.
 
-    ``without_secrets`` is the filter shared with the CLI; ``desktop_status`` is the
-    status join. ``outcome`` travels UNTOUCHED beside the published status, because a
-    renderer settles a ``stopped`` row this build has no word for on the raw word,
-    and because the ending is the server's fact rather than this plane's summary of
-    it.
+    ``without_secrets`` is the filter shared with the CLI; ``_desktop_status`` is the
+    status join. ``outcome`` travels UNTOUCHED beside the published status: the
+    ending is the server's fact rather than this plane's summary of it, and a row this
+    table has no word for keeps ``stopped``, which the renderer settles as finished —
+    a reading that claims no more than the server stated.
 
     ``source`` is written only when a caller names it: ``active`` never carried one,
     and a summary row that grew a field would be a shape change nothing asked for.
@@ -1314,7 +1316,7 @@ def _published_run(run: dict[str, Any], *, source: str | None = None) -> dict[st
     row = without_secrets(run)
     if source is not None:
         row["source"] = source
-    status = desktop_status(run)
+    status = _desktop_status(run)
     if status is not None:
         row["status"] = status
     return row
@@ -1330,7 +1332,7 @@ def _record_row(record: records.RunRecord) -> dict[str, Any]:
     both rendered as a nameless run with no error. Nothing reads ``run_id`` here:
     the CLI reads the record's own JSON, not this route's rows.
 
-    THE STATUS GOES THROUGH :func:`desktop_status` TOO, so the listing has ONE join
+    THE STATUS GOES THROUGH :func:`_desktop_status` TOO, so the listing has ONE join
     and not one per half. It is identity for a record today — the record stores the
     server's ``status`` and no ``outcome`` at all, so a stopped record stays
     ``stopped`` — and that is the honest answer rather than a guess: this plane must
@@ -1338,7 +1340,7 @@ def _record_row(record: records.RunRecord) -> dict[str, Any]:
     """
     row = {**record.to_json(), "source": "record"}
     row["id"] = row.pop("run_id")
-    status = desktop_status(row)
+    status = _desktop_status(row)
     if status is not None:
         row["status"] = status
     return row
@@ -1450,7 +1452,7 @@ async def _active_runs(root: Path, credential_id: int) -> list[dict[str, Any]]:
             return []
     active: list[dict[str, Any]] = []
     for run in listed:
-        if desktop_status(run) in SETTLED_STATUSES:
+        if _desktop_status(run) in SETTLED_STATUSES:
             continue
         active.append(_published_run(run))
     return active

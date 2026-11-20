@@ -14,11 +14,13 @@ WHAT IS PINNED HERE, one test per property the GUI's brief depends on:
 * **one identifier vocabulary** — every row of ``runs[]``, and both arms of the
   detail read, carry ``id`` and not the record's ``run_id``;
 * **a finished run is published as a STATUS** — the server ends every run as
-  ``stopped`` plus an ``outcome``, so ``succeeded``/``failed``/``cancelled`` become
-  the status on every row this plane answers with (the create receipt, the listing,
-  ``active``, the detail read, the cancel and delete echoes) while ``outcome``
-  travels beside it; a ``stopped`` row with no outcome, or with an ending this build
-  has no word for, keeps ``stopped``, and ``active`` lists nothing that has settled;
+  ``stopped`` plus an ``outcome``, so ``succeeded``/``failed``/``cancelled``/
+  ``expired`` become the status on every row this plane answers with (the create
+  receipt, the listing, ``active``, the detail read, the cancel and delete echoes)
+  while ``outcome`` travels beside it; a ``stopped`` row with no outcome, or with an
+  ending this build has no word for, keeps ``stopped``, and ``active`` lists nothing
+  that has settled — including the two statuses that must stay in flight, ``stopping``
+  and ``error``;
 * **the account states are the plane's own three** — ``signed-out`` is a real
   empty ``AuthStore``, ``expired`` is ``desktop_radient``'s own
   ``_credential_refusal(grant_invalid)``, and a transient unrefreshable row still
@@ -672,13 +674,13 @@ async def test_a_run_row_is_published_with_this_builds_tier_id(api: Api) -> None
 
 #: ``(case, the server's row overrides, the status this plane must publish)``.
 #:
-#: THE THREE TERMINAL SHAPES ARE THE LIVE DEPLOYMENT'S, read off a real
+#: THE FOUR TERMINAL SHAPES ARE THE LIVE DEPLOYMENT'S, read off a real
 #: non-production server by the end-to-end round that found this defect: every
 #: ending arrives as ``status: "stopped"`` plus an ``outcome``. Every value here is
 #: SYNTHETIC — no cluster, task, host, account or path of the real deployment — and
-#: the three shapes beside them are the edges the join must not guess on: a stopped
-#: row with no outcome, one whose ending this build has no word for, and a run still
-#: in flight.
+#: the shapes beside them are the edges the join must not guess on: a stopped row
+#: with no outcome, one whose ending this build has no word for, and the three
+#: statuses that are still work in flight.
 _PUBLISHED_STATUS_CASES: tuple[tuple[str, dict[str, Any], str], ...] = (
     (
         "succeeded",
@@ -707,13 +709,24 @@ _PUBLISHED_STATUS_CASES: tuple[tuple[str, dict[str, Any], str], ...] = (
         "cancelled",
     ),
     ("failed", {"status": "stopped", "outcome": "failed"}, "failed"),
-    ("stopped with no outcome", {"status": "stopped"}, "stopped"),
+    (
+        "expired, the stop the deadline drove",
+        {"status": "stopped", "outcome": "expired"},
+        "expired",
+    ),
     (
         "stopped with an ending this build has no word for",
-        {"status": "stopped", "outcome": "expired"},
+        {"status": "stopped", "outcome": "superseded"},
         "stopped",
     ),
+    ("stopped with no outcome", {"status": "stopped"}, "stopped"),
     ("in flight", {"status": "pending", "desired": "running"}, "pending"),
+    (
+        "stopping with desired stopped",
+        {"status": "stopping", "desired": "stopped"},
+        "stopping",
+    ),
+    ("error, retried by the server", {"status": "error", "desired": "running"}, "error"),
 )
 
 #: The same cases as pytest ids, so a failure names the shape rather than an index.
@@ -740,7 +753,9 @@ async def test_a_finished_run_is_published_under_the_status_its_outcome_names(
     hold instead of the charge and never drew the artifact controls — while the
     deployment had finished the run minutes earlier. Rows this build has no word
     for keep the server's own token rather than being mapped to a result it did not
-    report.
+    report. ``expired`` is the one ending published under its OWN word: the phase map
+    names it and settles it in the FAILED phase, so keeping the row ``stopped``
+    would have shown a deadline kill as Finished.
     """
     api.configure()
     api.radient.add(
@@ -757,7 +772,7 @@ async def test_a_finished_run_is_published_under_the_status_its_outcome_names(
 
 @pytest.mark.asyncio
 async def test_the_listing_publishes_every_ending_through_the_same_join(api: Api) -> None:
-    """All five shapes in one page, plus a local record: one join, one vocabulary."""
+    """Every shape on one page, plus a local record: one join, one vocabulary."""
     api.configure()
     _record(api, OTHER_RUN_ID, status="stopped")
     api.radient.add(
@@ -783,10 +798,14 @@ async def test_the_listing_publishes_every_ending_through_the_same_join(api: Api
 async def test_the_summarys_active_list_drops_every_finished_run(api: Api) -> None:
     """A settled run is not live work, whichever word settled it.
 
-    Every shape is on the server's page; only the run still in flight may be
+    Every shape is on the server's page; only the three still in flight may be
     reported as active. The two rows that keep ``stopped`` — no outcome, and an
     ending this build has no word for — are excluded exactly as the raw word was
     excluded before the join, so the summary cannot start listing finished work.
+    ``stopping`` (``desired: stopped`` — the server has not stopped it yet) and
+    ``error`` (a row a provider failure left retryable, which the server's sweep
+    retries) are the two the settled set must never grow to cover: folding either
+    in would drop a live, spending run from the dropdown with every gate green.
     """
     api.configure()
     _network(api.root)
@@ -799,8 +818,11 @@ async def test_the_summarys_active_list_drops_every_finished_run(api: Api) -> No
 
     body = (await api.client.get("/v1/desktop/remote-compute")).json()
 
-    assert [run["id"] for run in body["active"]] == ["run-5"]
-    assert body["active"][0]["status"] == "pending"
+    assert [(run["id"], run["status"]) for run in body["active"]] == [
+        ("run-6", "pending"),
+        ("run-7", "stopping"),
+        ("run-8", "error"),
+    ]
     # ``active`` never carried ``source`` and still does not: the join changed the
     # status, not the shape of the summary.
     assert "source" not in body["active"][0]
