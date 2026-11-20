@@ -31,16 +31,27 @@ from local_operator.session.creation import (
 
 logger = logging.getLogger(__name__)
 
-#: The words for a row whose owner has stopped reporting (``live_state ==
-#: "wedged"``), optionally followed by the measured age.
-#:
-#: A constant rather than a literal in :meth:`CatalogEntry.status` because a
-#: SECOND home for it already exists: the sidebar's glyph/description pairing
-#: tests name every phrase the glyphs may carry, and a copy of this string there
-#: is a copy that drifts. ``/info`` and the wake surfaces paraphrase the same
-#: fact in their own sentences — those are sentences, not labels, and they are
-#: asserted where they are built.
-WEDGED_STATUS = "Not answering · process alive"
+
+def wedged_status() -> str:
+    """The words for a row whose owner has stopped reporting (``live_state ==
+    "wedged"``), without the measured age.
+
+    A named function rather than an inline render in :meth:`CatalogEntry.status`
+    because a SECOND home for it already exists: the sidebar's glyph/description
+    pairing tests name every phrase the glyphs may carry, and a copy of this
+    string there is a copy that drifts. ``/info`` and the wake surfaces
+    paraphrase the same fact in their own sentences — those are sentences, not
+    labels, and they are asserted where they are built.
+
+    A FUNCTION, not the former ``WEDGED_STATUS`` constant: the words live in the
+    ``wire.session_status`` catalogue and must be rendered in the product
+    language at read time, so a module-level English string would pin every
+    locale to English (the operator's "no English anywhere" requirement).
+    """
+    from local_operator.i18n.keys import wire_session_status
+
+    return _terminal_label(wire_session_status.wedged())
+
 
 #: The status codes whose sessions are RUNNING: work in progress, and therefore
 #: the rows no listing may hide behind its own expander.
@@ -428,7 +439,17 @@ class CatalogEntry:
         # Mirror status_code's defensive suppression of a phantom gate. New
         # producers clear pending, but readers also consume older peer records.
         if self.row.pending and self.row.live_state != "wedged":
-            return "Approval needed" if self.row.pending == "approval" else "Answer needed"
+            # Rendered from ``wire.session_status`` like every rung below: the
+            # client prints this label verbatim (it may not re-derive status),
+            # so English here is English in every locale. ``status_code`` keeps
+            # the stable machine spelling clients branch on.
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(
+                wire_session_status.approval_needed()
+                if self.row.pending == "approval"
+                else wire_session_status.answer_needed()
+            )
         # BEFORE the unseen branch, and mirrored by `shows_completion_mark`,
         # which is what the sidebar suppresses the mark on. A row that is
         # wedged or busy describes itself by what it is doing now.
@@ -443,9 +464,16 @@ class CatalogEntry:
         # the desktop catalogue's ``status.label``, so the same sentence
         # travels to the app unchanged.
         if self.row.live_state == "wedged":
+            # Two whole messages, not a base plus an English suffix: a
+            # translator must be able to move the age inside the sentence.
             age = self.row.heartbeat_age_s
-            measured = f" (last heartbeat {format_duration(age)} ago)" if age is not None else ""
-            return f"{WEDGED_STATUS}{measured}"
+            if age is None:
+                return wedged_status()
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(
+                wire_session_status.wedged_heartbeat(duration=format_duration(age))
+            )
         # THE DRAIN OUTRANKS "Working", and says it in the record's own words.
         # A draining runtime IS working, so "Working" was true and useless: the
         # one thing a reader needs off this row is that the runtime has already
@@ -460,7 +488,9 @@ class CatalogEntry:
         if self.row.waiting_on > 0:
             return waiting_label(self.row.waiting_on, self.row.subagents_running or 0)
         if self.row.live_state == "busy":
-            return "Working"
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(wire_session_status.working())
         if self.shows_completion_mark:
             if self.completion_kind == "error":
                 return self._error_label(unseen=True)
@@ -480,7 +510,11 @@ class CatalogEntry:
         # it must still be the words (round 1, D1: a cold row with a stopped
         # schedule drew the wake mark while the tooltip said "Recent").
         if self.row.live_state == "attached":
-            return "Open"
+            from local_operator.i18n.keys import wire_session_status
+
+            # Key is ``attached`` (the live_state it names), not ``open``,
+            # which would shadow the builtin in the generated key module.
+            return _terminal_label(wire_session_status.attached())
         # The rung's words. Same position as the arm in :attr:`status_code`, and
         # the same predicate: the COUNT is spelled into the label because that is
         # what the transport already carries — no new payload field is needed for
@@ -513,7 +547,13 @@ class CatalogEntry:
             # says so above, because what it is doing outranks what kind it is —
             # the same precedence ``row_state_mark`` follows, so the words and
             # the glyph still cannot disagree.
-            return "Running headless (exec)" if self.row.kind == "exec" else "Ready"
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(
+                wire_session_status.exec_headless()
+                if self.row.kind == "exec"
+                else wire_session_status.ready()
+            )
         if self.row.wakes:
             # Dormant: the schedule exists but the session was stopped, so it is
             # not going to fire. Named rather than hidden — a user who sees the
@@ -620,11 +660,21 @@ def _terminal_label(message: Msg) -> str:
 
 
 def waiting_label(jobs: int, subagents: int = 0) -> str:
-    """Shared sentence-case label for a foreground wait, not generic busy."""
-    head = f"Waiting on {jobs} {'job' if jobs == 1 else 'jobs'}"
+    """Shared sentence-case label for a foreground wait, not generic busy.
+
+    Two WHOLE ICU messages (with and without the subagent count) rather than a
+    head plus an appended clause: English pluralised by hand (``== 1``) is wrong
+    for locales with more than two plural forms, and a translator must be free
+    to reorder the clauses. Only the ``subagents > 0`` choice stays here,
+    because "0 subagents running" is noise the row never printed.
+    """
+    from local_operator.i18n.keys import wire_session_status
+
     if subagents > 0:
-        head += f" · {subagents} {'subagent' if subagents == 1 else 'subagents'} running"
-    return head
+        return _terminal_label(
+            wire_session_status.waiting_subagents(jobs=jobs, subagents=subagents)
+        )
+    return _terminal_label(wire_session_status.waiting(jobs=jobs))
 
 
 def delegating_label(running: int, queued: int, jobs: int = 0) -> str:
@@ -658,16 +708,26 @@ def delegating_label(running: int, queued: int, jobs: int = 0) -> str:
     and ``sr-only`` carry verbatim, and naming it lets any surface that wants the
     same sentence ask for it instead of assembling a second vocabulary (U11).
     """
+    # Each addend is its own catalogue message (seven present/absent shapes
+    # would otherwise be seven near-duplicate sentences per locale); every
+    # segment is a complete phrase with locale plural rules, and only the
+    # language-neutral `` · `` separator is joined here. The queued addend
+    # drops its noun when it follows the running segment, so it is a distinct
+    # key rather than the same message with a stripped word.
+    from local_operator.i18n.keys import wire_session_status as keys
+
     parts = []
     if jobs > 0:
-        parts.append(f"{jobs} {'job' if jobs == 1 else 'jobs'} running")
+        parts.append(_terminal_label(keys.delegating_jobs(count=jobs)))
     if running > 0:
-        parts.append(f"{running} {'subagent' if running == 1 else 'subagents'} running")
+        parts.append(_terminal_label(keys.delegating_running(count=running)))
     if queued > 0:
         parts.append(
-            f"{queued} queued"
-            if running > 0
-            else f"{queued} {'subagent' if queued == 1 else 'subagents'} queued"
+            _terminal_label(
+                keys.delegating_queued_addend(count=queued)
+                if running > 0
+                else keys.delegating_queued(count=queued)
+            )
         )
     return " · ".join(parts)
 

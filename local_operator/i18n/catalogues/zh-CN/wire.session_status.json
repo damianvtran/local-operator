@@ -15,5 +15,19 @@
   "wire.session_status.error": "出错",
   "wire.session_status.unseen_error": "未读：出错",
   "wire.session_status.error_cause": "{cause, select, user_stop {出错——用户已停止} runtime_stall_bound {出错——运行时停滞超时后自行退出} continuation_limit {出错——已达续接上限；待处理消息已丢弃} output_limit {出错——已达模型输出上限；无法继续} runtime_retired {出错——为更新而退出} runtime_shutdown {出错——运行时在本轮中终止} runtime_overdue {出错——运行时超过进度时限后退出以更新} runtime_update_failed {出错——更新未完成；运行时仍使用已加载的构建} runtime_killed {出错——运行时未正常退出便消失；未收到停止请求} install_mid_update {出错——安装版本在本轮中被替换} owner_lost {出错——运行时在本轮中停止响应} disposed {出错——会话在本轮中被释放} other {出错}}",
-  "wire.session_status.unseen_error_cause": "{cause, select, user_stop {未读：出错——用户已停止} runtime_stall_bound {未读：出错——运行时停滞超时后自行退出} continuation_limit {未读：出错——已达续接上限；待处理消息已丢弃} output_limit {未读：出错——已达模型输出上限；无法继续} runtime_retired {未读：出错——为更新而退出} runtime_shutdown {未读：出错——运行时在本轮中终止} runtime_overdue {未读：出错——运行时超过进度时限后退出以更新} runtime_update_failed {未读：出错——更新未完成；运行时仍使用已加载的构建} runtime_killed {未读：出错——运行时未正常退出便消失；未收到停止请求} install_mid_update {未读：出错——安装版本在本轮中被替换} owner_lost {未读：出错——运行时在本轮中停止响应} disposed {未读：出错——会话在本轮中被释放} other {未读：出错}}"
+  "wire.session_status.unseen_error_cause": "{cause, select, user_stop {未读：出错——用户已停止} runtime_stall_bound {未读：出错——运行时停滞超时后自行退出} continuation_limit {未读：出错——已达续接上限；待处理消息已丢弃} output_limit {未读：出错——已达模型输出上限；无法继续} runtime_retired {未读：出错——为更新而退出} runtime_shutdown {未读：出错——运行时在本轮中终止} runtime_overdue {未读：出错——运行时超过进度时限后退出以更新} runtime_update_failed {未读：出错——更新未完成；运行时仍使用已加载的构建} runtime_killed {未读：出错——运行时未正常退出便消失；未收到停止请求} install_mid_update {未读：出错——安装版本在本轮中被替换} owner_lost {未读：出错——运行时在本轮中停止响应} disposed {未读：出错——会话在本轮中被释放} other {未读：出错}}",
+  "wire.session_status.approval_needed": "需要审批",
+  "wire.session_status.answer_needed": "需要回答",
+  "wire.session_status.wedged": "无应答 · 进程仍在运行",
+  "wire.session_status.wedged_heartbeat": "无应答 · 进程仍在运行（上次心跳在{duration}前）",
+  "wire.session_status.working": "工作中",
+  "wire.session_status.attached": "已打开",
+  "wire.session_status.ready": "就绪",
+  "wire.session_status.exec_headless": "无界面运行（exec）",
+  "wire.session_status.waiting": "等待{jobs, plural, other {#个任务}}",
+  "wire.session_status.waiting_subagents": "等待{jobs, plural, other {#个任务}} · {subagents, plural, other {#个子智能体}}运行中",
+  "wire.session_status.delegating_jobs": "{count, plural, other {#个任务运行中}}",
+  "wire.session_status.delegating_running": "{count, plural, other {#个子智能体运行中}}",
+  "wire.session_status.delegating_queued": "{count, plural, other {#个子智能体排队中}}",
+  "wire.session_status.delegating_queued_addend": "{count, plural, other {#个排队中}}"
 }

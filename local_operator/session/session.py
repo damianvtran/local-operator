@@ -4761,6 +4761,36 @@ class Session:
         #: runtime rather than a trusted one — an unattended compliance worker
         #: that must reach its screening tools and nothing else.
         self._declared_tools: frozenset[str] | None = None
+        #: Whether the bounded wait for declared/preloaded MCP servers has
+        #: SUCCEEDED (``session/declared_mcp_ready.py``). Once per session: the
+        #: wait exists for the cold-start race, and a server that drops later is
+        #: the reconnect path's job, not a per-turn stall. Set only after the gate
+        #: settles, never before it runs: an SDK caller retrying ``prompt()``
+        #: after the gate raised (or after an abort cut it short) must meet the
+        #: gate again, not a silent send without its declared tools (agent
+        #: review round 1, R3).
+        self._named_mcp_ready_checked = False
+        #: Whether this session's MCP reach is INHERITED: a delegated child whose
+        #: MCP tools are fixed by its parent's ``_child_mcp_wiring`` surface (on
+        #: the parent's BORROWED manager) and whose declaration is the parent's
+        #: bound carried down. Stamped by ``harness.subagent`` before it applies
+        #: that declaration. Two things key on it, both so a child keeps exactly
+        #: the tool set its parent's surface built for it:
+        #:
+        #: * ``materialize_declared_tools`` grants nothing. An inherited
+        #:   declaration NARROWS (``subagent``: "the two intersect rather than
+        #:   either winning"); treating it as a caller's enumeration and granting
+        #:   from the raw shared manager bypasses ``selected``, which withholds
+        #:   every ``ownTurnOnly`` server's tools from children. That is how the
+        #:   OSWorld parent's episode action tool reached a child's request
+        #:   (merge-gate run 44707733427).
+        #: * the first-turn MCP readiness gate does not run. The parent's own
+        #:   gate already settled the declared servers on the manager the child
+        #:   borrows, and nothing a wait could deliver enters a child's fixed
+        #:   surface (only an explicit ``mcp://`` activation does), so a wait
+        #:   would be pure latency and a raise would refuse a child turn over a
+        #:   tool it was never going to hold.
+        self._mcp_reach_inherited = False
         #: The OPS a declared tool may reach, for the few tools whose reach is not
         #: its name. ``None`` means "every op this build's tool accepts", which is
         #: the state every declaration without an op scope is in — see
@@ -5376,6 +5406,13 @@ class Session:
         self._seed_cache_diagnostics(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
+        #: The generation of the last ``agent_start`` this session EMITTED, kept
+        #: after the turn ends (unlike ``_logical_generation``). It is what the
+        #: frontend snapshot publishes, so snapshots, updates and turn events
+        #: share one counter; the raw ``_generation`` also counts continuation
+        #: runs and runs that never announce a start. The next announced start
+        #: is always above it, because ``_run_turn`` bumps the raw counter first.
+        self._turn_generation = 0
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
         # Todo-continuation latch: the full todo fingerprint captured at the
         # last guardrail nudge in THIS user turn, so a model that yields twice
@@ -15850,7 +15887,11 @@ class Session:
         """
         declared = self._declared_tools
         manager = getattr(self, "mcp_manager", None)
-        if declared is None or manager is None:
+        # An inherited declaration is a bound, never a grant: see
+        # ``_mcp_reach_inherited``. Before the first-turn gate called this on a
+        # child, the only child call (``set_tool_inventory`` in ``subagent``)
+        # ran before the borrowed manager was attached, which hid the leak.
+        if declared is None or manager is None or self._mcp_reach_inherited:
             return ()
         try:
             available = manager.get_tools()
@@ -21393,6 +21434,36 @@ class Session:
         # idle+supervisor decision before this admission may proceed.
         from local_operator.session.runtime import restart_fence
 
+        # FIRST, before anything about this run is published or journalled: a
+        # declared MCP server that is still connecting must be awaited before
+        # the request is built, and one that never arrives raises here, where
+        # nothing durable has happened yet (the same shape as ``TurnInFlight``).
+        # Never for a delegated child (``_mcp_reach_inherited``): its parent's
+        # gate settled the borrowed manager, and the gate's grant step would
+        # widen the child's surface past what its parent allowed.
+        if not self._named_mcp_ready_checked and not self._mcp_reach_inherited:
+            from local_operator.session.declared_mcp_ready import (
+                await_named_mcp_servers,
+            )
+
+            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
+            # the TUI/desktop subscribed to this runtime) merges a late
+            # ``preload_tools`` server mid-session, the contract documented on
+            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
+            # a headless host (exec, SDK, scheduler) holds the turn for one.
+            # The same "no UI, no attach subscriber" test the turn-end
+            # checkpoint uses to tell a headless store apart (review R4).
+            store = getattr(self, "_frontend_state_store", None)
+            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
+            self._named_mcp_ready_checked = await await_named_mcp_servers(
+                self.mcp_manager,
+                declared=self._declared_tools,
+                reachable=lambda: self.tool_inventory,
+                materialize=self.materialize_declared_tools,
+                wait_for_preload=not front_end,
+                # Esc lands here as the sticky flag (no turn signal exists yet).
+                cancelled=lambda: self._abort_requested,
+            )
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:
             publish_admission = getattr(self, "_publish_turn_admitted", None)
@@ -22768,6 +22839,7 @@ class Session:
                         # the UI sees, and its generation stamps the eventual
                         # end. Continuation runs re-enter here and are silent.
                         self._logical_generation = event.generation
+                        self._turn_generation = event.generation
                         await self._emit(event)
                     else:
                         # A continuation's provider receipt is newer than the
@@ -24185,6 +24257,8 @@ class Session:
             # ``agent_shell.MAY_DELEGATE_ENV`` for the commands it runs; see
             # ``agent_shell.py`` for what reads it and why it is asymmetric.
             may_delegate=any(tool.name == "task" for tool in self._tools),
+            # Same derivation, for the spill footer (see the field's comment).
+            spill_readable=any(tool.name == "read" for tool in self._tools),
             jobs=self.jobs,
             peer_arrival=self._peer_arrival,
             subagent_comms=self.subagent_comms,

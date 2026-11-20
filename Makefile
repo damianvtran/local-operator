@@ -211,7 +211,17 @@ test-affected: ## Run the tests this branch's diff affects; print PR evidence
 # because the runner still decides fail-closed and a local outage must not
 # block an arm. FAST_GATE_HELPER is overridable only so the hygiene test can
 # stub the decision; the runner never reads it.
-FAST_GATE_HELPER ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/fast_gate_check.py
+# Helpers resolve from the checkout the gate is run IN (git root of the
+# invocation cwd, which is also the repo `gh` acts on), not from the Makefile's
+# own directory: `make -f <copy elsewhere>/Makefile merge-gate` used to look for
+# scripts/ next to the copy, and a missing advisory helper read as a lookup
+# outage that armed WITHOUT duplicate detection. Falls back to the Makefile's
+# directory outside a git checkout (`:=` captures it before MAKEFILE_LIST grows).
+MERGE_GATE_MAKEFILE_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+MERGE_GATE_ROOT = $(or $(shell git rev-parse --show-toplevel 2>/dev/null),$(MERGE_GATE_MAKEFILE_DIR))
+FAST_GATE_HELPER ?= $(MERGE_GATE_ROOT)/scripts/fast_gate_check.py
+# Not overridable: tests stub `gh` beneath it, never the advisory itself.
+MERGE_GATE_ADVISORY_HELPER = $(MERGE_GATE_ROOT)/scripts/merge_gate_advisory.py
 # Prints the triggered run and how to follow it.
 # One-shot client check of the cost gate the full suite's `precondition` job
 # enforces on the runner (scripts/fast_gate_check.py, GH #4074): is `CI Gate`
@@ -233,6 +243,9 @@ fast-gate: ## Check fast CI is green for PR=<number>'s head (no waiting)
 merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	@set -e; \
 	if [ -z "$(PR)" ]; then echo "usage: make merge-gate PR=<number>" >&2; exit 2; fi; \
+	for helper in "$(FAST_GATE_HELPER)" "$(MERGE_GATE_ADVISORY_HELPER)"; do \
+	  [ -f "$$helper" ] || { echo "make merge-gate: helper not found: $$helper (resolved from $(MERGE_GATE_ROOT)); run it from inside a local-operator checkout; no label changed" >&2; exit 1; }; \
+	done; \
 	command -v jq >/dev/null 2>&1 \
 	  || { echo "make merge-gate: jq is required (the run list is filtered with 'jq --arg', which gh's --jq cannot take); install it, e.g. 'brew install jq'" >&2; exit 1; }; \
 	spec="$$(gh pr view "$(PR)" --json state,headRefOid,headRefName,headRepository,headRepositoryOwner \
@@ -259,7 +272,7 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	if [ "$(I_KNOW_A_GATE_RUN_EXISTS)" = "1" ]; then \
 	  echo "WARNING: I_KNOW_A_GATE_RUN_EXISTS=1: existing-gate lookup did not run (skipped); intentionally arming without duplicate detection" >&2; \
 	else \
-	advisory_helper="$(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/merge_gate_advisory.py"; \
+	advisory_helper="$(MERGE_GATE_ADVISORY_HELPER)"; \
 	advisory_deadline="$$(python3 -c 'import time; print(time.monotonic() + 17)')"; \
 	for active_status in queued in_progress pending waiting requested; do \
 	  if active="$$(python3 "$$advisory_helper" "$$advisory_deadline" \

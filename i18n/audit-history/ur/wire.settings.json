@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "aa59e6ef9b26e076de5acff448c4cfc96822a9147e438740d3949701172789f9",
+  "history_sha256": "c3d7b44c1e1a6ee2163c49078b2a95a646b467347b2bd0755a556ee291b05bfe",
   "entries": [
     {
       "locale": "ur",
@@ -1324,6 +1324,73 @@
       "status": "passed",
       "note": "Provenance correction, same audit and verdict as the preceding pr4266-r1 row (identical source/context/target hashes): translator identity relayed by the manager after the first append (was recorded unknown). PR #4266 round 1: re-audit after en wire.settings moved c62db407a0b2 -> fc000662374f by exactly 4 added keys (providers_bedrock_auth/.region .label/.help). Three-way vs merge-base 0d057990a180: locale diff is exactly those 4 added lines; every other key byte-identical to the previously passed target f6caaa702f8b (prior row c62db407a0b2, carried). 4 new keys audited: faithful; 'ambient' and AWS_REGION verbatim; labels <=29 cells and helps <=76 cells (rich cell_len); placeholder-free; NFC; no bidi controls; key set equals en. Findings: none. Native-speaker review and rendered-frame certification not claimed.",
       "round": "pr4266-r1-provenance"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "5ce2f020f0e760bb0e967358bb13fe2d7d76497935a55ac6c63ef46be0dc9f48",
+      "context_sha256": "7c506d1bb32fa3c14e43406e6ceb73e5d3406d10296723bc7813763c97c312b7",
+      "target_sha256": "8870d12bd668f009c148d035c5dae1d371c836b619594b52144f90737f84f3a0",
+      "translator": {
+        "agent": "coder subagent (PR #4317 implementer), not an i18n-translator lane; session id not given in the manager brief",
+        "model": "anthropic/claude-opus-5-5 (as stated by the manager brief; not independently verified)",
+        "date": "2026-11-19",
+        "fallback": "unknown: not reported in the brief"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (team radientdev, task subagent) acting as independent i18n auditor, session 2f61873f3c63; did not author or edit any value it judged",
+        "session": "2f61873f3c63",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed (harness system prompt: Model: anthropic/claude-opus-5-5)",
+        "date": "2026-11-19",
+        "result": "changes_requested",
+        "findings": 3,
+        "unresolved_blocker_major": 2,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "nit": 0
+        }
+      },
+      "status": "changes_requested",
+      "note": "PR #4317 copy r1 delta audit at 25421df34c29: base fully passed, diff = 2 added keys. Findings: C2 (en help overclaims scope: inherited by every locale); C3 label 35>29 cells; C6 discard/reject near-synonyms in help. Native/rendered certification not claimed.",
+      "round": "pr4317-copy-r1",
+      "keys_audited": 2
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "10a336b2a4aff78821258f858a2e9f4906ce0f5ada653dd2da62bb7ba6bd7cc2",
+      "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+      "target_sha256": "aca752e17e7c01c260f5f8cc79b1f70f5c64001ee2487f31258f88c4bf91adb8",
+      "translator": {
+        "agent": "coder (radientdev team task subagent, PR #4317 remediation implementer; translated all 28 changed strings)",
+        "session": "4d8fffdeba64",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "fallback": "none: auditor read the session record (origin.json agent=coder, subagent; every transcript response model claude-opus-5-5)"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (radientdev team task subagent) acting as independent i18n auditor; did not author or edit any value it judged",
+        "session": "aa991fa2d698",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed (harness system prompt: Model: anthropic/claude-opus-5-5)",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4317 copy r2 delta audit at feac0a8c484c: keys audited wire.settings.team_bridge_hold_release.label, wire.settings.team_bridge_hold_release.help against the remediated en source; prior r1 C1-C3 MAJORs verified fixed (eligibility covers org+machine, sign-in covers expired+wrong account, consent 'given', help hedged 'Some', label <=29 cells, title arms <=40 cells, measured with rich.cells.cell_len). Every other key in this namespace is byte-identical to the base 736fd54f06f0, whose last receipt was passed; no other key re-audited. Open non-gating findings: none. Native/rendered certification not claimed.",
+      "round": "pr4317-copy-r2",
+      "keys_audited": 2
     }
   ]
 }

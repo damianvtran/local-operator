@@ -298,8 +298,9 @@ _SHELL_TOOLS = frozenset({"bash", "eval"})
 #: be classified by name (``mcp__fs_write`` might delete files), so a session
 #: whose file access comes only through MCP is treated as having none; the
 #: always-on destructive-operation approval rule still binds it. Every class
-#: absent from the data dict means True, so a session holding the interactive
-#: tool set renders byte-identical to the tree before this table (tested).
+#: absent from the data dict means True, except ``has_workspace`` derives from
+#: files OR shell when omitted. With no flags supplied both default True, so
+#: the interactive tool set keeps the historical bytes (tested).
 CAPABILITY_CLASS_FLAGS: dict[str, frozenset[str]] = {
     "has_files": _FILE_TOOLS,
     "has_shell": _SHELL_TOOLS,
@@ -322,7 +323,7 @@ def tool_gated_prose_flags(tool_names: Collection[str]) -> dict[str, bool]:
 def _capability_layout_flags(seed: dict[str, Any]) -> dict[str, Any]:
     """Default the capability classes and derive the joins their gating needs.
 
-    Absent class means True, the historical unconditional render (see
+    Absent class means True, except workspace derives from files OR shell (see
     ``CAPABILITY_CLASS_FLAGS``). The derived flags exist because ``{{#if}}``
     has no ``else``/``or``: the ``## Tools`` lead paragraph is a chain of
     inline sentences that each used to start with a separating space, which
@@ -333,7 +334,12 @@ def _capability_layout_flags(seed: dict[str, Any]) -> dict[str, Any]:
     A caller may state any of them; derivation fills only what is absent.
     """
     for flag in CAPABILITY_CLASS_FLAGS:
-        seed.setdefault(flag, True)
+        if flag == "has_workspace":
+            # Workspace safety follows either way to touch local state, including
+            # direct render callers that provide class flags rather than tools.
+            seed.setdefault(flag, bool(seed["has_files"] or seed["has_shell"]))
+        else:
+            seed.setdefault(flag, True)
     seed.setdefault("no_web", not seed["has_web"])
     if seed["has_web"] and seed["no_web"]:
         raise ValueError(
@@ -345,6 +351,7 @@ def _capability_layout_flags(seed: dict[str, Any]) -> dict[str, Any]:
     seed.setdefault("notify_joins", bool(seed["no_reply_joins"] or seed["has_no_reply"]))
     seed.setdefault("has_tools_lead", bool(seed["notify_joins"] or seed.get("has_notify")))
     seed.setdefault("has_spill_line", bool(seed["has_eval"] or seed["has_resources"]))
+    seed.setdefault("has_scratch_line", bool(seed["has_files"] or seed["has_resources"]))
     return seed
 
 

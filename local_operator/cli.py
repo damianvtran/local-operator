@@ -12523,9 +12523,24 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         from local_operator.server import reload as serve_reload
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
+        # Same-OS-user check on every loopback connection (follow-up D,
+        # ``server/peer_check.py``): started now, in a background thread, so its
+        # self-probe overlaps app start-up instead of delaying it; connections
+        # that arrive first wait, paused, for the verdict. ``http=`` is the
+        # whole wiring -- ``tests/unit/test_cli_serve.py`` pins it, because a
+        # refactor that drops it silently reopens the cross-user hole.
+        from local_operator.server import peer_check
+
+        peer_check.ensure_resolving()
         # dictConfig otherwise closes ALL existing handlers (including ours)
         # and reinstalls synchronous stderr handlers before startup can run.
-        config = uvicorn.Config(asgi_app, host=host, port=resolved_port, log_config=None)
+        config = uvicorn.Config(
+            asgi_app,
+            host=host,
+            port=resolved_port,
+            log_config=None,
+            http=peer_check.gated_protocol_class(),
+        )
         # Retain the Server object so a ready-successor handoff can pause/resume
         # ACCEPTORS on it without a kill: the listener socket lives in this frame
         # and the handoff runs in the lifespan's loop, so app.state is the one
@@ -12561,6 +12576,9 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             reload=reload,
             reload_excludes=[".venv"],
             log_config=None,
+            # An import string: the reloader re-imports the protocol in its
+            # child, which resolves the peer-uid policy on its first connection.
+            http="local_operator.server.peer_check:PeerCheckedHTTPProtocol",
         )
     return 0
 

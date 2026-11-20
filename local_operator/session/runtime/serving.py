@@ -5696,7 +5696,20 @@ class ServingSessionHandle(SessionHandle):
                 # projection: a turn that RAISES emits no error event, so this
                 # string is the only description of what went wrong.
                 self._last_prompt_failure = str(exc)
-                logger.exception("mobile prompt failed after admission")
+                # Imported here: only a failed admission pays for it.
+                from local_operator.session.declared_mcp_ready import (
+                    DeclaredMcpToolsUnavailable,
+                )
+
+                if isinstance(exc, DeclaredMcpToolsUnavailable):
+                    # An EXPECTED refusal whose message already names the tools,
+                    # servers and reason: exec prints it as ``exec failed: …``.
+                    # A 13-line ERROR traceback ahead of that line is noise in a
+                    # pipeline worker's stderr (review N1 / QA O3), so the stack
+                    # stays available at debug only.
+                    logger.debug("mobile prompt refused before any request", exc_info=True)
+                else:
+                    logger.exception("mobile prompt failed after admission")
             except BaseException:
                 # KeyboardInterrupt/SystemExit retain their process semantics;
                 # the finally block still removes exactly the failed admission.

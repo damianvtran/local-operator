@@ -3985,6 +3985,49 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "clears the mkstemp FILE this call just staged, on the failure path",
     ),
+    # The voice slot (docs/design/qwen-voice.md, V3): every path is
+    # ``<config_dir>/voice/active.json`` or its mkstemp sibling in that same
+    # directory, built from the config root and fixed names alone, never from a
+    # session id, so none can name a path under ``sessions/``.
+    (
+        "local_operator/voice/slot.py::_write",
+        "os.replace",
+        "tmp FILE -> <config_dir>/voice/active.json FILE; fixed name, never sessions/",
+    ),
+    (
+        "local_operator/voice/slot.py::_write",
+        "os.unlink",
+        "clears the mkstemp FILE this call just wrote, on the failure path",
+    ),
+    (
+        "local_operator/voice/slot.py::_clear",
+        "<path>.unlink",
+        "removes the <config_dir>/voice/active.json slot FILE on disable",
+    ),
+    # The desktop voice route (docs/design/qwen-voice.md): every path is a
+    # ``tempfile.mkdtemp(prefix="lop-voice-")`` directory this request created,
+    # or a file under ``<config_dir>/voice/phrase-cache/`` named from a rung, a
+    # gender, a locale and a phrase hash. Nothing is built from a session id.
+    (
+        "local_operator/server/routes/desktop_voice.py::_save_upload",
+        "shutil.rmtree",
+        "removes the lop-voice-* mkdtemp dir this upload just made, on the failure path",
+    ),
+    (
+        "local_operator/server/routes/desktop_voice.py::_transcribe",
+        "shutil.rmtree",
+        "removes the lop-voice-* mkdtemp dir holding this request's utterance, after STT",
+    ),
+    (
+        "local_operator/server/routes/desktop_voice.py::_store_phrase",
+        "os.replace",
+        "tmp FILE -> <config_dir>/voice/phrase-cache/ FILE; hash-named, never sessions/",
+    ),
+    (
+        "local_operator/server/routes/desktop_voice.py::voice_speech",
+        "<path>.unlink",
+        "drops one corrupt <config_dir>/voice/phrase-cache/ FILE so it is regenerated",
+    ),
     (
         "local_operator/aida/state.py::_unlink_quietly",
         "<path>.unlink",

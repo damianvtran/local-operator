@@ -2786,6 +2786,16 @@ class ToolContext(BaseModel):
     # ``self._tools`` (``harness.subagent``), and a declared inventory narrows
     # the same list (``Session._filter_declared``).
     may_delegate: bool = False
+    # Whether THIS session can expand a ``spill://`` handle, i.e. holds ``read``
+    # (deferred counts: a deferred tool is callable). DERIVED from the live
+    # inventory in ``Session._build_tool_context``, exactly like
+    # ``may_delegate``. ``spill_truncate`` reads it so a capped result's footer
+    # never teaches a call the run cannot make: a bounded ``--tools`` run
+    # without ``read`` answered "SAVED at spill://… read(path=…)" by calling
+    # its MCP ``fetch`` on the handle or re-searching (head-to-head benchmark,
+    # 2026-11-20: 11 such fetches across three arms). ``True`` by default so
+    # every host that does not derive it keeps today's footer.
+    spill_readable: bool = True
     # The user's persistent agent registry (``local_operator.agents``), behind
     # the ``agent`` tool and behind role resolution for ``task(agent=...)``.
     # Typed ``Any`` because that module is heavy (dill, yaml, the whole agent

@@ -3065,6 +3065,14 @@ def team_bridge_enabled_label() -> Msg:
     return Msg("wire.settings.team_bridge_enabled.label", {})
 
 
+def team_bridge_hold_release_help() -> Msg:
+    return Msg("wire.settings.team_bridge_hold_release.help", {})
+
+
+def team_bridge_hold_release_label() -> Msg:
+    return Msg("wire.settings.team_bridge_hold_release.label", {})
+
+
 def team_bridge_screening_ambient_budget_per_hour_help() -> Msg:
     return Msg("wire.settings.team_bridge_screening_ambient_budget_per_hour.help", {})
 

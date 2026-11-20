@@ -399,10 +399,12 @@ Every hold ends in one of two ways; none waits forever:
   and the holds list offers **Deliver** or **Discard**. Prompt injection, social
   engineering, `out_of_scope_work`, `personal_info_request` and any answer with
   more than one category are still rejected. Only a preferred, allowlisted
-  screener's answer converts; others reject as before. It has no
-  `lop config edit` key: set `hold_release: false` (an unquoted `false`; a
-  quoted `"false"`, `off` or `0` still reads on, and the receiver logs that once)
-  under `values:` > `team_bridge:` (via `lop config open`) to reject these again.
+  screener's answer converts; others reject as before. Turn it off with the
+  **Hold work requests for review** row in `/settings`, or
+  `lop config edit team_bridge.hold_release false`, to reject these again. A
+  hand-edited `hold_release:` under `values:` > `team_bridge:` reads the same
+  way as that row (`false`, `"false"`, `off`, `no` or `0` is off); a value that
+  is neither on nor off reads on, and the receiver logs that once.
   A screener outside the preferred allowlist (a fallback after the preferred
   models fail) still rejects these requests.
 
