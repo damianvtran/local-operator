@@ -526,6 +526,62 @@ async def test_native_task_tree_records_parent_child_and_grandchild(
     assert "no subagents launched" in launch_carrier, "the hub result rides it too"
 
 
+@pytest.mark.asyncio
+async def test_episode_recorded_spend_refuses_native_task_child(scratch: Any, wire: Wire) -> None:
+    from local_operator.evaluation.session_arm import open_episode_session
+    from local_operator.harness.types import SubagentStartEvent
+
+    cap_micros = 1
+    receipt = Usage(input_tokens=1, usd_cost=cap_micros / 1_000_000)
+    wire.script(
+        "parent",
+        [
+            StreamUsageEvent(usage=receipt),
+            *tool_turn(
+                "task",
+                {"label": "kid", "prompt": f"{_CHILD_MARKER}: reply"},
+                "call-task",
+                usage=receipt,
+            ),
+        ],
+        text_turn("unexpected parent follow-up", usage=receipt),
+    )
+    wire.script("child", text_turn("unexpected child reply", usage=receipt))
+    wire.script("delivery-root", text_turn("unexpected delivery reply", usage=receipt))
+    starts: list[SubagentStartEvent] = []
+
+    def observe(event: Any) -> None:
+        if isinstance(event, SubagentStartEvent):
+            starts.append(event)
+
+    handle = await open_episode_session(
+        spec=_spec(), roots=scratch, on_event=observe, max_recorded_spend_micros=cap_micros
+    )
+    session = handle.session
+    root_id = session.session_id
+    try:
+        await session.prompt(f"{_PARENT_MARKER}: delegate the work")
+        await _settle(session)
+        # The parent's own follow-up can hit the cap too. A started and settled
+        # child distinguishes shared admission from a task that never launched.
+        (start,) = starts
+        job = session.jobs.get(start.job_id)
+        assert job is not None and job.type == "task" and job.label == "kid"
+        assert job.status == "completed" and job.settled_at is not None
+        shutdown = await session.shutdown_owned_work("recorded-spend task test")
+        assert shutdown.complete and shutdown.observer_callback_errors == 0
+        assert handle._admission is not None and not handle._admission.pending
+    finally:
+        await handle.aclose()
+
+    assert handle.admission_refusal == "budget-cap"
+    assert not wire.scoped("child"), "the launched child must be refused before transport"
+    assert [wire.scope_of(request) for request in wire.requests] == ["parent"]
+    (row,) = handle.request_rows
+    assert row["session_id"] == root_id and row["job_id"] is None
+    assert row["usage"]["usd_cost"] == receipt.usd_cost
+
+
 # ---------------------------------------------------------------------------
 # Preexisting fork + unsubscribe coverage through the SDK
 # ---------------------------------------------------------------------------
