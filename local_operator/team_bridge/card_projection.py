@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
@@ -266,13 +266,34 @@ def _render_card_marker(locator: _CardLocator, bodies: Mapping[str, str]) -> str
 
 
 def attach_history_excerpts(
-    messages: Sequence[Any], *, config_dir: Any, owner_key: str
+    messages: Sequence[Any],
+    *,
+    config_dir: Any,
+    owner_key: str,
+    memo: MutableMapping[str, _HistoryExcerpt] | None = None,
 ) -> list[Any]:
     """Return ``messages`` with request-local copies of recent cards carrying excerpts.
 
     The CALLER proves standing (live owner + consent) before calling; this
     function only reads the display store, and a failed read is "no excerpts".
     Never mutates an input message.
+
+    ``memo`` (the live Session's, keyed by card message id) FREEZES each card's
+    excerpt decision at its first render in this process. WHY: this transform
+    runs on every provider call, and without the memo a card's bytes changed
+    twice after they were already sent and cached — once when
+    ``PendingTurn._record_display_body`` wrote its body AFTER the card had gone
+    out ids-only, and again when the ``EXCERPT_CARD_WINDOW``-th newer card
+    pushed it out of the window. Either change re-wrote the Anthropic cache
+    from that card to the tail: 2,941 calls and 51.8M one-hour cache-write
+    tokens on main sessions over the 7 days to 2026-11-19 (~$415/week
+    API-equivalent). So a card first rendered without an excerpt stays without
+    one, a card rendered with one keeps it after it leaves the window, and the
+    window bounds only FRESH decisions. A restart or compaction starts a fresh
+    memo and may recompute (the cache is cold then anyway). The memo is a
+    standing-gated cache, not standing: the caller clears it whenever the fence
+    refuses, so revocation still removes every excerpt at the next render.
+    ``None`` (direct callers, tests) is the stateless per-request behaviour.
     """
 
     from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
@@ -281,6 +302,8 @@ def attach_history_excerpts(
 
     out = list(messages)
     picks: list[tuple[int, _CardLocator]] = []
+    seen = 0
+    live_keys: set[str] = set()
     for index in range(len(out) - 1, -1, -1):
         message = out[index]
         if getattr(message, "custom_type", None) != TEAM_BRIDGE_MESSAGE_TYPE:
@@ -291,14 +314,35 @@ def attach_history_excerpts(
         locator = _card_locator(details)
         if locator is None:
             continue
-        picks.append((index, locator))
-        if len(picks) >= EXCERPT_CARD_WINDOW:
+        seen += 1
+        key = getattr(message, "id", None) if memo is not None else None
+        if memo is not None and isinstance(key, str) and key:
+            live_keys.add(key)
+            decided = memo.get(key)
+            # The text check keeps a re-coalesced card (same id, new text) from
+            # reusing a decision made for different bytes.
+            if decided is not None and decided.text == details.get("text", ""):
+                if decided.bodies:
+                    out[index] = _with_excerpt(message, decided)
+                continue
+            if seen > EXCERPT_CARD_WINDOW:
+                # First rendered outside the window: decided now, without one.
+                memo[key] = _HistoryExcerpt(text=details.get("text", ""), bodies={})
+                continue
+        elif seen > EXCERPT_CARD_WINDOW:
             break
+        picks.append((index, locator))
+    if memo is not None:
+        # Bounded by the cards still in context: a card compaction dropped is
+        # never rendered again, so its decision has nothing left to protect.
+        for stale in [key for key in memo if key not in live_keys]:
+            del memo[stale]
     if not picks:
         return out
     wanted = [mid for _, loc in picks for mid in loc.message_ids[: EXCERPTS_PER_CARD * 4]]
     rows = DisplayBodyStore(config_dir).bodies(owner_key, wanted)
     for index, locator in picks:
+        original = out[index]
         bodies = {
             mid: str(row["body"])
             for mid in locator.message_ids
@@ -306,14 +350,18 @@ def attach_history_excerpts(
             and row.get("source") == "turn"
             and row.get("conversation_id") == locator.conversation_id
         }
-        if not bodies:
-            continue
-        original = out[index]
-        copy = original.model_copy()
-        object.__setattr__(
-            copy,
-            "_bridge_history_excerpt",
-            _HistoryExcerpt(text=original.details.get("text", ""), bodies=bodies),
-        )
-        out[index] = copy
+        excerpt = _HistoryExcerpt(text=original.details.get("text", ""), bodies=bodies)
+        key = getattr(original, "id", None)
+        if memo is not None and isinstance(key, str) and key:
+            # Recorded EVEN WHEN EMPTY: "first sent without one" is the decision.
+            memo[key] = excerpt
+        if bodies:
+            out[index] = _with_excerpt(original, excerpt)
     return out
+
+
+def _with_excerpt(original: Any, excerpt: _HistoryExcerpt) -> Any:
+    """A request-local copy carrying ``excerpt``; the context's card is untouched."""
+    copy = original.model_copy()
+    object.__setattr__(copy, "_bridge_history_excerpt", excerpt)
+    return copy

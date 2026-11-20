@@ -5124,6 +5124,10 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        #: Team Bridge card excerpt decisions, frozen at each card's first render
+        #: in this process (``card_projection.attach_history_excerpts``): keeps
+        #: already-cached card bytes stable. Cleared whenever standing fails.
+        self._bridge_excerpt_memo: dict[str, Any] = {}
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
         self._body_answered_turn: Any | None = None
@@ -21972,6 +21976,11 @@ class Session:
         excerpts at the next request (design §5, property C). It never mutates
         the context: cards get request-local copies (``card_projection``).
         Any failure is "no excerpts", which is today's ids-only marker.
+        STANDING is re-proved per call; each card's excerpt DECISION is frozen at
+        its first render (``_bridge_excerpt_memo``) so cached card bytes do not
+        move. NOT covered: the stranded-card reorder
+        (``_fallback_card_wake_initial``) still moves a card to the tail, which
+        re-writes the cache from its old position; the memo leaves it alone.
         """
         runtime = getattr(self, "bridge_runtime", None)
         if runtime is None or not any(
@@ -21991,8 +22000,13 @@ class Session:
             )
             from local_operator.team_bridge.store import _owner_key
 
+            # Frozen decisions hold body text; they ride only while standing
+            # does, so every refusal below drops them with the excerpts.
+            memo = getattr(self, "_bridge_excerpt_memo", None)
             refusal = authority_fence(runtime)
             if refusal is not None:
+                if memo is not None:
+                    memo.clear()
                 code = refusal.get("code")
                 if code == "feature_off":
                     # A torn config read also answers ``feature_off``; only a
@@ -22014,9 +22028,14 @@ class Session:
                 # sign-in itself is part of the standing (QA Q1). The logout
                 # hook purged the rows already; this withholds excerpts even
                 # if a row survived (fail closed: the ids-only marker).
+                if memo is not None:
+                    memo.clear()
                 return messages
             return attach_history_excerpts(
-                messages, config_dir=runtime.config_dir, owner_key=_owner_key(runtime.owner)
+                messages,
+                config_dir=runtime.config_dir,
+                owner_key=_owner_key(runtime.owner),
+                memo=memo,
             )
         except Exception:  # noqa: BLE001 — excerpts are optional; never fail a request
             logger.debug("bridge: history excerpts skipped", exc_info=False)
