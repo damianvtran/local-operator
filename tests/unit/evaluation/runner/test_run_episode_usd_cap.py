@@ -241,9 +241,12 @@ def test_the_derivation_rides_into_the_spec_metadata(tmp_path) -> None:
     }
 
 
-@pytest.mark.parametrize("session_wall_s", [None, 12.5])
+@pytest.mark.parametrize(
+    ("session_wall_s", "max_usd", "requested_micros"),
+    [(None, "3", 3_000_000), (12.5, "3", 3_000_000), (None, "0.000001", 1)],
+)
 def test_session_cli_discloses_limits_before_dispatch(
-    tmp_path, monkeypatch, capsys, session_wall_s
+    tmp_path, monkeypatch, capsys, session_wall_s, max_usd, requested_micros
 ) -> None:
     from local_operator.evaluation import source_pin
 
@@ -270,7 +273,7 @@ def test_session_cli_discloses_limits_before_dispatch(
             "model_cycles_limit": None,
             "session_turn_wall_s": session_wall_s,
             "decision_groups_limit": 7,
-            "requested_provider_usd_micros": 3_000_000,
+            "requested_provider_usd_micros": requested_micros,
             "requested_per_cycle_usd_micros": 250_000,
             "lease_and_frontend_wall_basis_s": 19,
         }
@@ -283,8 +286,8 @@ def test_session_cli_discloses_limits_before_dispatch(
     async def session_arm(*, args, spec, **_kwargs):
         assert assert_diagnostic() == spec.metadata["session_budget"]
         assert args.session_wall_s == session_wall_s
-        assert spec.metadata["usd_cap_configured_micros"] == 3_000_000
-        assert spec.metadata["usd_cap_reference_micros"] == 3_000_000
+        assert spec.metadata["usd_cap_configured_micros"] == requested_micros
+        assert spec.metadata["usd_cap_reference_micros"] == requested_micros
         assert "usd_cap_effective_micros" not in spec.metadata
         for resource in run_episode.BUDGET_RESOURCES:
             allowance = spec.budget.allowance_for(resource)
@@ -310,7 +313,7 @@ def test_session_cli_discloses_limits_before_dispatch(
         "--engagement",
         "session",
         "--max-usd",
-        "3",
+        max_usd,
         "--max-cycle-usd",
         "0.25",
         "--max-wall-s",
@@ -322,6 +325,61 @@ def test_session_cli_discloses_limits_before_dispatch(
         argv += ["--session-wall-s", str(session_wall_s)]
     assert run_episode.main(argv) == 0
     assert run_episode.main([*argv, "--in-process-host"], internal_test_support=True) == 0
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--max-usd", "0", "at least one USD micro"),
+        ("--max-usd", "-1", "at least one USD micro"),
+        ("--max-usd", "0.0000005", "at least one USD micro"),
+        ("--max-usd", "nan", "finite"),
+        ("--max-usd", "1e308", "finite"),
+        ("--max-cycle-usd", "inf", "finite"),
+        ("--max-cycle-usd", "1e308", "finite"),
+        ("--session-wall-s", "inf", "finite"),
+        ("--session-wall-s", "nan", "finite"),
+        ("--session-wall-s", "-inf", "finite"),
+    ],
+)
+@pytest.mark.parametrize("in_process", [False, True], ids=["managed", "in-process"])
+def test_invalid_session_budget_is_refused_before_disclosure_or_dispatch(
+    tmp_path, monkeypatch, capsys, flag, value, message, in_process
+) -> None:
+    from local_operator.evaluation import source_pin
+
+    selector = _write_tiny_selector(tmp_path)
+    run_root = tmp_path / "run"
+    monkeypatch.setattr(source_pin, "verify_core_source", lambda _pin: None)
+
+    def unexpected_step(*args, **kwargs):
+        pytest.fail("an invalid budget must be refused before setup or dispatch")
+
+    monkeypatch.setattr(run_episode, "build_config", unexpected_step)
+    monkeypatch.setattr(run_episode, "_run_managed_frontend", unexpected_step)
+    monkeypatch.setattr(run_episode, "_run_session_arm", unexpected_step)
+    argv = [
+        "--selector",
+        str(selector),
+        "--task-id",
+        "task",
+        "--route",
+        "/".join(_ROUTE),
+        "--run-root",
+        str(run_root),
+        "--no-store",
+        "--engagement",
+        "session",
+        f"{flag}={value}",
+    ]
+    if in_process:
+        argv.append("--in-process-host")
+    assert run_episode.main(argv, internal_test_support=in_process) == run_episode.EXIT_PREFLIGHT
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert flag in captured.err and message in captured.err
+    assert "session_budget=" not in captured.err
+    assert not run_root.exists()
 
 
 def _write_tiny_selector(tmp_path: Path) -> Path:

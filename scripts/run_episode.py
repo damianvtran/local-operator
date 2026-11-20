@@ -57,6 +57,7 @@ import asyncio
 import functools
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -926,7 +927,8 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
         "--max-usd",
         type=float,
         default=0.50,
-        help="provider spend cap (a safety net; see --max-usd-at for how the figure is scaled)",
+        help="provider spend cap for Reply; spend reference only for Session "
+        "(see --max-usd-at for scaling)",
     )
     parser.add_argument(
         "--max-usd-at",
@@ -934,9 +936,9 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
         default=None,
         metavar="PROVIDER/MODEL",
         help=(
-            "the route whose prices the --max-usd figure is stated at; the enforced cap "
-            "is scaled to the run route's prices, never down. Default: use the figure "
-            "as stated"
+            "the route whose prices the --max-usd figure is stated at; scales the Reply cap "
+            "or Session reference to the run route's prices, never down. "
+            "Default: use the figure as stated"
         ),
     )
     # OSWorld 2.0 bounds an episode by MODEL STEPS (500), not by time: the
@@ -947,7 +949,12 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
     # observed pace and truncated 9 of 30 episodes mid-work; see
     # docs/benchmarks/osworld_2/BUDGETS_AND_LATENCY.md.
     parser.add_argument("--max-wall-s", type=int, default=18000)
-    parser.add_argument("--max-cycle-usd", type=float, default=None, help="per-cycle cap")
+    parser.add_argument(
+        "--max-cycle-usd",
+        type=float,
+        default=None,
+        help="per-cycle spend cap for Reply; spend reference only for Session",
+    )
     parser.add_argument("--keep-recent-frames", type=int, default=3)
     parser.add_argument(
         "--action-binding",
@@ -1909,7 +1916,17 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
     return EXIT_EPISODE
 
 
-def _session_budget_disclosure(args: argparse.Namespace) -> dict[str, int | float | None]:
+def _usd_micros(value: float, *, flag: str) -> int:
+    # A finite USD input can still overflow when converted to micros.
+    micros = value * 1_000_000
+    if not math.isfinite(micros):
+        raise ValueError(f"{flag} must be finite when expressed in USD micros")
+    return round(micros)
+
+
+def _session_budget_disclosure(
+    args: argparse.Namespace, *, configured_usd_micros: int, max_cycle_usd_micros: int | None
+) -> dict[str, int | float | None]:
     """Preflight record shared by the frontend and the Session episode spec."""
     return {
         "provider_usd_cap_micros": None,
@@ -1918,10 +1935,8 @@ def _session_budget_disclosure(args: argparse.Namespace) -> dict[str, int | floa
         "model_cycles_limit": None,
         "session_turn_wall_s": args.session_wall_s,
         "decision_groups_limit": args.max_steps,
-        "requested_provider_usd_micros": int(round(args.max_usd * 1_000_000)),
-        "requested_per_cycle_usd_micros": (
-            int(round(args.max_cycle_usd * 1_000_000)) if args.max_cycle_usd is not None else None
-        ),
+        "requested_provider_usd_micros": configured_usd_micros,
+        "requested_per_cycle_usd_micros": max_cycle_usd_micros,
         "lease_and_frontend_wall_basis_s": args.max_wall_s,
     }
 
@@ -1949,6 +1964,22 @@ async def run(
         if refusal is not None:
             print(refusal, file=sys.stderr)
             return EXIT_PREFLIGHT
+    try:
+        configured_usd_micros = _usd_micros(args.max_usd, flag="--max-usd")
+        max_cycle_usd_micros = (
+            _usd_micros(args.max_cycle_usd, flag="--max-cycle-usd")
+            if args.max_cycle_usd is not None
+            else None
+        )
+        # The old one-micro reservation rejected zero after rounding.
+        # Price-basis scaling cannot rescue a nonpositive request.
+        if args.engagement == "session" and configured_usd_micros <= 0:
+            raise ValueError("--max-usd must authorize at least one USD micro after rounding")
+        if args.session_wall_s is not None and not math.isfinite(args.session_wall_s):
+            raise ValueError("--session-wall-s must be finite")
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
     if args.engagement == "session":
         from local_operator.evaluation.source_pin import (
             SourcePinError,
@@ -1965,12 +1996,16 @@ async def run(
             return EXIT_PREFLIGHT
     session_budget = None
     if args.engagement == "session":
-        session_budget = _session_budget_disclosure(args)
+        session_budget = _session_budget_disclosure(
+            args,
+            configured_usd_micros=configured_usd_micros,
+            max_cycle_usd_micros=max_cycle_usd_micros,
+        )
         # The frontend does not relay the owner's stderr, so disclose before
         # launching it as well as in the owner log. Stdout remains the outcome.
         print(  # i18n: ignore structured benchmark preflight diagnostic
             "session budget preflight (null limits are not enforced): "
-            f"session_budget={json.dumps(session_budget, sort_keys=True)}",
+            f"session_budget={json.dumps(session_budget, sort_keys=True, allow_nan=False)}",
             file=sys.stderr,
             flush=True,
         )
@@ -2032,7 +2067,6 @@ async def run(
     episode_id = args.episode_id or f"ep-{uuid.uuid4().hex[:12]}"
     ref_names = tuple(args.secret) if args.secret is not None else _DEFAULT_SECRET_REFS
     secret_refs = tuple(dict.fromkeys((*ref_names, *(ref.value for ref in infra_refs))))
-    configured_usd_micros = int(round(args.max_usd * 1_000_000))
     try:
         usd_cap = _scale_usd_cap(
             configured_usd_micros, route=(provider, model), basis=args.max_usd_at
@@ -2045,14 +2079,13 @@ async def run(
         # Preserve the requested value and price-basis arithmetic, but do not
         # call the resulting reference figure an enforced limit on this arm.
         usd_metadata["usd_cap_reference_micros"] = usd_metadata.pop("usd_cap_effective_micros")
-    max_cycle = int(round(args.max_cycle_usd * 1_000_000)) if args.max_cycle_usd else None
 
     try:
         config = build_config(
             args.run_root,
             episode_id=episode_id,
             max_steps=args.max_steps,
-            max_cycle_usd_micros=max_cycle,
+            max_cycle_usd_micros=max_cycle_usd_micros if args.max_cycle_usd else None,
             execution_overhead_seconds_per_action=(
                 _ACTION_SETTLE_SECONDS if settle_policy == "paper" else 0.0
             ),
