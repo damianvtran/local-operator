@@ -1,0 +1,108 @@
+{
+  "tui.tool_card.status.cut_off": {
+    "maxCells": 14,
+    "role": "status reason word",
+    "tone": "plain, terse, lower-case",
+    "note": "Reason slot beside the ⊘ glyph of a tool call whose turn ended INVOLUNTARILY (connection lost, process died) — nobody chose to stop it. Must stay distinct from 'interrupted', which is reserved for a recorded deliberate stop; it sits beside a 'turn cut off' notice, so match that notice's wording."
+  },
+  "tui.tool_card.status.error": {
+    "role": "status reason word",
+    "tone": "plain, terse, lower-case",
+    "note": "Fallback reason beside the ✗ glyph of a FAILED tool call when the failure carried no error text at all. Normally the tool's own error sentence shows here instead. Truncated with … if narrow."
+  },
+  "tui.tool_card.status.interrupted": {
+    "maxCells": 14,
+    "role": "status reason word",
+    "tone": "plain, terse, lower-case",
+    "note": "Reason slot beside the ⊘ glyph of a tool call that was positively STOPPED (the operator or the agent interrupted it). Contrast tui.tool_card.status.cut_off. Desktop equivalent: ui.chat.canonical.tool_row.outcome.interrupted in local-operator-ui."
+  },
+  "tui.tool_card.status.not_run": {
+    "role": "status reason word",
+    "tone": "plain, terse, lower-case",
+    "note": "Fallback reason beside the ✗ glyph of a tool call that was announced but never executed (refused or abandoned before starting), when no reason text was given. Desktop equivalent: ui.chat.canonical.tool_row.outcome.never_ran in local-operator-ui."
+  },
+  "tui.tool_card.status.partial": {
+    "maxCells": 12,
+    "role": "status reason word",
+    "tone": "plain, terse",
+    "note": "Reason slot (right of the row, before the amber ◐ glyph) of a search/glob result that is PARTIAL (some files or results were skipped), used only when the result text carries no 'Partial results:' line to promote. Capitalised in English because it stands in for that sentence's lead. Truncated with … if the slot is narrow."
+  },
+  "tui.tool_card.status.queued": {
+    "maxCells": 7,
+    "role": "status column word",
+    "tone": "plain, terse, lower-case",
+    "note": "Status column of a tool call that was announced and dictated but has not started executing yet (it waits behind another call). Not an error, not running. The status column sits at the row's right edge; the word is SHED WHOLE (never truncated) when the column cap is narrower than the word's terminal cell width, so a long translation disappears at narrow widths instead of being clipped."
+  },
+  "tui.tool_card.status.running": {
+    "maxCells": 7,
+    "role": "status column word",
+    "tone": "plain, terse, lower-case",
+    "note": "Status column of a tool row that is executing but whose start time is unknown (a replayed row), so no clock can be shown. Sized to the settled spine — the outcome glyph, a space and a 5-cell duration = 7 cells — so the row does not reflow when it settles. A shorter word is right-aligned into those 7 cells; a LONGER word makes the summary beside it lose cells while running. The status column sits at the row's right edge; the word is SHED WHOLE (never truncated) when the column cap is narrower than the word's terminal cell width, so a long translation disappears at narrow widths instead of being clipped. Distinct from tui.tool_card.live.running (the expanded block's header)."
+  },
+  "tui.tool_card.status.send.delivery_unconfirmed": {
+    "maxCells": 22,
+    "role": "send outcome word",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed send row, replacing the delivery-mode marker, followed by ' · ' and the target/message. The row truncates from the RIGHT, so this word must stay first and short: everything after it is shed before it is. Nothing confirms the message arrived; it may still arrive, so it must not read as a failure ('not delivered'). Name what is unconfirmed (the delivery), never a bare 'unconfirmed'. Desktop app ships the same word as ui.chat.trace.send.delivery.unconfirmed.word in local-operator-ui (src/i18n/catalogues/en/ui.chat.trace.json); reuse that locale's shipped wording so one state reads the same on both surfaces."
+  },
+  "tui.tool_card.status.send.no_new_wake": {
+    "maxCells": 14,
+    "role": "send outcome fragment",
+    "tone": "plain, terse, lower-case",
+    "note": "Second fragment after tui.tool_card.status.send.receipt_reused on a suppressed duplicate send: no new wake request was sent to the peer this time."
+  },
+  "tui.tool_card.status.send.not_delivered": {
+    "maxCells": 16,
+    "role": "status reason word",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the reason slot beside ✗ on a FAILED `send` (message to another agent session); the code appends ': <cause>'. When the slot is narrow the cause is cut first and this word kept whole. Desktop app ships the same word as ui.chat.trace.send.delivery.failed.word in local-operator-ui (src/i18n/catalogues/en/ui.chat.trace.json); reuse that locale's shipped wording so one state reads the same on both surfaces."
+  },
+  "tui.tool_card.status.send.receipt_reused": {
+    "maxCells": 16,
+    "role": "send outcome word",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed send row when a duplicate send was suppressed: the earlier send's receipt was reused instead of sending again. The code paints '<this> · <no_new_wake> · <target>'. Row truncates from the right, so keep it short."
+  },
+  "tui.tool_card.status.send.wake_unconfirmed": {
+    "maxCells": 22,
+    "role": "send outcome word",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed send row, replacing the delivery-mode marker, followed by ' · ' and the target/message. The row truncates from the RIGHT, so this word must stay first and short: everything after it is shed before it is. The message reached the peer's mailbox but the request to WAKE the peer got no answer: the wake, not the delivery, is unconfirmed. Desktop app ships the same word as ui.chat.trace.send.delivery.mailbox.word in local-operator-ui (src/i18n/catalogues/en/ui.chat.trace.json); reuse that locale's shipped wording so one state reads the same on both surfaces."
+  },
+  "tui.tool_card.status.session_reset": {
+    "maxCells": 16,
+    "role": "status reason word",
+    "tone": "plain, terse, lower-case",
+    "note": "Reason slot (amber, beside a success ✓) of a Python eval call that ran on a FRESH kernel: earlier variables/imports were lost. The call itself succeeded; this is a fact about the session, not a failure. Used only when the result carries no notice sentence to promote. Truncated with … if narrow."
+  },
+  "tui.tool_card.status.switch.partial": {
+    "maxCells": 20,
+    "role": "model-switch outcome word",
+    "tone": "plain, terse, lower-case",
+    "note": "Model-switch outcome: the switch took effect, but an error followed it. Keep the parenthesised qualifier style. Same slot as tui.tool_card.status.switch.switched."
+  },
+  "tui.tool_card.status.switch.pending": {
+    "maxCells": 16,
+    "role": "model-switch outcome word",
+    "tone": "plain, terse, lower-case",
+    "note": "Model-switch outcome: the switch was accepted but has not taken effect yet and can still fail. Same slot as tui.tool_card.status.switch.switched."
+  },
+  "tui.tool_card.status.switch.switched": {
+    "maxCells": 16,
+    "role": "model-switch outcome word",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed row of a `send` that switched another session's MODEL: the switch took effect. Replaces the 'model' marker and is followed by ' · <session> · → <model>'. Row truncates from the right; keep short."
+  },
+  "tui.tool_card.status.switch.unchanged": {
+    "maxCells": 16,
+    "role": "model-switch outcome word",
+    "tone": "plain, terse, lower-case",
+    "note": "Model-switch outcome: the session was already on the requested model, so nothing changed. Same slot as tui.tool_card.status.switch.switched."
+  },
+  "tui.tool_card.status.waiting": {
+    "maxCells": 7,
+    "role": "status column word",
+    "tone": "plain, terse, lower-case",
+    "note": "Status column of a tool call held at a pending approval gate: it has not run and is waiting for the operator's decision. Must not read as 'running' or as an outcome. The status column sits at the row's right edge; the word is SHED WHOLE (never truncated) when the column cap is narrower than the word's terminal cell width, so a long translation disappears at narrow widths instead of being clipped."
+  }
+}
