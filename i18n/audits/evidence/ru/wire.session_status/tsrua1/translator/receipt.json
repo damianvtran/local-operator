@@ -1,0 +1,20 @@
+{
+  "locale": "ru",
+  "namespace": "wire.session_status",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "3f1cf5b56ba0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state model declaration",
+    "fallback_used": false,
+    "date": "2026-11-19"
+  },
+  "auditor": {
+    "agent": null,
+    "model": null,
+    "result": "not_performed"
+  },
+  "status": "translated",
+  "note": "Translation only: 16 new messages; legacy retired_label unchanged. Two independent safety-copy audits required. No application-runtime or visual clearance. Candidate provenance: terminal-status-ru/provenance.json."
+}

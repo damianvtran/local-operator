@@ -1118,22 +1118,17 @@ def test_the_scalar_pin_rejects_a_generic_container() -> None:
 
 
 def test_paint_resolution_isolates_the_memo_with_a_shallow_copy(monkeypatch) -> None:
-    """The paint path hands out SHALLOW copies, and they are still isolated.
+    """Only Bedrock's payload is copied deeply; all other fields stay scalar.
 
-    ``resolve_model_info_paint`` runs once per usage component on the parent's
-    roster tick, so it stopped paying pydantic's deep-copy walk (measured as the
-    single largest cost of a 16-child tick). A shallow copy is only equivalent
-    while every ``ModelInfo`` field is a scalar -- a nested container would then
-    be SHARED between the caller's copy and the process-wide memo, and a caller
-    mutating it would corrupt every later price. This pins both halves: the
-    field inventory that makes the shallow copy safe, and the isolation itself
-    on the memo arm and the registry-fallback arm.
+    The field inventory is paired with the nested-mutation test below: allowing
+    a field here without actually isolating it must still fail that test.
     """
-    for name, field in ModelInfo.model_fields.items():
-        assert _is_scalar_annotation(field.annotation), (
-            f"ModelInfo.{name} is {field.annotation!r}: a non-scalar field makes "
-            "resolve_model_info_paint's shallow copy share state with its memo"
-        )
+    mutable = {
+        name
+        for name, field in ModelInfo.model_fields.items()
+        if not _is_scalar_annotation(field.annotation)
+    }
+    assert mutable == {"bedrock_metadata"}, "new mutable fields need an isolated copy policy"
 
     bucket = int(configure.time.time() // configure.DEFAULT_TTL_S)
     memo_row = ModelInfo(id="paint-model", name="paint-model", description="memo", input_price=3.0)
@@ -1148,6 +1143,62 @@ def test_paint_resolution_isolates_the_memo_with_a_shallow_copy(monkeypatch) -> 
     fallback.context_window = 1
     again, _ = configure.resolve_model_info_paint("anthropic", "claude-unheard-of-6")
     assert again.context_window == 200_000, "a caller's write reached the registry fallback"
+
+
+@pytest.mark.parametrize("memo_hit", [True, False])
+def test_paint_resolution_isolates_nested_bedrock_metadata(monkeypatch, memo_hit) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.providers.bedrock.models import capabilities_for_spec
+
+    model = "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/synthetic"
+    metadata = {
+        "foundation_ids": ["meta.llama3-3-70b-instruct-v1:0"],
+        "streaming": False,
+        "profile": {"regions": ["us-west-2"]},
+    }
+    row = ModelInfo(
+        id=model,
+        name=model,
+        description="profile",
+        bedrock_metadata=metadata,
+        context_window=128_000,
+        supports_tools=True,
+    )
+    bucket = int(configure.time.time() // configure.DEFAULT_TTL_S)
+    if memo_hit:
+        monkeypatch.setitem(configure._paint_memo, ("bedrock", model, bucket), row)
+    else:
+        monkeypatch.delitem(configure._paint_memo, ("bedrock", model, bucket), raising=False)
+        monkeypatch.setattr(configure, "_registry_fallback", lambda *_: row)
+
+    def caps(info):
+        return capabilities_for_spec(
+            SimpleNamespace(model_id=model, bedrock_metadata=info.bedrock_metadata)
+        )
+
+    expected_payload = row.model_dump(mode="json")
+    handed, hit = configure.resolve_model_info_paint("bedrock", model)
+    assert hit is memo_hit
+    assert handed.model_dump(mode="json") == expected_payload
+    expected = caps(row)
+    # Negative control: a shallow model copy really DOES alias this payload.
+    assert row.model_copy().bedrock_metadata is row.bedrock_metadata
+    assert handed.bedrock_metadata is not None
+    handed.bedrock_metadata["foundation_ids"].append("unknown.foundation")
+    handed.bedrock_metadata["profile"]["regions"].append("eu-west-1")
+    handed.bedrock_metadata["streaming"] = True
+    handed.context_window = 1
+    again, _ = configure.resolve_model_info_paint("bedrock", model)
+    assert again.model_dump(mode="json") == expected_payload
+    assert row.model_dump(mode="json") == expected_payload
+    assert again.context_window == 128_000 and again.supports_tools is True
+    assert caps(again) == expected
+    assert expected.streaming is False
+    assert (
+        caps(SimpleNamespace(bedrock_metadata={"foundation_ids": ["unknown.foundation"]})).protocol
+        != "anthropic"
+    )
 
 
 def test_paint_resolution_never_deep_copies(monkeypatch) -> None:

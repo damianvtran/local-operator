@@ -9,8 +9,20 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def audit_row(*, record: str, age: str, path: str) -> Msg:
+    return Msg("cli.services_heavy.audit_row", {"record": record, "age": age, "path": path})
+
+
 def command() -> Msg:
     return Msg("cli.services_heavy.command", {})
+
+
+def event_line(*, time: str, record: str) -> Msg:
+    return Msg("cli.services_heavy.event_line", {"time": time, "record": record})
+
+
+def events_header(*, path: str) -> Msg:
+    return Msg("cli.services_heavy.events_header", {"path": path})
 
 
 def heavy() -> Msg:
@@ -34,6 +46,10 @@ def late_start(*, start_by: str, now: str, late: str) -> Msg:
 
 def no_command() -> Msg:
     return Msg("cli.services_heavy.no_command", {})
+
+
+def no_events(*, path: str) -> Msg:
+    return Msg("cli.services_heavy.no_events", {"path": path})
 
 
 def not_start_by(*, value: str) -> Msg:

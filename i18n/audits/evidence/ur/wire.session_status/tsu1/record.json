@@ -1,0 +1,109 @@
+{
+  "locale": "ur",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "audit_id": "tsu1",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev; terminal-status-ur-audit; first independent instance)",
+    "session": "9075da90042e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host system session-state Model declaration in this audit session",
+    "fallback_used": false,
+    "fallback": "No fallback used in this audit session",
+    "independent_from_translator_session": "7b97856c53df",
+    "independent_from_translator": true,
+    "date": "2026-11-19",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "source_audit_revision": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "ur": {
+      "path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur.json",
+      "sha256": "4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/ur.md",
+      "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "370918e602a5f2660358036a2cb2f9dcbb39e351db0a091404b0ce25cbabd7b6"
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "139beb6691c1438fe28e2b1b34eb1387f8d9f915687f76a7009ff17b6990bd86"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "1398a7489fe0f0285a0e499b05ef18ecabd3833982a4404722bd95e66272934e"
+    },
+    {
+      "path": "audit-attempt1.log",
+      "sha256": "214995c4f61761071ca06793f29da3cd63cb4ada5d04e6881f235aebcca13b53"
+    },
+    {
+      "path": "audit-attempt2.log",
+      "sha256": "3f2a0f7f333bb8afa9234dd8ae669783d6fc054014c41edc1e5a07412ee3b7c7"
+    },
+    {
+      "path": "audit-ur.py",
+      "sha256": "e7c7e320e3960a82b7f036d6b8defa77ded35fd1c98c25541efb55029632e947"
+    },
+    {
+      "path": "history-sha.txt",
+      "sha256": "498e3874b9b555074017eff97d853de228d12ef8674fbb8cee74fc4d2bd21353"
+    },
+    {
+      "path": "ledger-dryrun.log",
+      "sha256": "d5b326bc6e0744a6eefe4deee0a6c7ab56c26114c40979357bcd5ec896884f70"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "finding_report": "report.md",
+  "audit_notes_not_execution_log": [
+    "report.md"
+  ],
+  "actual_execution_logs": [
+    "audit.log",
+    "audit-attempt1.log",
+    "audit-attempt2.log"
+  ],
+  "retention": {
+    "state": "scratch-only pending manager import",
+    "intended_canonical_root": "i18n/audits/evidence/ur/wire.session_status/tsu1",
+    "not_claimed_on_main": true
+  },
+  "independent_pass": 1,
+  "required_independent_passes": 2,
+  "render_proof": "not attempted; separate gate",
+  "mechanical_case_count": 59,
+  "validator_gap": "Existing plural->plural missing-one accepted; actual Urdu target has both one and other; supplementary check confirms completeness.",
+  "receipt_append_validation": {
+    "status": "dry-run passed, exit 0",
+    "history_sha256": "edee87c340a9707cb7413d147b5962bb9ef0a1ecd0df1ac5e0cddf0811165af2",
+    "actual_output": "i18n/audit-history/ur/wire.session_status.json\n",
+    "applied": false
+  },
+  "frozen_retired_label_preserved": true
+}

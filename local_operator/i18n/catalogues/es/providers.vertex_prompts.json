@@ -1,0 +1,6 @@
+{
+  "providers.vertex_prompts.field.project_id": "ID del proyecto de Google Cloud",
+  "providers.vertex_prompts.field.service_account": "JSON de la cuenta de servicio o ruta del archivo JSON",
+  "providers.vertex_prompts.hint.required": "Enter para enviar; Enter sin texto o Esc para cancelar el inicio de sesión.",
+  "providers.vertex_prompts.prompt.field": "Introduce {field} (deja vacío para cancelar): "
+}

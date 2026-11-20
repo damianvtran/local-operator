@@ -1855,6 +1855,22 @@ def providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_label() -> Msg:
     )
 
 
+def providers_bedrock_auth_help() -> Msg:
+    return Msg("wire.settings.providers_bedrock_auth.help", {})
+
+
+def providers_bedrock_auth_label() -> Msg:
+    return Msg("wire.settings.providers_bedrock_auth.label", {})
+
+
+def providers_bedrock_region_help() -> Msg:
+    return Msg("wire.settings.providers_bedrock_region.help", {})
+
+
+def providers_bedrock_region_label() -> Msg:
+    return Msg("wire.settings.providers_bedrock_region.label", {})
+
+
 def providers_openai_api_choice_chat_completions_description() -> Msg:
     return Msg("wire.settings.providers_openai_api.choice.chat_completions.description", {})
 

@@ -1,0 +1,369 @@
+[
+  {
+    "message_id": "wire.session_status.retired_label",
+    "params": {
+      "base": "已中断"
+    },
+    "text": "已中断——因更新已退役"
+  },
+  {
+    "message_id": "wire.session_status.interrupted",
+    "params": {},
+    "text": "已中断"
+  },
+  {
+    "message_id": "wire.session_status.unseen_interruption",
+    "params": {},
+    "text": "未读：已中断"
+  },
+  {
+    "message_id": "wire.session_status.retired",
+    "params": {},
+    "text": "已中断——为更新而退出"
+  },
+  {
+    "message_id": "wire.session_status.unseen_retirement",
+    "params": {},
+    "text": "未读：已中断——为更新而退出"
+  },
+  {
+    "message_id": "wire.session_status.signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "已中断——收到信号后停止"
+  },
+  {
+    "message_id": "wire.session_status.signal_stop",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "已中断——收到信号后停止（通过/stop --all）"
+  },
+  {
+    "message_id": "wire.session_status.signal_stop",
+    "params": {
+      "command": "lop sessions stop synthetic-id"
+    },
+    "text": "已中断——收到信号后停止（通过lop sessions stop synthetic-id）"
+  },
+  {
+    "message_id": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "未读：已中断——收到信号后停止"
+  },
+  {
+    "message_id": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "未读：已中断——收到信号后停止（通过/stop --all）"
+  },
+  {
+    "message_id": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "lop sessions stop synthetic-id"
+    },
+    "text": "未读：已中断——收到信号后停止（通过lop sessions stop synthetic-id）"
+  },
+  {
+    "message_id": "wire.session_status.forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "已中断——已强制终止"
+  },
+  {
+    "message_id": "wire.session_status.forced_kill",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "已中断——已强制终止（通过/stop --all）"
+  },
+  {
+    "message_id": "wire.session_status.forced_kill",
+    "params": {
+      "command": "lop sessions stop synthetic-id"
+    },
+    "text": "已中断——已强制终止（通过lop sessions stop synthetic-id）"
+  },
+  {
+    "message_id": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "未读：已中断——已强制终止"
+  },
+  {
+    "message_id": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "未读：已中断——已强制终止（通过/stop --all）"
+  },
+  {
+    "message_id": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "lop sessions stop synthetic-id"
+    },
+    "text": "未读：已中断——已强制终止（通过lop sessions stop synthetic-id）"
+  },
+  {
+    "message_id": "wire.session_status.complete",
+    "params": {},
+    "text": "已完成"
+  },
+  {
+    "message_id": "wire.session_status.unseen_completion",
+    "params": {},
+    "text": "未读：已完成"
+  },
+  {
+    "message_id": "wire.session_status.recent",
+    "params": {},
+    "text": "近期活动"
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "params": {
+      "count": 0
+    },
+    "text": "已停止（0个唤醒已休眠）"
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "params": {
+      "count": 1
+    },
+    "text": "已停止（1个唤醒已休眠）"
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "params": {
+      "count": 2
+    },
+    "text": "已停止（2个唤醒已休眠）"
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "params": {
+      "count": 5
+    },
+    "text": "已停止（5个唤醒已休眠）"
+  },
+  {
+    "message_id": "wire.session_status.dormant",
+    "params": {
+      "count": 100
+    },
+    "text": "已停止（100个唤醒已休眠）"
+  },
+  {
+    "message_id": "wire.session_status.error",
+    "params": {},
+    "text": "出错"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error",
+    "params": {},
+    "text": "未读：出错"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "出错——用户已停止"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "出错——运行时停滞超时后自行退出"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "continuation_limit"
+    },
+    "text": "出错——已达续接上限；待处理消息已丢弃"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "output_limit"
+    },
+    "text": "出错——已达模型输出上限；无法继续"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "出错——为更新而退出"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "出错——运行时在本轮中终止"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "出错——运行时超过进度时限后退出以更新"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "出错——更新未完成；运行时仍使用已加载的构建"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "出错——运行时未正常退出便消失；未收到停止请求"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "install_mid_update"
+    },
+    "text": "出错——安装版本在本轮中被替换"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "owner_lost"
+    },
+    "text": "出错——运行时在本轮中停止响应"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "disposed"
+    },
+    "text": "出错——会话在本轮中被释放"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "出错"
+  },
+  {
+    "message_id": "wire.session_status.error_cause",
+    "params": {
+      "cause": "unknown_external_code"
+    },
+    "text": "出错"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "未读：出错——用户已停止"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "未读：出错——运行时停滞超时后自行退出"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "continuation_limit"
+    },
+    "text": "未读：出错——已达续接上限；待处理消息已丢弃"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "output_limit"
+    },
+    "text": "未读：出错——已达模型输出上限；无法继续"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "未读：出错——为更新而退出"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "未读：出错——运行时在本轮中终止"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "未读：出错——运行时超过进度时限后退出以更新"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "未读：出错——更新未完成；运行时仍使用已加载的构建"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "未读：出错——运行时未正常退出便消失；未收到停止请求"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "install_mid_update"
+    },
+    "text": "未读：出错——安装版本在本轮中被替换"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "owner_lost"
+    },
+    "text": "未读：出错——运行时在本轮中停止响应"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "disposed"
+    },
+    "text": "未读：出错——会话在本轮中被释放"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "未读：出错"
+  },
+  {
+    "message_id": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "unknown_external_code"
+    },
+    "text": "未读：出错"
+  }
+]

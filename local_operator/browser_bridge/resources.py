@@ -24,8 +24,7 @@ from local_operator.browser_bridge.protocol import (
     ErrorCode,
     extension_older,
 )
-
-RESOURCE_NAME = ".browser-resource.json"
+from local_operator.browser_bridge.resource_layout import RESOURCE_NAME as RESOURCE_NAME
 
 #: The record's spelling of each ownership host. ``HOST_BRIDGE`` names the
 #: EXTENSION host — the same word its surface tokens use (``bridge:<tab>:<nonce>``),

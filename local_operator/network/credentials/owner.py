@@ -91,6 +91,7 @@ from local_operator.network.credentials.messages import (
 from local_operator.network.credentials.placement import PlacementDocument
 from local_operator.network.credentials.repair import REPAIR_FAILURES
 from local_operator.network.credentials.types import (
+    BROKER_ERROR_REASONS,
     QUOTA_REASON_HOLDER_EXCLUDED,
     QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
@@ -1185,15 +1186,27 @@ class MeshCredentialBroker:
             # "nothing signed in": the rows exist and the holder saw them answer a
             # usage limit. Judged on the owner's own id space — only an excluded id
             # this device really has counts, so a stale list over a logged-out owner
-            # still reads as the logout it is. ``retry_after_ms`` stays 0: the window
-            # is the HOLDER's evidence, and the borrower renders it from its own
-            # cooldowns (``client._resting_refusal``) rather than caching this.
+            # still reads as the logout it is. The holder's window is the HOLDER's
+            # evidence: the borrower renders it from its own cooldowns
+            # (``client._resting_refusal``) rather than caching this.
+            #
+            # WHAT THE OWNER ADDS (#3066 follow-up, review r2 n2): the rows the holder
+            # did NOT exclude may be kept out by THIS device's own blocks. Their
+            # earliest PROVEN reopening rides ``retry_after_ms`` under the same marker,
+            # so the borrower can state the earlier of the two waits instead of only
+            # its own. Only a proven time travels (``QuotaEligibility.retry_after_ms``
+            # is 0 otherwise), and 0 still means "nothing to add". The marker keeps a
+            # borrower of any build reading this as the holder's exclusion
+            # (``BrokerError.is_holder_exclusion`` checks ``reason`` first), so a
+            # remainder here is never cached as the owner's own pool state.
             if set(peer_excluded) & set(self._row_stamps(provider)):
+                owner_quota = self._quota_eligibility(provider, model_id, excluded_ids)
                 return BrokerError(
                     code="quota_blocked",
                     key=key,
                     owner_device=self.self_device,
                     owner_device_name=self.self_device_name,
+                    retry_after_ms=owner_quota.retry_after_ms if owner_quota is not None else 0,
                     message=(
                         f"every lendable login for {provider!r} was excluded by the holder, "
                         "which saw them rate-limited; nothing was lent"
@@ -3714,17 +3727,26 @@ class MeshCredentialBroker:
         # reads is rendered where the operator is (``client.py`` →
         # ``messages.py``), because only that side knows the last-seen time and
         # whether the operator can run the remedy locally.
+        detail: dict[str, Any] = {
+            "credential_key": key,
+            "act": self.self_device,
+            "sub": by,
+            "code": code,
+            "capability": "broker_credential",
+        }
+        if error.reason in BROKER_ERROR_REASONS:
+            # WHICH ARM REFUSED (#3066 follow-up, QA r2 Q7). ``quota_blocked`` alone
+            # reads the same for "the holder excluded every login it saw resting" and
+            # "this device's own pool is spent"; the marker the wire reply already
+            # carries tells them apart. Only the quota-arm vocabulary is recorded (a
+            # fixed word, never an id, label or value), so every other refusal's
+            # audit row is byte-for-byte what it was.
+            detail["reason"] = error.reason
         self._audit(
             "credential.grant_refused",
             actor=self.self_device,
             subject=by,
-            detail={
-                "credential_key": key,
-                "act": self.self_device,
-                "sub": by,
-                "code": code,
-                "capability": "broker_credential",
-            },
+            detail=detail,
         )
         error.message = message or f"{provider!r} was refused ({code})"
         return error.to_detail()

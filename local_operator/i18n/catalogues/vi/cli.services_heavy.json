@@ -8,6 +8,10 @@
   "cli.services_heavy.command": "Lệnh cần chạy, đặt sau `--`",
   "cli.services_heavy.holder": "  khe {slot}: {holder}, đã chạy {age}: {command}",
   "cli.services_heavy.no_command": "Không có gì để chạy: hãy đặt lệnh sau `--`, ví dụ `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  sự kiện thuê khe gần đây (nhật ký: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  chưa ghi nhận sự kiện thuê khe nào (nhật ký: {path})",
+  "cli.services_heavy.audit_row": "kiểm toán tác vụ nặng: gần nhất {record}, {age} trước (nhật ký: {path})",
   "cli.services_heavy.start_by": "Thời điểm muộn nhất để lệnh bắt đầu: số giây epoch hoặc ISO-8601 có độ lệch hoặc Z (ví dụ 2026-11-19T08:05:00Z). Được kiểm tra sau khi chờ hàng đợi, ngay trước khi lệnh bắt đầu; nếu đã quá hạn, lệnh không chạy và mã thoát là 79",
   "cli.services_heavy.late_start": "bắt đầu trễ: hạn start-by {start_by} đã qua (hiện tại {now}, trễ {late} giây); lệnh không được bắt đầu",
   "cli.services_heavy.not_start_by": "{value} không phải số giây epoch hay thời điểm ISO-8601 có độ lệch hoặc Z"

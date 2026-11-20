@@ -394,17 +394,64 @@ def _event(index: int) -> dict[str, Any]:
     }
 
 
-def _jobs(count: int, rows: int, *, start: int = 0) -> list[JobState]:
+def _row_only_event(index: int) -> dict[str, Any]:
+    """A retained trajectory row with no payload: it counts, and costs nothing.
+
+    The attach frame never carries a trajectory row's CONTENT -- the dump omits
+    the window and ``sync_wire_payload`` strips it again -- only the row COUNT
+    (``trajectory_length``). A fixture that needs a deep roster's *count* (the
+    all-year guard's 200 x 500) therefore pays for 100,000 full ``_event``
+    payloads it never measures, frozen and thawed once per store it builds.
+    That was a large share of the ~30 min the all-year guard spent on CI shard
+    0 (2026-11-19). ``test_the_all_year_fixture_compaction_is_wire_identical``
+    pins that this row and ``_event`` produce the same frame byte-for-byte, so
+    a future wire field derived from row content fails there instead of
+    letting the guard certify a lighter roster.
+    """
+    return {"type": "tool_execution_end", "_traj_seq": index}
+
+
+def _jobs(
+    count: int,
+    rows: int,
+    *,
+    start: int = 0,
+    event: Callable[[int], dict[str, Any]] = _event,
+) -> list[JobState]:
     return [
         JobState(
             id=f"job{index}",
             type="task",
             label=f"child {index}",
             status="running",
-            trajectory=[_event(row) for row in range(start, start + rows)],
+            trajectory=[event(row) for row in range(start, start + rows)],
         )
         for index in range(count)
     ]
+
+
+def _compact_receipts(receipts: list[Usage], *, children: int) -> list[Usage]:
+    """The same wire fold from a few receipts instead of ``len(receipts)``.
+
+    ``_folded_components`` is a LEFT fold over each serving identity, so folding
+    ``[fold(receipts[:-k]), *receipts[-k:]]`` repeats exactly the float
+    additions folding the whole list does: the folded row (token sums AND the
+    summed ``usd_cost`` repr) is byte-identical. What the fixture stops paying
+    for is ~80,000 ``Usage`` objects copied through every store the all-year
+    guard builds -- the cost that stalled CI shard 0 (2026-11-19, job
+    135411289526, ``[None-priced]`` still running at the 240 s stall timer).
+
+    ``k`` is DERIVED, not picked: enough unfolded receipts that, with the wire
+    fold deleted, ``children`` rows of them alone exceed the socket line. The
+    frame's residual consumers (the model catalogue, the diagnostic receipt
+    tail) shrink to absorb a smaller excess, so a token ``k`` such as 1 lets a
+    fold-less wire pass the guard (measured: k=1 passed ``[None-none]`` with
+    the fold mutated out). Sized off the line itself, no residual can hide it.
+    """
+    receipt_bytes = len(json.dumps(receipts[-1].model_dump(mode="json")))
+    unfolded = min(len(receipts), _MAX_LINE_BYTES // (children * receipt_bytes) + 1)
+    head, tail = receipts[:-unfolded], receipts[-unfolded:]
+    return [*_folded_components(head), *tail]
 
 
 def _line_bytes(frame: dict[str, Any]) -> int:
@@ -1174,6 +1221,55 @@ def test_every_job_row_field_is_classified() -> None:
     assert not stale, f"stale entries for row fields that no longer exist: {sorted(stale)}"
 
 
+def test_the_all_year_fixture_compaction_is_wire_identical() -> None:
+    """The all-year guard's cheap roster must put the SAME bytes on the wire.
+
+    That guard has ~0 B of slack, so a fixture that serializes even a few bytes
+    lighter certifies a shape lighter than the one it claims. It builds its 200
+    children from ``_row_only_event`` rows and ``_compact_receipts`` (the
+    fixture used to cost ~30 min of CI shard 0); this pins both substitutions
+    against the full-payload originals on a small roster, through both the
+    member and the released projection (the released one re-derives
+    ``trajectory_length`` from the window, so it is the path a content-derived
+    field would surface on first).
+    """
+    receipts = [_receipt(index) for index in range(400)]
+
+    def roster(event: Callable[[int], dict[str, Any]], components: list[Usage]) -> list[JobState]:
+        return [
+            job.model_copy(
+                update={"usage": Usage(input_tokens=1_000, cost_components=list(components))}
+            )
+            for job in _jobs(3, 500, event=event)
+        ]
+
+    def wire(rows: list[JobState]) -> tuple[str, str]:
+        settled = [
+            row.model_copy(update={"status": "completed", "settled_at": _RELEASED_ARM_SETTLED_AT})
+            for row in rows
+        ]
+        frames = []
+        for projected in (
+            rows,
+            [_with_lineage(_released_row(row), _NO_LINEAGE) for row in settled],
+        ):
+            store = FrontendStateStore(
+                FrontendSessionState(session_id="s1", epoch="e1", jobs=projected)
+            )
+            frames.append(json.dumps(sync_wire_payload(store.subscribe(lambda _u: None).sync)))
+        return frames[0], frames[1]
+
+    full = wire(roster(_event, receipts))
+    cheap = wire(roster(_row_only_event, _compact_receipts(receipts, children=200)))
+    assert cheap == full, (
+        "the all-year guard's compacted roster no longer serializes like the full one: "
+        "a wire field now depends on trajectory row content or on the receipt count. "
+        "Rebuild the guard's fixture rather than letting it certify a lighter frame."
+    )
+    # Not vacuous: the released projection really carries the 500-row count.
+    assert '"trajectory_length": 500' in full[1]
+
+
 @pytest.mark.parametrize("long_context", ["none", "priced", "unpriced"])
 @pytest.mark.parametrize("cache_reported", [None, True, False])
 def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
@@ -1230,16 +1326,22 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
             )
 
         monkeypatch.setitem(globals(), "_receipt", tier_receipt)
+    # 400 receipts per child, folded by serving identity on the wire. Built ONCE
+    # and handed to every row in the compacted form `_compact_receipts` proves
+    # wire-identical (asserted here, per variant, because the receipt shape is
+    # what the parametrisation changes).
+    receipts = [_receipt(index) for index in range(400)]
+    compact = _compact_receipts(receipts, children=200)
+    assert [row.model_dump(mode="json") for row in _folded_components(compact)] == [
+        row.model_dump(mode="json") for row in _folded_components(receipts)
+    ], "the compacted receipts no longer fold to the 400-receipt row; rebuild the fixture"
     jobs = [
         job.model_copy(
             update={
                 # The per-job twin of usage_components: a child's own folded
                 # receipts, which is what kept 18 stripped-trajectory jobs at
                 # 196 KB on the reference machine.
-                "usage": Usage(
-                    input_tokens=1_000,
-                    cost_components=[_receipt(index) for index in range(400)],
-                ),
+                "usage": Usage(input_tokens=1_000, cost_components=compact),
                 # Unbounded in BYTES: whole child outputs. This is what pushed
                 # the roster over the limit at ~130 rows (C4).
                 "result_text": "r" * 40_000,
@@ -1276,7 +1378,9 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
                 },
             }
         )
-        for index, job in enumerate(_jobs(200, 500))
+        # 500 rows per child for `trajectory_length`'s width; their payload
+        # never reaches the wire (see `_row_only_event`).
+        for index, job in enumerate(_jobs(200, 500, event=_row_only_event))
     ]
     # Exercise the real authority's complete, non-empty snapshot: an earlier
     # read plus a newer unread outcome. A new attention payload field must get

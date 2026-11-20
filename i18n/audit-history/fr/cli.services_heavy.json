@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "cli.services_heavy",
-  "history_sha256": "1d096ed3ce724a6ed25771a9931c5ac8b45333db5cc26743f367ea2268a6943b",
+  "history_sha256": "916ef85434fade8ab29adbd4323f51b57a58b3b0a4a921ff68eb3dfa10709e70",
   "entries": [
     {
       "locale": "fr",
@@ -32,16 +32,16 @@
     {
       "locale": "fr",
       "namespace": "cli.services_heavy",
-      "source_sha256": "1254b434c7f9718087a858a65481f58ccf48f63cb1b7385ae57883de1baf4bbf",
+      "source_sha256": "6030d2a2f32786c31c223706df5364c383eb04bc7d9df6e23dd9c5d2870d7d52",
       "translator": {
-        "agent": "coder agent (lopdev team; commits 677e51c23 + remediation a8bfabbd1)",
-        "model": "anthropic/claude-opus-5-5 (per remediation comment #issuecomment-7003591943)",
+        "agent": "coder agent (lopdev team; commits 002ba4840 + remediation d1c53d681; session id not relayed)",
+        "model": "not relayed to auditor",
         "fallback": "unknown",
         "date": "2026-11-19"
       },
       "auditor": {
-        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 2 session 79d6b80e07ba); wrote no locale value",
-        "session": "79d6b80e07ba",
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 1 session 50f2395eb392, round 2 session 02399cb08595); wrote no locale value",
+        "session": "02399cb08595",
         "model": "anthropic/claude-opus-5-5",
         "fallback": "none observed in this session",
         "date": "2026-11-19",
@@ -52,7 +52,7 @@
         "nit": 0
       },
       "status": "passed",
-      "note": "i18n audit round 2 for PR #4279 (feat/run-bounded-start-by) at head a8bfabbd1, 2026-11-19. Target fr/cli.services_heavy catalogue_sha256 f7074f088df26081e20085810c31c742223ef28ea07219485fc61de1ff188380. New keys audited: start_by, late_start, not_start_by. Round 2 re-audit of the round-1 failure I1, fixed in a8bfabbd1: start_by and late_start now carry U+202F before ':' and ';' (value idx 40/183 and 16/100), byte-identical to the round-1 corrected strings by codepoint compare; no other byte changed. Placeholders {start_by} {now} {late} {value} and literals start-by, epoch, ISO-8601, Z, the example timestamp and 79 preserved; no stray Cc/Cf/NBSP. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4279 '### i18n audit — round 1' (#issuecomment-7003508546) and '### i18n audit — round 2'."
+      "note": "i18n audit round 2 for PR #4264 (fix/heavy-lease-audit) at head d1c53d681, 2026-11-19. Target fr/cli.services_heavy.json sha256 eba49ab209fb71ae2838e84507bc2a44884437b69b642f96096c7f6e2cd2576b. New keys audited: events_header, event_line, no_events, audit_row. Round 2 re-audit of the round-1 failures, now fixed in d1c53d681: events_header, no_events, audit_row (I1: U+202F before ':'; lease -> bail). Each value is byte-identical to the corrected strings from round 1, checked by codepoint compare; placeholders, indentation and colons kept; no stray Cc/Cf. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4264 '### i18n audit — round 1' (#issuecomment-6999094193) and '### i18n audit — round 2'."
     }
   ]
 }

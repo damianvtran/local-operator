@@ -586,10 +586,15 @@ def test_bridge_clause_is_membership_gated_and_costs_nothing_when_absent() -> No
     coordinates. There is deliberately no ``no_bridge`` negation — the tool is
     either there (usage prose) or absent (no clause at all).
     """
-    solo = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[0]
+    # ``sessions`` is held on both sides because the clause is INLINE on the
+    # peer-sessions sentence (its paragraph's line break is gated on that
+    # paragraph existing — ``TOOL_GATED_PROSE_FLAGS``); every session that can
+    # hold ``bridge`` is a top-level one that holds ``sessions`` too.
+    peers = [*TOOLS, _tool("sessions", "Sessions.")]
+    solo = build_system_blocks(peers, SKILLS, ENV, DATE)[0]
     assert "guide://team-bridge" not in solo
 
-    bridged = build_system_blocks([*TOOLS, _tool("bridge", "Agent bridge.")], SKILLS, ENV, DATE)[0]
+    bridged = build_system_blocks([*peers, _tool("bridge", "Agent bridge.")], SKILLS, ENV, DATE)[0]
     assert "guide://team-bridge" in bridged
     assert "never a second channel for the same ask" in bridged
     assert "(`guide://team-bridge`), as a peer;" in bridged
@@ -2062,3 +2067,108 @@ def test_marker_shaped_content_degrades_granularity_but_never_bytes() -> None:
     for text in texts:
         sections = split_tail_sections(text)
         assert assemble_system_block_sections(3, sections) == text, text
+
+
+# ---------------------------------------------------------------------------
+# Tool-gated prose (TOOL_GATED_PROSE_FLAGS): prose about a tool ships only
+# with the tool, and a session holding every tool keeps its exact bytes.
+# ---------------------------------------------------------------------------
+
+from local_operator.prompts_api import TOOL_GATED_PROSE_FLAGS  # noqa: E402
+
+_GATED_TOOL_NAMES = sorted(
+    {name for names in TOOL_GATED_PROSE_FLAGS.values() for name in names} | {"read", "bash"}
+)
+
+
+def _gated_blocks(names: list[str], **kwargs: Any) -> list[str]:
+    from local_operator.prompts_api import build_system_blocks
+
+    return build_system_blocks(
+        [_tool(name, f"{name} tool") for name in names],
+        skills_block="",
+        env_details="env",
+        date_str="2026-01-01",
+        host_has_browser=True,
+        host_has_console=True,
+        **kwargs,
+    )
+
+
+def test_a_session_holding_every_gated_tool_renders_the_ungated_bytes() -> None:
+    """The byte-identity guarantee: with every gated tool held, block 0 equals
+    the render a caller gets by never mentioning the flags at all (absent
+    means True: the template's historical, unconditional prose)."""
+    from local_operator.prompts_api import TOOL_GATED_PROSE_FLAGS, render_template
+
+    gated = _gated_blocks(_GATED_TOOL_NAMES)[0]
+    plain = render_template(
+        "system.md",
+        {"has_browser": False, "no_browser": False, "has_console": False, "no_console": False},
+    )
+    stated = render_template(
+        "system.md",
+        {
+            "has_browser": False,
+            "no_browser": False,
+            "has_console": False,
+            "no_console": False,
+            **{flag: True for flag in TOOL_GATED_PROSE_FLAGS},
+        },
+    )
+    assert plain == stated
+    # build_system_blocks appends its own sections AFTER the template render, so
+    # the gated session's head must begin with the whole ungated render.
+    assert gated.startswith(plain)
+    for marker in (
+        "## Library",
+        "Keep the todo list honest",
+        "Subagents: `task` delegates",
+        "Other `lop` sessions:",
+        "Session tags (`tags`)",
+        "`eval` persists Python state",
+        "Reach for `ask` only when",
+        "Once that bar is met, `ask` is the only channel",
+        "nobody — use `ask` when the user must decide.",
+        "`wake` schedules a follow-up",
+    ):
+        assert marker in gated, marker
+    assert "No `ask` tool in this session" not in gated
+
+
+def test_absent_tools_drop_their_prose_and_keep_the_deciding_guidance() -> None:
+    head = _gated_blocks(["read", "bash"])[0]
+    for absent in (
+        "## Library",
+        "Keep the todo list honest",
+        "Subagents: `task` delegates",
+        "Other `lop` sessions:",
+        "Session tags (`tags`)",
+        "`eval` persists Python state",
+        "`wake` schedules a follow-up",
+        "`no_reply` and write nothing",
+        "Reach for `ask` only when",
+        "Treat every `ask` as QUEUED",
+    ):
+        assert absent not in head, absent
+    assert "No `ask` tool in this session: decide yourself and state assumptions" in head
+    assert "Deciding is your job" in head
+    assert "Authorization never extends to a destructive or irreversible step" in head
+    # No stray blank-line runs where whole paragraphs dropped out. Scoped to the
+    # gated region: the role-restricted browser/console arm below ``###
+    # Resources`` has its own (pre-existing) blank line.
+    assert "\n\n\n" not in head[: head.index("### Resources")]
+
+
+def test_a_deferred_tool_counts_as_held_for_its_prose() -> None:
+    """Deferred = callable via ``read tool://<name>``, so its usage prose stays."""
+    head = _gated_blocks(["read", "library", "todo"], deferred_tools=("library", "todo"))[0]
+    assert "## Library" in head
+    assert "Keep the todo list honest" in head
+
+
+def test_has_ask_and_no_ask_cannot_both_be_true() -> None:
+    from local_operator.prompts_api import render_template
+
+    with pytest.raises(ValueError, match="has_ask and no_ask"):
+        render_template("system.md", {"has_ask": True, "no_ask": True})

@@ -416,13 +416,18 @@ class Authorizer:
           the id yet (O asks D to pull S from O). The capability check above has
           already required ``move``; the id is checked where it matters, when D's
           pull reaches O and O's own ownership rule answers.
+        * ``workset_probe`` arrives at the DESTINATION for the same reason, BEFORE
+          the move (docs/design/move-working-set.md §11.1): the owner asks "can you
+          fetch/push these remotes, which toolchains do you lack". It reads nothing
+          of the session — the id only labels the ask — and runs only allowlisted
+          remote URLs (``workset_probe.classify_url``), so it needs no ownership.
         """
         from local_operator.network.types import MOVE_PHASES_AFTER_HANDOFF
 
         if op != "net_session_move" or "frame" in frame:
             return None
         phase = str(frame.get("phase") or "")
-        if phase == "invite":
+        if phase in ("invite", "workset_probe"):
             return session_id
         if phase in MOVE_PHASES_AFTER_HANDOFF:
             tombstone = self._networks.session_tombstones().get(session_id) or {}

@@ -218,6 +218,49 @@ def _complete_flag_pair(
     return {}
 
 
+#: ``system.md`` flags that gate prose ABOUT ONE TOOL on that tool being held,
+#: each mapped to the tool names whose presence (any of them) keeps the prose.
+#:
+#: WHY: every paragraph below used to ship to every session whatever its tool
+#: set, so a headless SDK run declared to ``read``/``web_search``/``web_fetch``
+#: — the shape automation pipelines and head-to-head benchmarks use — paid on
+#: every request for instructions about the library, todos, subagents, peer
+#: sessions, tags, ``eval`` and the ask queue, none of which it could call. The
+#: prose describes how to USE a tool, so a session without the tool loses
+#: nothing by not reading it (the deciding-yourself guidance in "Deciding and
+#: asking" is NOT gated: it is about judgement, not about ``ask``).
+#:
+#: CONSTRAINTS:
+#: - MEMBERSHIP, never visibility, and a DEFERRED tool counts as held: it is
+#:   callable through ``read tool://<name>``, so its usage prose is still true.
+#:   ``build_system_blocks``'s ``tools`` already includes deferred tools (the
+#:   inventory lists them on its "schema on demand" line).
+#: - A session holding every tool renders byte-identical to the tree before
+#:   this gate (the markers sit inline in the template), which is what keeps
+#:   interactive sessions' cached prefix and the context-budget guard unmoved.
+#: - ``wake``/``monitor`` share one sentence, so either keeps it (the
+#:   conservative arm: the sentence names a tool rather than drop guidance).
+#: - Absent from the data dict means True (``_resolve_system_md_flags``), the
+#:   historical unconditional render for callers that pass no tool list.
+TOOL_GATED_PROSE_FLAGS: dict[str, frozenset[str]] = {
+    "has_library": frozenset({"library"}),
+    "has_wake_monitor": frozenset({"wake", "monitor"}),
+    "has_no_reply": frozenset({"no_reply"}),
+    "has_eval": frozenset({"eval"}),
+    "has_todo": frozenset({"todo"}),
+    "has_subagents": frozenset({"task", "hub"}),
+    "has_sessions": frozenset({"sessions", "send"}),
+    "has_tags": frozenset({"tags"}),
+    "has_ask": frozenset({"ask"}),
+}
+
+
+def tool_gated_prose_flags(tool_names: Collection[str]) -> dict[str, bool]:
+    """``TOOL_GATED_PROSE_FLAGS`` evaluated against one session's tool names."""
+    held = set(tool_names)
+    return {flag: bool(names & held) for flag, names in TOOL_GATED_PROSE_FLAGS.items()}
+
+
 def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
     """Complete ``system.md``'s capability flag pairs, or refuse an impossible one.
 
@@ -267,6 +310,27 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
     seed = dict(data)
     if "ask_queued" not in seed and "ask_inline" not in seed:
         seed["ask_queued"] = _ask_queue_queued()
+    # TOOL-GATED PROSE (see ``TOOL_GATED_PROSE_FLAGS``): an ABSENT flag means
+    # "the caller did not say", and the historical answer to that is the prose
+    # shipping — every one of these paragraphs was unconditional before the
+    # gate existed. Defaulting to True keeps every caller that never heard of
+    # the gate (a test rendering ``{}``, a probe) on its exact old bytes; only
+    # ``build_system_blocks``, which derives each flag from tool membership,
+    # turns one off. The derived layout flags follow from their members so a
+    # caller stating one member cannot leave a stray blank line behind.
+    for flag in TOOL_GATED_PROSE_FLAGS:
+        seed.setdefault(flag, True)
+    seed.setdefault("no_ask", not seed["has_ask"])
+    if seed["has_ask"] and seed["no_ask"]:
+        raise ValueError(
+            "system.md: has_ask and no_ask cannot both be true — that ships the "
+            "ask mechanics and the no-ask fallback line together."
+        )
+    seed.setdefault(
+        "has_peer_line",
+        bool(seed["has_subagents"] or seed["has_sessions"] or seed.get("has_bridge")),
+    )
+    seed.setdefault("has_peer_paragraph", bool(seed["has_peer_line"] or seed["has_tags"]))
     resolved = {
         **seed,
         **_complete_flag_pair(
@@ -1313,6 +1377,9 @@ def build_system_blocks(
             "has_bridge": (
                 any(tool.name == "bridge" for tool in tools) if has_bridge is None else has_bridge
             ),
+            # Prose about one tool ships only with that tool (deferred counts);
+            # see ``TOOL_GATED_PROSE_FLAGS`` for the why and the constraints.
+            **tool_gated_prose_flags([tool.name for tool in tools]),
         },
     )
     instructions += (

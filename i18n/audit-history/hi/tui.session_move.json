@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "tui.session_move",
-  "history_sha256": "6d17cdc9fdf9c9e44c6326495ac5ca85db87855f0fa369e01112a2b9e125f357",
+  "history_sha256": "9481ba45714825a6ca63f5de15440f21e36de84ca9dd61c554be7dde91746a1d",
   "entries": [
     {
       "locale": "hi",
@@ -79,6 +79,40 @@
         {
           "path": "i18n/audits/evidence/hi/tui.session_move/c1a2/target-candidate.json",
           "sha256": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.session_move",
+      "source_sha256": "6ae6b80caee5646d17edfec168e25857e56a596ef8cbeb0f4f043401fc16ac5d",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "hi `tui.session_move` delta audit: 1 changed key (unsupported_flag adds --without-working-set), PASS, 0 findings; 6 other keys byte-identical to the 2026-11-11 pass. Head ca98f3789. Evidence: i18n/audits/evidence/hi/cli.sessions_move_workset/mw1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/cli.sessions_move_workset/mw1/record.json",
+          "sha256": "631be5f82496aecb6008771ff30495b66fa2245c05e6dcbcbc00e05ca8bf59f5"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.sessions_move_workset/mw1/report.md",
+          "sha256": "0bff663fd11591723f5f184b8c9fa3684dd836f6a84f2697985637777b664a7d"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.sessions_move_workset/mw1/audit.log",
+          "sha256": "dca225b29f51ee3d74fda00dfd94bce3ed34bc4f9cd7b8b867a69a42c8fbc3ca"
         }
       ]
     }

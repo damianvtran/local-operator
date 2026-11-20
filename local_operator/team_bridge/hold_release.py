@@ -32,6 +32,15 @@ WHAT IS RELEASABLE, AND WHY IT IS SO NARROW (DECISIONS Amendment 1, D2/D4):
   the hub's anti-probing clamp never counts it, and without a budget a sender
   could probe the releasable class for free while training the person to click.
 
+FALLBACK WORK REVIEW (operator directive 2026-11-19). A valid fallback BOUNCE
+naming solely ``new_work_request`` may enter the existing generic ``model_hold``
+review class when both work-scope conversion and generic review are enabled and
+the strict reason check passes. It does NOT enter ``work_scope_hold``: the row
+keeps the actual model/provider, non-preferred provenance and bounce verdict.
+Only the person's signed Deliver/Discard supplies authority, exactly as for an
+ordinary generic review hold. No preferred-screening receipt or automatic
+allow is created; disclosure categories remain terminal bounces.
+
 THE RELEASE RECORD (D7, S-7/S-8/S-11). Deliver and Discard are both signed by
 the operator key (TB-02: a bridge deny is the operator's statement to a third
 party). The signature is under a DEDICATED domain

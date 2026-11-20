@@ -111,8 +111,16 @@ class LoginOperation:
     launch_url: str | None = None
     #: True when the open paste prompt is a FALLBACK beside a browser flow that
     #: is still the primary path (``paste_code_flow`` without a required paste).
-    #: Fixed per provider at start, so it is also true before the prompt opens.
+    #: Fixed per provider at start, so it is also true before the prompt opens;
+    #: cleared once the browser/paste race has been decided, because any prompt
+    #: a provider opens AFTER that (Vertex asking for a project ID) is required.
     input_optional: bool = False
+    #: Set when the fallback paste prompt was answered or cancelled, i.e. the
+    #: callback race is over; cleared by ``on_input_rejected`` because a
+    #: rejected paste is re-offered as the SAME optional fallback.
+    paste_race_over: bool = field(default=False, repr=False)
+    #: Last ``on_progress`` narration: a post-auth prompt's question.
+    last_progress: str | None = field(default=None, repr=False)
     #: What the successful sign-in wrote to config (``defaults_applied`` in the
     #: snapshot), filled BEFORE ``state`` becomes ``succeeded`` so a poller that
     #: sees success sees it too.
@@ -139,6 +147,10 @@ class LoginOperation:
     #: Additive recovery copy, never provider/controller text. Only a successful
     #: Radient operation publishes it; routing inventories remain unchanged.
     retained_notice: str | None = None
+    #: What this operation acts on beyond the provider, never published: the
+    #: AWS profile of a Bedrock SSO sign-in, so a second sign-in for the SAME
+    #: profile is refused (409) while other providers' flows are untouched.
+    subject: str | None = field(default=None, repr=False)
 
     @property
     def abandoned(self) -> bool:
@@ -432,11 +444,34 @@ class DesktopAuth:
             if expires_in and expires_in > 0:
                 op.deadline = min(time.monotonic() + float(expires_in), op.deadline)
 
+        def on_progress(message: str) -> None:
+            # Narration the provider controls (not upstream HTTP bodies, which
+            # go through on_warning/errors), surfaced so a post-auth prompt shows
+            # its actual question. Bounded so a long line cannot bloat polling.
+            if op.abandoned or not message:
+                return
+            text = str(message).strip()[:240]
+            op.last_progress = text
+            op.message = text
+
+        def on_input_rejected() -> None:
+            op.paste_race_over = False
+
         def on_warning(_message: str) -> None:
             # Provider errors can include HTTP bodies or a rejected paste.
             # Relay an actionable state, never those uncontrolled strings.
             if not op.abandoned:
                 op.message = "Sign-in could not use that response. Check it and try again."
+
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # This is a required configuration step after OAuth, not another
+            # optional code paste. Publish the explicit field label instead of
+            # inferring a question from provider progress narration.
+            op.paste_race_over = True
+            # Desktop rejects empty /input submissions; its cancel endpoint is
+            # the way out. Do not reuse CLI's empty-to-cancel instruction here.
+            op.last_progress = field
+            return await on_input()
 
         async def on_input() -> str | None:
             if op.abandoned:
@@ -444,8 +479,13 @@ class DesktopAuth:
                 # flows' own "declined", so they end as cancelled.
                 return None
             pending = asyncio.get_running_loop().create_future()
+            my_prompt_id = str(uuid.uuid4())
+            if op.paste_race_over:
+                # The fallback prompt already lost or answered the race, so this
+                # one is a REQUIRED follow-up after authorization.
+                op.input_optional = False
             op.pending_input = pending
-            op.prompt_id = str(uuid.uuid4())
+            op.prompt_id = my_prompt_id
             if op.input_optional:
                 # The browser is still the primary path; the prompt is only the
                 # fallback. Staying ``waiting`` keeps the renderer on the browser
@@ -455,26 +495,42 @@ class DesktopAuth:
                 op.message = OPTIONAL_PASTE_MESSAGE
             else:
                 op.state = "input_required"
-                op.message = "Paste the key or sign-in response requested by this provider."
+                op.message = (
+                    op.last_progress
+                    if op.paste_race_over and op.last_progress
+                    else "Paste the key or sign-in response requested by this provider."
+                )
             op.ready.set()
             try:
                 return await pending
             finally:
-                op.pending_input = None
-                op.prompt_id = None
-                # Only a PROMPT state goes back to ``waiting``. A flow that ends
-                # (timeout, denied callback, success) cancels this prompt task
-                # without awaiting it, so this ``finally`` can run AFTER ``_run``
-                # has already written the terminal state -- and an unconditional
-                # reset turned "expired"/"failed" into a live-looking
-                # ``waiting`` the renderer kept polling (QA round 1, Q1).
-                if op.state == "input_required":
-                    op.state = "waiting"
+                # Answered or cancelled, the fallback's race is decided either
+                # way (``_await_code`` now awaits the cancelled reader before
+                # ``exchange_token``, so this lands before any follow-up prompt).
+                op.paste_race_over = True
+                # Only clear the prompt THIS call opened: a cancelled earlier
+                # prompt unwinding late must never wipe a newer one, which left
+                # Desktop answering 409 to a live follow-up question.
+                if op.prompt_id == my_prompt_id:
+                    op.pending_input = None
+                    op.prompt_id = None
+                    # Only a PROMPT state goes back to ``waiting``. A flow that
+                    # ends (timeout, denied callback, success) cancels this
+                    # prompt task without awaiting it, so this ``finally`` can
+                    # run AFTER ``_run`` has already written the terminal state
+                    # -- and an unconditional reset turned "expired"/"failed"
+                    # into a live-looking ``waiting`` the renderer kept polling
+                    # (QA round 1, Q1).
+                    if op.state == "input_required":
+                        op.state = "waiting"
 
         callbacks = LoginCallbacks(
             on_auth_url=on_url,
+            on_progress=on_progress,
             on_warning=on_warning,
+            on_input_rejected=on_input_rejected,
             on_manual_code_input=on_input if definition.accepts_paste_prompt else None,
+            on_setup_input=on_setup_input if not definition.local_setup else None,
             on_flow_details=on_flow_details,
         )
         from local_operator.providers.controller import ProviderController
@@ -558,6 +614,125 @@ class DesktopAuth:
             op.auth_url = op.instructions = op.launch_url = op.user_code = None
             op.ready.set()
             controller.close()
+
+    def active_bedrock_sso(self, profile: str) -> LoginOperation | None:
+        for op in self.operations.values():
+            if (
+                op.provider == "bedrock"
+                and op.subject == profile
+                and op.task is not None
+                and not op.task.done()
+                and not op.abandoned
+            ):
+                return op
+        return None
+
+    async def start_bedrock_sso(self, profile: str, kind: str) -> LoginOperation:
+        """Run ``aws sso login`` / ``aws login`` for one profile as an operation.
+
+        Design §7 route 5: an ordinary ``LoginOperation`` the renderer polls
+        with ``GET /v1/auth/operations/{id}`` and cancels with ``DELETE`` —
+        both already route through ``cancel`` above, which aborts the op's
+        signal, and ``sso_login`` kills the CLI's process group on that abort.
+
+        It does NOT supersede other operations the way ``start`` does: that
+        rule exists because browser flows share one fixed loopback port, and
+        the AWS CLI binds none of ours. The route refuses a second sign-in for
+        the same profile (409) via :meth:`active_bedrock_sso`. Nothing is
+        stored by this operation: the CLI writes its own token cache, and the
+        connection is saved separately by ``PUT .../bedrock/connection``.
+        """
+        async with self._lock():
+            if self._closed:
+                raise SignInUnavailableError("Sign-in is unavailable while the server shuts down.")
+            while len(self.operations) >= MAX_OPERATIONS:
+                del self.operations[next(iter(self.operations))]
+            from local_operator.providers.bedrock.sso_login import SSO_LOGIN_TIMEOUT_S
+
+            op = LoginOperation(
+                id=str(uuid.uuid4()),
+                provider="bedrock",
+                subject=profile,
+                deadline=time.monotonic() + SSO_LOGIN_TIMEOUT_S,
+            )
+            self.operations[op.id] = op
+            op.task = asyncio.create_task(self._run_bedrock_sso(op, profile, kind))
+            return op
+
+    async def _run_bedrock_sso(self, op: LoginOperation, profile: str, kind: str) -> None:
+        from local_operator.i18n.keys import wire_login_bedrock as k
+        from local_operator.i18n.messages import render_resolved
+        from local_operator.providers.bedrock import sso_login
+
+        def settle(state: str, message: str) -> None:
+            if not op.abandoned:
+                op.state, op.message = state, message
+
+        def on_url(url: str, instructions: str | None = None) -> None:
+            # Only an https URL reaches the renderer's browser opener; the AWS
+            # CLI's device URL always is one.
+            parsed = urlsplit(url)
+            if op.abandoned or parsed.scheme != "https" or not parsed.hostname:
+                return
+            op.auth_url = url
+            op.instructions = instructions
+            op.state = "waiting"
+            op.message = instructions or op.message
+            op.ready.set()
+
+        def on_flow_details(
+            *,
+            user_code: str | None = None,
+            launch_url: str | None = None,
+            expires_in: float | None = None,
+        ) -> None:
+            if not op.abandoned:
+                op.user_code = user_code[:64] if user_code else None
+
+        def on_progress(message: str) -> None:
+            # ``aws login`` opens the browser itself and reports its URL only
+            # as text (``sso_login`` module doc): publish it as the message so
+            # the renderer can show it without opening a second tab.
+            if op.abandoned:
+                return
+            op.message = message
+            if op.state == "starting":
+                op.state = "waiting"
+            op.ready.set()
+
+        callbacks = LoginCallbacks(
+            on_auth_url=on_url, on_progress=on_progress, on_flow_details=on_flow_details
+        )
+        from local_operator.providers.bedrock.profiles import login_command
+
+        command = login_command(profile, kind) or ""  # type: ignore[arg-type]
+        settle("starting", render_resolved(k.sso_started(profile=profile)))
+        try:
+            result = await sso_login.run_sso_login(
+                profile, kind=kind, callbacks=callbacks, abort=op.signal  # type: ignore[arg-type]
+            )
+            if result.session.state in ("expired", "missing"):
+                settle("failed", render_resolved(k.sso_run_yourself(command=command)))
+            else:
+                settle("succeeded", render_resolved(k.sso_done(profile=profile)))
+        except asyncio.CancelledError:
+            settle("cancelled", render_resolved(k.sso_cancelled()))
+        except sso_login.SsoLoginFailed as failed:
+            if failed.timed_out:
+                settle("expired", render_resolved(k.sso_timeout(profile=profile)))
+            else:
+                settle("failed", render_resolved(k.sso_failed(profile=profile, command=command)))
+        except sso_login.SsoLoginRefused as refused:
+            # The route pre-checks every refusal; this is the race where `aws`
+            # vanished between the check and the spawn.
+            settle("failed", render_resolved(k.sso_cli_missing()))
+            logger.debug("bedrock sso sign-in refused at spawn: %s", refused.code)
+        except Exception:  # noqa: BLE001 - never leak CLI/provider text to the renderer
+            logger.debug("bedrock sso sign-in failed", exc_info=True)
+            settle("failed", render_resolved(k.sso_failed(profile=profile, command=command)))
+        finally:
+            op.auth_url = op.instructions = op.launch_url = op.user_code = None
+            op.ready.set()
 
     async def cancel(self, op: LoginOperation) -> None:
         # A second cancel of an op already abandoned returns at once: the first

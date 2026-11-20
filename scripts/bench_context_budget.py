@@ -2170,7 +2170,16 @@ BUDGET_BILLED_TOKENS = 37_467
 #   origin/main 2dc66f06   92,817 chars = ~33,387 billed (4 of headroom)
 #   merged head            93,034 chars = ~33,465 billed
 #     = +217 chars = ~+78 billed; the raise keeps main's 4 of headroom.
-BUDGET_CHILD_BILLED_TOKENS = 33_469
+# LOWERED 33,469 -> 32,698 by tool-gated system.md prose (perf/harness-cost-
+# efficiency): a child holds no ``ask``, so the ask mechanics, the queued-ask
+# paragraph and the wake/monitor/no_reply sentences drop out of its block 0,
+# replaced by one no-ask line. Measured locally, isolated HOME:
+#   origin/main cc65674b   92,451 chars = ~33,256 billed / 213 headroom
+#   this branch            90,307 chars = ~32,485 billed
+#     = -2,144 chars = ~-771 billed; lowered by exactly the saving so the
+#     ceiling keeps main's 213 of headroom (CI reads differ from local by tens
+#     of tokens, see the TOP ceiling's notes). The top arm is byte-identical.
+BUDGET_CHILD_BILLED_TOKENS = 32_698
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

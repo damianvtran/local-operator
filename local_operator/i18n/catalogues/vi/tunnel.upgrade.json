@@ -1,0 +1,5 @@
+{
+  "tunnel.upgrade.client.label": "Cần cập nhật ứng dụng tunnel",
+  "tunnel.upgrade.client.guidance": "Radient yêu cầu ứng dụng tunnel hỗ trợ chuyển tiếp. Chạy {update_command}, xóa cấu hình ghi đè {override} khỏi config.yml nếu đã đặt, rồi kết nối lại bằng {reconnect_command}. Đăng nhập lại hoặc thay đổi thông tin thanh toán sẽ không khắc phục được vấn đề này.",
+  "tunnel.upgrade.client.plain": "Cập nhật Local Operator lên phiên bản hỗ trợ tunnel chỉ dùng chuyển tiếp. Trong config.yml, xóa cấu hình ghi đè tunnel.transport: cloudflare nếu đã đặt, rồi kết nối lại máy tính này. Đăng nhập lại hoặc thay đổi thông tin thanh toán sẽ không khắc phục được vấn đề này."
+}

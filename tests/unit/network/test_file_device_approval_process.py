@@ -22,6 +22,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from local_operator.network import account_binding as B
 from local_operator.network import approvals as A
 from local_operator.network import file_device_approval as F
 from local_operator.network import identity, relay, store
@@ -60,6 +61,11 @@ def _native_boundary(mp: pytest.MonkeyPatch, root: Path, keyfile: Path) -> None:
     mp.setattr(A, "local_anchor_trio", lambda root=None: {**trio, "spki": point})
     mp.setattr(sign, "resolve_backend_name", lambda root: trust.SECURE_ENCLAVE)
     mp.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *a, **kw: None)
+    # The actor's sign-in would start the org Agent Hub boundary on an unjoined
+    # daemon thread (a network call with synthetic tokens, writing under
+    # ``root/hub``); not what this boundary test exercises, and a late write
+    # can recreate a deleted tmp dir. Same neutralisation as the ``rig`` fixture.
+    mp.setattr(AuthStore, "_org_hub_boundary", lambda self, boundary: None)
 
     class SoftwarePresence:
         handle = SimpleNamespace(key_id=trio["key_id"])
@@ -186,6 +192,63 @@ def _worker(pipe, role: str, base_text: str, keyfile_text: str) -> None:
                         )
                     elif op == "authorize":
                         result = asyncio.run(F.authorized_context(link, auth, row.id))
+                    elif op == "binding":
+                        # Test-only orchestration invokes the owner adapter on
+                        # the ACTUAL authenticated listener. No production RPC
+                        # is added and the process-local receipt never crosses
+                        # this Pipe: only assertions/metadata are reported.
+                        exact = B.ReadBinding(
+                            owner_key=F.MeshKey(
+                                device_id=a.identity.device_id, public_key=a.identity.public_key
+                            ),
+                            network_id=link.network_id,
+                            network_epoch=link.epoch,
+                            link_id=link.link_id,
+                            transcript_hash=link.result.transcript_hash,
+                            request_id="req_synthetic_process_read",
+                            session_id="synthetic-owner-session",
+                            source_row_id="synthetic-row",
+                            provenance_id="synthetic-proof",
+                            proof_digest="sha256:" + "a" * 64,
+                            file_version="synthetic-seal-not-established-by-P1",
+                            phase="fetch",
+                            offset=0,
+                            length=17,
+                            transfer_nonce="a" * 32,
+                        )
+                        verified = asyncio.run(
+                            B.verify_live(
+                                incoming_link=link,
+                                auth=auth,
+                                owner_account=B.ExactNativeAccountSelection(credential_id=row.id),
+                                evidence=B.OwnerFileEvidenceReference(
+                                    association=command["association"]
+                                ),
+                                required_subject=B.CanonicalSubject(
+                                    issuer=F.DEFAULT_RADIENT_API_BASE_URL,
+                                    opaque_id=command.get("subject", "account-a"),
+                                ),
+                                required_purpose=F.PURPOSE,
+                                read_binding=exact,
+                            )
+                        )
+                        verified.require_read(
+                            link,
+                            (
+                                exact.model_copy(update={"length": 18})
+                                if command.get("substitute_read")
+                                else exact
+                            ),
+                        )
+                        assert verified.requester_key.public_key == link.result.peer_public_key
+                        result = {
+                            "source": B.__file__,
+                            "subject": verified.subject.model_dump(),
+                            "generation": verified.generation,
+                            "journal_revision": verified.journal_revision,
+                            "link_id": verified.read_binding.link_id,
+                            "requester_key": verified.requester_key.public_key,
+                        }
                     elif op == "status":
                         result = a.status()
                     else:
@@ -332,6 +395,8 @@ def test_actual_listener_capture_crosses_desktop_pids_and_persists(tmp_path):
         assert probe["result"]["old_ok_predicate"] is False
         assert probe["result"]["instance"] == probe["result"]["record_instance"]
         print("P1 ACTUAL CONTROL DISCRIMINATOR", json.dumps(probe, sort_keys=True), flush=True)
+        unbound = r.call("binding", association="0" * 64)
+        assert not unbound["ok"] and "code" in unbound, unbound
         captured = r.call("capture")
         assert captured["ok"], captured
         first = captured["result"]["approval_id"]
@@ -350,6 +415,18 @@ def test_actual_listener_capture_crosses_desktop_pids_and_persists(tmp_path):
         active = r.call("authorize")
         assert active["ok"], active
         assert active["result"]["generation"] == 1
+        association = active["result"]["association"]
+        bound = r.call("binding", association=association)
+        assert bound["ok"] and bound["result"]["generation"] == 1, bound
+        assert bound["result"]["link_id"] == r.ready["link_id"]
+        assert bound["result"]["subject"]["opaque_id"] == "account-a"
+        wrong_subject = r.call("binding", association=association, subject="account-b")
+        assert (
+            not wrong_subject["ok"] and wrong_subject["code"] == "account_binding_subject_mismatch"
+        )
+        substituted = r.call("binding", association=association, substitute_read=True)
+        assert not substituted["ok"] and substituted["code"] == "account_binding_read_mismatch"
+        transcript.append({"binding": bound, "unbound": unbound, "substituted": substituted})
         stale = r.call("capture")
         assert stale["ok"], stale
         # R restart/new authenticated member link invalidates UNAPPLIED cards,
@@ -361,6 +438,8 @@ def test_actual_listener_capture_crosses_desktop_pids_and_persists(tmp_path):
         refused = d.call("approve", approval_id=stale["result"]["approval_id"])
         assert not refused["ok"] and refused.get("code") == "file_approval_link_changed", refused
         assert r.call("authorize")["ok"]
+        rebound = r.call("binding", association=association)
+        assert rebound["ok"] and rebound["result"]["link_id"] != bound["result"]["link_id"], rebound
         # Two independent workers hold decisions for the SAME expected g1.
         one, two = r.call("capture"), r.call("capture")
         assert one["ok"] and two["ok"]
@@ -384,8 +463,11 @@ def test_actual_listener_capture_crosses_desktop_pids_and_persists(tmp_path):
         assert d.call("approve", approval_id=rev["result"]["approval_id"])["ok"]
         assert d.call("apply", approval_id=rev["result"]["approval_id"])["ok"]
         assert not r.call("authorize")["ok"]
+        assert not r.call("binding", association=association)["ok"]
         F._path(root).write_bytes(before)
         assert not r.call("authorize")["ok"]
+        restored = r.call("binding", association=association)
+        assert not restored["ok"] and restored["code"] == "file_approval_negative_fence", restored
         witness = F._load_journal(root)
         assert max(row.deny_generation for row in witness.fences.values()) == 3
         print("P1 REAL PROCESS FIT", json.dumps(transcript, sort_keys=True))

@@ -8,6 +8,10 @@
   "cli.services_heavy.command": "El comando que se ejecutará, después de `--`",
   "cli.services_heavy.holder": "  ranura {slot}: {holder}, en ejecución desde hace {age}: {command}",
   "cli.services_heavy.no_command": "No hay nada que ejecutar: pon el comando después de `--`, por ejemplo `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  eventos recientes de la concesión (registro: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  aún no hay eventos de la concesión registrados (registro: {path})",
+  "cli.services_heavy.audit_row": "auditoría de trabajos pesados: último {record}, hace {age} (registro: {path})",
   "cli.services_heavy.start_by": "Hora límite para iniciar el comando: segundos epoch o ISO-8601 con desfase o Z (p. ej. 2026-11-19T08:05:00Z). Se comprueba tras la espera en cola, justo antes de iniciar el comando; si ya pasó, el comando no se ejecuta y el estado de salida es 79",
   "cli.services_heavy.late_start": "inicio tardío: el límite start-by {start_by} ya pasó (ahora {now}, {late} s tarde); el comando no se inició",
   "cli.services_heavy.not_start_by": "{value} no son segundos epoch ni una hora ISO-8601 con desfase o Z"
