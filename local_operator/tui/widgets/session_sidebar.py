@@ -30,10 +30,7 @@ from local_operator.i18n.keys import tui_session_sidebar as _ss
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
-from local_operator.resume import (
-    format_age,
-    peer_reason_words,
-)
+from local_operator.resume import format_age, peer_reason_words
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
 from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
@@ -2463,9 +2460,7 @@ class SessionSidebar(Widget, can_focus=True):
             return None
         status = entry.status
         if entry.status_code == "wedged":
-            status = _t_ss(
-                _ss.tooltip_status_wedged(status=status, command=WEDGED_REMEDY_COMMAND)
-            )
+            status = _t_ss(_ss.tooltip_status_wedged(status=status, command=WEDGED_REMEDY_COMMAND))
         # WHERE IT LIVES, and only when there is something to say. This is the
         # one place the device is readable now that remote rows carry no section
         # of their own: the row is width-bound and the tooltip travels with it.
@@ -2503,9 +2498,7 @@ class SessionSidebar(Widget, can_focus=True):
                 # so the sibling surfaces read as one voice). See
                 # `UNREACHABLE_REMOTE_MARK` for the at-rest half of this state.
                 unreachable = _t_ss(
-                    _ss.tooltip_unreachable(
-                        reason=peer_reason_words(entry.row.unreachable_reason)
-                    )
+                    _ss.tooltip_unreachable(reason=peer_reason_words(entry.row.unreachable_reason))
                 )
         lines = [entry.row.name, status]
         if location:
@@ -3349,9 +3342,7 @@ class SessionSidebar(Widget, can_focus=True):
         footer = (
             _t_ss(_ss.footer_refresh_failed())
             if self.error
-            else _t_ss(_ss.footer_opening())
-            if self.requested_id
-            else hint
+            else _t_ss(_ss.footer_opening()) if self.requested_id else hint
         )
         painted = truncate_cells(footer, width)
         # The chip is the ladder's SUFFIX whenever it is painted — every

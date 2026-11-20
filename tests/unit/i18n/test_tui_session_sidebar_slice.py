@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -82,7 +83,31 @@ def _untitled() -> CatalogEntry:
     return CatalogEntry(SessionRow("noname000001", time.time(), ""))
 
 
-async def _surfaces(pilot, app) -> dict[str, object]:
+class _Surfaces(TypedDict):
+    """What ``_surfaces`` reads off the widget, typed so each assertion narrows.
+
+    ``remote`` mixes shapes on purpose: the two reachable-state rows keep two
+    tooltip lines (owner + reason), the two stale rows keep one.
+    """
+
+    frame: list[str]
+    wedged: str
+    remote: list[list[str] | str]
+    notes: tuple[str, str]
+    notes_zero: tuple[str, str]
+    footer_error: str
+    footer_opening: str
+    states: list[list[str]]
+
+
+def _tooltip(sidebar, entry: CatalogEntry) -> str:
+    """``_describe`` is ``str | None`` (None only for no entry); assert it painted."""
+    described = sidebar._describe(entry)
+    assert described is not None
+    return described
+
+
+async def _surfaces(pilot, app) -> _Surfaces:
     """Every keyed surface, read from what the widget actually paints."""
     sidebar = await _sidebar_with(
         pilot,
@@ -92,36 +117,42 @@ async def _surfaces(pilot, app) -> dict[str, object]:
         show_subagents=True,
         total=1,
     )
-    out: dict[str, object] = {}
-    out["frame"] = [line.rstrip() for line in sidebar.render().plain.splitlines()]
-    wedged = sidebar._describe(_wedged()).splitlines()[1]
-    out["wedged"] = wedged
-    out["remote"] = [
+    frame = [line.rstrip() for line in sidebar.render().plain.splitlines()]
+    wedged = _tooltip(sidebar, _wedged()).splitlines()[1]
+    remote: list[list[str] | str] = [
         sidebar._describe(_remote("r1", label="mbp")).splitlines()[2:4],
         sidebar._describe(_remote("r2", label="mbp", network="mesh")).splitlines()[2:4],
         sidebar._describe(_remote("r3", label="mbp", stale=True)).splitlines()[2],
         sidebar._describe(_remote("r4", label="mbp", network="mesh", stale=True)).splitlines()[2],
     ]
     sidebar._asks_total, sidebar._hub_total = 4, 2
-    out["notes"] = (sidebar._asks_note(), sidebar._hub_note())
+    notes = (sidebar._asks_note(), sidebar._hub_note())
     sidebar._asks_total = sidebar._hub_total = 0
-    out["notes_zero"] = (sidebar._asks_note(), sidebar._hub_note())
+    notes_zero = (sidebar._asks_note(), sidebar._hub_note())
     sidebar.error = "boom"
-    out["footer_error"] = sidebar.render().plain.splitlines()[-1].strip()
+    footer_error = sidebar.render().plain.splitlines()[-1].strip()
     sidebar.error = ""
     sidebar.requested_id = "act"
-    out["footer_opening"] = sidebar.render().plain.splitlines()[-1].strip()
+    footer_opening = sidebar.render().plain.splitlines()[-1].strip()
     sidebar.requested_id = None
     # Body states: an empty list in each of the three quiet states.
     sidebar.set_entries([])
-    states = []
+    states: list[list[str]] = []
     for error, loading in (("boom", False), ("", True), ("", False)):
         sidebar.error, sidebar._catalog_loading = error, loading
         lines = [line.strip() for line in sidebar.render().plain.splitlines() if line.strip()]
         states.append(lines[:2])
-    out["states"] = states
     sidebar.error, sidebar._catalog_loading = "", False
-    return out
+    return _Surfaces(
+        frame=frame,
+        wedged=wedged,
+        remote=remote,
+        notes=notes,
+        notes_zero=notes_zero,
+        footer_error=footer_error,
+        footer_opening=footer_opening,
+        states=states,
+    )
 
 
 async def _overflow_painted(pilot, app) -> str:
@@ -165,14 +196,14 @@ async def test_english_bytes_match_the_pre_extraction_literals() -> None:
         assert empty == ["Sessions", "No conversations yet"]
         assert await _overflow_painted(pilot, app) == "+3 more pinned — scroll"
         sidebar = app._session_sidebar
-        nameless = sidebar._describe(_remote("r5")).splitlines()[2]
+        nameless = _tooltip(sidebar, _remote("r5")).splitlines()[2]
         # owner_label falls back to the device id prefix, so the "unnamed
         # device" key is reached only with no device id at all.
         assert nameless == "on d_aaaa11"
         bare = CatalogEntry(
             SessionRow("r6", time.time(), "x", locality="remote", placement_stale=False)
         )
-        assert sidebar._describe(bare).splitlines()[2] == "on unnamed device"
+        assert _tooltip(sidebar, bare).splitlines()[2] == "on unnamed device"
 
 
 @pytest.fixture
@@ -229,7 +260,7 @@ async def test_every_surface_follows_a_live_language_change(fr_sidebar) -> None:
         assert empty == ["FR Sessions", "FR No conversations yet"]
         assert await _overflow_painted(pilot, app) == "FR +3 more pinned — scroll"
         bare = CatalogEntry(SessionRow("r6", time.time(), "x", locality="remote"))
-        assert app._session_sidebar._describe(bare).splitlines()[2] == "FR on FR unnamed device"
+        assert _tooltip(app._session_sidebar, bare).splitlines()[2] == "FR on FR unnamed device"
         assert text._refreshers == []
 
 

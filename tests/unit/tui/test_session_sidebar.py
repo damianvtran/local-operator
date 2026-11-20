@@ -422,6 +422,7 @@ async def test_a_wedged_rows_tooltip_carries_the_remedy_and_an_error_rows_does_n
     presence: the clause must not travel to a row whose remedy is different.
     """
     from local_operator.session.catalog import wedged_status
+
     # The English bytes of the keyed remedy clause (tui.session_sidebar.tooltip.
     # status_wedged around the literal `lop stop` command token).
     WEDGED_REMEDY = "lop stop if it stays silent"
