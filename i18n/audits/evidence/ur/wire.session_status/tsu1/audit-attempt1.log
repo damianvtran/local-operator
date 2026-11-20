@@ -1,0 +1,13 @@
+INPUT_HASHES {"en": {"path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json", "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"}, "context": {"path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json", "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"}, "ur": {"path": "/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur.json", "sha256": "4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b"}, "style": {"path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/ur.md", "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"}, "glossary": {"path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md", "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"}}
+NORMAL_ADMISSION PASS scripts.i18n.check.check_catalogues scoped fixture en+ur/wire.session_status
+NEGATIVE dropped_key {"rejected": true, "actual_problems": ["ur/wire.session_status: missing key 'wire.session_status.complete'"]}
+NEGATIVE added_key {"rejected": true, "actual_problems": ["ur/wire.session_status: unknown key 'wire.session_status.extra'"]}
+NEGATIVE renamed_placeholder {"rejected": true, "actual_problems": ["ur/wire.session_status: wire.session_status.signal_stop: arguments (('cmd', 'select'),) != en's (('command', 'select'),): argument 1 is 'cmd', en's is 'command' (renamed or reordered)"]}
+NEGATIVE invalid_icu {"rejected": false, "actual_problems": []}
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/9075da90042e/scratchpad/audit-ur.py", line 53, in <module>
+    negative('invalid_icu',lambda d:d.update({'wire.session_status.dormant':d['wire.session_status.dormant'][:-1]}))
+  File "/Users/damian/.local-operator/sessions/9075da90042e/scratchpad/audit-ur.py", line 49, in negative
+    assert problems,name
+           ^^^^^^^^
+AssertionError: invalid_icu

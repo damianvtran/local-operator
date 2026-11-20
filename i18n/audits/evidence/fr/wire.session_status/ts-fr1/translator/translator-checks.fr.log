@@ -1,0 +1,8 @@
+PASS frozen source/context SHA-256; 17 keys in source order; historical retired_label value unchanged
+PASS all 17 ICU syntax/ordered argument signatures; select identifiers/order; literal token parity; single-line/no manual bidi controls
+PASS French count plural arms: one/many/other; # retained in all three arms
+PASS command sentinel none is empty; other interpolates original command unchanged, with localized connector
+check.py: catalogue checks: 0 problem(s)
+PASS repository scripts/i18n/check.py --catalogues-only; isolated scratch en/fr namespace fixture; exit 0
+Receipt written: /Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/translator-receipt.fr.json
+Target SHA-256: 1b48011bda6364f5091c78e236020980018fa15934ff9424feca4280f5a9429d

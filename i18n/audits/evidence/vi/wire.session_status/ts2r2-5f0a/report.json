@@ -1,0 +1,32 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "round": "second-independent-remediation-R2",
+  "scope": "VI-S2-01 only; runtime_overdue arm in error_cause and unseen_error_cause; directly adjacent selector fallbacks and command branches",
+  "finding_resolution": {
+    "VI-S2-01": {
+      "status": "fixed",
+      "old": "runtime rời đi để cập nhật sau ngưỡng tiến triển",
+      "new": "runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển",
+      "meaning_evidence": "incidents.py::_overdue_cause_sentence (lines 469–475) says runtime left for newer build after no movement reported from work in flight. Corrected wording explicitly says runtime stopped for update after the progress-wait period expired; it does not claim an operator stop, exact duration, successful new-build load, or stall-bound self-exit.",
+      "idiom": "đã dừng ... sau khi hết thời hạn chờ ... is idiomatic event/status wording; removes anthropomorphic rời đi and unclear ngưỡng tiến triển.",
+      "unseen": "chưa đọc remains a separate unread qualifier, not a cause or outcome change."
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "retained": "15 unchanged keys and 12 unchanged cause arms in each changed key proved by exact reverse-byte reconstruction; previous 17-key checks and all 54-case coverage remain applicable, with two updated outputs checked separately. 52 unchanged outputs were additionally replayed and matched exactly.",
+  "previous_verdict": "Original changes_requested report/receipt preserved byte-identically; this is a new current R2 report, not a rewrite.",
+  "not_claimed": [
+    "visual",
+    "runtime",
+    "pseudo",
+    "native rendering",
+    "shipping eligibility"
+  ],
+  "residual_gap": "Unknown external nonempty diagnostic prose remains legacy English and unresolved outside this namespace.",
+  "evidence_type": "audit_notes_not_execution_log; actual execution output in audit.log"
+}
