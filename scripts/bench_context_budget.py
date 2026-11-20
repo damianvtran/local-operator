@@ -1947,7 +1947,13 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #   this branch             89,080 chars = ~32,043 billed
 #     = -15,069 chars = ~-5,420 billed; lowered by exactly the saving so the
 #     ceiling keeps main's headroom (local-vs-CI offset, notes above).
-BUDGET_BILLED_TOKENS = 32_047
+# RAISED 32,047 -> 32,135 by the same PR's round-1 remediation (#4326): the
+# media generators' purpose phrases name their guide (review R4, +192 chars)
+# and ``ask_withdraw`` keeps its two moot examples (QA Q-F2, +53). Same script,
+# isolated HOME, one host: 89,080 -> 89,325 chars = ~32,043 -> ~32,131 billed
+# (+88), so the ceiling moves by exactly that and keeps its 4 of headroom.
+# Net wave 2 is still -14,824 chars = ~-5,333 billed against origin/main.
+BUDGET_BILLED_TOKENS = 32_135
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2195,6 +2201,10 @@ BUDGET_BILLED_TOKENS = 32_047
 #   origin/main 1566e04b   90,307 chars = ~32,485 billed / 213 headroom
 #   this branch            76,507 chars = ~27,521 billed
 #     = -13,800 chars = ~-4,964 billed; lowered by exactly the saving.
+# NOT raised for the round-1 remediation (#4326): a child holds the media
+# tools, so the R4 guide pointers cost it +192 chars (76,507 -> 76,699 =
+# ~27,590 billed); it has no ``ask_withdraw``. 144 of headroom stays, so the
+# ceiling keeps its wave-2 value rather than loosening.
 BUDGET_CHILD_BILLED_TOKENS = 27_734
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

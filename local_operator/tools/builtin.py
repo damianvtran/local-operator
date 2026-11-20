@@ -37730,15 +37730,19 @@ class AskWithdrawParams(BaseModel):
 #: needs them (the ask receipt's prose is the budget precedent): what settles,
 #: the two reasons with their one-line consequences, and the refusals. The
 #: DETECTION RULE (settle an ask the user's message answered before ending the
-#: turn), what counts as moot, and "an answer is `answered_in_chat`, never
-#: `moot`" ship in ``system.md``'s queued-ask paragraph, which renders whenever
-#: this tool is held: both gate on the same host ask hook, and the paragraph on
-#: ``ask`` membership (see ``_ASK_DESCRIPTION_RESTRAINT``). They were repeated
-#: here verbatim until wave 2 (2026-11-19). The tool itself stays PUBLISHED —
+#: turn), the dropped/handed-off moot cases, and "an answer is
+#: `answered_in_chat`, never `moot`" ship in ``system.md``'s queued-ask
+#: paragraph, which renders whenever this tool is held: both gate on the same
+#: host ask hook, and the paragraph on ``ask`` membership (see
+#: ``_ASK_DESCRIPTION_RESTRAINT``). They were repeated here verbatim until
+#: wave 2 (2026-11-19). The two moot examples system.md does NOT carry ("you
+#: found the answer yourself", "the work moved on") stay here, shortest form
+#: (PR #4326 QA Q-F2). The tool itself stays PUBLISHED —
 #: see the ``ask_withdraw`` note in ``tools/deferral.py`` for the measurement.
 _ASK_WITHDRAW_DESCRIPTION = (
     "Close a queued ask you no longer need answered — the asker's own settle. "
-    "reason='moot': the question stopped mattering; it settles as withdrawn and "
+    "reason='moot': the question stopped mattering (you found the answer "
+    "yourself or the work moved on); it settles as withdrawn and "
     "nothing more is delivered for it. reason='answered_in_chat': the user's chat "
     "message that answered it (latest or earlier) IS the answer: record their "
     "words VERBATIM in `answers`; the standard response arrives as usual. To "

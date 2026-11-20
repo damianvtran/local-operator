@@ -5126,7 +5126,8 @@ class Session:
         self._pending_body_turn: Any | None = None
         #: Team Bridge card excerpt decisions, frozen at each card's first render
         #: in this process (``card_projection.attach_history_excerpts``): keeps
-        #: already-cached card bytes stable. Cleared whenever standing fails.
+        #: already-cached card bytes stable. Cleared whenever standing fails and
+        #: at every compaction commit (``_finish_compaction``).
         self._bridge_excerpt_memo: dict[str, Any] = {}
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
@@ -30451,6 +30452,17 @@ class Session:
             # ...]`` already. The preserved turns carry no tool_call pairing, so
             # none of the orphan invariants can be affected.
             self._context.messages = [marker, *preserved_messages, *kept]
+            # The Team Bridge excerpt memo exists only to keep ALREADY-CACHED
+            # card bytes stable. This swap puts a new marker ahead of every kept
+            # card, so the cache is cold from here regardless, and a frozen
+            # "sent ids-only" decision now protects nothing. Compaction keeps the
+            # kept cards' message ids, so without this a long-lived bridge
+            # session (which rarely restarts) never regained an excerpt for a
+            # card a body turn delivered (agent review R1). ``getattr`` matches
+            # the transform's own read: partial hosts may never have built one.
+            excerpt_memo = getattr(self, "_bridge_excerpt_memo", None)
+            if excerpt_memo is not None:
+                excerpt_memo.clear()
             history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )

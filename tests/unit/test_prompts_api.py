@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -2174,13 +2175,36 @@ def test_has_ask_and_no_ask_cannot_both_be_true() -> None:
         render_template("system.md", {"has_ask": True, "no_ask": True})
 
 
+#: A sentence end glued to the next sentence: ``.``/``)``/a closing backtick
+#: straight into a capital or an opening backtick, with the separating space
+#: dropped (``…`guide://agents`.Coordination…``). The space checks below cannot
+#: see that failure, because a MISSING space leaves no double, leading or
+#: trailing one (PR #4326 review R3).
+_GLUED_JOIN = re.compile(r"[.)`][A-Z`]")
+
+
+def _join_defects(text: str) -> list[str]:
+    """Every badly joined line in the gated inline region of a rendered system.md."""
+    # The gated inline joins all live between these headings; the safety list
+    # above them indents its continuation lines on purpose.
+    region = text[text.index("## Tools") : text.index("### Resources")]
+    defects = []
+    for line in region.splitlines():
+        if "  " in line or line.startswith(" ") or line.endswith(" "):
+            defects.append(f"spacing: {line!r}")
+        if glued := _GLUED_JOIN.search(line):
+            defects.append(f"glued at {glued.start()}: {line!r}")
+    return defects
+
+
 def test_every_gated_flag_combination_joins_its_sentences_cleanly() -> None:
     """REGRESSION (#4318 review R3): the inline peer sentences carried their
     separating spaces unconditionally, so ``has_bridge`` without
     ``has_sessions`` rendered a line starting with a space (or a double space
     after the subagents sentence). Every combination of the tool-gated flags,
     plus ``has_bridge`` and ``has_notify`` which share those lines, must join
-    with single spaces: no double space, no leading or trailing space."""
+    with single spaces: no double space, no leading or trailing space, and no
+    sentence glued to the next one."""
     import itertools
 
     from local_operator.prompts_api import render_template
@@ -2189,13 +2213,24 @@ def test_every_gated_flag_combination_joins_its_sentences_cleanly() -> None:
     base = {"has_browser": False, "no_browser": False, "has_console": False, "no_console": False}
     for combo in itertools.product([False, True], repeat=len(flags)):
         text = render_template("system.md", {**base, **dict(zip(flags, combo, strict=True))})
-        # The gated inline joins all live between these headings; the safety
-        # list above them indents its continuation lines on purpose.
-        region = text[text.index("## Tools") : text.index("### Resources")]
-        for line in region.splitlines():
-            assert "  " not in line, (combo, line)
-            assert not line.startswith(" "), (combo, line)
-            assert not line.endswith(" "), (combo, line)
+        assert _join_defects(text) == [], combo
+
+
+def test_the_join_check_sees_a_dropped_separator() -> None:
+    """Negative control for the check above: forcing the bridge sentence's
+    conditional space off (``has_bridge_joins=False``) while the subagents
+    sentence precedes it glues the two, and only the glued-join pattern sees
+    it, since no spacing rule is broken."""
+    from local_operator.prompts_api import render_template
+
+    base = {"has_browser": False, "no_browser": False, "has_console": False, "no_console": False}
+    glued = render_template(
+        "system.md",
+        {**base, "has_subagents": True, "has_bridge": True, "has_bridge_joins": False},
+    )
+    defects = _join_defects(glued)
+    assert defects and all(defect.startswith("glued at") for defect in defects), defects
+    assert any(".Coordination with" in defect for defect in defects), defects
 
 
 def test_wake_and_ask_clauses_render_only_with_their_tools() -> None:

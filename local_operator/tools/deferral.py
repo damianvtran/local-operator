@@ -184,13 +184,19 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "no_reply": "end a turn silently; takes no arguments so call it directly",
     "artifact_data": "claude.ai artifact shared data store",
     # No commas inside a phrase: the line joins entries with ", ".
-    "generate_image": "generate or edit an image from a prompt",
-    "generate_video": "generate a video from a prompt",
+    # Each media generator names its guide HERE as well as in its description:
+    # a valid direct call never publishes the description, so without this the
+    # "read the guide first" pointer was lost on exactly the calls that skip
+    # ``tool://`` (PR #4326 review R4; image "any read first" fell 5/5 -> 4/5).
+    "generate_image": "generate or edit an image from a prompt; guide://image-generation first",
+    "generate_video": "generate a video from a prompt; guide://video-generation first",
     "video_status": "check a generate_video job",
-    "generate_voiceover": "speak text aloud as a voiceover",
-    "generate_sound_effect": "make a sound effect from prompt + duration_s",
-    "generate_music": "compose music from prompt + duration_ms",
-    "modify_music": "rework sections of a generated track",
+    "generate_voiceover": "speak text aloud as a voiceover; guide://sound-generation first",
+    "generate_sound_effect": (
+        "make a sound effect from prompt + duration_s; guide://sound-generation first"
+    ),
+    "generate_music": "compose music from prompt + duration_ms; guide://music-generation first",
+    "modify_music": "rework sections of a generated track; guide://music-generation first",
     "music_status": "check or cancel a music job",
     "tags": "list/create/assign session tag categories",
     "harness_import": "import Claude Code/Codex/omp sessions and memory",

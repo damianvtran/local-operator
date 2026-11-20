@@ -366,8 +366,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1198 and ask_withdraw 452 -> 378. Both descriptions stop repeating
     # system.md's "Deciding and asking" rules, which render exactly when ``ask``
     # is held; limits, refusals and the secret path stay. Same printed table.
+    # ask_withdraw 378 -> 389 (+11, PR #4326 QA Q-F2): the two moot examples
+    # system.md does not carry ("you found the answer yourself or the work moved
+    # on") return to the description; same printed table, nothing else moved.
     "ask": 1198,
-    "ask_withdraw": 378,
+    "ask_withdraw": 389,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
     # entry that moved. eval carries no pin (context budget; see supplements.pins).
