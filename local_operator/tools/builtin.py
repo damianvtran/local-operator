@@ -17430,6 +17430,8 @@ async def execute_send(
         candidate_lines,
         exact_ignored_clause,
         live_scan_found_nothing,
+        pid_not_on_this_device,
+        remote_pid_decision,
         resolve_peer_target,
         session_id_unowned,
         skipped_clause,
@@ -17480,6 +17482,41 @@ async def execute_send(
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     cold_session_id = ""
+    if record is None and params.pid is not None and pid_not_on_this_device(error or ""):
+        # A REMOTE PID (2026-11-18): `sessions` lists remote rows WITH their
+        # owner's pid, which invites `send(pid=N)` — and the local resolver
+        # knew nothing of it ("no session found with pid N"), while the same
+        # session by `session=` routed fine. Pids are device-local and recycle,
+        # so the pid is translated to a session id ONLY when the owner's fresh
+        # report names exactly one running session for it; that session then
+        # rides the existing session-id route (no new transport). Several
+        # devices, a non-running row, or no match at all stay refusals — see
+        # ``peer_send.remote_pid_decision``. Entered only on the resolver's
+        # MISS form, so a local pid hit (or a local refusal about a pid this
+        # device does hold) never reaches the catalogue: local wins.
+        from local_operator.session.peer_rows import peer_pid_rows
+
+        pid_rows = await asyncio.to_thread(peer_pid_rows, params.pid, config_dir())
+        routed_row, pid_refusal = remote_pid_decision(
+            params.pid, pid_rows, address=lambda sid, _device: f"session={sid}"
+        )
+        if routed_row is None:
+            return _error(tool_call_id, "send", pid_refusal)
+        by_session = params.model_copy(update={"pid": None, "session": routed_row.session_id})
+        result = await _execute_send_routed(tool_call_id, by_session, routed_row, context)
+        # Identifier field: the session id the pid was translated to.
+        lead = (
+            f"pid {params.pid} is session {identifier_text(context, routed_row.session_id)} "
+            f"on {routed_row.owner_device_name}; routed by session id"
+        )
+        details = dict(result.details or {})
+        details["routed_from_pid"] = params.pid
+        return result.model_copy(
+            update={
+                "content": [TextContent(text=f"{lead}\n{result.text}")],
+                "details": details,
+            }
+        )
     if record is None and session_id_unowned(error):
         # No live record OWNS this id — the scan did not know it, or the record
         # it found was stale (the pid is gone) — so an exact ``session`` may
