@@ -425,6 +425,8 @@ async def test_runner_sends_images_in_the_single_isolated_user_turn() -> None:
     await runner.acall("PROMPT", default_model="m", images=[(b"\x89PNGfake", "image/png")])
     (request,) = captured
     assert request.tools == [] and request.isolated and request.purpose == "team_bridge_screen"
+    # One unique turn per screen: a cache marker could only buy the write premium.
+    assert request.cache_markers == "none"
     (message,) = request.messages
     assert message.role == "user"
     assert isinstance(message.content[0], TextContent) and message.content[0].text == "PROMPT"

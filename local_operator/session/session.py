@@ -31387,8 +31387,12 @@ class Session:
         propagate: the guardrail turns every failure into a block.
         """
         spec = self._lowest_effort(self.effective_model)
+        # Cache the STATIC judge prompt only (``guardrails/judge.py``, ~1.3k
+        # tokens, re-sent at a 68 s median gap — inside the 5m TTL). The
+        # default marker sat on the unique user turn after it, so the 7-day
+        # ledger showed a 0% hit rate on writes paid for every check.
         request = self._errand_request(spec, system, prompt).model_copy(
-            update={"purpose": "guardrail"}
+            update={"purpose": "guardrail", "cache_markers": "system"}
         )
         return await self._drain_errand(request)
 
