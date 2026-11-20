@@ -10,6 +10,7 @@
   "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock rechazó estas credenciales de AWS en {region}.",
   "wire.errors.bedrock.iam_denied": "Tu identidad de AWS no tiene permiso para llamar a {action} en {resource}. Pide a tu administrador de AWS que te lo conceda en IAM; puede que otros modelos sigan funcionando.",
   "wire.errors.bedrock.input_invalid": "Esta solicitud de conexión de Amazon Bedrock no es válida: falta {field} o tiene un formato incorrecto.",
+  "wire.errors.bedrock.invalid_api_key": "Amazon Bedrock rechazó la clave de API en {region}: tiene un formato incorrecto o no es válida. Comprueba que copiaste la clave completa o crea una nueva.",
   "wire.errors.bedrock.invalid_connection": "Esta conexión de Amazon Bedrock no es válida ({detail}). Vuelve a conectar Bedrock.",
   "wire.errors.bedrock.model_access": "Esta cuenta de AWS no tiene acceso a {model} en {region}. Activa el acceso al modelo en la consola de Amazon Bedrock o elige otro modelo.",
   "wire.errors.bedrock.model_unavailable": "{model} no está disponible en {region}. Prueba su perfil de inferencia global. o regional (por ejemplo, us.), u otra región.",

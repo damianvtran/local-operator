@@ -53,6 +53,10 @@ def input_invalid(*, field: str) -> Msg:
     return Msg("wire.errors.bedrock.input_invalid", {"field": field})
 
 
+def invalid_api_key(*, region: str) -> Msg:
+    return Msg("wire.errors.bedrock.invalid_api_key", {"region": region})
+
+
 def invalid_connection(*, detail: str) -> Msg:
     return Msg("wire.errors.bedrock.invalid_connection", {"detail": detail})
 

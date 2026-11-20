@@ -54,6 +54,11 @@
     "role": "provider error sentence",
     "tone": "plain, short, actionable"
   },
+  "wire.errors.bedrock.invalid_api_key": {
+    "note": "AWS refused the Bedrock API key itself because it is malformed or not a valid key (for example a truncated paste), not because of an IAM permission. {region} is an AWS Region id such as us-east-1; keep it verbatim. 'API key' is the Bedrock API key the user pasted or set.",
+    "role": "provider error sentence shown in the transcript and on failed sign-in",
+    "tone": "diagnostic, names the remedy"
+  },
   "wire.errors.bedrock.invalid_connection": {
     "note": "{detail} is a short English technical reason. 'Connect Bedrock again' means sign in to the provider again.",
     "role": "provider error sentence shown in the transcript and on failed sign-in",

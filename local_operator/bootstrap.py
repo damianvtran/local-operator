@@ -80,6 +80,16 @@ def resolve_hosting_model(
         model_name = current_agent.model or model_name
 
     if not hosting:
+        # Same Bedrock self-enable rule as session_factory.resolve_hosting_model
+        # (one shared helper, so the SDK/server path and `lop exec` cannot
+        # disagree about when Bedrock turns on by itself). Only reached when no
+        # agent/request/config hosting exists, so it never overrides one.
+        from local_operator.providers.bedrock.auto_select import implied_bedrock_hosting
+
+        implied = implied_bedrock_hosting(model_name, config_dir=config_manager.config_dir)
+        if implied is not None:
+            hosting, model_name = implied
+    if not hosting:
         raise ValueError("Hosting platform is not configured.")
     if not model_name:
         # Fall back to the provider's default model rather than erroring on a
