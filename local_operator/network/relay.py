@@ -85,7 +85,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, redial, store, wire
+from local_operator.network import projection, redial, store, uplink, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -796,6 +796,23 @@ MEMBERSHIP_READ_CLIENT_TIMEOUT_S = 5.0
 #: a CAP, not a share: see :func:`probe_candidates`.
 PROBE_CONNECT_TIMEOUT_S = 3.0
 
+#: How long a literal-address connect must have WAITED, unanswered, before the
+#: probe calls it dial silence (``CandidateAttempt.dial_silent``; code review
+#: R3-1, PR #4260). The connect budget is ``min(connect_cap, deadline - now)``
+#: and one deadline is shared by peers probed in turn (``ready``'s 12 s,
+#: ``doctor``'s), so a late peer can be handed milliseconds: a connect that
+#: times out after 2 ms, or is still pending 20 ms into its life when the report
+#: stops waiting, has NOT BEEN ATTEMPTED LONG ENOUGH to say anything about the
+#: peer (reproduced: 192.0.2.1 with 2 ms or 20 ms left read as silent). 1.0 s is
+#: over 6x the slowest healthy connect measured above (~0.15 s transatlantic;
+#: loopback 0.03 s) and equals TCP's initial retransmission timeout (RFC 6298
+#: section 2.1), so a SYN unanswered that long has had its full first chance.
+#: The effective floor is ``min(connect_cap, SILENT_MIN_WAIT_S)``: a caller
+#: whose cap is shorter still gets silence when the connect used its whole cap.
+#: A shorter wait keeps its base diagnostic (``no_answer`` /
+#: ``connect_failed:TimeoutError``) with no silence evidence.
+SILENT_MIN_WAIT_S = 1.0
+
 #: The one reason a member row carries when nothing was even attempted. Its own
 #: spelling because "we could not try" and "we tried and nothing answered" are
 #: different operator actions, and a budget that ran out must never be reported as
@@ -885,6 +902,16 @@ class CandidateAttempt:
     connected: bool
     detail: str
     latency_ms: float | None = None
+    #: ATTEMPT EVIDENCE OF SILENCE (security review U3, PR #4260): True only when
+    #: a TCP connect to an IP LITERAL was actually issued and nothing answered —
+    #: the probe's own connect timed out, or the connect was still blocked (no
+    #: SYN-ACK, RST or ICMP error yet) when the collector stopped waiting. A
+    #: ``detail`` cannot carry this: ``no_answer`` is also the closing pass's name
+    #: for a worker that never reached its connect, and ``connect_failed:OSError``
+    #: covers local-stack errors (EADDRNOTAVAIL, EACCES, ENOBUFS) raised before any
+    #: SYN. Only the uplink "<peer> isn't answering" reading consumes it; every
+    #: existing reader keeps reading ``detail``.
+    dial_silent: bool = False
 
 
 @dataclass(frozen=True)
@@ -926,6 +953,7 @@ class _AttemptOutcome:
     sock: socket.socket | None
     detail: str
     latency_ms: float
+    dial_silent: bool = False
 
 
 def probe_candidates(
@@ -974,27 +1002,93 @@ def probe_candidates(
     opened_lock = threading.Lock()
     stop = threading.Event()
     started_at = time.monotonic()
+    #: ONE state per endpoint, guarded by ``opened_lock`` (U3b / R3-1, PR #4260):
+    #: absent = not started; ``("issued", t0)`` = the connect syscall is about to
+    #: run on a socket already built; ``("done", outcome)`` = the worker's
+    #: terminal answer, written under the same lock that queues it. The collector
+    #: reads this once under the lock at the cutoff, so an outcome that completed
+    #: just before the cutoff is never lost to it, and an issued-but-pending
+    #: connect stays ambiguous: it keeps ``no_answer`` and carries no evidence.
+    states: dict[str, tuple[str, Any]] = {}
+    #: R3-1: the wait a timed-out literal dial needs before its silence counts.
+    silent_floor = min(connect_cap, SILENT_MIN_WAIT_S)
+
+    def finish(outcome: _AttemptOutcome) -> None:
+        with opened_lock:
+            states[outcome.endpoint] = ("done", outcome)
+            results.put(outcome)
 
     def attempt(endpoint: str) -> None:
         budget = connect_cap
         if deadline is not None:
             budget = min(connect_cap, max(0.0, deadline - time.monotonic()))
         if budget <= 0:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
             return
         address, _, port_text = endpoint.rpartition(":")
         try:
             port = int(port_text)
         except ValueError:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
             return
+        literal = _is_ip_literal(address)
         started = time.monotonic()
+        #: U4 (PR #4260): the timeout this connect was GIVEN, and the instant it
+        #: gave up, stamped before any cleanup. See the ``dial_silent`` gate below.
+        assigned = budget
+        ended: float | None = None
         try:
-            sock = socket.create_connection((address or endpoint, port), timeout=budget)
+            if literal:
+                # Build the socket ourselves for a literal so a creation error
+                # (EMFILE, EAFNOSUPPORT) is a local error raised BEFORE the dial
+                # is marked issued, and ``t0`` is stamped right before the one
+                # syscall that sends a SYN (U3b). A hostname keeps
+                # create_connection: its blocked call may be the resolver.
+                host = address.strip("[]")
+                sock = _new_dial_socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+                try:
+                    sock.settimeout(budget)
+                    with opened_lock:
+                        started = time.monotonic()
+                        states[endpoint] = ("issued", started)
+                    sock.connect((host, port))
+                except BaseException:
+                    # Stamp first: a slow close must not count as time spent
+                    # waiting for an answer (U4).
+                    ended = time.monotonic()
+                    _close_quietly(sock)
+                    raise
+            else:
+                sock = socket.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
-            results.put(
+            waited = (ended if ended is not None else time.monotonic()) - started
+            with opened_lock:
+                issued = states.get(endpoint, ("",))[0] == "issued"
+            finish(
                 _AttemptOutcome(
-                    endpoint, None, f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}", 0.0
+                    endpoint,
+                    None,
+                    f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}",
+                    0.0,
+                    # Silence only for an ISSUED literal connect that hit its OWN
+                    # timeout (every other OSError is a local or remote answer,
+                    # U3) after waiting at least the floor: a timeout on a sliver
+                    # of a shared deadline is "not attempted long enough" (R3-1).
+                    # U4 requires BOTH halves of "waited the floor": the timeout
+                    # the connect was given must itself reach the floor (a short
+                    # timeout that completed proves only a short wait, however
+                    # the clock reads afterwards), and the wait measured up to
+                    # the moment connect gave up — before the close above —
+                    # must reach it too. Either alone can be inflated: elapsed
+                    # by a slow cleanup or a descheduled thread, the assignment
+                    # by a connect that returned early.
+                    dial_silent=(
+                        literal
+                        and issued
+                        and isinstance(exc, TimeoutError)
+                        and assigned >= silent_floor
+                        and waited >= silent_floor
+                    ),
                 )
             )
             return
@@ -1006,7 +1100,9 @@ def probe_candidates(
                 _close_quietly(sock)
                 return
             opened.append(sock)
-        results.put(_AttemptOutcome(endpoint, sock, DETAIL_OK, latency))
+            outcome = _AttemptOutcome(endpoint, sock, DETAIL_OK, latency)
+            states[endpoint] = ("done", outcome)
+            results.put(outcome)
 
     threads = [
         threading.Thread(target=attempt, args=(endpoint,), name="mesh-probe", daemon=True)
@@ -1014,6 +1110,17 @@ def probe_candidates(
     ]
     for thread in threads:
         thread.start()
+
+    def record(outcome: _AttemptOutcome) -> None:
+        attempts.append(
+            CandidateAttempt(
+                endpoint=outcome.endpoint,
+                connected=outcome.sock is not None,
+                detail=outcome.detail,
+                latency_ms=outcome.latency_ms or None,
+                dial_silent=outcome.dial_silent,
+            )
+        )
 
     attempts: list[CandidateAttempt] = []
     winner_sock: socket.socket | None = None
@@ -1028,20 +1135,40 @@ def probe_candidates(
         except queue.Empty:
             break
         settled += 1
-        attempts.append(
-            CandidateAttempt(
-                endpoint=outcome.endpoint,
-                connected=outcome.sock is not None,
-                detail=outcome.detail,
-                latency_ms=outcome.latency_ms or None,
-            )
-        )
+        record(outcome)
         if outcome.sock is not None and winner_sock is None:
             winner_sock, winner = outcome.sock, outcome.endpoint
             if not wait_all:
                 break
 
-    stop.set()
+    # The cutoff: one read of every endpoint's state, under the lock the workers
+    # write it under. After ``stop`` is set no worker can append a socket, so the
+    # snapshot is the probe's final knowledge (U3b). There is deliberately no
+    # further drain at the cutoff (R4-1, deferred as a MINOR): a worker that has
+    # not written its terminal state by now reads ``no_answer`` with no silence
+    # evidence, which errs toward caution — never a false "isn't answering".
+    reported = {row.endpoint for row in attempts}
+    with opened_lock:
+        stop.set()
+        final = dict(states)
+    late: list[_AttemptOutcome] = []
+    if wait_all or winner_sock is None:
+        # A terminal outcome written before the cutoff but not yet dequeued is
+        # still that endpoint's answer (a completed timeout must not turn into
+        # ``no_answer``). The early-return path (winner, not wait_all) asked for
+        # one answer only and stays as it was.
+        for endpoint in endpoints:
+            state = final.get(endpoint)
+            if endpoint not in reported and state is not None and state[0] == "done":
+                late.append(state[1])
+                reported.add(endpoint)
+    for outcome in late:
+        # Not counted in ``settled``: ``complete`` keeps its meaning — every
+        # answer arrived before the collector stopped waiting — and a late
+        # read only stops a terminal outcome from being renamed ``no_answer``.
+        record(outcome)
+        if outcome.sock is not None and winner_sock is None:
+            winner_sock, winner = outcome.sock, outcome.endpoint
     with opened_lock:
         for sock in opened:
             if sock is not winner_sock:
@@ -1053,14 +1180,19 @@ def probe_candidates(
     # cannot mistake "we stopped waiting" for "this address is fine". WHICH name
     # depends on whether anything was tried at all — a probe handed a deadline that
     # had already passed has not dialled anything and must say so, rather than
-    # report a reachability result it never established.
+    # report a reachability result it never established. An issued connect still
+    # pending here is AMBIGUOUS (U3b): it supports only "no answer during this
+    # check", so it keeps the base ``no_answer`` and never carries ``dial_silent``.
     starved = deadline is not None and deadline <= started_at
-    reported = {row.endpoint for row in attempts}
     for endpoint in endpoints:
         if endpoint not in reported:
+            reported.add(endpoint)
             attempts.append(
                 CandidateAttempt(
-                    endpoint, False, DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER, None
+                    endpoint,
+                    False,
+                    DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER,
+                    None,
                 )
             )
 
@@ -1071,6 +1203,26 @@ def probe_candidates(
         complete=settled == len(threads),
         reason="" if winner_sock is not None else probe_reason(attempts),
     )
+
+
+def _new_dial_socket(family: int) -> socket.socket:
+    """The bare TCP socket a literal-address probe dials on (U3b, PR #4260).
+
+    Its own function so a creation failure is testable as what it is — a local
+    error raised before any dial was issued — without patching the socket type.
+    """
+    return socket.socket(family, socket.SOCK_STREAM)
+
+
+def _is_ip_literal(address: str) -> bool:
+    """Whether ``address`` is an IP literal, so a blocked connect cannot be a lookup."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(address.strip("[]"))
+    except ValueError:
+        return False
+    return True
 
 
 def _dial_candidates(member: MemberRecord) -> list[str]:
@@ -1171,13 +1323,26 @@ def _is_loopback_endpoint(endpoint: str) -> bool:
 
 
 def peer_link_state(
-    link: PeerLink | None, reason: str, attempts: Sequence[CandidateAttempt]
+    link: PeerLink | None,
+    reason: str,
+    attempts: Sequence[CandidateAttempt],
+    *,
+    route_reader: Callable[[str], bool | None] | None = None,
 ) -> str:
     """Keep host refusal, address black holes and handshake rejection distinct.
 
     A refused TCP connection proves the host answered but no relay listened;
     a timeout proves neither. A connected socket rejected during handshake is
     a third state that the aggregate reason alone cannot reliably distinguish.
+
+    ``local_offline`` (2026-11-18: a Mac on an IPv6-only network dialling an
+    IPv4-only node2) is the fourth: THIS device has no route to ANY of the
+    peer's own dialled endpoints, so the failure is ours, not the peer's. It
+    wins over ``address_unreachable`` only, and only when a passive lookup of
+    each endpoint PROVES the missing route (``uplink.no_route_for``). Asked per
+    endpoint, never inferred from the public-route reading (review R1): a LAN
+    or loopback peer keeps its route without a default route. No reader, a
+    hostname or an unreadable lookup keeps today's ``address_unreachable``.
     """
     if link is not None:
         return "reachable"
@@ -1201,6 +1366,10 @@ def peer_link_state(
     ):
         return "relay_down"
     if any(attempt.detail != DETAIL_NOT_ATTEMPTED for attempt in attempts):
+        if route_reader is not None and uplink.no_route_for(
+            [attempt.endpoint for attempt in attempts], route_reader
+        ):
+            return "local_offline"
         return "address_unreachable"
     if reason in ("no_endpoint", "not_a_member"):
         return reason
@@ -5861,6 +6030,10 @@ class RelayServer:
         #: (``network.redial``). Fed by link admission and close; read by
         #: ``_redial_loop`` and ``peer_status``.
         self.redial = redial.RedialTracker()
+        # The passive per-endpoint route lookup (``network.uplink``). An attribute
+        # so a test can inject a scripted reader; a relay built without
+        # ``__init__`` has none, so no ``local_offline`` and no recovery kick.
+        self._route_reader: Callable[[str], bool | None] | None = uplink.endpoint_has_route
         #: Collapses repeats of one identical handshake refusal into one audit row
         #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
         self._refusal_rows = redial.RefusalCoalescer()
@@ -7171,7 +7344,18 @@ class RelayServer:
                     continue
                 if self._redial_candidates(member):
                     self.redial.seed(member.device_id)
+        # Peers whose last failed redial had NO route to any of their own
+        # endpoints. Watched for a route to appear; see ``_kick_routed_peers``.
+        unroutable: set[str] = set()
         while not self._stop.wait(REDIAL_TICK_S):
+            # ADVISORY, NEVER A PAUSE (security U1, review R1): the baseline
+            # backoff below runs for every peer whatever the route reading says,
+            # so a wrong reading can delay nobody and starve nobody. The reading
+            # only ADDS a retry: a peer proven unroutable is redialled the
+            # moment a route to ITS endpoints appears (U2), instead of waiting
+            # out a backoff grown while there was no route to it at all.
+            if unroutable:
+                self._kick_routed_peers(unroutable)
             for device_id in self.redial.due():
                 if self._stop.is_set():
                     return
@@ -7196,6 +7380,42 @@ class RelayServer:
                     link, reason = None, f"error:{type(exc).__name__}"
                 if link is None:
                     self.redial.failed(device_id, cause=reason or "unreachable")
+                    if self._peer_route(device_id) is False:
+                        unroutable.add(device_id)
+
+    def _peer_route(self, device_id: str) -> bool | None:
+        """Whether this device has a route to any of ``device_id``'s dial candidates.
+
+        ``None`` (no claim) without a reader, without candidates, or for any
+        hostname/unreadable lookup — see ``uplink.endpoints_route``.
+        """
+        reader = getattr(self, "_route_reader", None)
+        if reader is None:
+            return None
+        endpoints = [
+            endpoint
+            for member in self._members_named(device_id)
+            for endpoint in self._redial_candidates(member)
+        ]
+        return uplink.endpoints_route(endpoints, reader)
+
+    def _kick_routed_peers(self, unroutable: set[str]) -> None:
+        """Kick each watched peer whose own endpoints have a route again (U2).
+
+        CONFIRMED RECOVERY ONLY: ``True`` from a fresh per-endpoint lookup. An
+        ``unknown`` answer is not recovery — it kicks nothing and the peer stays
+        watched; its baseline retry still runs regardless. A peer that linked
+        up meanwhile (a surface dial, or it dialled us) needs no kick. The
+        lookup sends nothing (``network.uplink``), so doing it once per tick
+        for the few unroutable peers costs syscalls, not traffic.
+        """
+        for device_id in list(unroutable):
+            if self._link_for(device_id) is not None:
+                unroutable.discard(device_id)
+                continue
+            if self._peer_route(device_id) is True:
+                unroutable.discard(device_id)
+                self.redial.kick(device_id)
 
     def _members_named(self, device_id: str) -> list[MemberRecord]:
         """Every active member row for ``device_id``, across this device's networks."""
@@ -16236,6 +16456,9 @@ class RelayServer:
         """
         peers: list[dict[str, Any]] = []
         deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
+        # Per-endpoint passive route lookups (no traffic) are what let a row say
+        # ``local_offline`` instead of blaming the peer.
+        route_reader = getattr(self, "_route_reader", None)
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
@@ -16262,7 +16485,7 @@ class RelayServer:
                     if tracker is not None and link is None
                     else {"state": redial.CONNECTED, "attempts": 0}
                 )
-                state = peer_link_state(link, reason, attempts)
+                state = peer_link_state(link, reason, attempts, route_reader=route_reader)
                 peers.append(
                     {
                         "device_id": member.device_id,
@@ -16572,6 +16795,9 @@ class RelayServer:
                         "ok": False,
                         "latency_ms": attempt.latency_ms,
                         "detail": attempt.detail,
+                        # Present only when True, so every other row's shape is
+                        # exactly today's (U3; read by uplink._answered_by_silence).
+                        **({"dial_silent": True} if attempt.dial_silent else {}),
                     }
                 )
         # SCOPE FIRST, THEN INFORMATIONAL (F9; design round 1, D3): the same

@@ -1,0 +1,175 @@
+{
+  "production_path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/session/catalog.py",
+  "rows": [
+    {
+      "locale": "en",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "Unseen interruption — retired for an update"
+    },
+    {
+      "locale": "en",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "Unseen error — runtime left for an update after its progress bound"
+    },
+    {
+      "locale": "en",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    },
+    {
+      "locale": "fr",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "Interruption non lue — retirée pour une mise à jour"
+    },
+    {
+      "locale": "fr",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "Erreur non lue — runtime arrêté pour une mise à jour après le délai maximal sans progression"
+    },
+    {
+      "locale": "fr",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    },
+    {
+      "locale": "es",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "Interrupción sin leer — retirada para actualizar"
+    },
+    {
+      "locale": "es",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "Error sin leer — el runtime salió para actualizar al agotar su margen de progreso"
+    },
+    {
+      "locale": "es",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    },
+    {
+      "locale": "zh-CN",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "未读：已中断——为更新而退出"
+    },
+    {
+      "locale": "zh-CN",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "未读：出错——运行时超过进度时限后退出以更新"
+    },
+    {
+      "locale": "zh-CN",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    },
+    {
+      "locale": "ru",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "Прервано для обновления (не просмотрено)"
+    },
+    {
+      "locale": "ru",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "Ошибка (не просмотрена) — рантайм завершил работу для обновления, исчерпав лимит ожидания прогресса"
+    },
+    {
+      "locale": "ru",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    },
+    {
+      "locale": "vi",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "Gián đoạn — chưa đọc — đã ngừng để cập nhật"
+    },
+    {
+      "locale": "vi",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "Lỗi — chưa đọc — runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển"
+    },
+    {
+      "locale": "vi",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    },
+    {
+      "locale": "hi",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "बाधित (अपठित) — अपडेट के लिए रनटाइम बंद हुआ"
+    },
+    {
+      "locale": "hi",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "त्रुटि (अपठित) — प्रगति के लिए तय समय-सीमा के बाद रनटाइम अपडेट के लिए बंद हुआ"
+    },
+    {
+      "locale": "hi",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    },
+    {
+      "locale": "ur",
+      "kind": "retired",
+      "reason": "",
+      "code": "interrupted",
+      "label": "درمیان میں رکا — رن ٹائم اپ ڈیٹ کے لیے بند ہوا؛ کیفیت ابھی نہیں پڑھی گئی"
+    },
+    {
+      "locale": "ur",
+      "kind": "error",
+      "reason": "the runtime left for the newer build after 15 min of no movement reported from the work in flight",
+      "code": "error",
+      "label": "خرابی — کیفیت ابھی نہیں پڑھی گئی؛ پیش رفت کی حد کے بعد رن ٹائم اپ ڈیٹ کے لیے بند ہوا"
+    },
+    {
+      "locale": "ur",
+      "kind": "error",
+      "reason": "external diagnostic unchanged",
+      "code": "error",
+      "label": "Unseen error — external diagnostic unchanged"
+    }
+  ],
+  "passed": 24,
+  "stored_reasons_unchanged": true
+}

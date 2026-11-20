@@ -194,7 +194,20 @@ before any heavy job. Every heavy job needs it and tests `outputs.ok == 'true'`.
 There is no bypass input. The runner never waits for CI; use
 `make fast-gate PR=<n>` (one-shot client check of the same helper via `--local`;
 exits immediately) or `gh pr checks <n> --watch`, then `make merge-gate PR=<n>`
-to arm the full suite. `make merge-gate` does not itself call the helper.
+to arm the full suite.
+
+**`make merge-gate` checks first (GH #4194/#4215/#4145).** The ritual runs the
+same helper with `--local` before any label write and refuses to arm on exit 1
+(pending, red, absent): no label changes, and it prints the `FAST-CI` line and
+how to retry. Exit 3 (API or token unavailable locally) warns and arms, since
+the runner re-decides fail-closed. Before this, arming right after a push found
+`ci.yml` still `queued` (21 of 92 red gate runs, 2026-11-15..18), and the gate
+went red with no test run. A label added by hand still bypasses the client
+check; that run's `Merge gate (full suite)` now says `PRECONDITION NOT MET (not
+a test failure)` so it is not mistaken for a red suite. The runner deliberately
+does not poll: a waiting precondition would hold a runner from the same
+saturated pool the queued `ci.yml` run is waiting for (ci.yml `pull_request`
+runs, n=140, 2026-11-17..18: median 46, p90 137, max 210 min created->completed).
 
 **Trusted helper.** For a PR the helper is fetched from `gate_base`, the live
 main tip `changes` resolved and the heavy jobs test against, not from the

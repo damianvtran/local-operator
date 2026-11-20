@@ -29,7 +29,6 @@ import json
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +51,7 @@ from local_operator.i18n.keys import (
 )
 from local_operator.i18n.messages import Msg, render_resolved
 from local_operator.paths import CONFIG_DIR_ENV
+from local_operator.resume import SessionRow
 from local_operator.session import catalog as catalog_mod
 from local_operator.stt import cascade as stt_cascade  # noqa: F401
 from local_operator.tts import cascade as tts_cascade  # noqa: F401
@@ -278,13 +278,18 @@ def test_the_video_route_reasons_keep_their_english() -> None:
 
 
 def test_the_retired_row_label_keeps_its_english() -> None:
-    entry = SimpleNamespace(completion_kind="retired", completion_reason="")
-    stop_label = catalog_mod.CatalogEntry._stop_label
-    expected = "Interrupted — retired for an update"
-    assert stop_label(entry, "Interrupted") == expected  # type: ignore[arg-type]
-    assert stop_label(entry, "Unseen interruption") == (  # type: ignore[arg-type]
-        "Unseen interruption — retired for an update"
-    )
+    # Backend labels resolve config, not the TUI's active-locale binding. Use
+    # the public row path: the retired helper no longer accepts English bases.
+    text.set_active_locale("fr")
+    row = SessionRow("synthetic-retired", 1.0, "Synthetic session")
+    for unseen, expected in (
+        (False, "Interrupted — retired for an update"),
+        (True, "Unseen interruption — retired for an update"),
+    ):
+        entry = catalog_mod.CatalogEntry(
+            row, unseen=unseen, completion_kind="retired", completion_token="synthetic-token"
+        )
+        assert (entry.status_code, entry.status) == ("interrupted", expected)
 
 
 def test_an_unkeyed_import_detail_stays_the_english_diagnostic() -> None:
@@ -414,10 +419,18 @@ def test_backend_composed_display_text_follows_the_configured_language(
     assert render_resolved(wire_wakes_supervisor.shared_unit_mismatch()) == (
         marker_fr + "this store is not the one the shared unit serves; launchd cannot supervise it"
     )
-    entry = SimpleNamespace(completion_kind="retired", completion_reason="")
-    assert catalog_mod.CatalogEntry._stop_label(entry, "Interrupted") == (  # type: ignore[arg-type]
-        marker_fr + "Interrupted — retired for an update"
-    )
+    # Deliberately oppose the TUI locale: backend-rendered strings belong to
+    # the configured language, and complete-message keys own both prefixes.
+    text.set_active_locale("en")
+    row = SessionRow("synthetic-retired", 1.0, "Synthetic session")
+    for unseen, expected in (
+        (False, "Interrupted — retired for an update"),
+        (True, "Unseen interruption — retired for an update"),
+    ):
+        entry = catalog_mod.CatalogEntry(
+            row, unseen=unseen, completion_kind="retired", completion_token="synthetic-token"
+        )
+        assert (entry.status_code, entry.status) == ("interrupted", marker_fr + expected)
 
 
 @pytest.mark.asyncio

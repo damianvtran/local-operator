@@ -143,12 +143,19 @@ commands and the follow-up schedule, is in
 | --- | --- | --- | --- | --- |
 | [GHSA-22mg-8gw7-636x](https://github.com/damianvtran/local-operator/security/advisories/GHSA-22mg-8gw7-636x) | Critical | 2026-09-05 | 0.47.5 | [@mhdgning131](https://github.com/mhdgning131) |
 | [GHSA-3xjw-9qpc-53mh](https://github.com/damianvtran/local-operator/security/advisories/GHSA-3xjw-9qpc-53mh) | High | 2026-09-05 | 0.47.5 | [@mhdgning131](https://github.com/mhdgning131) |
+| [GHSA-5rx7-59wg-j944](https://github.com/damianvtran/local-operator/security/advisories/GHSA-5rx7-59wg-j944) | High | 2026-10-26 | 0.90.7 | [@Artur12555](https://github.com/Artur12555) |
+| [GHSA-cjv2-5fqm-h4gm](https://github.com/damianvtran/local-operator/security/advisories/GHSA-cjv2-5fqm-h4gm) | High | 2026-11-20 | 0.108.0 | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool), [@immingyu0](https://github.com/immingyu0) (independent rediscovery) |
+| [GHSA-q32x-jc47-67mm](https://github.com/damianvtran/local-operator/security/advisories/GHSA-q32x-jc47-67mm) | High | 2026-11-20 | 0.108.0 (desktop app 0.58.3) | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool) |
+| [GHSA-p7wx-ww96-267m](https://github.com/damianvtran/local-operator/security/advisories/GHSA-p7wx-ww96-267m) | Medium | 2026-11-20 | browser extension 0.1.28 | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool) |
+| [GHSA-qpfw-qw4q-544v](https://github.com/damianvtran/local-operator/security/advisories/GHSA-qpfw-qw4q-544v) | Low | 2026-11-20 | 0.108.0 | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool) |
 
-If you are on a version earlier than 0.47.5, upgrade:
+If you are on a version earlier than 0.108.0, upgrade:
 
 ```sh
-pip install --upgrade 'local-operator>=0.47.5'
+pip install --upgrade 'local-operator>=0.108.0'
 ```
+
+Browser-extension fixes arrive through the Chrome Web Store automatically.
 
 ## Contact
 

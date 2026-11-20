@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "note": "Original auditor metadata-only canonical retention correction. Original record, receipt and dryrun preserved byte-identically; no repeated semantic audit.",
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "round": "second-independent-retention2",
+  "translator": {
+    "agent": "i18n-translator / terminal-status-fr",
+    "model": "openai/gpt-6.1-sol",
+    "session": "a14cc322d1da",
+    "provenance_source": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/translator-receipt.fr.json"
+  },
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-fr-zh-second-audit",
+    "session": "3d32baae3ed6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session Model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "independent_from_translator_session": "a14cc322d1da",
+    "independent_from_translator": true,
+    "independent_from_first_auditor_session": "4730cb4c2fb8",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/audit.log",
+      "sha256": "8d6dd37fae73d4459f335f5462014cc445c33ead65f3447d099468a295cb3674"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/ledger-dryrun.log",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/ledger-dryrun.log",
+      "sha256": "e34ba90d26c360700d24dede8367d8698311aeeb52b17b12dcec343d8c5e9276"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/original-ledger-dryrun.log",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/original-ledger-dryrun.log",
+      "sha256": "461c8c6b4417bdcd30c570bd67c35256e5809886a98a58a46263aff0e340d4f3"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/original-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/original-receipt.json",
+      "sha256": "c1f4a1a2823266264b564cbd24bd54289078ca5ddcb39e7c7798bb6442cef2af"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/original-record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/original-record.json",
+      "sha256": "8666f7529c15bb22004830f1f374249c3ee1b74d0b9e668ec9e0d5cb3b9fbcd2"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/probe.py",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/probe.py",
+      "sha256": "469e1a27b3561929ac3d314eaaee0d6e48da557eb8a64d7cc45084c4410f8565"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/receipt.json",
+      "sha256": "daab50603e29c4f999c3209a137488a70a72f75f95f10f0c910cc63b9e246464"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/report.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/report.json",
+      "sha256": "f1304237a0238ee3e437bba9e65f7d89ded160c1ebfb42f246ae7ac9a7901d90"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32-retention2/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/record.json",
+      "sha256": "894794e95f62612f91d84bf86fe40101b01b69942831cefabd793bcaa39c952a"
+    }
+  ],
+  "original_receipt": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/receipt.json",
+  "original_receipt_sha256": "daab50603e29c4f999c3209a137488a70a72f75f95f10f0c910cc63b9e246464",
+  "original_record": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/record.json",
+  "original_record_sha256": "894794e95f62612f91d84bf86fe40101b01b69942831cefabd793bcaa39c952a"
+}

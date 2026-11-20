@@ -172,6 +172,10 @@ def setup_failed() -> Msg:
     return Msg("cli.team_bridge.setup.failed", {})
 
 
+def setup_mesh_node_relay() -> Msg:
+    return Msg("cli.team_bridge.setup.mesh_node_relay", {})
+
+
 def setup_not_ready(*, service: str, detail: str) -> Msg:
     return Msg("cli.team_bridge.setup.not_ready", {"service": service, "detail": detail})
 

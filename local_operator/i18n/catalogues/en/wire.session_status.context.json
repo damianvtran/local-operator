@@ -3,5 +3,85 @@
     "role": "Sidebar/picker row status label (a plain-text suffix) for a session whose turn was cut by a build update",
     "tone": "terse status label with cause",
     "note": "EN-only context sidecar. {base} is the row's ALREADY-composed status word (currently `Interrupted`), inserted verbatim; the suffix after the em dash names the cause (the app retired the turn to update; the operator did not stop it). One logical line: keep the cause short."
+  },
+  "wire.session_status.interrupted": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+  },
+  "wire.session_status.unseen_interruption": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+  },
+  "wire.session_status.retired": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+  },
+  "wire.session_status.unseen_retirement": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+  },
+  "wire.session_status.signal_stop": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+  },
+  "wire.session_status.unseen_signal_stop": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+  },
+  "wire.session_status.forced_kill": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+  },
+  "wire.session_status.unseen_forced_kill": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+  },
+  "wire.session_status.complete": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+  },
+  "wire.session_status.unseen_completion": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+  },
+  "wire.session_status.recent": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+  },
+  "wire.session_status.dormant": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {count} is the number of armed wakes made dormant by stopping; use locale plural rules. Not cancelled or scheduled to fire."
+  },
+  "wire.session_status.error": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+  },
+  "wire.session_status.unseen_error": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+  },
+  "wire.session_status.error_cause": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+  },
+  "wire.session_status.unseen_error_cause": {
+    "role": "Sidebar/picker terminal status label",
+    "tone": "terse, factual",
+    "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
   }
 }

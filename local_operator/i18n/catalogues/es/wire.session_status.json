@@ -1,3 +1,19 @@
 {
-  "wire.session_status.retired_label": "{base} — retirada por una actualización"
+  "wire.session_status.retired_label": "{base} — retirada por una actualización",
+  "wire.session_status.interrupted": "Interrumpida",
+  "wire.session_status.unseen_interruption": "Interrupción sin leer",
+  "wire.session_status.retired": "Interrumpida — retirada para actualizar",
+  "wire.session_status.unseen_retirement": "Interrupción sin leer — retirada para actualizar",
+  "wire.session_status.signal_stop": "Interrumpida — detenida con una señal{command, select, none {} other { mediante {command}}}",
+  "wire.session_status.unseen_signal_stop": "Interrupción sin leer — detenida con una señal{command, select, none {} other { mediante {command}}}",
+  "wire.session_status.forced_kill": "Interrumpida — finalizada por la fuerza{command, select, none {} other { mediante {command}}}",
+  "wire.session_status.unseen_forced_kill": "Interrupción sin leer — finalizada por la fuerza{command, select, none {} other { mediante {command}}}",
+  "wire.session_status.complete": "Completada",
+  "wire.session_status.unseen_completion": "Finalización sin leer",
+  "wire.session_status.recent": "Reciente",
+  "wire.session_status.dormant": "Detenida ({count, plural, one {# despertar inactivo} many {# de despertares inactivos} other {# despertares inactivos}})",
+  "wire.session_status.error": "Error",
+  "wire.session_status.unseen_error": "Error sin leer",
+  "wire.session_status.error_cause": "{cause, select, user_stop {Error — detenida por el usuario} runtime_stall_bound {Error — el runtime se cerró al agotar su límite sin avances} continuation_limit {Error — límite de continuación alcanzado; mensaje pendiente descartado} output_limit {Error — límite de salida del modelo alcanzado; no se pudo continuar} runtime_retired {Error — retirada para actualizar} runtime_shutdown {Error — el runtime terminó durante el turno} runtime_overdue {Error — el runtime salió para actualizar al agotar su margen de progreso} runtime_update_failed {Error — la actualización no terminó; el runtime conservó la compilación cargada} runtime_killed {Error — el runtime desapareció sin un cierre limpio; no se solicitó detenerlo} install_mid_update {Error — instalación reemplazada durante el turno} owner_lost {Error — el runtime dejó de responder durante el turno} disposed {Error — sesión descartada durante el turno} other {Error}}",
+  "wire.session_status.unseen_error_cause": "{cause, select, user_stop {Error sin leer — detenida por el usuario} runtime_stall_bound {Error sin leer — el runtime se cerró al agotar su límite sin avances} continuation_limit {Error sin leer — límite de continuación alcanzado; mensaje pendiente descartado} output_limit {Error sin leer — límite de salida del modelo alcanzado; no se pudo continuar} runtime_retired {Error sin leer — retirada para actualizar} runtime_shutdown {Error sin leer — el runtime terminó durante el turno} runtime_overdue {Error sin leer — el runtime salió para actualizar al agotar su margen de progreso} runtime_update_failed {Error sin leer — la actualización no terminó; el runtime conservó la compilación cargada} runtime_killed {Error sin leer — el runtime desapareció sin un cierre limpio; no se solicitó detenerlo} install_mid_update {Error sin leer — instalación reemplazada durante el turno} owner_lost {Error sin leer — el runtime dejó de responder durante el turno} disposed {Error sin leer — sesión descartada durante el turno} other {Error sin leer}}"
 }

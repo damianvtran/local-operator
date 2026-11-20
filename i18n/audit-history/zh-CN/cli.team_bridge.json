@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "cli.team_bridge",
-  "history_sha256": "b02690c72d06bc1e85c4a28309ff7b07a47809fd6bf68633d16fa4794f610b13",
+  "history_sha256": "f564e44439a33756ce1a03e3fd52ca5752b01b8099e9683e1ec75da983b39981",
   "entries": [
     {
       "locale": "zh-CN",
@@ -103,6 +103,64 @@
       },
       "status": "passed",
       "note": "Merged-source audit, PR #4096 round 3 (convergence), head 908660b7aadb on main 72dd603f, scope cf62fdda6b1a..908660b7aadb; en source_sha256 bc305b44083685109f05166df42eec6cc2cd3eeaaf2b86848def36bad7dd544a = main's 20ff80eb text plus the PR's 25552503 status keys, no key changed on both sides. Audited keys: notify.screening_model_unavailable_body (main's 'Radient Console' value and its context note) and the PR's status.running, status.running_none, status.running_unrecorded, status.running_exited, status.running_detail, status.restart_needed, status.restart_needed_replaced, each read against its en context note. Other keys unchanged since their passed rows and not re-audited. Mechanical: key parity 66/66; placeholders identical to en in every audited key ({pid},{version},{started},{generation},{versions},{installed}); no plural/select in scope; NFC; no Cf/bidi controls. zh-CN: 你 register; no space between CJK and Latin/digit runs (Z1) holds in 'Radient Console充值' and '版本{version}'; full-width ：；（）。—— per style guide; replaced key '上次更新之前的代码' says replaced code, not a different version. No findings. Auditor edits: none. Unresolved blocker/major: 0. Audit performed by reading under a fleet load hold: no in-locale render through messages.render_record and no check.py --audit-base sweep were run this round. Single independent semantic audit; not a second high-visibility audit; native-speaker review not claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "61f9455c03c38d428f2ae5a1df169ec5f00f29995ae843660bda7874fe6c0059",
+      "translator": {
+        "agent": "coder — PR #4246 translator (lopdev team; round-1 values at 7dac6d31a, remediation at 73dc05353 applying the round-1 auditor corrections byte-for-byte plus the QA Q1 `peer` literal)",
+        "model": "unrecorded — the translator's serving model is not stated in the PR or commits; not inferred",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 2 (lopdev team reviewer, task 4246-i18n-audit-r2), independent of the translator; did not edit any value",
+        "session": "610af24653b9",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "PR #4246 round 2, head 73dc05353 on base b941eb9dc, scope 7dac6d31a..73dc05353. Audited key: cli.team_bridge.setup.mesh_node_relay (en changed for QA Q1: 'with no `peer` field'), read against its en context note; other cli.team_bridge keys unchanged since their passed rows and not re-audited. Mechanical: no placeholders/ICU in en or locale; code spans `send` and `peer` byte-identical and untranslated; 'Team Bridge' verbatim; NFC; no Cf/bidi controls. zh-CN: round-1 correction applied (mesh kept as 'mesh' per corpus, e.g. cli.browser_node.help_setup); 不填写`peer`字段 uses corpus term 字段. Single independent semantic audit by reading; no rendered-frame or native-speaker review claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "c4a543064eb704d8636dcfd7c52f8114ee5517d9ab5c337651d19160b649fd7f",
+      "translator": {
+        "agent": "coder — PR #4246 translator (lopdev team; values at cb5aa864 for the D1 remediation)",
+        "model": "unrecorded — the translator's serving model is not stated in the PR or commits; not inferred",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 3 (lopdev team reviewer, task 4246-i18n-r3), independent of the translator; did not edit any value",
+        "session": "05713429fa2d",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "N1"
+        ]
+      },
+      "status": "passed",
+      "note": "PR #4246 round 3, head 64bb33e3 on base b941eb9dc, scope 162955bb..64bb33e3 (fr re-audit cb5aa864..64bb33e3). Audited key: cli.team_bridge.setup.mesh_node_relay (en rewritten for design D1: agent route via the in-session `send` tool, person route asks the chief of staff on the primary device, `peer=<primary device>` optional, guide://network), read against its en context note; other cli.team_bridge keys unchanged since their passed rows and not re-audited. Mechanical: no placeholders/ICU; code spans `send`, `sessions`, `list`, `peer=<primary device>` byte-identical; 'Team Bridge' and guide://network verbatim; NFC; no Cf/bidi controls. zh-CN: 你-register, pronoun dropped; '从不'; '`send`工具'; person route '在该设备上' (node is 此设备); full-width punctuation. Open NIT N1 (non-gating): '人工' could read '本人'/'用户'. Single independent semantic audit by reading; no rendered-frame or native-speaker review claimed. Comments 7031156522 (round 3) and the fr re-audit comment on the PR."
     },
     {
       "locale": "zh-CN",

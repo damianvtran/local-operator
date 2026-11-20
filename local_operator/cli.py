@@ -5102,6 +5102,7 @@ def send_command(args: argparse.Namespace) -> int:
     # unique match come back, and neither may be converted into a stored send).
     from local_operator.mobile.peer_send import (
         live_scan_found_nothing,
+        pid_not_on_this_device,
         session_id_unowned,
     )
 
@@ -5223,6 +5224,41 @@ def send_command(args: argparse.Namespace) -> int:
             cold_session_id = stored_id
         elif stored_error:
             error = stored_error
+    if (
+        record is None
+        and getattr(args, "pid", None) is not None
+        and pid_not_on_this_device(error or "")
+    ):
+        # A REMOTE PID: same rule and same fresh read as the in-session `send`
+        # tool (``peer_send.remote_pid_decision``), so a pid copied from a
+        # remote row of `lop sessions` gets an answer naming the session it
+        # is. `lop send` has no cross-device route of its own (a remote
+        # `--session` is not routed here either), so the ONE-live-match case
+        # names the mesh command that delivers by session id instead of
+        # inventing a transport; every other case is the tool's refusal in
+        # this command's grammar. Entered only on the local MISS form, so a
+        # local pid hit never reads the catalogue: local wins.
+        from local_operator.mobile.peer_send import remote_pid_decision
+        from local_operator.session.peer_rows import peer_pid_rows
+
+        def _mesh_address(session_id: str, device: str) -> str:
+            return (
+                f"lop network sessions --peer {device} --send {session_id} "
+                "--mailbox -- '<message>'"
+            )
+
+        routed_row, pid_refusal = remote_pid_decision(
+            args.pid, peer_pid_rows(args.pid, config_dir()), address=_mesh_address
+        )
+        if routed_row is not None:
+            pid_refusal = (
+                f"pid {args.pid} is session {routed_row.session_id} on "
+                f"{routed_row.owner_device_name}; `lop send` does not cross devices — "
+                f"deliver by session id with "
+                f"`{_mesh_address(routed_row.session_id, routed_row.owner_device)}`"
+            )
+        _peer_red(pid_refusal)
+        return 1
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             # The stored fallback just failed too, so the message names BOTH

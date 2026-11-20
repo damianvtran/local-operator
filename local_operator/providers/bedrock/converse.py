@@ -327,7 +327,17 @@ def build_converse_body(
             estimate = count_text_tokens(
                 json.dumps([tool_prefix, plain_system, prefix_rows], ensure_ascii=False)
             )
-            if request.context_tokens_hint_measured and request.context_tokens_hint is not None:
+            # The measured hint is the WHOLE previous request's size, so it is
+            # an upper bound only for a point that sits inside the conversation.
+            # The system point covers tools+system alone: maxing it with the
+            # hint made the system cachePoint vanish once a conversation passed
+            # ``cache_max_tokens`` in total (e.g. 20k), breaking the stable
+            # prefix's cache mid-session for a prefix that never grew.
+            if (
+                prefix_rows
+                and request.context_tokens_hint_measured
+                and request.context_tokens_hint is not None
+            ):
                 estimate = max(estimate, request.context_tokens_hint)
             return caps.cache_max_tokens is None or estimate <= caps.cache_max_tokens
 
