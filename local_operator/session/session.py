@@ -4648,6 +4648,19 @@ class Session:
                 "notify_available",
                 lambda: any(tool.name == "notify" for tool in self._tools),
             )
+        if getattr(system_blocks_provider, "session_tool_membership", False):
+            # The factory provider closes over the PRE-narrowing tool list, but
+            # block zero's tool-gated prose (browser/console usage, library,
+            # todo, ask mechanics ...) must describe the tools this session
+            # actually holds: an SDK ``ApprovalPolicy.declared([...])`` run
+            # narrowed to three tools used to ship the browser playbook in block
+            # 0 while block 1 said "This session was not given the browser
+            # tool". ``self._tools`` is the live, already-narrowed set (every
+            # rebinding goes through ``refresh_tools``), deferred tools included.
+            # The provider keys its cache on these names, so a change before the
+            # first turn reaches the frozen prefix and a later one is an ordinary
+            # head change handled by ``_prepare_system_blocks``.
+            setattr(system_blocks_provider, "live_tools", lambda: list(self._tools))
         if getattr(system_blocks_provider, "session_cos_identity", False):
             # Her configured name for the prompt (``_cos_display_name``). The
             # factory cannot answer it: it must not import her package (R17),

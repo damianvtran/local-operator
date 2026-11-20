@@ -4251,6 +4251,18 @@ def _make_system_blocks_provider(
         # zero. Ask the owning Session, never infer from host type or a stub.
         notify_probe = getattr(provider, "notify_available", None)
         has_notify = bool(notify_probe()) if callable(notify_probe) else None
+        # The SESSION's live tool set when it installed the probe (see
+        # ``Session.__init__``'s ``session_tool_membership``), else the factory
+        # list. ``tools`` below is the PRE-narrowing construction snapshot: a
+        # declared SDK/exec inventory, a role prune or ``set_ask_handler`` all
+        # rebind the session's copy, never this one, so rendering block zero
+        # from it shipped usage prose for tools the session did not hold. Every
+        # membership-derived flag and the cache key read ``current_tools`` so the
+        # head moves exactly when membership does.
+        live_probe = getattr(provider, "live_tools", None)
+        current_tools: list[AgentTool] = (
+            cast("list[AgentTool]", live_probe()) if callable(live_probe) else tools
+        )
         # The coordination clause and the ``guide://team-bridge`` it names are
         # ONE unit, so the clause takes the SAME answer the guide resolver and
         # the bridge recommendation above take: does this session actually have
@@ -4265,7 +4277,8 @@ def _make_system_blocks_provider(
         # dead end the recommendation trigger was fixed for above. Enrolled and
         # fresh is unchanged: both halves hold, so the clause still renders.
         has_bridge = (
-            any(tool.name == "bridge" for tool in tools) and "team-bridge" in hooks.guides_by_name
+            any(tool.name == "bridge" for tool in current_tools)
+            and "team-bridge" in hooks.guides_by_name
         )
         # ``model_label`` is passed live by the Session on each provider step, so
         # a deliberate ``set_model`` or a failover fallback is reflected in the
@@ -4374,7 +4387,7 @@ def _make_system_blocks_provider(
             interactive,
             channel,
             open_asks or "",
-            tuple((tool.name, tool.description) for tool in tools),
+            tuple((tool.name, tool.description) for tool in current_tools),
             has_notify,
             has_bridge,
         )
@@ -4386,7 +4399,7 @@ def _make_system_blocks_provider(
         if key == cached_key:
             return list(cached_blocks)
         cached_blocks = build_system_blocks(
-            tools,
+            current_tools,
             knowledge_block,
             environment,
             date_str,
@@ -4422,6 +4435,8 @@ def _make_system_blocks_provider(
     # protocol explicitly; benchmarks can still call this builder read-only.
     setattr(provider, "append_only_state", True)
     setattr(provider, "session_notify_membership", True)
+    # Asks the owning Session to install ``live_tools`` (see ``provider``).
+    setattr(provider, "session_tool_membership", True)
     # Asks the owning Session to install ``cos_display_name`` (see above).
     setattr(provider, "session_cos_identity", True)
     setattr(provider, "repo_guidance", repo_guidance)
