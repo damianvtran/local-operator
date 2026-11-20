@@ -311,6 +311,16 @@ async def test_a_declared_server_that_already_failed_raises_at_once_naming_the_t
     assert "after 30" not in message, "the message must not claim a timeout that never ran"
 
 
+def test_readiness_failure_labels_each_server() -> None:
+    error = DeclaredMcpToolsUnavailable(
+        {"alpha": "disconnected", "beta": "connecting"},
+        {"mcp__alpha_x", "mcp__beta_y"},
+        timeout_s=30.0,
+        elapsed_s=30.0,
+    )
+    assert "(server alpha failed: disconnected; server beta timed out" in str(error)
+
+
 @pytest.mark.asyncio
 async def test_a_declared_server_dying_mid_wait_raises_when_it_dies_not_at_the_bound():
     # QA Q2d, and O2: the reason is "failed", the time is the real one.
@@ -613,6 +623,7 @@ async def test_a_delegated_child_keeps_exactly_its_tool_set_through_its_first_tu
     child = await build_child(parent)
     built_with = sorted(tool.name for tool in child._tools)
     assert "mcp__episode_apply_actions" not in built_with, "precondition: withheld at build"
+    assert "mcp__linear_list_teams" in built_with, "precondition: ordinary MCP inherited"
     inherited = child._declared_tools or ()
     assert "mcp__episode_apply_actions" in inherited, "precondition: declaration carried down"
 
@@ -624,6 +635,7 @@ async def test_a_delegated_child_keeps_exactly_its_tool_set_through_its_first_tu
     assert stream.requests, "the child's turn reached the provider"
     advertised = [tool.name for tool in stream.requests[-1].tools]
     assert "mcp__episode_apply_actions" not in advertised
+    assert "mcp__linear_list_teams" in advertised, "ordinary inherited MCP survives readiness"
     assert sorted(tool.name for tool in child._tools) == built_with
     assert manager.waited == [], "a child waits on nothing it could not receive"
     await child.dispose()
