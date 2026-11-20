@@ -1075,6 +1075,8 @@ def test_public_surface_is_pinned() -> None:
         "MarkdownSchema",
         "PeerMessageErrand",
         "PromptErrand",
+        "RequestAdmission",
+        "RequestAdmissionRefused",
         "SessionEventStream",
         "SessionIsolationError",
         "SessionOpenRefused",
@@ -1099,9 +1101,12 @@ def test_public_surface_is_pinned() -> None:
     with pytest.raises(AttributeError):
         sdk.no_such_export  # noqa: B018
 
+    from local_operator.harness.request_admission import RequestAdmission, RequestAdmissionRefused
     from local_operator.session.runtime.launch import PromptErrand as Direct
 
     assert sdk.PromptErrand is Direct
+    assert sdk.RequestAdmission is RequestAdmission
+    assert sdk.RequestAdmissionRefused is RequestAdmissionRefused
 
     def params(func: Any) -> list[tuple[str, str]]:
         return [(p.name, p.kind.name) for p in inspect.signature(func).parameters.values()]

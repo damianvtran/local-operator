@@ -7338,7 +7338,12 @@ class SessionStreamFn:
                 if callable(begin) and not request.isolated
                 else None
             )
-            stream = self._stream_account_request(request, signal, boundary, admission=admission)
+            # Requests without a policy keep the original stream call contract.
+            stream = (
+                self._stream_account_request(request, signal, boundary)
+                if admission is None
+                else self._stream_account_request(request, signal, boundary, admission=admission)
+            )
             try:
                 async for event in stream:
                     yield event

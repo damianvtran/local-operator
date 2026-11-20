@@ -6107,16 +6107,18 @@ class TestTheStreamCompletedStopBoundary:
     async def test_episode_spend_refusal_names_the_stop_and_joins_owned_work(
         self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch, enforce: bool
     ) -> None:
-        # The mock SSE transport deliberately sends no usage frame. The same
-        # capped EpisodeSpec must still complete two requests with no opt-in.
+        # The wire sends no usage, so only the opt-in must refuse request two.
+        # Use action groups: local-only groups spend the attempted-group clock
+        # but do not take the screen epochs that give this stop its max-steps label.
         calls, outcome, text = await self._run(
             real_arm_scratch,
             monkeypatch,
-            script=[[("read", {"path": str(real_arm_scratch / "world" / "note.txt")})]],
+            script=[[self._NOOP_CALL], [self._NOOP_CALL]],
             max_steps=2,
             enforce_recorded_spend=enforce,
         )
         assert len(calls) == (1 if enforce else 2)
+        assert outcome.steps == outcome.attempted_groups == len(calls)
         rows = [json.loads(line) for line in text.splitlines()]
         assert any(row["kind"] == "shutdown" and row["complete"] for row in rows)
         stops = [row for row in rows if row.get("cap_semantics") == "admission_on_recorded_spend"]
