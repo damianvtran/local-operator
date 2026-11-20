@@ -419,6 +419,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "own audio on this computer, selected by a machine-wide setting, and a moved or "
         "forked session neither owns nor needs them.",
     ),
+    "local_operator/heavy_audit.py": (
+        1,
+        "``AUDIT_FILENAME`` ('heavy-lease.jsonl') is the heavy-job lease audit trail in "
+        "the per-MACHINE <config>/run/heavy-jobs/ directory (``heavy_lease.lease_dir()``), "
+        "beside the slot locks it records, never an entry of a session directory. It is "
+        "this machine's serialization evidence: a copy on another device would describe "
+        "slots that device never held.",
+    ),
     "local_operator/notifications/sound.py": (
         2,
         "``THROTTLE_FILE`` ('notification-sound.last') and ``RECEIPT_FILE`` "

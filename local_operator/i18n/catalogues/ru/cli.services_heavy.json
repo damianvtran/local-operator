@@ -7,5 +7,9 @@
   "cli.services_heavy.timeout": "Максимальное время ожидания слота в очереди, в секундах (по умолчанию — лимит очереди машины, {wait_seconds} с, если {env_name} не задаёт другой)",
   "cli.services_heavy.command": "Команда для выполнения, после `--`",
   "cli.services_heavy.holder": "  слот {slot}: {holder}, работает {age}: {command}",
-  "cli.services_heavy.no_command": "Нечего выполнять: укажите команду после `--`, например `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "Нечего выполнять: укажите команду после `--`, например `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  последние события аренды слота (журнал: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  событий аренды слота пока нет (журнал: {path})",
+  "cli.services_heavy.audit_row": "аудит тяжёлых задач: последнее {record}, {age} назад (журнал: {path})"
 }

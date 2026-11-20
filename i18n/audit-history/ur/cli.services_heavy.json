@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "cli.services_heavy",
-  "history_sha256": "7c8c9b754f5093147b26f84bfc6be7447d03ff35f1091166f3771f5e6811078b",
+  "history_sha256": "b8fdb5a1ee8c4be54a6e8fcfb73d42bfb96e45ff4302bef99fef10fe2b80d7ed",
   "entries": [
     {
       "locale": "ur",
@@ -28,6 +28,31 @@
       },
       "status": "passed",
       "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target ur/cli.services_heavy.json sha256 8203b2fb6df6612f7d8d728091483b1f6b85712b8d262aff8e98c67982462b47 (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. C4 (MINOR, fixed by auditor): timeout «(طے شدہ:» -> «(ڈیفالٹ:», the established ur rendering of \"(default:\" (ڈیفالٹ 91 vs طے شدہ 12 occurrences across ur catalogues). N3 (NIT, not changed): subcommand names quoted with straight ' ' as in the source and ur cli.services_help precedent; no manual bidi controls; Urdu ، ؛ ۔ punctuation used in prose, LTR islands (`--`, example command, {placeholders}, pid) byte-identical. Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "6030d2a2f32786c31c223706df5364c383eb04bc7d9df6e23dd9c5d2870d7d52",
+      "translator": {
+        "agent": "coder agent (lopdev team; commits 002ba4840 + remediation d1c53d681; session id not relayed)",
+        "model": "not relayed to auditor",
+        "fallback": "unknown",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 1 session 50f2395eb392, round 2 session 02399cb08595); wrote no locale value",
+        "session": "02399cb08595",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 2 for PR #4264 (fix/heavy-lease-audit) at head d1c53d681, 2026-11-19. Target ur/cli.services_heavy.json sha256 3350d62ec04e1d6ed333a50f9bc7caadd727082c31aff716723c881680a5ac5e. New keys audited: events_header, event_line, no_events, audit_row. Passed in round 1 with no change since (the round-1 remediation left this file alone). Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4264 '### i18n audit — round 1' (#issuecomment-6999094193) and '### i18n audit — round 2'."
     }
   ]
 }

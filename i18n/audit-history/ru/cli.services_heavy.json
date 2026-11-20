@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "cli.services_heavy",
-  "history_sha256": "2fffab0099c7d0a1491d323ba04e70b1abdc8a9607abdc3e072c5ca3f5755d05",
+  "history_sha256": "8d8baecd5e46c20bb226bac6fb0e4ec090e72f2f29d6a0da936a09741dfa2207",
   "entries": [
     {
       "locale": "ru",
@@ -28,6 +28,31 @@
       },
       "status": "passed",
       "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target ru/cli.services_heavy.json sha256 7eae07af9bcdce86b8b95f412dd3b74674d76a5cf64059331de3c1baefa0c469 (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. No findings. Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "6030d2a2f32786c31c223706df5364c383eb04bc7d9df6e23dd9c5d2870d7d52",
+      "translator": {
+        "agent": "coder agent (lopdev team; commits 002ba4840 + remediation d1c53d681; session id not relayed)",
+        "model": "not relayed to auditor",
+        "fallback": "unknown",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 1 session 50f2395eb392, round 2 session 02399cb08595); wrote no locale value",
+        "session": "02399cb08595",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 2 for PR #4264 (fix/heavy-lease-audit) at head d1c53d681, 2026-11-19. Target ru/cli.services_heavy.json sha256 9ca8feb61fc93a2eac9207101c6d57d25698ecb10fdbb82f092db08240253b9d. New keys audited: events_header, event_line, no_events, audit_row. Passed in round 1 with no change since (the round-1 remediation left this file alone). Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4264 '### i18n audit — round 1' (#issuecomment-6999094193) and '### i18n audit — round 2'."
     }
   ]
 }

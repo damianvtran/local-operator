@@ -7,5 +7,9 @@
   "cli.services_heavy.timeout": "排队等待槽位的最长时间（秒）（默认：本机的队列上限，{wait_seconds}s，除非 {env_name} 另行设置）",
   "cli.services_heavy.command": "要运行的命令，写在 `--` 之后",
   "cli.services_heavy.holder": "  槽位 {slot}：{holder}，已运行 {age}：{command}",
-  "cli.services_heavy.no_command": "没有要运行的命令：请把命令写在 `--` 之后，例如 `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "没有要运行的命令：请把命令写在 `--` 之后，例如 `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  最近的租约事件（日志：{path}）：",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  尚未记录任何租约事件（日志：{path}）",
+  "cli.services_heavy.audit_row": "重型任务审计：最近一次{record}，{age}前（日志：{path}）"
 }
