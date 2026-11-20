@@ -9,6 +9,7 @@ saw those images. Each layer runs its production code; the seams are the hub
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -565,7 +566,14 @@ def _receipt(verdict: str, body: str) -> ScreeningReceipt:
     ).validated()
 
 
-def _persist_receipt(config_dir: Path, receipt: ScreeningReceipt, message_id: str) -> None:
+def _persist_receipt(
+    config_dir: Path,
+    receipt: ScreeningReceipt,
+    message_id: str,
+    *,
+    preferred: bool = False,
+    envelope_digest: str = "e" * 64,
+) -> None:
     """Model what the REAL screener writes before it answers ``deliver``.
 
     ``screen_item`` is replaced wholesale in this rig, so nothing calls
@@ -578,9 +586,11 @@ def _persist_receipt(config_dir: Path, receipt: ScreeningReceipt, message_id: st
 
     import sqlite3
 
-    from local_operator.team_bridge.store import state_db_path
+    from local_operator.team_bridge.store import Store, state_db_path
 
     with sqlite3.connect(state_db_path(config_dir)) as conn:
+        # finish_screening lazily adds receipt provenance before writing it.
+        Store._ensure_receipt_rendered_template_column(conn)
         row = conn.execute("SELECT owner_key, enrollment_generation FROM enrollments").fetchone()
         assert row is not None
         owner_key, generation = row
@@ -588,7 +598,7 @@ def _persist_receipt(config_dir: Path, receipt: ScreeningReceipt, message_id: st
             "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, "
             "body_sha256, template_sha256, prompt_version, model, verdict, categories, "
             "envelope_digest, admission_revision, policy_epoch, creator_generation, "
-            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at, screener_preferred) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 owner_key,
                 message_id,
@@ -598,16 +608,19 @@ def _persist_receipt(config_dir: Path, receipt: ScreeningReceipt, message_id: st
                 receipt.model,
                 receipt.verdict,
                 json.dumps(sorted(receipt.categories)),
-                "e" * 64,
+                envelope_digest,
                 "rev-1",
                 1,
                 generation,
                 time.time(),
+                int(preferred),
             ),
         )
 
 
-def _connector_rig(monkeypatch, tmp_path, hub: Hub, *, verdict: str, vision: bool = True):
+def _connector_rig(
+    monkeypatch, tmp_path, hub: Hub, *, verdict: str, vision: bool = True, preferred: bool = False
+):
     from tests.unit.team_bridge.test_conversation_delivery import _enroll
     from tests.unit.team_bridge.test_conversation_delivery import _owner as conv_owner
 
@@ -624,7 +637,15 @@ def _connector_rig(monkeypatch, tmp_path, hub: Hub, *, verdict: str, vision: boo
             _persist_receipt(tmp_path, bounce_receipt, MID)
             return ScreenResult("bounce", receipt=bounce_receipt)
         allow_receipt = _receipt("allow", hub.body)
-        _persist_receipt(tmp_path, allow_receipt, MID)
+        envelope, error = screening.validate_envelope(owner, item)
+        assert envelope is not None, error
+        _persist_receipt(
+            tmp_path,
+            allow_receipt,
+            MID,
+            preferred=preferred,
+            envelope_digest=envelope.envelope_digest,
+        )
         return ScreenResult(
             "deliver",
             receipt=allow_receipt,
@@ -902,6 +923,136 @@ def _prior_receipt(monkeypatch, verdict: str, body: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text_only", [False, True])
+async def test_lost_admit_response_commits_reply_binding_before_recovery_wake(
+    monkeypatch, tmp_path, text_only
+) -> None:
+    """A server commit with a lost response must not emit an unreserved card."""
+    from local_operator.team_bridge.store import Store
+
+    hub = Hub([_png()])
+    owner, ref, screened, cards = _connector_rig(
+        monkeypatch, tmp_path, hub, verdict="deliver", preferred=True
+    )
+    store = Store(tmp_path)
+    real_admit = HubWire.conversation_admit
+    if text_only:
+        original_screen_images = conversation_mod._screen_images
+        first_fetch = True
+
+        async def initially_withheld(*args, **kwargs):
+            nonlocal first_fetch
+            if first_fetch:
+                first_fetch = False
+                raise att.AttachmentRejected("unverified")
+            return await original_screen_images(*args, **kwargs)
+
+        monkeypatch.setattr(conversation_mod, "_screen_images", initially_withheld)
+
+    async def lost_response(self, *args, **kwargs):
+        await real_admit(self, *args, **kwargs)
+        if text_only:
+            self.hub.admission.pop("attachments_hash", None)
+        raise RuntimeError("controlled lost admission response")
+
+    monkeypatch.setattr(HubWire, "conversation_admit", lost_response)
+    first = await _deliver(owner, ref, tmp_path, hub)
+    assert first["action"] == "hold"
+    receipt = store.receipt_for_message(owner, MID)
+    assert receipt is not None and receipt["verdict"] == "allow"
+    assert store.body_reservation(owner, CID, MID) is None
+    assert cards == []
+
+    real_wake = conversation_mod.deliver_wake
+    bindings_at_emission = []
+
+    async def verify_committed_binding(*args, **kwargs):
+        # A separate read-only connection observes the commit BEFORE emission.
+        bindings_at_emission.append(
+            store.admitted_inbound_reservation_readonly(
+                owner, in_reply_to_message_id=MID, designated_session="sess_a"
+            )
+        )
+        return await real_wake(*args, **kwargs)
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", verify_committed_binding)
+    recovered = await _deliver(owner, ref, tmp_path, hub)
+    assert recovered["action"] == "delivered"
+    assert bindings_at_emission == [{"conversation_id": CID, "message_id": MID}]
+    assert len(cards) == 1
+    reservation = store.body_reservation(owner, CID, MID)
+    assert reservation is not None and reservation["state"] == "pending"
+    assert (await _deliver(owner, ref, tmp_path, hub))["action"] == "duplicate"
+    assert len(cards) == len(screened) == len(hub.admits) == 1
+
+    from local_operator.team_bridge.tool import execute_bridge
+    from tests.unit.team_bridge.test_channel_tool import RecordingClient
+
+    # Exercise the real channel_post binding guard, stubbing only remote admission
+    # and the send transport. Keep the canonical destination and exact reply id.
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, **kwargs: None)
+    client = RecordingClient()
+    runtime = BridgeRuntime(
+        cast(TeamBridgeClient, client), tmp_path, owner.tenant_id, owner, "sess_a"
+    )
+    reply = await execute_bridge(
+        runtime,
+        {
+            "op": "channel_post",
+            "channel_id": CID,
+            "body": "controlled reply",
+            "in_reply_to_message_id": MID,
+        },
+    )
+    assert reply["ok"], reply
+    assert len(client.calls) == 1
+    assert client.calls[0]["conversation_id"] == CID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "damage",
+    ["old_generation", "rotated_generation", "wrong_body", "wrong_attachments", "rejected_text"],
+)
+async def test_recovery_cannot_turn_unbound_evidence_into_a_reply_receipt(
+    monkeypatch, tmp_path, damage
+) -> None:
+    import sqlite3
+
+    from local_operator.team_bridge.store import Store, state_db_path
+
+    hub = Hub([_png()])
+    owner, ref, screened, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    _persist_receipt(tmp_path, _receipt("allow", hub.body), MID, preferred=True)
+    hub.admission = {"verdict": "allow", "attachments_hash": hub.attachments_hash}
+    if damage == "old_generation":
+        with sqlite3.connect(state_db_path(tmp_path)) as conn:
+            conn.execute("UPDATE screening_receipts SET creator_generation = 0")
+    elif damage == "rotated_generation":
+        with sqlite3.connect(state_db_path(tmp_path)) as conn:
+            conn.execute("UPDATE enrollments SET enrollment_generation = 2")
+    elif damage == "wrong_body":
+        _persist_receipt(tmp_path, _receipt("allow", "different bytes"), MID, preferred=True)
+    elif damage == "wrong_attachments":
+        hub.admission["attachments_hash"] = "0" * 64
+        # No admitted text either: image-screen 404 alone proves neither grant.
+        hub.admission["verdict"] = "reject"
+    else:
+        hub.admission = {"verdict": "reject"}
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert out["action"] == "hold"
+    assert cards == screened == hub.admits == []
+    store = Store(tmp_path)
+    assert store.body_reservation(owner, CID, MID) is None
+    assert (
+        store.admitted_inbound_reservation_readonly(
+            owner, in_reply_to_message_id=MID, designated_session="sess_a"
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_retry_after_image_admit_delivers_the_card_without_rescreening(
     monkeypatch, tmp_path
 ) -> None:
@@ -926,19 +1077,19 @@ async def test_retry_after_image_admit_delivers_the_card_without_rescreening(
     monkeypatch.setattr(conversation_mod, "deliver_wake", flaky)
     first = await _deliver(owner, ref, tmp_path, hub)
     assert first["action"] == "hold" and len(hub.admits) == 1 and cards == []
-    _prior_receipt(monkeypatch, "allow", hub.body)
     hub.fetches.clear()
     outcomes = [await _deliver(owner, ref, tmp_path, hub) for _ in range(3)]
     assert outcomes[0]["action"] == "delivered"
     assert outcomes[0]["recovered"] == "images_admitted"
-    assert len(cards) == 3 and "attachments: 2 image(s)" in cards[0]
+    assert [out["action"] for out in outcomes] == ["delivered", "duplicate", "duplicate"]
+    assert len(cards) == 1 and "attachments: 2 image(s)" in cards[0]
     assert all(purpose != "screen" for _, purpose in hub.fetches)
     assert len(hub.admits) == 1  # never re-admitted, never re-screened
     assert len(screened) == 1
 
 
 @pytest.mark.asyncio
-async def test_retry_with_no_local_receipt_trusts_only_the_hub_admission(
+async def test_retry_with_no_local_receipt_never_mints_a_reply_binding(
     monkeypatch, tmp_path
 ) -> None:
     hub = Hub([_png()])
@@ -947,7 +1098,11 @@ async def test_retry_with_no_local_receipt_trusts_only_the_hub_admission(
     # lost, and the local store was reset since).
     hub.admission = {"verdict": "allow", "attachments_hash": hub.attachments_hash}
     out = await _deliver(owner, ref, tmp_path, hub)
-    assert out["action"] == "delivered" and out["recovered"] == "images_admitted"
+    assert out["action"] == "hold" and out["code"] == "receipt_unavailable"
+    assert cards == []
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).body_reservation(owner, CID, MID) is None
     assert [p for _, p in hub.fetches] == ["screen", "context"]
     # A hub REJECT or text-only admission with no local receipt (R2-04): the
     # metadata-only card goes out — no body, no image, nothing re-screened —
@@ -1344,3 +1499,157 @@ async def test_unsent_fallback_image_allow_never_bypasses_rescreening(
         again = await _deliver(owner, ref, tmp_path, hub)
         assert again["action"] == "hold" and len(calls) == 2
         assert hub.admits == [] and cards == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof", ["same_images", "changed_images", "text_only", "text_admitted"])
+async def test_recovery_requires_real_local_envelope(monkeypatch, tmp_path, proof) -> None:
+    """Remote grants cannot upgrade a real local text/different-image receipt."""
+    from local_operator.team_bridge.store import Store
+    from tests.unit.team_bridge.test_screening import _run
+
+    hub = Hub([_png()])
+    owner, ref, screens, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    access = SimpleNamespace(credential_id=1)
+    wire = HubWire(hub)
+    fetched = await conversation_mod._fetch_body(wire, ref, owner, access)
+    assert fetched is not None
+    assert fetched.attachments is not None
+    item = conversation_mod._screening_item(
+        owner=owner,
+        conversation_id=CID,
+        message_id=MID,
+        body=hub.body,
+        body_hash=fetched.body_hash,
+        sender=conversation_mod._allocation_sender(fetched.display),
+        **conversation_mod.screening_routing(ref, fetched.display),
+    )
+    if proof in ("same_images", "changed_images"):
+        images = await conversation_mod._screen_images(
+            wire, ref, owner, access, fetched.attachments
+        )
+        item["attachments"] = screening.ScreeningAttachments(
+            attachments_hash=hub.attachments_hash, images=tuple(images)
+        )
+    result = await asyncio.to_thread(_run, owner, tmp_path, ImageRunner(), item=item)
+    assert result.disposition == "deliver" and result.receipt is not None
+    store = Store(tmp_path)
+    # Supported write-once ACK intent preserves the genuine non-preferred receipt.
+    store.record_ack_intent(owner, MID, "read", result.receipt, "recovery-proof")
+    before = store.receipt_for_message(owner, MID)
+    if proof == "changed_images":
+        hub.images = [_png((2, 3, 4))]
+        hub.descriptors = [_descriptor(hub.images[0], attachment_id=AID)]
+    hub.admission = {"verdict": "allow"}
+    if proof != "text_admitted":
+        hub.admission["attachments_hash"] = hub.attachments_hash
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert store.receipt_for_message(owner, MID) == before
+    binding = store.admitted_inbound_reservation_readonly(
+        owner, in_reply_to_message_id=MID, designated_session="sess_a"
+    )
+    if proof in ("same_images", "text_admitted"):
+        assert out["action"] == "delivered" and binding is not None
+        assert len(cards) == 1
+    else:
+        assert out["action"] == "hold" and binding is None
+        assert store.body_reservation(owner, CID, MID) is None
+        assert cards == []
+    assert screens == [] and hub.admits == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["context", "history"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["disabled", "credential", "generation", "revoked", "session", "consent", "cancelled"],
+)
+async def test_recovery_rechecks_producer_fence_after_remote_proof(
+    monkeypatch, tmp_path, boundary, mutation
+) -> None:
+    """Authority changes/cancellation during either await forbid a new reservation."""
+    from local_operator.team_bridge.store import Store
+
+    hub = Hub([_png()])
+    owner, ref, screens, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    # Seed real proof through the same screening/ACK spine as the continuity test.
+    from tests.unit.team_bridge.test_screening import _run
+
+    access = SimpleNamespace(credential_id=1)
+    wire = HubWire(hub)
+    fetched = await conversation_mod._fetch_body(wire, ref, owner, access)
+    assert fetched is not None
+    assert fetched.attachments is not None
+    item = conversation_mod._screening_item(
+        owner=owner,
+        conversation_id=CID,
+        message_id=MID,
+        body=hub.body,
+        body_hash=fetched.body_hash,
+        sender=conversation_mod._allocation_sender(fetched.display),
+        **conversation_mod.screening_routing(ref, fetched.display),
+    )
+    if boundary == "context":
+        images = await conversation_mod._screen_images(
+            wire, ref, owner, access, fetched.attachments
+        )
+        item["attachments"] = screening.ScreeningAttachments(
+            attachments_hash=hub.attachments_hash, images=tuple(images)
+        )
+    result = await asyncio.to_thread(_run, owner, tmp_path, ImageRunner(), item=item)
+    assert result.receipt is not None and result.disposition == "deliver"
+    store = Store(tmp_path)
+    store.record_ack_intent(owner, MID, "read", result.receipt, "recovery-fence")
+    hub.admission = {"verdict": "allow"}
+
+    def change_authority(current_access):
+        import sqlite3
+
+        from local_operator.team_bridge.store import state_db_path
+
+        if mutation == "cancelled":
+            raise asyncio.CancelledError
+        if mutation == "disabled":
+            (tmp_path / "config.yml").write_text(
+                json.dumps({"values": {"team_bridge": {"enabled": False}}})
+            )
+        elif mutation == "credential":
+            current_access.credential_id = 2
+        else:
+            change = {
+                "generation": "enrollment_generation=2",
+                "revoked": "state='retired'",
+                "session": "designated_session='sess_b'",
+                "consent": "consent_version=''",
+            }[mutation]
+            with sqlite3.connect(state_db_path(tmp_path)) as conn:
+                conn.execute("UPDATE enrollments SET " + change)
+
+    if boundary == "context":
+        hub.admission["attachments_hash"] = hub.attachments_hash
+        original_fetch = HubWire.fetch_attachment
+
+        async def fetch(self, *args, **kwargs):
+            out = await original_fetch(self, *args, **kwargs)
+            if kwargs.get("purpose") == "context":
+                change_authority(kwargs["access"])
+            return out
+
+        monkeypatch.setattr(HubWire, "fetch_attachment", fetch)
+    else:
+        original_history = HubWire.conversation_messages
+
+        async def history(self, *args, **kwargs):
+            out = await original_history(self, *args, **kwargs)
+            change_authority(kwargs["access"])
+            return out
+
+        monkeypatch.setattr(HubWire, "conversation_messages", history)
+    if mutation == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await _deliver(owner, ref, tmp_path, hub)
+    else:
+        out = await _deliver(owner, ref, tmp_path, hub)
+        assert out["action"] == "hold", out
+    assert store.body_reservation(owner, CID, MID) is None
+    assert cards == [] and screens == [] and hub.admits == []
