@@ -49,14 +49,28 @@ being unable to see or change effort was the reported problem — but a level is
 worth choosing once and leaving, and that is why nothing here nudges the user to
 cycle mid-task.
 
+- Google Gemini 3 and later. ``generateContent`` takes a named tier as
+  ``generationConfig.thinkingConfig.thinkingLevel`` (an earlier revision of this
+  docstring said the named tiers were Interactions-API only; that is false).
+  Probed live on Vertex 2026-11-19: ``gemini-4-neon`` accepts
+  low|medium|high|xhigh and answers 400 ``Thinking level is unsupported:
+  THINKING_LEVEL_MINIMAL`` for ``minimal``; ``gemini-3.8-flash`` accepts
+  low|medium|high and refuses both ``minimal`` and ``xhigh``. The ladders
+  differ per model, so the LIVE source is models.dev's
+  ``reasoning_options`` (projected by ``model.prices``, which carried exactly
+  those two ladders on the probe date), and this table holds only the
+  conservative rung set every probed Gemini 3+ model accepted, so a model too
+  new for the catalogue still gets a working dial. No default is seeded: the
+  model's own default applies until the user picks. A rung a model refuses is
+  shed by ``GoogleClient`` (one retry without the key), never a failed turn.
+
 Families NOT here offer nothing, which is the honest answer rather than a gap:
 
-- Google. Our ``GoogleClient`` speaks ``generateContent`` with a
-  ``generationConfig``, and the named ``thinking_level`` tiers Gemini documents
-  belong to the Interactions API; the shipped 2.5-series registry rows express
-  thinking as a token budget instead. Offering "medium" with no name-to-wire
-  mapping would put a level on the band that never reaches the request, so
-  Gemini reports ``reasoning`` and ``/effort`` says there is nothing to pick.
+- Google Gemini 2.x. Those models express thinking as a token budget
+  (``thinkingBudget``), not a named tier, and this client sends no budget, so
+  offering "medium" would put a level on the band that never reaches the
+  request. They report ``reasoning`` and ``/effort`` says there is nothing to
+  pick.
 - DeepSeek's reasoner, xAI. They reason at a depth the API does not expose as
   a named tier, or expose it under a key we have not verified against a live
   request. An unverified key is a 400 on a turn the user did not ask to risk.
@@ -282,6 +296,13 @@ _OPENAI_O_SERIES = EffortSupport(("low", "medium", "high"))
 # every turn nobody touched the dial.
 _KIMI_K3 = EffortSupport(("low", "high", "max"))
 
+# Gemini 3+ (see the Google bullet in the module docstring for the probes).
+# The INTERSECTION of the probed ladders, not the union: ``xhigh`` is a 400 on
+# gemini-3.8-flash, so offering it family-wide would break one model to serve
+# another. Richer ladders (gemini-4-neon's ``xhigh``) arrive live from
+# models.dev, which outranks this offline fallback in ``build_model_spec``.
+_GEMINI_3_PLUS = EffortSupport(("low", "medium", "high"))
+
 #: First match wins, so the narrower Anthropic generations are listed before the
 #: forward-reading ``5 and above`` arm. Patterns are ``search``ed against the
 #: lowercased id so an aggregator prefix (``anthropic/claude-opus-5``,
@@ -356,6 +377,14 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
         re.compile(r"(?:^|/)(?:kimi-for-coding|(?:kimi-)?k3(?:[.:-]|$))"),
         _KIMI_K3,
     ),
+    # Gemini generation 3 and above, forward-reading so ``gemini-5-*`` works the
+    # day it ships. ``(?:^|/)`` anchors on the id (bare, ``models/``-prefixed,
+    # or an aggregator's ``google/``, matching how the other arms treat a
+    # vendor prefix). ``[1-9]\d{1,2}`` admits two- and three-digit generations
+    # and ``(?!\d)`` keeps a run of digits from being read piecemeal; Gemini
+    # 2.x (``gemini-2.5-pro``) is excluded on purpose: it takes
+    # ``thinkingBudget``, which this client does not send.
+    (re.compile(r"(?:^|/)gemini-(?:[3-9]|[1-9]\d{1,2})(?!\d)"), _GEMINI_3_PLUS),
 )
 
 

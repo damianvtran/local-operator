@@ -999,6 +999,16 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # stops offering `none`/`low` on the OpenRouter route, because the router
     # says those rungs 400 there. A rung we cannot send is not a rung.
     listing_levels = _listing_effort(canonical, model_name)
+    if listing_levels is None:
+        # Google's listings state no thinking ladder, and a registry-complete
+        # Gemini row never reaches discovery (so the memo above stays cold for
+        # it). models.dev's projection is the live second source: it is what
+        # lets a model released after this build offer its real ladder
+        # (``gemini-4-neon``'s ``xhigh``) instead of the table's conservative
+        # family rung set. Same precedence as a listing ladder — it outranks
+        # the table — and gated to the providers whose client sends the level
+        # (``prices.CATALOGUE_EFFORT_PROVIDERS``).
+        listing_levels = _catalogue_effort(canonical, model_name)
     # The native endpoint documents none/low/high/max, high by default. Scope
     # this to the route: aggregators own their own effort gate (and defaults).
     # Both the ladder and the echo rule come from ``model.configure``'s own
@@ -3110,6 +3120,44 @@ def _listing_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
     try:
         bucket = int(time.time() // DEFAULT_TTL_S)
         return _effort_memo.get((provider, model_id, bucket))
+    except Exception:  # noqa: BLE001 — a display dial is never worth a failed start
+        return None
+
+
+#: ``(provider, model_id, ttl bucket) -> ladder or None`` for
+#: :func:`_catalogue_effort`. Separate from :data:`_effort_memo` because it must
+#: remember a MISS too (``None`` there reads as "never looked"), or every repaint
+#: of a model models.dev does not list would re-read the ~140 KB document.
+_catalogue_effort_memo: dict[tuple[str, str, int], tuple[str, ...] | None] = {}
+
+
+def _catalogue_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
+    """models.dev's ladder for ``provider/model_id``, memoised per TTL bucket.
+
+    Total and non-raising like :func:`_listing_effort`, and DISK ONLY
+    (``prices.catalogue_effort_ladder`` never fetches): ``build_model_spec``
+    runs on paint paths. A provider outside ``CATALOGUE_EFFORT_PROVIDERS``
+    returns ``None`` before any read, so no other provider's spec changes.
+    """
+    try:
+        from local_operator.model.prices import (
+            CATALOGUE_EFFORT_PROVIDERS,
+            catalogue_effort_ladder,
+        )
+
+        if provider not in CATALOGUE_EFFORT_PROVIDERS:
+            return None
+        bucket = int(time.time() // DEFAULT_TTL_S)
+        key = (provider, model_id, bucket)
+        if key in _catalogue_effort_memo:
+            return _catalogue_effort_memo[key]
+        ladder = catalogue_effort_ladder(provider, model_id)
+        if len(_catalogue_effort_memo) >= _EFFORT_MEMO_MAX:
+            # Same leak ceiling as the listing memo; a dropped entry costs one
+            # disk read on the next spec build.
+            _catalogue_effort_memo.clear()
+        _catalogue_effort_memo[key] = ladder
+        return ladder
     except Exception:  # noqa: BLE001 — a display dial is never worth a failed start
         return None
 

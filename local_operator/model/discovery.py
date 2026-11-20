@@ -2438,6 +2438,35 @@ def cached_available_models(
     config_dir: Path | None = None,
     allow_shared: bool = True,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
+    """:func:`_cached_available_models` with models.dev effort ladders applied.
+
+    The disk-only twin of :func:`available_models` must project the same
+    ladders, or a picker's cached first frame would show no effort column for a
+    Gemini row that its live repaint then fills in (see
+    :func:`_with_catalogue_efforts`; the projection is a disk read too).
+    """
+    rows, status = _cached_available_models(
+        provider_id,
+        account_id=account_id,
+        cache_dir=cache_dir,
+        base_url=base_url,
+        values=values,
+        config_dir=config_dir,
+        allow_shared=allow_shared,
+    )
+    return _with_catalogue_efforts(provider_id, rows, cache_dir), status
+
+
+def _cached_available_models(
+    provider_id: str,
+    *,
+    account_id: str | None = None,
+    cache_dir: Path | None = None,
+    base_url: str | None = None,
+    values: Mapping[str, Any] | None = None,
+    config_dir: Path | None = None,
+    allow_shared: bool = True,
+) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model cached on disk for ``provider_id`` with zero network calls.
 
     Synchronous, non-blocking, and I/O-isolated: uses :func:`peek_listing` so it
@@ -2683,7 +2712,7 @@ def available_models(
             for model_id, info in rows.items()
         }
     try:
-        return _available_models(
+        listed, status = _available_models(
             provider_id,
             rows,
             api_key=api_key,
@@ -2701,7 +2730,32 @@ def available_models(
         # means a cache or coding fault. Even then the picker has to open: the
         # registry alone is a usable answer, a traceback is not.
         logger.debug("falling back to the static registry for %s: %s", provider_id, exc)
-        return merge_models(rows, None), "static"
+        listed, status = merge_models(rows, None), "static"
+    return _with_catalogue_efforts(provider_id, listed, cache_dir), status
+
+
+def _with_catalogue_efforts(
+    provider_id: str, rows: list[DiscoveredModel], cache_dir: Path | None
+) -> list[DiscoveredModel]:
+    """``rows`` with silent effort ladders filled from models.dev, never raising.
+
+    WHY HERE: every listing consumer (the TUI/desktop picker's
+    ``live_catalogue``, the ``/v1/models`` route, the resolver's
+    ``info_from_discovered_model`` memo warm) reads through this module, so one
+    projection point keeps them agreeing. It is what makes a Gemini model
+    released after this build show its real thinking ladder without a release:
+    neither Google listing states one (see ``prices.CATALOGUE_EFFORT_PROVIDERS``
+    for the gate and why it is narrow). Applied to static fallback rows too, so
+    an offline registry row still gets the last-known catalogue ladder. Lazy
+    import: ``model.prices`` imports this module.
+    """
+    try:
+        from local_operator.model.prices import with_catalogue_efforts
+
+        return with_catalogue_efforts(provider_id, rows, cache_dir=cache_dir)
+    except Exception as exc:  # noqa: BLE001 - a display dial is never worth a listing
+        logger.debug("models.dev effort ladders unavailable for %s: %s", provider_id, exc)
+        return rows
 
 
 def _available_models(
