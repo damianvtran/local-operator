@@ -1600,6 +1600,11 @@ _DELIVERY_HOLD_CODES = frozenset(
         # body reservation failures (conversation._record_body_reservation)
         "receipt_unavailable",
         "reservation_refused",
+        # card hand-off identity (Store.bind_card_handoff / _deliver_card)
+        "card_unconfirmed",
+        "card_provenance_unknown",
+        "card_handoff_split",
+        "card_binding_mismatch",
         # the loop's own defaults (connector/loop.py)
         "hold",
         "retry_failed",
@@ -1817,6 +1822,10 @@ _HOLD_CLASS_DELIVERY_PENDING = frozenset(
         "envelope_refused",
         "receipt_unavailable",
         "reservation_refused",
+        # card hand-off identity (conversation._deliver_card, PR #3478 QA r1): a
+        # replayed id still IN FLIGHT at the receiver, or no answer. The SAME id
+        # is re-sent on the retry backoff, so this is transient, never review.
+        "card_unconfirmed",
         "invalid_body_reservation",
         "credential_changed",
         "consent_revoked",
@@ -2156,6 +2165,12 @@ _HOLD_UPSERT_CLASSED = _HOLD_UPSERT + ", failure_class = excluded.failure_class"
 #: will never be, so a card now would wake the agent for nothing; record it
 #: and stop.
 CARD_OWED = "owed"
+
+#: :meth:`Store.card_handoff_bindings` answers for a message with no reservation
+#: row, and for a legacy row whose ``card_handoff_id`` is NULL (written before
+#: the hand-off identity existed). Sentinels outside the ``peer-`` grammar.
+CARD_HANDOFF_UNRESERVED = "<unreserved>"
+CARD_HANDOFF_LEGACY = "<legacy>"
 CARD_POSTED = "posted"
 CARD_SETTLED = "settled"
 
@@ -3700,13 +3715,19 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_card_handoff_column(conn)
+            # ``card_handoff_id = ''`` is the PROVENANCE mark: this row was
+            # written by a build that binds a card identity before dispatch, so
+            # an unbound value later means "no card attempted yet". A NULL can
+            # only come from an older writer and is held as unknown (see
+            # :meth:`card_handoff_bindings`).
             cursor = conn.execute(
                 "INSERT INTO body_reservations (owner_key, account_id, tenant_id, "
                 "endpoint_id, credential_id, canonical_base_url, enrollment_generation, "
                 "conversation_id, message_id, conversation_seq, mention, body_sha256, "
                 "screening_fingerprint, policy_epoch, consent_version, designated_session, "
-                "state, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?) "
+                "state, created_at, updated_at, card_handoff_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'') "
                 "ON CONFLICT(owner_key, conversation_id, message_id) DO NOTHING",
                 (
                     _owner_key(owner),
@@ -3847,6 +3868,30 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    @staticmethod
+    def _ensure_card_handoff_column(conn: sqlite3.Connection) -> None:
+        """Add ``card_handoff_id`` to a carrying table that predates it.
+
+        WHY (PR #3478 QA r1): the card's peer message id is the ONLY thing the
+        receiver can deduplicate a re-posted card on, and it used to be minted
+        afresh per hand-off, so a failed posted-marker write followed by a replay
+        produced a second card. The id is now bound to the row BEFORE dispatch
+        and re-used by every replay; rows sharing one id are the exact
+        membership of the card that carried it (a coalesced group's membership
+        is persisted, never recomputed).
+
+        Values: ``NULL`` = legacy row (written before this column; its earlier
+        card, if any, went out under an id nothing recorded); ``''`` = bound to
+        nothing yet; ``peer-<32 hex>`` = the hand-off identity. A REFERENCE
+        only — no body, label or digest of content. ADDITIVE AND NULLABLE like
+        :meth:`_ensure_card_posted_column`, so no schema stamp moves and an older
+        binary never names it.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "card_handoff_id" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN card_handoff_id TEXT")
 
     @staticmethod
     def _ensure_receipt_rendered_template_column(conn: sqlite3.Connection) -> None:
@@ -4121,6 +4166,144 @@ class Store:
             if row["state"] == "claimed":
                 return CARD_POSTED
             return CARD_OWED if row["state"] == "pending" else CARD_SETTLED
+
+    def card_handoff_bindings(
+        self, owner: OwnerSnapshot, conversation_id: str, message_ids: list[str]
+    ) -> dict[str, str | None]:
+        """Each message's card hand-off binding, for partitioning one flush.
+
+        Answers, per id: :data:`CARD_HANDOFF_UNRESERVED` (no row — e.g. the
+        unadmitted recovery card, which has never had a reservation),
+        :data:`CARD_HANDOFF_LEGACY` (NULL: provenance unknown), ``''`` (bound to
+        nothing yet) or the bound ``peer-`` id. Live-owner fenced: a fenced
+        owner reads every id as unreserved and the bind below refuses it.
+        Takes the write lock for the guarded additive ``ALTER`` (as
+        :meth:`body_card_status` does).
+        """
+
+        answer: dict[str, str | None] = {mid: CARD_HANDOFF_UNRESERVED for mid in message_ids}
+        with self._connect() as conn:
+            self._init(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return answer
+            self._begin_write(conn)
+            self._ensure_card_handoff_column(conn)
+            for mid in message_ids:
+                row = conn.execute(
+                    "SELECT card_handoff_id FROM body_reservations WHERE owner_key = ? "
+                    "AND conversation_id = ? AND message_id = ?",
+                    (_owner_key(owner), conversation_id, mid),
+                ).fetchone()
+                if row is not None:
+                    value = row["card_handoff_id"]
+                    answer[mid] = CARD_HANDOFF_LEGACY if value is None else str(value)
+        return answer
+
+    def bind_card_handoff(
+        self,
+        owner: OwnerSnapshot,
+        conversation_id: str,
+        message_ids: list[str],
+        *,
+        designated_session: str,
+        minted_id: str,
+    ) -> tuple[str, bool]:
+        """Bind ONE card's identity to its exact membership, before dispatch.
+
+        Returns ``(handoff_id, replay)``. All rows unbound (``''``) → every row
+        takes ``minted_id`` in this one transaction and ``replay`` is False. All
+        rows already bound to the SAME id → that id, ``replay`` True; the
+        membership is whatever rows carry it, so a replay can never re-label a
+        different logical card. Anything else REFUSES with a closed code and
+        nothing is dispatched:
+
+        * ``card_provenance_unknown`` — a legacy (NULL) row: its earlier card,
+          if any, went out under an id nothing recorded, so a new id proves
+          nothing and no automatic replay may run on its behalf;
+        * ``card_handoff_split`` — mixed bindings (the caller partitions first);
+        * ``card_binding_mismatch`` — a row missing, not this owner's live
+          credential/generation, not designated to ``designated_session``, no
+          longer ``pending``, or already posted. The CURRENT bindings are checked
+          here, at bind time, not trusted from when the card was buffered.
+
+        ``minted_id`` must already be a valid ``peer-<32 hex>``; the store does
+        not import the transport, so it enforces the same closed grammar itself.
+        """
+
+        if not message_ids or re.fullmatch(r"peer-[0-9a-f]{32}", minted_id or "") is None:
+            raise StoreRefused("card_binding_mismatch", "handoff id")
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_card_posted_column(conn)
+            self._ensure_card_handoff_column(conn)
+            bound: set[str | None] = set()
+            for mid in message_ids:
+                row = conn.execute(
+                    "SELECT credential_id, enrollment_generation, designated_session, state, "
+                    "card_posted_at, card_handoff_id FROM body_reservations WHERE "
+                    "owner_key = ? AND conversation_id = ? AND message_id = ?",
+                    (_owner_key(owner), conversation_id, mid),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["credential_id"] != owner.credential_id
+                    or row["enrollment_generation"] != owner.enrollment_generation
+                    or row["designated_session"] != designated_session
+                    or row["state"] != "pending"
+                    or row["card_posted_at"] is not None
+                ):
+                    raise StoreRefused("card_binding_mismatch")
+                if row["card_handoff_id"] is None:
+                    raise StoreRefused("card_provenance_unknown")
+                bound.add(str(row["card_handoff_id"]))
+            if len(bound) != 1:
+                raise StoreRefused("card_handoff_split")
+            (current,) = bound
+            if current:
+                return current, True
+            placeholders = ",".join("?" for _ in message_ids)
+            conn.execute(
+                "UPDATE body_reservations SET card_handoff_id = ? WHERE owner_key = ? "
+                f"AND conversation_id = ? AND message_id IN ({placeholders}) "
+                "AND card_handoff_id = ''",
+                (minted_id, _owner_key(owner), conversation_id, *message_ids),
+            )
+            return minted_id, False
+
+    def narrow_card_handoff(
+        self,
+        owner: OwnerSnapshot,
+        conversation_id: str,
+        handoff_id: str,
+        delivered: list[str],
+    ) -> int:
+        """Unbind members a FRESH accept of a replayed id did not carry.
+
+        Called only when a replay under ``handoff_id`` was accepted as NEW by the
+        receiver: that proves the id was never committed before, so no earlier
+        card under it reached anyone, and the id now names exactly the
+        ``delivered`` subset. Any other still-owed member bound to it would
+        otherwise be swallowed as a "duplicate" on its own replay (a lost wake),
+        so it returns to ``''`` and gets its own id next time. Posted rows are
+        never touched. Returns the number of rows unbound.
+        """
+
+        placeholders = ",".join("?" for _ in delivered) or "''"
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_card_posted_column(conn)
+            self._ensure_card_handoff_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET card_handoff_id = '' WHERE owner_key = ? "
+                "AND conversation_id = ? AND card_handoff_id = ? AND card_posted_at IS NULL "
+                f"AND message_id NOT IN ({placeholders})",
+                (_owner_key(owner), conversation_id, handoff_id, *delivered),
+            )
+            return int(cursor.rowcount)
 
     def mark_body_card_posted(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float

@@ -929,9 +929,153 @@ async def _deliver_card(
     session_id: str,
     config_dir: Path,
 ) -> str:
-    """Hand the metadata card to the designated session (shipped mailbox wake)."""
+    """Hand the metadata card to the designated session (shipped mailbox wake).
+
+    IDEMPOTENT HAND-OFF (PR #3478 QA r1, comments 6663928534 / 6663979598). The
+    peer accepted a card, ``mark_body_card_posted`` then failed, and a forced
+    replay posted a SECOND card: each hand-off minted a fresh peer message id,
+    so the receiver's existing duplicate gate had nothing to match. The card's
+    id is now bound to its reservation rows BEFORE dispatch
+    (:meth:`Store.bind_card_handoff`) and every replay re-sends that same id on
+    the EXISTING ``message_id`` field — no new wire field, operation, retry
+    policy or transport. See :func:`_card_handoff_settled` for what a replay's
+    answer may and may not prove.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    from .wake import CARD_HANDOFF, CardHandoff
 
     card = build_conversation_card(metadata)
+    members = list(metadata.coalesced_message_ids or (metadata.message_id,))
+    store = Store(config_dir)
+    bound = _bind_card_handoff(store, owner, metadata.conversation_id, members, session_id)
+    handoff = CardHandoff(bound[0]) if bound is not None else None
+    token = CARD_HANDOFF.set(handoff)
+    try:
+        detail = await _send_card(
+            owner, metadata, card, session_id=session_id, config_dir=config_dir
+        )
+    finally:
+        CARD_HANDOFF.reset(token)
+    if handoff is not None and bound is not None:
+        _card_handoff_settled(
+            store, owner, metadata.conversation_id, members, handoff, replay=bound[1]
+        )
+    return detail
+
+
+def _bind_card_handoff(
+    store: Any, owner: Any, conversation_id: str, members: list[str], session_id: str
+) -> tuple[str, bool] | None:
+    """``(handoff_id, replay)`` for this card, ``None`` for an unreserved card.
+
+    A card with NO reservation row at all (the unadmitted recovery card) keeps
+    the historical minted id: there is no durable row to bind an identity to,
+    so it stays at-least-once exactly as before. A mix of reserved and
+    unreserved members, or of different bindings, is refused before dispatch
+    (the coalescer partitions by binding first, so a mix is drift).
+    """
+
+    from local_operator.mobile.peer_send import mint_peer_message_id
+    from local_operator.team_bridge.store import (
+        CARD_HANDOFF_LEGACY,
+        CARD_HANDOFF_UNRESERVED,
+        StoreRefused,
+    )
+
+    bindings = store.card_handoff_bindings(owner, conversation_id, members)
+    values = set(bindings.values())
+    if values == {CARD_HANDOFF_UNRESERVED}:
+        return None
+    if CARD_HANDOFF_LEGACY in values:
+        # Closed code, never an id: this is the legacy-provenance hold.
+        logger.warning("bridge: card held code=card_provenance_unknown")
+        raise StoreRefused("card_provenance_unknown")
+    if CARD_HANDOFF_UNRESERVED in values:
+        raise StoreRefused("card_handoff_split")
+    return store.bind_card_handoff(
+        owner,
+        conversation_id,
+        members,
+        designated_session=session_id,
+        minted_id=mint_peer_message_id(),
+    )
+
+
+def _card_handoff_settled(
+    store: Any,
+    owner: Any,
+    conversation_id: str,
+    members: list[str],
+    handoff: Any,
+    *,
+    replay: bool,
+) -> None:
+    """Decide what a hand-off's TYPED answer proves; raise to keep it owed.
+
+    First send (``replay`` False): today's semantics, unchanged — delivered,
+    mailbox and unconfirmed all settle the card (a failed one already raised).
+
+    Replay under a bound id — only the receiver's own answer counts, never a
+    transcript body or any other local inference:
+
+    * ``mailbox`` — the receiver answered DUPLICATE+COMMITTED (or its row was
+      found by id on disk): the earlier hand-off landed, so the caller may mark
+      the card posted. No second card exists.
+    * ``delivered`` — accepted as NEW: the id was never committed before, so
+      no earlier card under it reached anyone. The id now names exactly
+      ``members``; any OTHER still-owed row bound to it is released for its own
+      id (:meth:`Store.narrow_card_handoff`) so its replay is not swallowed as a
+      duplicate (a lost wake).
+    * ``unconfirmed`` (in flight at the receiver, queued, or no answer) —
+      truthfully unknown: raise ``card_unconfirmed`` so the reservation stays
+      owed and held. The retry re-sends the SAME id (deduplicated), never a
+      fresh one, so this is not a resend-a-new-card loop.
+
+    No typed outcome (a cold target with no durable history, whose errand
+    carries no id, or a test double): nothing more is known than before, so
+    today's at-least-once behaviour stands — a documented residual.
+    """
+
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        DELIVERY_MAILBOX,
+        DELIVERY_UNCONFIRMED,
+    )
+    from local_operator.team_bridge.store import StoreRefused
+
+    outcome = handoff.outcome
+    if not replay or outcome is None:
+        return
+    state = getattr(outcome, "state", None)
+    if state == DELIVERY_MAILBOX:
+        logger.info("bridge: card replay deduplicated code=card_already_delivered")
+        return
+    if state == DELIVERY_DELIVERED:
+        try:
+            store.narrow_card_handoff(owner, conversation_id, handoff.message_id, members)
+        except StoreRefused:
+            # Second store failure in the same window: the card IS out, so the
+            # caller still records it; a sibling still bound to this id stays a
+            # residual (see the PR's residual list), logged as a closed code.
+            logger.warning("bridge: card handoff unnarrowed code=store_refused")
+        return
+    if state == DELIVERY_UNCONFIRMED:
+        logger.warning("bridge: card replay held code=card_unconfirmed")
+        raise StoreRefused("card_unconfirmed")
+    # Any other state is drift: unknown is never delivered.
+    raise StoreRefused("card_unconfirmed")
+
+
+async def _send_card(
+    owner: Any,
+    metadata: ConversationCardMetadata,
+    card: str,
+    *,
+    session_id: str,
+    config_dir: Path,
+) -> str:
     return await deliver_wake(
         owner,
         card,
