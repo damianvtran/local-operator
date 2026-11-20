@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "tui.settings_view",
+  "history_sha256": "f96c96d2dd0f5b00a977c1e3da0b22f36847a5573311665d461698d69183a55a",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "tui.settings_view",
+      "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+      "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+      "target_sha256": "8572913bd0cab3a7bd52ad1f0f61d460a87535e24492728676edc1a51b8f8318",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "e92f890d1503",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "RU1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 1) of the new tui.settings_view namespace (21 keys), source commit 56781d884f27. Auditor e92f890d1503 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (RU1). Superseded: target_sha256 is the round-1 file; the translator then revised it and a round-2 audit (row sv2) covers the current bytes. Record: i18n/audits/evidence/ru/tui.settings_view/sv1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ru/tui.settings_view/sv1/record.json",
+      "round": "sv1"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.settings_view",
+      "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+      "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+      "target_sha256": "660859830727cca6ab89212b533ecc8178032f2f39aa0d972561b5fac287330a",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "16c480601401",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit (round 2, after the round-1 fixes) of the new tui.settings_view namespace (21 keys), source commit 56781d884f27. Auditor 16c480601401 (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/ru/tui.settings_view/sv2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ru/tui.settings_view/sv2/record.json",
+      "round": "sv2"
+    }
+  ]
+}

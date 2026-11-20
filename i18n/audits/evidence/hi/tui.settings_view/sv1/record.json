@@ -1,0 +1,338 @@
+{
+  "locale": "hi",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "cfdc911af9caf0cd539fb6cc8968d40f53ea94ef2d1b2438315f85cc8e097cc4",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "source": "manager task brief; identity not independently attested"
+  },
+  "auditor": {
+    "agent": "translation-auditor/settings-audit-hi",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "session": "2cb09a81d822",
+    "fallback_used": false
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "findings": [],
+  "keys_read": 21,
+  "source_commit": "56781d884f27cb85551746e9bccf7a3c81a17ab6",
+  "checks": {
+    "parity": "21/21 keys and message_arguments match",
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "plural_samples": [
+      {
+        "count": 0,
+        "rendered": "… 0 और"
+      },
+      {
+        "count": 1,
+        "rendered": "… 1 और"
+      },
+      {
+        "count": 2,
+        "rendered": "… 2 और"
+      },
+      {
+        "count": 5,
+        "rendered": "… 5 और"
+      },
+      {
+        "count": 21,
+        "rendered": "… 21 और"
+      }
+    ],
+    "no_exact_number_selectors": true,
+    "latin": "No unsanctioned Latin in any rendered value after excluding supplied key names and /team; inspected catalogue ICU syntax separately",
+    "bidi_controls": "none; Hindi LTR; Urdu RTL not applicable",
+    "width": "All mandatory maxCells pass. Optional contract_unset = 32 vs cap 23; production widgets/settings_view.py:4467-4470 drops it for contract (22). Both acquire 2-space indent in production; short hint = 20+2 = 22, under 23.",
+    "hint_ladder_cells": [
+      36,
+      29,
+      20
+    ],
+    "provider_real_command": {
+      "rendered": "किसी में लॉग इन नहीं — /login <provider>",
+      "cells": 33
+    },
+    "rendered_frame": "Not captured: render_message and rich.cells.cell_len evidence only, not terminal shaping proof",
+    "scanner_control": "Initial regex stripping ICU placeholders falsely left plural keyword other; discriminating render-based scan passed."
+  },
+  "consistency_citations": [
+    "i18n/style-guides/hi.md:8-18 polite imperatives and ordinary Hindi",
+    "i18n/style-guides/hi.md:22-28 Latin exceptions/Devanagari loans; :32 session; :49-53 plurals; :62-68 width",
+    "i18n/glossary.md:19-30 keep-Latin exceptions; :56 सत्र; :60 एजेंट; :77 टीम",
+    "wire.settings.hosting.label; wire.settings.web_search_providers.label: प्रोवाइडर",
+    "wire.settings.retry_modelfallback.choice.true.description; tui.small.settings_view.hop_row_hint: हॉप",
+    "tui.small.settings_view.chain_row_hint: चेन",
+    "wire.settings.auto_save_conversation.choice.false.description: सहेजें",
+    "wire.settings.shell_environment_mode.help: लॉन्च पर लागू"
+  ],
+  "render_checks": [
+    {
+      "key": "tui.settings_view.editor.contract",
+      "rendered": "enter सहेजें · esc रद्द करें",
+      "cells": 22,
+      "english_cells": 25,
+      "maxCells": null,
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "rendered": "enter सहेजें · esc रद्द · खाली करके हटाएँ",
+      "cells": 32,
+      "english_cells": 42,
+      "maxCells": 23,
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "rendered": "↑↓ सुझाव · tab पूरा करें · enter सहेजें · esc",
+      "cells": 36,
+      "english_cells": 50,
+      "maxCells": null,
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "rendered": "↑↓ देखें · tab पूरा करें · enter सहेजें",
+      "cells": 29,
+      "english_cells": 38,
+      "maxCells": null,
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "rendered": "↑↓ · tab · enter सहेजें",
+      "cells": 20,
+      "english_cells": 22,
+      "maxCells": 23,
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.pane.agents_empty",
+      "rendered": "कोई एजेंट कॉन्फ़िगर नहीं है",
+      "cells": 17,
+      "english_cells": 20,
+      "maxCells": 38,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.pane.empty_hint",
+      "rendered": "/team से सूची देखें और जोड़ें",
+      "cells": 19,
+      "english_cells": 29,
+      "maxCells": 38,
+      "arguments": [
+        [
+          "command",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.pane.more",
+      "rendered": "… 2 और",
+      "cells": 6,
+      "english_cells": 8,
+      "maxCells": 16,
+      "arguments": [
+        [
+          "count",
+          "plural"
+        ],
+        [
+          "shown",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.pane.providers_empty",
+      "rendered": "किसी में लॉग इन नहीं — /team",
+      "cells": 21,
+      "english_cells": 22,
+      "maxCells": 38,
+      "arguments": [
+        [
+          "command",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.pane.providers_header",
+      "rendered": "प्रोवाइडर",
+      "cells": 6,
+      "english_cells": 9,
+      "maxCells": 20,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.pane.tab_agents",
+      "rendered": "एजेंट",
+      "cells": 3,
+      "english_cells": 6,
+      "maxCells": 10,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.pane.tab_teams",
+      "rendered": "टीमें",
+      "cells": 2,
+      "english_cells": 5,
+      "maxCells": 10,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.pane.teams_empty",
+      "rendered": "कोई टीम कॉन्फ़िगर नहीं है",
+      "cells": 16,
+      "english_cells": 19,
+      "maxCells": 38,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.row.add_chain",
+      "rendered": "+ चेन जोड़ें",
+      "cells": 7,
+      "english_cells": 13,
+      "maxCells": null,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.row.add_hop",
+      "rendered": "+ हॉप जोड़ें",
+      "cells": 7,
+      "english_cells": 11,
+      "maxCells": null,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.scope.live",
+      "rendered": "तुरंत",
+      "cells": 3,
+      "english_cells": 4,
+      "maxCells": 14,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.scope.never",
+      "rendered": "कभी नहीं",
+      "cells": 5,
+      "english_cells": 5,
+      "maxCells": 14,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.scope.new_launch",
+      "rendered": "दोबारा लॉन्च पर",
+      "cells": 10,
+      "english_cells": 10,
+      "maxCells": 14,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.scope.new_sessions",
+      "rendered": "नए सत्रों में",
+      "cells": 8,
+      "english_cells": 12,
+      "maxCells": 14,
+      "arguments": []
+    },
+    {
+      "key": "tui.settings_view.section.takes_effect",
+      "rendered": "लागू: तुरंत",
+      "cells": 7,
+      "english_cells": 17,
+      "maxCells": null,
+      "arguments": [
+        [
+          "scope",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "tui.settings_view.too_short",
+      "rendered": "सेटिंग्स के लिए टर्मिनल बहुत छोटा है — इसे ऊँचा करें",
+      "cells": 35,
+      "english_cells": 48,
+      "maxCells": null,
+      "arguments": []
+    }
+  ],
+  "note": "Read all 21 English/target keys and context, compared shipped terminology. No semantic, idiom, register, glossary, placeholder, plural or actionable overflow findings. All translated rendered values shorter than English. No repo edits."
+}

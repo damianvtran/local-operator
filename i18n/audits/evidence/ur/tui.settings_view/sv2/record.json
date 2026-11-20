@@ -1,0 +1,30 @@
+{
+  "locale": "ur",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "c5d1f69979748a0646f6de5fb03bad87f25a0409269c621b61e32a6ac03ba19e",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied in manager task; translation not performed by this auditor."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "session": "8d4b3de6edfe",
+    "date": "2026-11-20",
+    "fallback": "No fallback used.",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "scope": "Round 2 delta only: tui.settings_view.editor.contract; composition with editor.contract_unset, three editor.suggest variants, four scope words and section.takes_effect.",
+    "keys_read": 10,
+    "changed_keys_audited": 1
+  },
+  "status": "passed",
+  "findings": [],
+  "note": "Delta-only approval, not a fresh full-namespace audit. Read source/target/context bytes, locale guide and glossary. All 10 scoped/context keys pass message_arguments parity and render_message. Contract: enter محفوظ · esc منسوخ; 23 rich cells versus English 25, or 25 versus 27 including the two-cell indent. Terse action labels are intelligible without changing address register; محفوظ/منسوخ match the longer respectful imperatives محفوظ کریں/منسوخ کریں. No catalogue bidi controls. contract_unset: 43 cells versus English 42; verified settings_view.py:4443-4470 drops the long form when it does not fit, retaining editor.contract. Scope compositions measure 11/16/18/19 cells; short suggestion 22 cells. No full rendered terminal/RTL shaping claim; known best-effort Urdu stance retained."
+}
