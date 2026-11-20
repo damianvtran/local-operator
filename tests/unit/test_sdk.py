@@ -677,6 +677,8 @@ async def test_spawn_resume_skips_the_warm_step(
         {"goal": "finish"},
         {"approvals": ApprovalPolicy.auto()},
         {"yolo": True, "approvals": ApprovalPolicy.auto()},
+        {"mcp_ready_timeout_s": None},
+        {"mcp_ready_timeout_s": 5.0},
     ],
 )
 async def test_spawn_refuses_state_the_spawn_contract_cannot_deliver(
@@ -1245,6 +1247,36 @@ async def test_spawn_refuses_output_enforcement_with_a_named_remedy(
         )
 
 
+@pytest.mark.parametrize("timeout", [None, 5.0])
+def test_attach_refuses_a_first_prompt_mcp_wait_it_could_never_apply(timeout: Any) -> None:
+    """The wait runs in the OWNER's turn loop; a viewer's value would be inert."""
+    with pytest.raises(SessionSpecError, match="mcp_ready_timeout_s"):
+        sdk._refuse_attach_extras(SessionSpec(resume="abc123def456", mcp_ready_timeout_s=timeout))
+    # The default is what a spec that never mentioned it carries: accepted.
+    sdk._refuse_attach_extras(SessionSpec(resume="abc123def456"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "policy", "bound"),
+    [
+        ({}, "all", 30.0),
+        ({"mcp_ready_timeout_s": 4}, "all", 4.0),
+        ({"mcp_ready_timeout_s": None}, "off", None),
+    ],
+)
+async def test_open_session_hands_the_first_prompt_mcp_wait_to_the_session(
+    scratch: SessionRoots, overrides: dict[str, Any], policy: str, bound: float | None
+) -> None:
+    """Shape only: the SDK sets the session's first-turn MCP policy; the wait
+    itself is the session's gate (``test_declared_mcp_ready.py`` pins it, and
+    ``tests/e2e/test_sdk_first_prompt_mcp_ready_e2e.py`` drives it for real)."""
+    async with sdk.open_session(_mock_spec(**overrides), roots=scratch) as session:
+        session = cast(Any, session)
+        assert session._first_turn_mcp_wait == policy
+        assert session._first_turn_mcp_timeout_s == bound
+
+
 def test_attach_refuses_output_enforcement() -> None:
     """An attach spec that carried enforcement would be inert by construction:
     the viewer never installs owner-side state. Refused, never silently set."""
@@ -1351,6 +1383,9 @@ def sdk4_boundary(tmp_path, monkeypatch):
 
         def set_approval_handler(self, gate):
             state.approval_handler = gate
+
+        def set_first_turn_mcp_wait(self, timeout_s):
+            state.mcp_ready_timeout_s = timeout_s
 
     state.session = Session()
     state.cause = session_factory.HostingNotConfiguredError(_SDK4_OPAQUE)

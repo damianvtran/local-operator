@@ -23,6 +23,7 @@ import pytest
 from local_operator.mcp.manager import McpManager
 from local_operator.session.declared_mcp_ready import (
     DeclaredMcpToolsUnavailable,
+    McpServersNotReady,
     await_named_mcp_servers,
     servers_to_await,
 )
@@ -613,6 +614,8 @@ async def test_a_delegated_child_keeps_exactly_its_tool_set_through_its_first_tu
     manager = EpisodeManager()
     stream = OneShotStream()
     parent = make_session(tmp_path, stream)
+    # An SDK owner: its every-server first-prompt wait must not reach a child.
+    parent.set_first_turn_mcp_wait(30.0)
     attach_manager(parent, manager)
     parent.refresh_tools([*parent._tools, *manager.get_tools()])
     parent.set_tool_inventory(
@@ -629,6 +632,10 @@ async def test_a_delegated_child_keeps_exactly_its_tool_set_through_its_first_tu
 
     # The grant path itself refuses, with the borrowed manager attached.
     assert child.materialize_declared_tools() == ()
+    assert child._first_turn_mcp_wait == "declared", "the SDK policy is never inherited"
+    # Worst case, the policy set on the child anyway: the inherited-reach skip
+    # still wins, so the cold ``pl`` server it would otherwise await is not.
+    child.set_first_turn_mcp_wait(30.0)
 
     await child.prompt("go")
 
@@ -640,3 +647,168 @@ async def test_a_delegated_child_keeps_exactly_its_tool_set_through_its_first_tu
     assert manager.waited == [], "a child waits on nothing it could not receive"
     await child.dispose()
     await parent.dispose()
+
+
+# An SDK owner's first prompt: every configured server (``wait_for_all``)
+# --------------------------------------------------------------------------
+#
+# The undeclared SDK race (``sdk.open_session`` + ``prompt()`` against a 1.5 s
+# stdio fixture: the first request left 0.36 s after ``prompt()`` and the
+# model's ``read mcp://slowfix/search`` answered "Unknown tool"). Real-path
+# proof: ``tests/e2e/test_sdk_first_prompt_mcp_ready_e2e.py``.
+
+
+@pytest.mark.asyncio
+async def test_wait_for_all_holds_for_an_undeclared_slow_server_until_it_lands():
+    settled, elapsed, _ = await _gate(
+        TimedManager({"slow": ("up", 0.3, ["mcp__slow_search"])}),
+        None,
+        wait_for_all=True,
+        timeout_s=5.0,
+    )
+    assert settled is True
+    assert 0.3 <= elapsed < 2.0, f"stops when the server lands, not at the bound: {elapsed:.2f}"
+    # Negative control: the default rule (TUI/exec) waits on nothing undeclared,
+    # which is exactly the race the SDK turns off.
+    _settled, raced, _ = await _gate(
+        TimedManager({"slow": ("up", 0.3, ["mcp__slow_search"])}), None, timeout_s=5.0
+    )
+    assert raced < 0.2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_all_refuses_a_server_still_connecting_at_the_bound():
+    manager = TimedManager({"stuck": ("hangs",), "ok": ("connected", ["mcp__ok_x"])})
+    with pytest.raises(McpServersNotReady) as caught:
+        await _gate(manager, None, wait_for_all=True, timeout_s=0.3)
+    error = caught.value
+    assert error.servers == {"stuck": "connecting"}
+    assert error.connected == ("ok",)
+    assert error.elapsed_s >= 0.3 and error.timeout_s == 0.3
+    assert "first prompt not sent" in str(error)
+    assert "stuck connecting at the 0.3 s bound" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_all_never_holds_for_auth_required_or_disconnected_servers():
+    manager = TimedManager({"oauth": ("disconnected",), "dead": ("disconnected",)})
+    manager.status["oauth"] = "auth-required"
+    settled, elapsed, _ = await _gate(manager, None, wait_for_all=True, timeout_s=10.0)
+    assert settled is True and elapsed < 0.2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_all_neither_spins_nor_refuses_a_server_parked_in_backoff(caplog):
+    # ``connecting`` with no continuation: ``_pending_reconnects``' shape.
+    manager = TimedManager({"parked": ("disconnected",)})
+    manager.status["parked"] = "connecting"
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.declared_mcp_ready"):
+        settled, elapsed, _ = await _gate(manager, None, wait_for_all=True, timeout_s=10.0)
+    assert settled is True and elapsed < 0.5
+    assert "'parked' settled connecting" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_for_all_warns_and_proceeds_for_a_server_that_dies_mid_wait(caplog):
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.declared_mcp_ready"):
+        settled, elapsed, _ = await _gate(
+            TimedManager({"dies": ("dies", 0.2)}), None, wait_for_all=True, timeout_s=10.0
+        )
+    assert settled is True and elapsed < 1.5
+    assert "'dies' settled disconnected" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_for_all_is_cut_short_by_an_abort():
+    deadline = time.monotonic() + 0.2
+    settled, elapsed, _ = await _gate(
+        TimedManager({"stuck": ("hangs",)}),
+        None,
+        wait_for_all=True,
+        timeout_s=10.0,
+        cancelled=lambda: time.monotonic() > deadline,
+    )
+    assert settled is False and elapsed < 1.5
+
+
+class UndeclaredSlowManager(FakeManager):
+    """One undeclared server that connects only once the gate waits on it."""
+
+    def __init__(self, stream) -> None:
+        super().__init__({"bd": {"status": "connecting"}})
+        self._stream = stream
+        self.requests_at_wait: list[int] = []
+
+    def get_tools(self) -> list[Any]:
+        return []
+
+    async def wait_settled(self, timeout_s: float, *, servers=None, first=False) -> bool:
+        self.waited.append((timeout_s, None if servers is None else frozenset(servers)))
+        self.requests_at_wait.append(len(self._stream.requests))
+        await asyncio.sleep(0)
+        self.servers["bd"]["status"] = "connected"
+        return True
+
+
+def _undeclared_session(tmp_path):
+    from local_operator.harness.types import StreamEndEvent
+    from tests.unit.session.test_declared_tool_inventory import (
+        ScriptedStream,
+        make_session,
+    )
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]] * 2)
+    session = make_session(tmp_path, stream, tools=[])
+    manager = UndeclaredSlowManager(stream)
+    setattr(session, "mcp_manager", manager)
+    return session, manager, stream
+
+
+@pytest.mark.asyncio
+async def test_an_sdk_first_prompt_waits_for_an_undeclared_server_before_any_request(tmp_path):
+    session, manager, stream = _undeclared_session(tmp_path)
+    session.set_first_turn_mcp_wait(30.0)
+
+    await session.prompt("go")
+    await session.prompt("again")
+
+    assert _waited_on(manager) == [frozenset({"bd"})], "first prompt only"
+    assert manager.requests_at_wait == [0], "the wait ran before the first request"
+    assert [timeout for timeout, _ in manager.waited] == [0.25], "sliced for Esc"
+    assert stream.requests, "both prompts reached the provider"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_without_the_sdk_policy_an_undeclared_session_waits_on_nothing(tmp_path):
+    # Negative control: the TUI/exec default is unchanged by this policy.
+    session, manager, stream = _undeclared_session(tmp_path)
+    await session.prompt("go")
+    assert manager.waited == [] and stream.requests
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_sdk_opt_out_skips_the_first_turn_wait_even_for_declared_tools(tmp_path):
+    session, manager, stream = _undeclared_session(tmp_path)
+    session.set_tool_inventory(["mcp__bd_search"], unattended=True)
+    session.set_first_turn_mcp_wait(None)
+
+    await session.prompt("go")
+
+    assert manager.waited == [], "an explicit opt-out races discovery by choice"
+    assert stream.requests
+    await session.dispose()
+
+
+@pytest.mark.parametrize("value", [True, -0.5, float("nan"), float("inf"), "30"])
+def test_set_first_turn_mcp_wait_validates_like_wait_for_tools(tmp_path, value):
+    from tests.unit.session.test_declared_tool_inventory import (
+        ScriptedStream,
+        make_session,
+    )
+
+    session = make_session(tmp_path, ScriptedStream([]), tools=[])
+    with pytest.raises(ValueError, match="timeout_s must be a finite number >= 0"):
+        session.set_first_turn_mcp_wait(value)
+    assert session._first_turn_mcp_wait == "declared", "a refusal leaves the policy alone"

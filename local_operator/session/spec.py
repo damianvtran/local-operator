@@ -48,6 +48,7 @@ is the one allowed the function-local heavy imports, and
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field, replace
@@ -527,6 +528,22 @@ class SessionSpec:
     #: ``local_operator.tools.confinement`` for the filesystem mechanism and
     #: its stated limits, and ``open_session`` for the preflight.
     world_root: str | Path | None = None
+    #: How long an in-process owner's FIRST ``prompt()`` waits for MCP servers
+    #: that are still connecting, in seconds; ``None`` opts out. MCP discovery
+    #: is asynchronous (servers past the manager's 250 ms startup gate finish
+    #: on background continuations), so without this wait a first prompt
+    #: raced them and a model calling a slow server's tool read "Tool not
+    #: found" (reproduced against a 1.5 s stdio fixture: the first request
+    #: left 0.36 s after ``prompt()``). The default is the measured first-turn
+    #: bound, ``declared_mcp_ready.DECLARED_MCP_READY_TIMEOUT_S`` (cold stdio
+    #: servers: median 0.68-0.85 s, max 3.48 s, n=12 each); a test pins the two
+    #: equal because this module may not import that one. A server still
+    #: connecting at the bound raises ``McpServersNotReady`` before anything is
+    #: sent; ``auth-required``/failed servers never hold the turn. ``None``
+    #: sends the first prompt without any MCP wait, declared tools included
+    #: (``wait_for_tools`` remains the manual gate). ``open_session(mode="own")``
+    #: only: attach and ``spawn_session`` refuse a non-default value.
+    mcp_ready_timeout_s: float | None = 30.0
 
     def __post_init__(self) -> None:
         if self.agent_name and self.agent_id:
@@ -606,6 +623,20 @@ class SessionSpec:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.world_root_empty()))
+        timeout = self.mcp_ready_timeout_s
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            # The exact technical sentence ``Session.wait_for_tools`` and
+            # ``Session.set_first_turn_mcp_wait`` raise for the same parameter,
+            # prefixed with the field so the caller knows which spec value.
+            raise SessionSpecError(
+                # i18n: ignore technical parameter validation (identifier + bound)
+                "mcp_ready_timeout_s: timeout_s must be a finite number >= 0"
+            )
 
     def to_namespace(self) -> argparse.Namespace:
         """The narrow session-factory namespace, field-for-field as exec builds it.
