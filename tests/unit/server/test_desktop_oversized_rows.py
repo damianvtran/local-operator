@@ -363,13 +363,14 @@ def _text_row(id_: str, ts: float, char: str, count: int) -> TranscriptEntry:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("char", ["ж", "😀"])
+@pytest.mark.parametrize("char", ["ж", "三", "😀"])
 async def test_a_non_latin_snapshot_fits_the_cap_on_the_sse_wire(tmp_path: Path, char: str) -> None:
     """R1-1: the snapshot record the event stream emits, measured through ``_sse_data``.
 
     On 2a397de74 these rows fit the 4 MiB page bound in UTF-8 bytes, and the
     SSE record (``json.dumps`` escapes non-ASCII: 6 B per 2-byte character,
-    12 B per emoji) was ~3x that — over the UI's 8 MiB per-record cap.
+    12 B per emoji) was ~3x that — over the UI's 8 MiB per-record cap. CJK
+    (3 B -> 6 B escaped, 2x) is covered too.
     """
     from local_operator.server.routes.desktop_sessions import _sse_data
 
@@ -377,7 +378,9 @@ async def test_a_non_latin_snapshot_fits_the_cap_on_the_sse_wire(tmp_path: Path,
     sid = await pool.create(str(tmp_path))
     directory = tmp_path / "sessions" / sid
     directory.mkdir(parents=True, exist_ok=True)
-    count = 200_000 if len(char.encode()) == 2 else 100_000
+    # ~400 KB of UTF-8 per row whatever the width (200k Cyrillic, ~133k CJK,
+    # 100k emoji), so twelve rows overrun the page bound and force has_more.
+    count = 400_000 // len(char.encode("utf-8"))
     rows = [*_opening(1), *(_text_row(f"t{n}", 200.0 + n, char, count) for n in range(12))]
     (directory / TRANSCRIPT_FILENAME).write_text(
         "\n".join(row.to_json() for row in rows) + "\n", encoding="utf-8"

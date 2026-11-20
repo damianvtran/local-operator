@@ -66,7 +66,7 @@ def test_multibyte_text_is_budgeted_in_bytes_not_characters() -> None:
     assert clipped["truncated"]["shown_bytes"] == len(canonical_row_bytes(projection))
 
 
-@pytest.mark.parametrize("char", ["x", "ж", "😀"])
+@pytest.mark.parametrize("char", ["x", "ж", "三", "😀"])
 def test_shown_bytes_is_utf8_like_bytes_total(char: str) -> None:
     """R2-1: ``shown_bytes`` counted wire bytes while ``bytes_total`` counted UTF-8.
 
@@ -74,6 +74,8 @@ def test_shown_bytes_is_utf8_like_bytes_total(char: str) -> None:
     ``shown_bytes`` 1,572,687 against ``bytes_total`` 800,123 — showing ~2x
     MORE than the whole row. Both now count UTF-8, so shown is a true
     fraction of total; ``x`` is the ASCII control, where the units coincide.
+    ``三`` (CJK, 3 UTF-8 bytes -> 6 escaped) is the case closest to parity
+    between the two units, so it guards against a fix tuned only to 2x/3x.
     """
     row = _tool("a", char * 400_000) if char != "x" else _tool("a", char * 3_000_000)
     clipped = clip_row(row, session_id="s", reason="history_cap")
