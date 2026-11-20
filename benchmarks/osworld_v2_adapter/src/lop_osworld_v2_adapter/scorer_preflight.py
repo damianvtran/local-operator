@@ -60,7 +60,9 @@ def _standard_candidates(scorer_id: str) -> Iterator[FreeCADRuntime]:
             for site in sorted(lib.glob("python3.*/site-packages")):
                 version = site.parent.name
                 if re.fullmatch(r"python3\.\d+", version):
-                    fallback = shutil.which(version, path="/usr/bin:/usr/local/bin:/opt/homebrew/bin")
+                    fallback = shutil.which(
+                        version, path="/usr/bin:/usr/local/bin:/opt/homebrew/bin"
+                    )
                     if fallback is not None:
                         yield FreeCADRuntime(scorer_id, Path(fallback), (lib, site))
 

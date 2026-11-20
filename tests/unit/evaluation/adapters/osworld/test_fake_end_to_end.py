@@ -1271,7 +1271,11 @@ async def test_host_scorer_preflight_at_reset(
         artifact_root=str(artifacts),
         secrets=tuple(
             ResolvedSecret(name=name, value="synthetic")
-            for name in (vendor_bridge.GITLAB_TOKEN_ENV, "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+            for name in (
+                vendor_bridge.GITLAB_TOKEN_ENV,
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+            )
         ),
     )
     if case in {"missing", "incompatible", "timeout", "unsafe", "drifted"}:
@@ -1299,7 +1303,12 @@ async def test_host_scorer_preflight_at_reset(
     monkeypatch.setenv(python_key, "previous-value")
     if case == "cancelled":
         await _cancel_score_while_evaluator_is_running(
-            adapter, builds[0], score, monkeypatch, (python_key, lib_key), (str(python), str(library))
+            adapter,
+            builds[0],
+            score,
+            monkeypatch,
+            (python_key, lib_key),
+            (str(python), str(library)),
         )
     else:
 
