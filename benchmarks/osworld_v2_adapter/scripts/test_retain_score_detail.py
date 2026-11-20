@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Literal, TextIO
 from unittest.mock import patch
 
-from retain_score_detail import MAX_DETAIL_BYTES, publish_score_detail, retain_score_detail
+from retain_score_detail import (
+    MAX_DETAIL_BYTES,
+    publish_score_detail,
+    retain_score_detail,
+)
 
 
 class RetainScoreDetailTest(unittest.TestCase):
@@ -94,7 +98,9 @@ class RetainScoreDetailTest(unittest.TestCase):
         receipt_paths: list[Path] = []
 
         @contextmanager
-        def fail_receipt_close(path: Path, mode: Literal["x"], *, encoding: str) -> Iterator[TextIO]:
+        def fail_receipt_close(
+            path: Path, mode: Literal["x"], *, encoding: str
+        ) -> Iterator[TextIO]:
             with open_path(path, mode, encoding=encoding) as stream:
                 yield stream
             if path.name == "score-detail-receipt.json":
@@ -112,7 +118,9 @@ class RetainScoreDetailTest(unittest.TestCase):
         self.assertEqual(
             warning.getvalue().strip(), "sealed: WARNING: optional score detail sidecar I/O failed"
         )
-        self.assertEqual(sorted(p.name for p in sealed.iterdir()), ["events.jsonl.gz", "outcome.json"])
+        self.assertEqual(
+            sorted(p.name for p in sealed.iterdir()), ["events.jsonl.gz", "outcome.json"]
+        )
         self.assertEqual((sealed / "outcome.json").read_bytes(), outcome_bytes)
         self.assertEqual((sealed / "events.jsonl.gz").read_bytes(), events_bytes)
         self.assertEqual(ledger.read_bytes(), ledger_bytes)
