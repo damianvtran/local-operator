@@ -386,12 +386,12 @@
       "render_points": [
         {
           "path": "local_operator/session/catalog.py",
-          "symbol": "CatalogEntry._stop_label (render)",
-          "note": "row status label suffix rendered with the memoised label locale and printed verbatim by clients"
+          "symbol": "_terminal_label (render)",
+          "note": "complete terminal messages selected by CatalogEntry.status/_stop_label/_error_label and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
         }
       ],
       "references": {
-        "session/catalog.py": 2
+        "session/catalog.py": 10
       }
     },
     "wire.sessions": {
