@@ -6118,7 +6118,10 @@ class TestTheStreamCompletedStopBoundary:
             enforce_recorded_spend=enforce,
         )
         assert len(calls) == (1 if enforce else 2)
-        assert outcome.steps == outcome.attempted_groups == len(calls)
+        assert outcome.steps == len(calls)
+        # The capped request ends an aborted assistant message before transport:
+        # it still reserves a group, but executes no action and takes no screen epoch.
+        assert outcome.attempted_groups == 2
         rows = [json.loads(line) for line in text.splitlines()]
         assert any(row["kind"] == "shutdown" and row["complete"] for row in rows)
         stops = [row for row in rows if row.get("cap_semantics") == "admission_on_recorded_spend"]
