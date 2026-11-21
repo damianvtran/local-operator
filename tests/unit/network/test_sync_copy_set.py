@@ -552,6 +552,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "cache file, rebuilt from the journal on the next open, never an entry of a "
         "session directory and never part of what a sync copy carries.",
     ),
+    "local_operator/session/index_prewarm.py": (
+        1,
+        "``SETTLED_DIRNAME`` ('prewarm_settled'): the segment under the DEVICE cache "
+        "root (<config>/cache/) holding the boot prewarm's per-journal settlement "
+        "record. It pins an inode, so it is meaningless on another device; a derived "
+        "cache file, never an entry of a session directory or part of a sync copy.",
+    ),
     "local_operator/role_provenance.py": (
         2,
         "``PROVENANCE_FILENAME``/``PROVENANCE_LOCKNAME`` ('role-provenance.jsonl' and "

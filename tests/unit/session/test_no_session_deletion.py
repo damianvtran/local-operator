@@ -384,6 +384,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic swap of a sibling pid-temp FILE onto the derived cache record "
         "under <config>/cache; never a session path.",
     ),
+    # ``_write_settled`` publishes the boot prewarm's settlement record by renaming
+    # its own pid-suffixed temp FILE onto ``<config>/cache/prewarm_settled/<id>.json``
+    # (``index_prewarm.SETTLED_DIRNAME``), and unlinks only that temp when the
+    # write fails. ``_settled_path`` builds both from the CONFIG ROOT plus an id
+    # checked against ``_SETTLED_STEM``, so no ``sessions/`` path can be named;
+    # the record is a derived cache, re-proven from the journal when missing.
+    (
+        "local_operator/session/index_prewarm.py::_write_settled",
+        "os.replace",
+        "Atomic swap of a sibling pid-temp FILE onto the derived prewarm settlement "
+        "record under <config>/cache/prewarm_settled; never a session path.",
+    ),
+    (
+        "local_operator/session/index_prewarm.py::_write_settled",
+        "<path>.unlink",
+        "Removes only the failed write's own pid-temp FILE under "
+        "<config>/cache/prewarm_settled; never a session path.",
+    ),
     # ``_record_absence`` publishes the absence-proof sidecar beside that record:
     # ``<config>/cache/cold_replay/<id>.absence.json``, named by
     # ``absence_proof_path`` (``with_name`` on the record path, so the same
@@ -1770,22 +1788,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "files whose shape+size+age passed",
     ),
     #
-    # Two FILE unlinks, both named by the function that owns the sidecars' paths:
-    # the per-session scan cache and the spool write lock. Neither path can be a
-    # session directory — the first comes from `session_files.ledger.cache_path`
-    # (`<config>/cache/session_files/<id>.json`) and the second from
-    # `spooled.lock_name` (`<config>/wakes/spooled/.<id>.lock`) — and both are
-    # written OUTSIDE the session directory by the modules that own them. The
-    # call runs only after `_bounded_rmtree` has already removed THIS session's
+    # Three FILE unlinks, each named by the module that owns the sidecar's path:
+    # `session_files.ledger.cache_path` names the scan cache at
+    # `<config>/cache/session_files/<id>.json`; `index_prewarm.settled_record_path`
+    # names the settlement record at `<config>/cache/prewarm_settled/<id>.json`;
+    # `spooled.lock_name` names the spool lock at `<config>/wakes/spooled/.<id>.lock`.
+    # All three are OUTSIDE the session directory, and unlink rejects directories.
+    # The call runs only after `_bounded_rmtree` has already removed THIS session's
     # directory, and it is keyed by that session's id: a sidecar whose session
-    # directory still exists is never touched.
+    # directory still exists is never touched. The spool lock is unlinked only
+    # while held; a busy or unopenable lock remains in place.
     (
         "local_operator/session/cleanup.py::_drop_session_sidecars",
         "<path>.unlink",
-        "Unlinks the removed session's own file-scan cache entry and spool lock — "
-        "regular files named by the owning modules' path helpers, never a directory, "
-        "and only for a session whose directory this removal just deleted",
-        2,
+        "Unlinks the removed session's own file-scan cache entry, prewarm settlement "
+        "record and held spool lock — regular files named by the owning modules' path "
+        "helpers, never a directory, and only for a session whose directory this "
+        "removal just deleted",
+        3,
     ),
     # -- transcript compression ----------------------------------------------
     # The compression pass RENAMES nothing and REMOVES nothing but the two files
@@ -5407,6 +5427,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # receiver is the config dir plus the session id, and it names a FILE
         # under cache/, so neither side can be a session directory.
         "local_operator/session/cold_metadata.py::write_cold_metadata",
+        # tmp FILE -> <config>/cache/prewarm_settled/<id>.json: the boot prewarm's
+        # settlement record, same derived-cache argument (config root + a
+        # _SETTLED_STEM-checked id, a FILE under cache/).
+        "local_operator/session/index_prewarm.py::_write_settled",
         # tmp FILE -> <config>/cache/cold_replay/<id>.absence.json: the absence-proof
         # sidecar beside that record, same directory, same derived-cache argument.
         "local_operator/session/replay_cache.py::_record_absence",
