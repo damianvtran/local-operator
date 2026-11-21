@@ -1,0 +1,244 @@
+{
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+  "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+  "target_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+  "status": "passed",
+  "verdict": "clean",
+  "round": 1,
+  "keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label",
+    "wire.settings.speech_voice_tone.choice.neutral.label",
+    "wire.settings.speech_voice_tone.choice.bright.label",
+    "wire.settings.speech_voice_tone.choice.calm.label",
+    "wire.settings.speech_voice_tone.choice.authoritative.label",
+    "wire.settings.speech_voice_expressiveness.choice.low.label",
+    "wire.settings.speech_voice_expressiveness.choice.medium.label",
+    "wire.settings.speech_voice_expressiveness.choice.high.label"
+  ],
+  "keys_audited": 8,
+  "translator": {
+    "agent": "separate translator agent; specific session not supplied",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "provider quota fallback, per manager delegation brief",
+    "provenance_source": "manager brief; translator session not independently inspected"
+  },
+  "auditor": {
+    "agent": "translation-auditor / voice-audit-hi (lopdev task)",
+    "session": "55ac8e3ab73e",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota switch observed in this transcript",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "independence": "Independent session/agent; same actual model as translator disclosed; no repository writes."
+  },
+  "scope": {
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-voice-choice-backfill",
+    "head": "0bf4305da8f4b113f3ce2120bfdf58845b3218c9",
+    "base": "4128f2a2",
+    "target_state": "uncommitted translator contribution, bound by actual full target hash",
+    "contribution_keys": [
+      "wire.settings.speech_voice_tone.choice.warm.label",
+      "wire.settings.speech_voice_tone.choice.neutral.label",
+      "wire.settings.speech_voice_tone.choice.bright.label",
+      "wire.settings.speech_voice_tone.choice.calm.label",
+      "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "wire.settings.speech_voice_expressiveness.choice.high.label"
+    ],
+    "companion_description_keys_read": [
+      "wire.settings.speech_voice_tone.choice.warm.description",
+      "wire.settings.speech_voice_tone.choice.neutral.description",
+      "wire.settings.speech_voice_tone.choice.bright.description",
+      "wire.settings.speech_voice_tone.choice.calm.description",
+      "wire.settings.speech_voice_tone.choice.authoritative.description",
+      "wire.settings.speech_voice_expressiveness.choice.low.description",
+      "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "wire.settings.speech_voice_expressiveness.choice.high.description"
+    ],
+    "labels_read": 8,
+    "companion_descriptions_read": 8,
+    "source_context_entries_read": 16,
+    "full_namespace_linguistic_audit": false
+  },
+  "namespace_verdicts": {
+    "wire.settings": {
+      "verdict": "clean",
+      "keys_audited": 8,
+      "scope": "eight contributed display labels only"
+    }
+  },
+  "findings": [],
+  "per_key_audit": [
+    {
+      "key": "wire.settings.speech_voice_tone.choice.warm.label",
+      "value": "warm",
+      "english": "warm",
+      "hindi": "आत्मीय",
+      "english_cells": 4,
+      "hindi_cells": 4,
+      "english_label_description_cells": 32,
+      "hindi_label_description_cells": 19,
+      "linguistic_verdict": "clean",
+      "reason": "आत्मीय is idiomatic figurative interpersonal warmth, not temperature; compatible with मिलनसार और सहज।"
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+      "value": "neutral",
+      "english": "neutral",
+      "hindi": "तटस्थ",
+      "english_cells": 7,
+      "hindi_cells": 4,
+      "english_label_description_cells": 27,
+      "hindi_label_description_cells": 18,
+      "linguistic_verdict": "clean",
+      "reason": "तटस्थ is a concise established neutral/unmarked-tone adjective."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.bright.label",
+      "value": "bright",
+      "english": "bright",
+      "hindi": "उत्साही",
+      "english_cells": 6,
+      "hindi_cells": 4,
+      "english_label_description_cells": 29,
+      "hindi_label_description_cells": 20,
+      "linguistic_verdict": "clean",
+      "reason": "उत्साही conveys upbeat/energetic delivery, not visual brightness; consistent with उत्साही और ऊर्जावान।"
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.calm.label",
+      "value": "calm",
+      "english": "calm",
+      "hindi": "शांत",
+      "english_cells": 4,
+      "hindi_cells": 2,
+      "english_label_description_cells": 27,
+      "hindi_label_description_cells": 21,
+      "linguistic_verdict": "clean",
+      "reason": "शांत is an everyday concise calm-delivery adjective."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "value": "authoritative",
+      "english": "authoritative",
+      "hindi": "अधिकारपूर्ण",
+      "english_cells": 13,
+      "hindi_cells": 7,
+      "english_label_description_cells": 37,
+      "hindi_label_description_cells": 25,
+      "linguistic_verdict": "clean",
+      "reason": "अधिकारपूर्ण is idiomatic for a firm, assured voice (अधिकारपूर्ण स्वर), not intrinsically domineering. Beside आत्मविश्वासी और निश्चिंत। in this tone control it neither asserts permissions/factual infallibility nor authoritarian governance; it is not अधिकारवादी/तानाशाही. A forced synonym based solely on the अधिकार root is not warranted."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "value": "low",
+      "english": "low",
+      "hindi": "कम",
+      "english_cells": 3,
+      "hindi_cells": 2,
+      "english_label_description_cells": 26,
+      "hindi_label_description_cells": 14,
+      "linguistic_verdict": "clean",
+      "reason": "कम naturally marks a low degree of अभिव्यंजकता, not low pitch or volume."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "value": "medium",
+      "english": "medium",
+      "hindi": "मध्यम",
+      "english_cells": 6,
+      "hindi_cells": 4,
+      "english_label_description_cells": 25,
+      "hindi_label_description_cells": 17,
+      "linguistic_verdict": "clean",
+      "reason": "मध्यम is the natural middle-degree label; its form does not require a gender suffix change."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+      "value": "high",
+      "english": "high",
+      "hindi": "अधिक",
+      "english_cells": 4,
+      "hindi_cells": 3,
+      "english_label_description_cells": 28,
+      "hindi_label_description_cells": 19,
+      "linguistic_verdict": "clean",
+      "reason": "अधिक forms a coherent कम / मध्यम / अधिक degree scale for अभिव्यंजकता, not volume or pitch."
+    }
+  ],
+  "controls": {
+    "real_config_to_resolver_to_registry": "PASS",
+    "config_over_environment": "PASS",
+    "kill_switch_forces_english": "PASS",
+    "return_to_hindi": "PASS",
+    "machine_ids_order_defaults": "PASS",
+    "localized_labels_rejected_as_ids": "PASS",
+    "placeholder_markup_parity": "PASS",
+    "unexpected_bidi_join_controls": "PASS"
+  },
+  "parity": {
+    "exact_eight_key_delta": true,
+    "source_target_scope_key_order_equal": true,
+    "source_target_full_keysets_equal": true,
+    "target_catalogue_order_unchanged_vs_base": true,
+    "placeholders": "none in all eight source and target labels; exact empty parity",
+    "markup_and_skeletons": "none",
+    "full_namespace_keys": 895,
+    "full_namespace_order": "Not identical en vs hi; verified pre-existing target order unchanged, scope key order identical. No order regression."
+  },
+  "fit": {
+    "method": "rich.cells.cell_len",
+    "labels_larger_than_english": [],
+    "fragments": "label + two spaces + description; no markers/padding included",
+    "consumer": "settings_view.py:3939-3950 final row ellipsis, not wrapping; :4218-4244 label/default marker/description composition; no fixed per-field cap",
+    "limitation": "Devanagari cell metrics are optimistic. All eight labels and label+description fragments measure <= English; NOT rendered shaping/layout proof."
+  },
+  "plural_check": "N/A: eight labels have no ICU plural or placeholders.",
+  "rtl_check": "N/A for LTR Hindi; no bidi or ZWJ/ZWNJ controls in scoped labels; Urdu excluded.",
+  "read_sources": [
+    "AGENTS.md i18n/environment/isolation sections",
+    "docs/I18N.md:260-337 receipt/provenance workflow",
+    "i18n/glossary.md",
+    "i18n/style-guides/hi.md",
+    "docs/qa/i18n-voice-choice-preflight.json",
+    "English/hi wire.settings catalogues: eight labels + eight companion descriptions",
+    "en/wire.settings.context.json: sixteen added entries",
+    "settings_io.py:188-217,6273-6332,6784-6805",
+    "settings_view.py:3939-3950,4218-4244",
+    "i18n/resolve.py, text.py, boot.py"
+  ],
+  "preflight_reconciliation": "Preflight recorded old context 2ee6972b... with 16 missing entries. Current committed context e5c44bf0... adds exactly those 16; read all sixteen here. English source hash unchanged. Actual full current context hash above, not stale preflight hash.",
+  "evidence": {
+    "probe_script": "/Users/damian/.local-operator/sessions/55ac8e3ab73e/scratchpad/voice-audit-hi-probe.py",
+    "probe_script_sha256": "29a54c2f05155d98960043bf610e44f9f6acb483f1a49408209e307a7b32d5d0",
+    "probe_output": "/Users/damian/.local-operator/sessions/55ac8e3ab73e/scratchpad/voice-audit-hi-probe.json",
+    "probe_output_sha256": "876a052f7a71414d396e48dbf5167a20cf5bfa1989ffd6d787bf5394659e3e0a",
+    "command": "env -i HOME=<scratch>/hi-probe-home LOCAL_OPERATOR_CONFIG_DIR=<scratch>/hi-probe-home/config PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=<worktree> /Users/damian/local-operator/.venv/bin/python <scratch>/voice-audit-hi-probe.py",
+    "actual_exit": 0,
+    "actual_output": "configured_language=hi; active_locale=hi; 8 rows; 8 controls PASS",
+    "isolation": "env -i strips CMUX_* and inherited LOP_*; real ConfigManager writes only scratch language=hi; no mocked resolver or eligibility override. Shared existing interpreter, verified import inside manager worktree."
+  },
+  "not_run": [
+    "Test suites/pytest",
+    "Pseudo-localization",
+    "Rendered TUI/screenshots/glyph shaping and true layout or ellipsis fit: independent QA later",
+    "Native/browser dispatch",
+    "Dependency installs",
+    "Urdu RTL audit",
+    "Full-namespace linguistic certification",
+    "Machine-ID config persistence writes; IDs validated/coerced only"
+  ],
+  "note": "Terminal clean verdict for exact eight-label contribution, not full namespace or visual signoff. All scoped labels are natural Hindi, no unsanctioned English or forced synonym necessary. Standalone adjectives/levels maintain neutral polite UI register; no address/gender mismatch. Companion descriptions read for semantic context, unchanged and not newly re-approved as translations. No repository files edited."
+}

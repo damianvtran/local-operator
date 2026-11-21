@@ -1,0 +1,218 @@
+{
+  "locale": "es",
+  "namespace": "wire.settings",
+  "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+  "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+  "target_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-voice-choice-backfill",
+  "head": "0bf4305da8f4b113f3ce2120bfdf58845b3218c9",
+  "scope_base": "4128f2a2",
+  "round": 1,
+  "scope_keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label",
+    "wire.settings.speech_voice_tone.choice.neutral.label",
+    "wire.settings.speech_voice_tone.choice.bright.label",
+    "wire.settings.speech_voice_tone.choice.calm.label",
+    "wire.settings.speech_voice_tone.choice.authoritative.label",
+    "wire.settings.speech_voice_expressiveness.choice.low.label",
+    "wire.settings.speech_voice_expressiveness.choice.medium.label",
+    "wire.settings.speech_voice_expressiveness.choice.high.label"
+  ],
+  "scope_note": "Audit of the eight working-tree label value changes only, on top of the named HEAD. This is not a full-namespace re-audit; manager must preserve prior provenance for unchanged keys.",
+  "coverage": {
+    "contribution_labels_read": 8,
+    "unchanged_descriptions_read": 8,
+    "parent_setting_labels_read": 2,
+    "sidecar_entries_read": 16,
+    "all_changed_keys_exactly_covered": true,
+    "full_namespace_reaudit": false
+  },
+  "date": "2026-11-21T18:52:49.180802+00:00",
+  "translator": {
+    "agent": "separate translator agent (identity supplied by delegation; session not supplied)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "provider quota fallback per manager brief",
+    "provenance_source": "delegating manager; not independently inferred from catalogue"
+  },
+  "auditor": {
+    "agent": "translation-auditor / voice-audit-es",
+    "session": "bb24daf92834",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, host model-switch notice: provider quota failure",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "read_route_verified": true
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "namespace_verdict": {
+    "wire.settings": "clean for the exact eight-key contribution; terminal"
+  },
+  "findings": [],
+  "semantic_decisions": {
+    "warm": "cálido naturally describes a friendly, approachable tono, not merely temperature.",
+    "neutral": "neutro is native Spanish and agrees with masculine tono; it is not unsanctioned retained English.",
+    "bright": "animado conveys upbeat/energetic delivery without suggesting visual brightness.",
+    "calm": "sereno is idiomatic for a calm, steady tono and agrees with the masculine setting noun.",
+    "authoritative": "firme conveys confidence and assurance; it avoids the unwanted authoritarian reading.",
+    "low": "baja agrees with feminine expresividad and expresses degree, not volume.",
+    "medium": "media agrees with feminine expresividad and names the middle level unambiguously.",
+    "high": "alta agrees with feminine expresividad and expresses degree, not pitch."
+  },
+  "contextual_notes": [
+    "Lowercase adjectival fragments match es style. Masculine tono adjectives and feminine expresividad levels are correct. The unchanged feminine tone descriptions describe the implied voz/locución, not a requirement to feminize the separate tono labels.",
+    "No glossary term conflict identified; there are no additional exact single-word source precedents for these eight terms inside this namespace.",
+    "Unchanged medium description La constante actual. is pre-existing and was not retranslated or certified as a new contribution. The new label media itself accurately names the middle level.",
+    "Preflight is explicitly historical: its context SHA 2ee6972b... predates the NEW16 sidecar at the actual full context SHA in this receipt. It is not used as current context proof."
+  ],
+  "controls": {
+    "configured_locale": "PASS: native ConfigManager.set_config_value(language, es) in isolated config; resolve.config_value() and resolve.resolve_language() both es; text active es",
+    "real_consumer": "PASS: actual worktree settings_io.BY_KEY and Choice labels/descriptions; machine values/order preserved",
+    "negative_control": "PASS: switch actual active locale to en, observe eight English labels, then restore from configured es and observe eight Spanish labels",
+    "placeholder_integrity": "PASS: exact eight source/target empty placeholder/markup/ICU inventories; no token additions, drops, renames, or reorder",
+    "key_order": "PASS: relative source/target order identical; consumer tone warm/neutral/bright/calm/authoritative and expressiveness low/medium/high stable",
+    "plurals": "N/A: no counts or plural structures",
+    "rtl": "N/A for es; no embedded bidi controls detected; Urdu was not audited",
+    "fit": "MEASURED only: Rich cell lengths and joined label+description lengths, excluding row chrome/default marker. Actual widget source truncates with ellipsis, not wrapping. No invented cap.",
+    "pseudo_localization": "NOT RUN: scope prohibits suite/layout dispatch",
+    "rendered_layout": "NOT RUN: independent QA follows; no screenshot, browser, native, TUI or layout-proof claim",
+    "test_suite": "NOT RUN: scoped resolver probe only; no suite/install/native/browser dispatch"
+  },
+  "runtime": [
+    {
+      "setting": "speech.voice.tone",
+      "value": "warm",
+      "label": "cálido",
+      "description": "Cercana y afable."
+    },
+    {
+      "setting": "speech.voice.tone",
+      "value": "neutral",
+      "label": "neutro",
+      "description": "Uniforme y sin matices."
+    },
+    {
+      "setting": "speech.voice.tone",
+      "value": "bright",
+      "label": "animado",
+      "description": "Animada y enérgica."
+    },
+    {
+      "setting": "speech.voice.tone",
+      "value": "calm",
+      "label": "sereno",
+      "description": "Pausada y serena."
+    },
+    {
+      "setting": "speech.voice.tone",
+      "value": "authoritative",
+      "label": "firme",
+      "description": "Segura y firme."
+    },
+    {
+      "setting": "speech.voice.expressiveness",
+      "value": "low",
+      "label": "baja",
+      "description": "Contenida y sencilla."
+    },
+    {
+      "setting": "speech.voice.expressiveness",
+      "value": "medium",
+      "label": "media",
+      "description": "La constante actual."
+    },
+    {
+      "setting": "speech.voice.expressiveness",
+      "value": "high",
+      "label": "alta",
+      "description": "Vivaz y expresiva."
+    }
+  ],
+  "fit_measures": [
+    {
+      "key": "wire.settings.speech_voice_tone.choice.warm.label",
+      "english": "warm",
+      "spanish": "cálido",
+      "en_cells": 4,
+      "es_cells": 6,
+      "en_label_plus_description_cells": 32,
+      "es_label_plus_description_cells": 25
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+      "english": "neutral",
+      "spanish": "neutro",
+      "en_cells": 7,
+      "es_cells": 6,
+      "en_label_plus_description_cells": 27,
+      "es_label_plus_description_cells": 31
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.bright.label",
+      "english": "bright",
+      "spanish": "animado",
+      "en_cells": 6,
+      "es_cells": 7,
+      "en_label_plus_description_cells": 29,
+      "es_label_plus_description_cells": 28
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.calm.label",
+      "english": "calm",
+      "spanish": "sereno",
+      "en_cells": 4,
+      "es_cells": 6,
+      "en_label_plus_description_cells": 27,
+      "es_label_plus_description_cells": 25
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "english": "authoritative",
+      "spanish": "firme",
+      "en_cells": 13,
+      "es_cells": 5,
+      "en_label_plus_description_cells": 37,
+      "es_label_plus_description_cells": 22
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "english": "low",
+      "spanish": "baja",
+      "en_cells": 3,
+      "es_cells": 4,
+      "en_label_plus_description_cells": 26,
+      "es_label_plus_description_cells": 27
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "english": "medium",
+      "spanish": "media",
+      "en_cells": 6,
+      "es_cells": 5,
+      "en_label_plus_description_cells": 25,
+      "es_label_plus_description_cells": 27
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+      "english": "high",
+      "spanish": "alta",
+      "en_cells": 4,
+      "es_cells": 4,
+      "en_label_plus_description_cells": 28,
+      "es_label_plus_description_cells": 24
+    }
+  ],
+  "evidence_sources": [
+    "docs/I18N.md:260-307",
+    "i18n/glossary.md",
+    "i18n/style-guides/es.md",
+    "docs/qa/i18n-voice-choice-preflight.json",
+    "local_operator/settings_io.py:6273-6335,6786-6806",
+    "local_operator/tui/widgets/settings_view.py:3933-3949,4210-4246",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json"
+  ],
+  "note": "Independent linguistic and token/consumer audit passed for this contribution. Rendered fit remains explicitly NOT RUN and belongs to independent QA. No repository edits made."
+}
