@@ -202,10 +202,15 @@ def test_a_broker_crash_mid_session_fails_closed_and_never_decrypts_locally(
     store locally.
     """
     # With #4389 in, a session re-registers with the descendant's respawned
-    # daemon on its own and the read is then SERVED with a notice (the
-    # recovery `test_a_broker_that_comes_back_inside_the_window_…` pins).
-    # Re-registration is switched off here so this cell keeps pinning the
-    # refusal for a session that does not come back.
+    # daemon on its own and the read is then SERVED with a notice. That
+    # automatic recovery is proven by the REAL-roll tests in
+    # test_broker_roll.py (`test_roll_swaps_the_broker_and_the_session_is_
+    # notified_again`, `test_a_descendant_during_reregistration_is_held_then_
+    # notified`, `test_a_real_roll_keeps_the_lineage_marker_through_reregistration`),
+    # not by `test_a_broker_that_comes_back_inside_the_window_…`, which turns
+    # automatic re-registration off too and drives it by hand. It is switched
+    # off here so this cell keeps pinning the refusal for a session that does
+    # not come back.
     from local_operator.secrets import session as session_module
 
     monkeypatch.setattr(session_module, "_REREGISTER_DELAYS_S", ())
@@ -532,8 +537,13 @@ def test_session_wait_matches_the_roll_budget() -> None:
     from local_operator.secrets import broker as broker_module
 
     assert access.SESSION_BROKER_WAIT_S == client.ROLL_WAIT_S <= 8.0
+    # #4389 R3-2: strictly inside, by the explicit margin — a held read must be
+    # answered BEFORE the waiting client gives up, not at the same instant.
+    assert broker_module.ROLL_HOLD_MARGIN_S >= 1.0
     assert (
-        broker_module.ROLL_GRACE_S + broker_module.NOTIFY_ACK_TIMEOUT_S
+        broker_module.ROLL_GRACE_S
+        + broker_module.NOTIFY_ACK_TIMEOUT_S
+        + broker_module.ROLL_HOLD_MARGIN_S
         <= access.SESSION_BROKER_WAIT_S
     )
 
@@ -784,3 +794,137 @@ def test_an_unidentifiable_live_session_keeps_its_marker(
     _prune_stale_markers(directory)
     assert alive.exists(), "a live session's marker was pruned on an unknown lookup"
     assert not gone.exists(), "a definitively dead session's marker survived"
+
+
+# --- #4389 round 3 ------------------------------------------------------------
+
+
+def test_marker_prune_asks_the_windows_safe_liveness_probe(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1: pruning decides "gone" through ``procstate.pid_liveness``, never ``os.kill``.
+
+    ``os.kill(pid, 0)`` TERMINATES the process on Windows (the xplat battery's
+    ``static.posix_attributes`` rule). The probe's three answers are pinned:
+    False prunes, None (could not prove) keeps, True keeps — and ``os.kill``
+    is never reached. The pid used is this test's own, which ``os.kill`` would
+    call alive, so a regression to signal 0 keeps the "gone" marker and fails.
+    """
+    from local_operator import procstate
+    from local_operator.secrets import peer
+    from local_operator.secrets.session import _prune_stale_markers, lineage_dir
+
+    directory = lineage_dir(config_root)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    marker = directory / f"{os.getpid()}-12345-feedface"
+
+    def no_kill(*_args: object) -> None:
+        raise AssertionError("marker pruning reached os.kill")
+
+    monkeypatch.setattr(peer, "process_info", lambda pid: None)
+    monkeypatch.setattr(os, "kill", no_kill)
+    for answer, survives in ((None, True), (True, True), (False, False)):
+        marker.write_text("m")
+        monkeypatch.setattr(procstate, "pid_liveness", lambda pid, a=answer: a)
+        _prune_stale_markers(directory)
+        assert marker.exists() is survives, f"pid_liveness={answer!r}"
+
+
+def _tripwire(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("the unnotified local decrypt was reached after a roll was observed")
+
+
+def test_an_observed_roll_survives_a_liveness_ping_that_exhausts_the_budget(
+    keyfile_store: SecretStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8 (a): the sentinel is seen, then the liveness ping spends the budget and
+    the sentinel lapses meanwhile. "No broker" is the roll not finishing: refuse."""
+    from local_operator.secrets.protocol import rolling_path
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    _write_sentinel(rolling_path(config_root), 1)
+
+    def exhausted(base=None, **_kwargs):
+        rolling_path(config_root).unlink()  # the sentinel lapses during the ping
+        return False
+
+    monkeypatch.setattr(client, "ensure_broker", exhausted)
+    monkeypatch.setattr(access, "open_store", _tripwire)
+    with pytest.raises(client.BrokerRolling):
+        access.retrieve_secret("DEMO_TOKEN", config_root)
+
+
+def test_an_observed_roll_survives_a_sentinel_that_expires_before_the_retrieve(
+    keyfile_store: SecretStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8 (b): liveness succeeds only AFTER the sentinel expired; the real client
+    retrieval then meets silence. It must stay a roll refusal, never the fallback."""
+    from local_operator.secrets.protocol import rolling_path
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(client, "ROLL_WAIT_S", 0.4)
+    _write_sentinel(rolling_path(config_root), 1)
+
+    def late_liveness(base=None, **_kwargs):
+        rolling_path(config_root).unlink()
+        return True
+
+    def silent(*_args, **_kwargs):
+        raise BrokerUnavailable("the secret broker did not answer: timed out")
+
+    monkeypatch.setattr(client, "ensure_broker", late_liveness)
+    monkeypatch.setattr(client, "_bounded_request", silent)
+    monkeypatch.setattr(access, "open_store", _tripwire)
+    with pytest.raises(client.BrokerRolling):
+        access.retrieve_secret("DEMO_TOKEN", config_root)
+
+
+def test_a_no_roll_outage_outside_a_session_still_falls_back(
+    keyfile_store: SecretStore,
+    config_root: Path,
+    open_store_spy: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S8 control: with NO roll observed, the same silence keeps the §13 fallback."""
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(client, "ensure_broker", lambda base=None, **_: True)
+
+    def silent(*_args, **_kwargs):
+        raise BrokerUnavailable("the secret broker did not answer: timed out")
+
+    monkeypatch.setattr(client, "_bounded_request", silent)
+    assert access.retrieve_secret("DEMO_TOKEN", config_root) == SECRET_VALUE
+    assert open_store_spy == [config_root]
+
+
+@pytest.mark.allow_secret_broker
+@pytest.mark.skipif(not _SUPPORTED, reason="the broker is implemented for macOS and Linux")
+def test_outside_a_session_a_stalled_broker_costs_one_budget_then_falls_back(
+    keyfile_store: SecretStore,
+    config_root: Path,
+    open_store_spy: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q4: a stopped broker (accepts, never answers) with no roll in sight.
+
+    The ordinary outage rule still decrypts locally, but the WHOLE call — the
+    liveness ping, and the fallback's own broker leg in ``master_key_for`` —
+    shares one deadline. QA measured ~29 s before: two fresh 10 s pings, then
+    two more in the fallback. Spawning is stubbed so nothing real starts.
+    """
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(client, "ROLL_WAIT_S", 1.0)
+    monkeypatch.setattr(client, "REQUEST_TIMEOUT_S", 3.0)
+    monkeypatch.setattr(client, "_spawn_broker", lambda base=None: -1)
+    monkeypatch.setattr(client, "_record_spawn", lambda *args, **kwargs: None)
+    listener = _silent_listener(config_root)
+    try:
+        started = time.monotonic()
+        assert access.retrieve_secret("DEMO_TOKEN", config_root) == SECRET_VALUE
+        elapsed = time.monotonic() - started
+    finally:
+        listener.close()
+    assert open_store_spy == [config_root]
+    assert elapsed < client.ROLL_WAIT_S + 0.8, f"stalled {elapsed:.2f}s"

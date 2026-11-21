@@ -30,6 +30,7 @@ import socket
 import stat
 import struct
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,15 @@ SUCCESSOR_SOCKET_FILENAME = "broker.next"
 #: refusing broker while it exists WAITS instead of degrading to the unnotified
 #: local decrypt (``client.retrieve``).
 ROLLING_FILENAME = "broker.rolling"
+
+#: The ONE client-side budget for a retrieval that meets a roll, a crash or a
+#: stalled broker (security R1: "waits (bounded, ≤8 s) or fails"). It lives
+#: here, not in ``client``, because both sides derive from it (#4389 R3-2): the
+#: client clips every phase to it, and the broker's ``ROLL_GRACE_S`` hold is
+#: derived FROM it with an explicit margin so a held read is always answered
+#: before the client gives up. ``protocol`` is the one module both already
+#: import, so neither has to import the other.
+ROLL_WAIT_S = 8.0
 
 #: macOS ``sockaddr_un.sun_path`` is 104 bytes and ``bind()`` fails silently
 #: past it. Measured on this machine: a 103-byte path binds, 104 fails. The
@@ -240,17 +250,38 @@ def send_frame(connection: socket.socket, payload: dict[str, Any]) -> None:
     connection.sendall(_HEADER.pack(len(body)) + body)
 
 
-def _recv_exactly(connection: socket.socket, count: int) -> bytes:
+def _arm(connection: socket.socket, deadline: float | None) -> None:
+    """Clip ``connection``'s timeout to what is left of a ``time.monotonic`` deadline.
+
+    Raises ``socket.timeout`` (an ``OSError``) when nothing is left, so a phase
+    that would start AFTER the caller's budget never starts (#4389 S5/CR9): a
+    timeout computed once and reused per phase let a reply split across several
+    receives spend that timeout again on each one. ``None`` leaves the socket
+    as configured — the broker side and every unbudgeted caller.
+    """
+    if deadline is None:
+        return
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise socket.timeout("the caller's deadline passed before this phase began")
+    current = connection.gettimeout()
+    connection.settimeout(left if current is None else min(current, left))
+
+
+def _recv_exactly(connection: socket.socket, count: int, deadline: float | None = None) -> bytes:
     """Read exactly ``count`` bytes or raise.
 
     ``recv`` on a stream socket may return short for any reason; a reader that
     treats one ``recv`` as one message works for small frames on an idle
     machine and corrupts under load, which is the worst possible failure
     distribution for a security boundary.
+
+    ``deadline`` re-arms the timeout before EVERY ``recv`` (see :func:`_arm`).
     """
     chunks: list[bytes] = []
     remaining = count
     while remaining > 0:
+        _arm(connection, deadline)
         chunk = connection.recv(remaining)
         if not chunk:
             raise ProtocolError("connection closed mid-frame")
@@ -259,13 +290,13 @@ def _recv_exactly(connection: socket.socket, count: int) -> bytes:
     return b"".join(chunks)
 
 
-def recv_frame(connection: socket.socket) -> dict[str, Any]:
-    """Read one length-prefixed JSON frame."""
-    length = _HEADER.unpack(_recv_exactly(connection, _HEADER.size))[0]
+def recv_frame(connection: socket.socket, deadline: float | None = None) -> dict[str, Any]:
+    """Read one length-prefixed JSON frame, every receive inside ``deadline`` if given."""
+    length = _HEADER.unpack(_recv_exactly(connection, _HEADER.size, deadline))[0]
     if length > MAX_FRAME_BYTES:
         raise ProtocolError(f"peer announced a {length}-byte frame; the limit is {MAX_FRAME_BYTES}")
     try:
-        payload = json.loads(_recv_exactly(connection, length).decode("utf-8"))
+        payload = json.loads(_recv_exactly(connection, length, deadline).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProtocolError(f"malformed frame: {exc}") from exc
     if not isinstance(payload, dict):

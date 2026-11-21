@@ -740,8 +740,18 @@ def _hand_off(
         # this roller gone never sends a second SIGTERM into the old broker's
         # draining stop(). Dying between this write and the kill leaves the
         # same orphan as before CR3, over a window of one syscall.
+        #
+        # #4389 S6 tail: this write must cover the WHOLE bounded exit wait
+        # below, not just ROLL_GRACE_S. The old broker's drain may take up to
+        # OLD_EXIT_TIMEOUT_S, and a late (unmarked) lineage only re-registers
+        # after it exits; a sentinel that lapsed mid-drain left its
+        # descendants' denials and silences final for the gap before the
+        # refresh below. The exit observation then re-arms it for the
+        # successor's hold, counted from the exit.
         try:
-            _write_sentinel(sentinel, old_pid, ttl=ROLL_GRACE_S, signalled=True)
+            _write_sentinel(
+                sentinel, old_pid, ttl=OLD_EXIT_TIMEOUT_S + ROLL_GRACE_S, signalled=True
+            )
         except OSError:
             pass
         try:

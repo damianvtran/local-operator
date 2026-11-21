@@ -403,14 +403,20 @@ def _prune_stale_markers(directory: Path) -> None:
 
 
 def _pid_definitively_gone(pid: int) -> bool:
-    """True only when the kernel says no process has ``pid`` (``ESRCH``)."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:  # EPERM: it exists, just not ours to signal
-        return False
-    return False
+    """True only when the kernel PROVES no process has ``pid``.
+
+    Delegates to :func:`local_operator.procstate.pid_liveness` rather than
+    ``os.kill(pid, 0)`` (#4389 R3-1): signal 0 is a probe on POSIX but a
+    ``TerminateProcess`` on Windows, so the bare call would kill the very
+    session whose marker it asks about — and the xplat battery's
+    ``static.posix_attributes`` rule fails the build on it for that reason.
+    ``None`` ("could not prove either way", e.g. an ``OpenProcess`` access
+    denial) is NOT gone: pruning on doubt is the #4388 S3 defect, which deleted
+    a live session's marker and reopened its children's local fallback.
+    """
+    from local_operator.procstate import pid_liveness
+
+    return pid_liveness(pid) is False
 
 
 def registered_session_ancestor(base: Path | None = None) -> tuple[int, str] | None:

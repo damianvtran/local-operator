@@ -61,7 +61,9 @@ from local_operator.secrets.errors import (
 from local_operator.secrets.peer import PEER_AUTHENTICATION_SUPPORTED
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
+    ROLL_WAIT_S,
     ProtocolError,
+    _arm,
     decode_bytes,
     encode_bytes,
     ensure_runtime_dir,
@@ -139,9 +141,14 @@ def request(
     base: Path | None = None,
     *,
     connection: socket.socket | None = None,
+    deadline: float | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
     """Send one request and return the reply, raising on a refusal.
+
+    ``deadline`` (``time.monotonic``) re-arms the socket timeout before the
+    send and before EACH receive of the reply (#4389 S5/CR9), and a phase that
+    would begin after it never begins; ``None`` is the unclipped request.
 
     Opens its own connection unless one is supplied, because peer
     authentication happens per connection and a shared one would attribute
@@ -156,8 +163,9 @@ def request(
     owned = connection is None
     link = connection if connection is not None else _connect(socket_path(base))
     try:
+        _arm(link, deadline)
         send_frame(link, {"version": PROTOCOL_VERSION, "op": operation, **fields})
-        reply = recv_frame(link)
+        reply = recv_frame(link, deadline)
     except (OSError, ProtocolError, socket.timeout) as exc:
         raise BrokerUnavailable(f"the secret broker did not answer: {exc}") from exc
     finally:
@@ -216,13 +224,26 @@ class BrokerRolling(SecretStoreError):
     """
 
 
-#: Ceiling on how long a retrieval waits out a roll before failing closed
-#: (security R1: "waits (bounded, ≤8 s) or fails"). The ONE client-side budget
-#: (review S5): it covers the successor's hold (``broker.ROLL_GRACE_S``, 6 s)
-#: plus the redaction notice (``broker.NOTIFY_ACK_TIMEOUT_S``, 2 s), and every
-#: retry's request timeout is clipped to what remains of it. Pinned by
-#: ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
-ROLL_WAIT_S = 8.0
+# ``ROLL_WAIT_S`` (imported from ``protocol`` above, re-exported here for its
+# historical callers) is the ceiling on how long a retrieval waits out a roll
+# before failing closed, and the ONE client-side budget (review S5): every
+# phase is clipped to what remains of it. The successor's hold
+# (``broker.ROLL_GRACE_S``) is derived from it with a margin for the redaction
+# notice and scheduling (#4389 R3-2), pinned by
+# ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
+
+
+def _expired(deadline: float | None) -> bool:
+    """Has a caller's ``time.monotonic`` budget run out? ``None`` never expires."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _pause(seconds: float, deadline: float | None) -> None:
+    """Sleep ``seconds``, but never past a caller's deadline (#4389 S5/CR9)."""
+    if deadline is not None:
+        seconds = min(seconds, deadline - time.monotonic())
+    if seconds > 0:
+        time.sleep(seconds)
 
 
 def rolling_in_progress(base: Path | None = None) -> bool:
@@ -279,17 +300,27 @@ def _bounded_request(
     :data:`REQUEST_TIMEOUT_S` per round trip: QA measured a read stall 14 s
     behind a successor that went quiet after the rename, all of it in the
     liveness ``ping`` that ran before any budget started. ``None`` keeps the
-    ordinary unclipped request. The floor keeps an exhausted budget a fast,
-    real attempt rather than a zero timeout (which would make the socket
-    non-blocking).
+    ordinary unclipped request.
+
+    **No work after expiry (#4389 S5/CR9).** An exhausted budget is refused
+    BEFORE the connect, as :class:`BrokerUnavailable` (what every caller already
+    handles for "no answer"); the earlier 100 ms floor turned an exhausted
+    budget into one more attempt per phase. The connect gets what remains, and
+    :func:`request` re-arms the remainder before the send and each receive, so a
+    reply split across several receives cannot spend the budget once per
+    receive.
     """
     if deadline is None:
         return request(operation, base, **fields)
-    remaining = max(deadline - time.monotonic(), 0.1)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise BrokerUnavailable(
+            f"the time allowed for the secret broker ran out before {operation!r} could be sent"
+        )
     link = _connect(socket_path(base), timeout=min(CONNECT_TIMEOUT_S, remaining))
     try:
-        link.settimeout(min(REQUEST_TIMEOUT_S, remaining))
-        return request(operation, base, connection=link, **fields)
+        link.settimeout(REQUEST_TIMEOUT_S)
+        return request(operation, base, connection=link, deadline=deadline, **fields)
     finally:
         try:
             link.close()
@@ -369,6 +400,11 @@ def ensure_broker(
     """
     if _alive(base, deadline):
         return True
+    # #4389 S5/CR9: a first ping that spent the whole budget (a silent broker
+    # holds it for every second it has) must not be followed by a re-ping, a
+    # spawn and a poll the caller has no time left for.
+    if _expired(deadline):
+        return False
 
     if not PEER_AUTHENTICATION_SUPPORTED:
         logger.debug(
@@ -410,17 +446,22 @@ def ensure_broker(
             while time.monotonic() < poll_until:
                 if _alive(base, deadline):
                     return True
-                time.sleep(_LOCK_POLL_S)
+                _pause(_LOCK_POLL_S, poll_until)
             return False
         # Won the race. Re-check: the previous holder may have started one
         # between our ping and our lock acquisition.
         if _alive(base, deadline):
             return True
+        # Never SPAWN once the budget is gone (#4389 S5/CR9): the re-check above
+        # can itself spend what was left, and a daemon started for a caller
+        # that has already given up is a side effect nobody waits for.
+        if _expired(deadline):
+            return False
         _record_spawn(base, _spawn_broker(base))
         while time.monotonic() < poll_until:
             if _alive(base, deadline):
                 return True
-            time.sleep(_LOCK_POLL_S)
+            _pause(_LOCK_POLL_S, poll_until)
         return False
     finally:
         try:
@@ -779,9 +820,13 @@ def _broker_identity(base: Path | None) -> tuple[str, str | None]:
         return sys.executable, None
 
 
-def fetch_master_key(base: Path | None = None) -> bytes:
-    """Ask the broker for the master key, for a caller it has authorized."""
-    reply = request("key", base)
+def fetch_master_key(base: Path | None = None, *, deadline: float | None = None) -> bytes:
+    """Ask the broker for the master key, for a caller it has authorized.
+
+    ``deadline`` clips connect, send and every receive to a caller's budget
+    (#4389 Q4); ``None`` is the ordinary request.
+    """
+    reply = _bounded_request("key", base, deadline)
     key = reply.get("key")
     if not isinstance(key, str):
         raise SecretStoreError("the broker returned no key material")
@@ -794,6 +839,7 @@ def retrieve(
     *,
     role: str = "agent",
     deadline: float | None = None,
+    observed_roll: bool = False,
 ) -> bytes:
     """Fetch one secret's value through the broker.
 
@@ -812,8 +858,14 @@ def retrieve(
     and reply is clipped to it, and a roll is waited out only within it. The
     fail-closed path inside a session passes one so its whole wait stays one
     bound (#4388 R1); ``None`` keeps today's behaviour outside a roll.
+
+    ``observed_roll`` says the CALLER already saw the roll sentinel (#4389 S8):
+    a sentinel that expires between that observation and this call must not
+    reset the "a roll was seen" bit, or a silence would again fall open.
     """
-    reply = _retrieve_through_roll(name, base, role=role, deadline=deadline)
+    reply = _retrieve_through_roll(
+        name, base, role=role, deadline=deadline, observed_roll=observed_roll
+    )
     value = reply.get("value")
     if not isinstance(value, str):
         raise SecretStoreError("the broker returned no value")
@@ -821,7 +873,12 @@ def retrieve(
 
 
 def _retrieve_through_roll(
-    name: str, base: Path | None, *, role: str, deadline: float | None = None
+    name: str,
+    base: Path | None,
+    *,
+    role: str,
+    deadline: float | None = None,
+    observed_roll: bool = False,
 ) -> dict[str, Any]:
     """One ``retrieve`` request that WAITS OUT a broker roll instead of failing open.
 
@@ -849,7 +906,7 @@ def _retrieve_through_roll(
     # sentinel is gone stays final here: the successor's own hold has ended,
     # and inside a live session `access._retrieve_inside_session` (not this
     # loop) decides what a denial means — it never decrypts locally.
-    seen_roll = rolling_in_progress(base)
+    seen_roll = observed_roll or rolling_in_progress(base)
     if deadline is None and seen_roll:
         deadline = time.monotonic() + ROLL_WAIT_S
     while True:
@@ -867,7 +924,7 @@ def _retrieve_through_roll(
                     "the secret broker is being replaced by an update and did not finish "
                     f"within {ROLL_WAIT_S:g}s; retry in a moment"
                 ) from exc
-            time.sleep(0.1)
+            _pause(0.1, deadline)
 
 
 def unlock(passphrase: str, base: Path | None = None) -> None:

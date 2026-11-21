@@ -61,6 +61,7 @@ from local_operator.secrets.peer import (
 from local_operator.secrets.protocol import (
     MAX_SOCKET_PATH,
     PROTOCOL_VERSION,
+    ROLL_WAIT_S,
     ProtocolError,
     decode_bytes,
     encode_bytes,
@@ -123,21 +124,22 @@ UNLOCK_BACKOFF_MAX_S = 8.0
 #: closes that window without trusting anything from the old broker: the hold
 #: never grants, it only waits for the session to authenticate itself afresh.
 #:
-#: **Derived, not picked (review CR1).** A held request is answered only after
-#: the hold AND the redaction notice (``NOTIFY_ACK_TIMEOUT_S``, longer when it
-#: queues behind the session's write lock), and the whole of that must land
-#: inside the client's ``REQUEST_TIMEOUT_S`` — otherwise the client sees a
-#: timeout, the roll sentinel may be gone by then, and a timeout outside a roll
-#: is exactly what ``access.retrieve_secret`` turns into the unnotified local
-#: decrypt. The first revision held 8 s: 8 + 2 s notice ≈ the 10 s timeout. So
-#: the hold is the timeout minus the notice budget minus
-#: :data:`ROLL_HOLD_MARGIN_S` for write-lock queueing and scheduling (6 s), pinned
-#: by ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
-#: It still covers the re-registration path's own worst case with room: the old
-#: broker's ``stop()`` closes session channels after its ≤1 s watcher tick, and
-#: the session retries over ≤2 s (``session._REREGISTER_DELAYS_S``) — ~3 s.
+#: **Derived, not picked (review CR1, #4389 R3-2).** A held request is answered
+#: only after the hold AND the redaction notice (``NOTIFY_ACK_TIMEOUT_S``, longer
+#: when it queues behind the session's write lock), and the whole of that must
+#: land inside the CLIENT'S budget. Since #4389 that budget is not the 10 s
+#: request timeout but ``protocol.ROLL_WAIT_S`` (8 s): every phase of a read that
+#: met a roll is clipped to it, so a hold derived from the request timeout (6 s +
+#: 2 s notice = exactly 8 s) left zero margin and the client gave up at the same
+#: instant the successor answered. So the hold is the client's budget minus the
+#: notice minus :data:`ROLL_HOLD_MARGIN_S` for write-lock queueing and scheduling
+#: (4 s), pinned by
+#: ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
+#: It still covers the re-registration path's own worst case: the old broker's
+#: ``stop()`` closes session channels after its ≤1 s watcher tick, and the
+#: session retries over ≤2 s (``session._REREGISTER_DELAYS_S``) — ~3 s.
 ROLL_HOLD_MARGIN_S = 2.0
-ROLL_GRACE_S = REQUEST_TIMEOUT_S - NOTIFY_ACK_TIMEOUT_S - ROLL_HOLD_MARGIN_S
+ROLL_GRACE_S = ROLL_WAIT_S - NOTIFY_ACK_TIMEOUT_S - ROLL_HOLD_MARGIN_S
 
 #: What the ``roll`` audit row says when the old broker's build cannot be read
 #: (Q3). Brokers released before the roll existed have no ``version`` in their

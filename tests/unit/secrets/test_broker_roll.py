@@ -902,9 +902,12 @@ def test_hold_plus_notice_fits_the_client_timeout() -> None:
 
     hold = broker_module.ROLL_GRACE_S
     notice = broker_module.NOTIFY_ACK_TIMEOUT_S
-    assert hold + notice + broker_module.ROLL_HOLD_MARGIN_S <= client.REQUEST_TIMEOUT_S
-    assert broker_module.ROLL_HOLD_MARGIN_S >= 1.0
-    assert hold + notice <= client.ROLL_WAIT_S <= client.REQUEST_TIMEOUT_S
+    margin = broker_module.ROLL_HOLD_MARGIN_S
+    # #4389 R3-2: the client clips a roll read to ROLL_WAIT_S, not the request
+    # timeout, so the hold + notice must fit inside THAT with a real margin
+    # (6 + 2 == 8 used to leave none).
+    assert margin >= 1.0
+    assert hold + notice + margin <= client.ROLL_WAIT_S <= client.REQUEST_TIMEOUT_S
     assert hold >= sum(session_module._REREGISTER_DELAYS_S) + 1.0
 
 
@@ -1370,3 +1373,175 @@ def test_an_unreadable_predecessor_version_says_why(
     assert len(rows) == 1, rows
     assert "(unknown)" not in rows[0].outcome
     assert f"({broker_module.PREDECESSOR_VERSION_UNREPORTED})" in rows[0].outcome
+
+
+# --- #4389 round 3: one deadline through every phase (S5/CR9) ------------------
+
+
+class _Clock:
+    """A deterministic ``time.monotonic``: it moves only when a test says so."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _SplitReplySocket:
+    """A connection whose reply arrives in two receives; the first spends the budget."""
+
+    def __init__(self, clock: _Clock, spend: float) -> None:
+        import json
+        import struct
+
+        body = json.dumps({"ok": True, "pid": 1}).encode()
+        self._chunks = [struct.pack("!I", len(body)), body]
+        self._clock = clock
+        self._spend = spend
+        self.recvs = 0
+        self._timeout: float | None = None
+
+    def settimeout(self, value: float | None) -> None:
+        self._timeout = value
+
+    def gettimeout(self) -> float | None:
+        return self._timeout
+
+    def sendall(self, _data: bytes) -> None:
+        pass
+
+    def recv(self, _count: int) -> bytes:
+        self.recvs += 1
+        chunk = self._chunks.pop(0)
+        self._clock.now += self._spend
+        return chunk
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_reply_split_across_receives_cannot_outlive_the_deadline(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5/CR9: the remaining budget is recomputed before EACH receive.
+
+    The header arrives as the budget runs out; the body would arrive on a second
+    receive. Before, one timeout computed up front was reused for every phase,
+    so the second receive ran past the deadline and the call succeeded late.
+    """
+    from local_operator.secrets import protocol
+
+    assert protocol._HEADER.format in ("!I", ">I")
+    clock = _Clock()
+    monkeypatch.setattr(time, "monotonic", clock)
+    link = _SplitReplySocket(clock, spend=2.0)
+    monkeypatch.setattr(client, "_connect", lambda path, timeout=0: link)
+    with pytest.raises(client.BrokerUnavailable):
+        client._bounded_request("ping", config_root, clock.now + 1.0)
+    assert link.recvs == 1, "a receive started after the caller's deadline"
+
+
+def test_an_exhausted_budget_makes_no_connection(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5/CR9: no work after expiry — the old 100 ms floor connected anyway."""
+    clock = _Clock()
+    monkeypatch.setattr(time, "monotonic", clock)
+
+    def connect(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("connected after the deadline")
+
+    monkeypatch.setattr(client, "_connect", connect)
+    with pytest.raises(client.BrokerUnavailable):
+        client._bounded_request("ping", config_root, clock.now - 0.01)
+
+
+def test_no_spawn_after_the_first_ping_spent_the_deadline(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5/CR9: a silent broker's first ping eats the budget; nothing is spawned after."""
+    clock = _Clock()
+    monkeypatch.setattr(time, "monotonic", clock)
+    deadline = clock.now + 1.0
+    pings: list[float] = []
+
+    def silent_ping(_base: object, _deadline: object) -> bool:
+        pings.append(clock.now)
+        clock.now = max(clock.now, deadline)  # the ping waits until the budget is gone
+        return False
+
+    spawned: list[object] = []
+    monkeypatch.setattr(client, "_alive", silent_ping)
+    monkeypatch.setattr(client, "_spawn_broker", lambda base=None: spawned.append(base) or -1)
+    monkeypatch.setattr(client, "_record_spawn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "PEER_AUTHENTICATION_SUPPORTED", True)
+    assert client.ensure_broker(config_root, deadline=deadline) is False
+    assert spawned == [], "a broker was spawned after the caller's deadline"
+    assert len(pings) == 1, f"pinged again after the deadline: {pings}"
+
+
+def test_a_real_roll_keeps_the_lineage_marker_through_reregistration(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-3 + S6 tail, on a real roll with AUTOMATIC re-registration left on.
+
+    R3-3: the session's lineage marker survives the automatic re-registration
+    with the successor, its child is served through it (with the notice), and
+    the marker is gone once the session closes.
+
+    S6 tail: the sentinel written just before the old broker is signalled must
+    outlive the whole bounded exit wait (``OLD_EXIT_TIMEOUT_S``), then be
+    re-armed for the successor's hold from the exit.
+    """
+    from local_operator.secrets import roll as roll_module
+    from local_operator.secrets.broker import ROLL_GRACE_S
+    from local_operator.secrets.session import lineage_dir
+
+    writes: list[tuple[float, bool]] = []
+    real_write = roll_module._write_sentinel
+
+    def spy(path, old_pid, *, ttl=roll_module.SENTINEL_TTL_S, signalled=False):
+        writes.append((ttl, signalled))
+        return real_write(path, old_pid, ttl=ttl, signalled=signalled)
+
+    monkeypatch.setattr(roll_module, "_write_sentinel", spy)
+    _start_old_broker(config_root, reaper)
+    seen: list[str] = []
+    registration = session_module.register_session(
+        lambda _name, value: seen.append(value.decode()), base=config_root
+    )
+    assert registration is not None
+    mine = f"{os.getpid()}-"
+
+    def markers() -> list[str]:
+        directory = lineage_dir(config_root)
+        if not directory.is_dir():
+            return []
+        return [p.name for p in directory.iterdir() if p.name.startswith(mine)]
+
+    try:
+        assert len(markers()) == 1, "no lineage marker after the first registration"
+        before = markers()
+        result = roll_module.roll_broker(config_root, force=True)
+        reaper.add(result.new_pid)
+        assert result.status == "rolled", result
+        assert _await(
+            lambda: os.getpid() in (_status(config_root).get("sessions") or ())
+        ), "the session did not re-register with the successor on its own"
+        assert markers() == before, "the marker changed across the automatic re-registration"
+        out, _ = _finish(_child_retrieve(config_root))
+        assert "FALLBACK" not in out, out
+        assert f"VALUE {SECRET_VALUE}" in out, out
+        assert SECRET_VALUE in seen
+    finally:
+        registration.close()
+    assert markers() == [], "the marker outlived the session's close"
+
+    signalled = [ttl for ttl, flagged in writes if flagged]
+    assert signalled, writes
+    assert signalled[0] >= roll_module.OLD_EXIT_TIMEOUT_S + ROLL_GRACE_S, (
+        f"the pre-signal sentinel ({signalled[0]}s) lapses inside the "
+        f"{roll_module.OLD_EXIT_TIMEOUT_S}s exit wait"
+    )
+    assert signalled[-1] == ROLL_GRACE_S, "not re-armed for the hold after the exit"

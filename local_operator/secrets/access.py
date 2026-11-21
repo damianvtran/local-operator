@@ -177,8 +177,17 @@ def resolve_master_key(base: Path | None = None, *, create: bool = False) -> byt
     )
 
 
-def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
+def master_key_for(
+    base: Path | None = None, *, create: bool = False, deadline: float | None = None
+) -> bytes:
     """The master key, from the broker when there is one, else from disk.
+
+    ``deadline`` (``time.monotonic``) bounds the broker leg — pings, spawn poll
+    and the ``key`` request — for a caller that is already spending one budget
+    (#4389 Q4: ``retrieve_secret``'s local fallback used to re-ping a silent
+    broker twice with fresh 10 s timeouts, ~29 s in all). Once it has passed,
+    ``ensure_broker`` does no further broker work and this goes straight to the
+    key file. ``None`` is the ordinary, unbudgeted call.
 
     **Why the broker is tried first even in ``keyfile`` mode, where it grants
     nothing extra.** Going through it means retrievals are attributed to a peer
@@ -230,9 +239,12 @@ def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
     )
     from local_operator.secrets.errors import BrokerIncompatible
 
+    # Passed only when there is one, so the many doubles standing in for these
+    # two calls with `(base)` keep working.
+    bounded = {"deadline": deadline} if deadline is not None else {}
     try:
-        if ensure_broker(base):
-            return fetch_master_key(base)
+        if ensure_broker(base, **bounded):
+            return fetch_master_key(base, **bounded)
         if hardened:
             raise BrokerUnavailable(
                 "This store is hardened with a passphrase and the secret broker could not "
@@ -292,7 +304,9 @@ def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
     return resolve_master_key(base)
 
 
-def open_store(base: Path | None = None, *, create: bool = False) -> SecretStore:
+def open_store(
+    base: Path | None = None, *, create: bool = False, deadline: float | None = None
+) -> SecretStore:
     """Return a store ready to use, obtaining the master key for it.
 
     ``create`` is passed by the write verbs only: a ``get`` against a store
@@ -309,8 +323,12 @@ def open_store(base: Path | None = None, *, create: bool = False) -> SecretStore
     so a caller it serves needs no repair, while a caller it refuses or cannot
     reach lands on the repairing path rather than on a raw
     :func:`load_master_key`.
+
+    ``deadline`` is threaded to :func:`master_key_for` (#4389 Q4).
     """
-    return SecretStore(master_key_for(base, create=create), base=base)
+    if deadline is None:
+        return SecretStore(master_key_for(base, create=create), base=base)
+    return SecretStore(master_key_for(base, create=create, deadline=deadline), base=base)
 
 
 def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent") -> bytes:
@@ -420,27 +438,58 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
         # notify. A registered session's tool child has one, so it never takes
         # it; see `_retrieve_inside_session` for the bounded wait and refusal.
         return _retrieve_inside_session(name, base, role=role, owner=owner)
-    # QA Q2: while a roll is under way the WHOLE call, liveness ping included,
-    # gets the client's one roll budget; before, the ping alone could wait a
-    # full request timeout against a silent successor before that budget began
-    # (measured 14 s). Passed only during a roll, so the ordinary path — and
-    # every double standing in for these two calls — is unchanged.
-    bounded = {"deadline": time.monotonic() + ROLL_WAIT_S} if rolling_in_progress(base) else {}
+    # **One budget for the whole call, fallback included (QA Q2, #4389 Q4).**
+    # The liveness ping, any spawn, the retrieval AND the local fallback's own
+    # broker leg (`open_store` → `master_key_for` → `ensure_broker`) share one
+    # deadline of the client's roll budget. Before, the ping alone could wait a
+    # full request timeout against a silent broker (measured 14 s), and with
+    # no roll in sight the fallback re-pinged it twice more (QA measured ~29 s
+    # before the local decrypt). A healthy broker answers in well under it: the
+    # one slow leg it has, the redaction notice, is capped at 2 s.
+    deadline = time.monotonic() + ROLL_WAIT_S
+    # **The roll observation is held for the whole call (#4389 S8).** It is
+    # read ONCE, before anything can spend the budget. A sentinel that expires
+    # while the liveness ping or the retrieval waits must not turn "a roll was
+    # under way and the broker never answered" back into an ordinary outage —
+    # that is the unnotified local decrypt the roll guard exists to prevent,
+    # and lineages that predate the session marker rely on this guard alone.
+    observed_roll = rolling_in_progress(base)
     try:
-        if ensure_broker(base, **bounded):
-            return retrieve(name, base, role=role, **bounded)
+        if ensure_broker(base, deadline=deadline):
+            # `observed_roll` is passed only when set, so doubles standing in for
+            # `retrieve` with the pre-#4389 keywords keep working.
+            seen = {"observed_roll": True} if observed_roll else {}
+            return retrieve(name, base, role=role, deadline=deadline, **seen)
         # No broker could be started. In the hardened tier there is no
         # unwrapped key on disk to fall back to, so let the local path raise
         # its own accurate message rather than inventing one here.
-    except BrokerUnavailable:
+        if observed_roll and not hardened:
+            raise _roll_outlasted(ROLL_WAIT_S)
+    except BrokerUnavailable as exc:
         # Reached one moment, gone the next. Availability, not policy: §13
-        # keeps the store usable rather than making a daemon a hard dependency.
+        # keeps the store usable rather than making a daemon a hard dependency
+        # — unless a roll was observed, when silence is the roll not finishing.
         if hardened:
             raise
+        if observed_roll:
+            raise _roll_outlasted(ROLL_WAIT_S) from exc
     except BrokerDenied:
+        # A denial is policy, not silence: it keeps the keyfile tier's
+        # documented fallback (§8) even after a roll, whose tail the
+        # successor's own hold covers (client `_retrieve_through_roll`).
         if hardened:
             raise
-    return open_store(base).get(name, role=role, session_id=session_id())
+    return open_store(base, deadline=deadline).get(name, role=role, session_id=session_id())
+
+
+def _roll_outlasted(budget: float) -> Exception:
+    """The refusal for a broker that stayed unreachable after a roll was observed."""
+    from local_operator.secrets.client import BrokerRolling
+
+    return BrokerRolling(
+        "the secret broker is being replaced by an update and did not come back "
+        f"within {budget:g}s; retry in a moment"
+    )
 
 
 # `BrokerIncompatible` is deliberately absent from the clauses above: it is a
@@ -536,12 +585,16 @@ def _retrieve_inside_session(
     last: str = "no secret broker could be started"
     while True:
         remaining = deadline - time.monotonic()
+        # No attempt starts after the window closes (#4389 S5/CR9): the old
+        # 100 ms floor bought one more ping-and-spawn past the bound.
+        if remaining <= 0:
+            break
         try:
             # `ensure_broker`'s own spawn poll is clipped to the window so one
             # slow start cannot carry the total past the bound.
             if ensure_broker(
                 base,
-                timeout=max(0.1, min(STARTUP_TIMEOUT_S, remaining)),
+                timeout=min(STARTUP_TIMEOUT_S, remaining),
                 deadline=deadline,
             ):
                 return retrieve(name, base, role=role, deadline=deadline)
