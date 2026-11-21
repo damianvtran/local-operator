@@ -49,11 +49,13 @@ from local_operator.info.collect import LiveState
 from local_operator.info.copy import (
     InfoRow,
     copy_slice,
+    info_duration,
     info_leaving,
     info_plural,
     info_state,
     info_text as _i,
     info_update,
+    info_wrap_end,
     join_info,
     paint_info_row,
 )
@@ -62,7 +64,6 @@ from local_operator.info.model import (
     InfoSnapshot,
     SessionsInfo,
     format_bytes,
-    format_duration,
     is_shadowed_install,
 )
 from local_operator.info.render import build_export, not_answering_clause
@@ -558,6 +559,7 @@ class _Body:
                 space = text.rfind(" ", offset, end + 1)
                 if space > offset:
                     end = space
+            end = info_wrap_end(text, offset, end, body_width)
             row = InfoRow(no_wrap=True, overflow="crop")
             row.append("  ")
             row.append(copy_slice(text, offset, end), style=semantic_style("dim"))
@@ -716,6 +718,11 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
                 if install.source_ref
                 else _i(_ik.install_source_snapshot_unknown())
             ),
+            # Shed the translated description, never part of the identifying SHA.
+            values=(
+                _i(_ik.install_source_snapshot(source_ref=str(install.source_ref[:12]))),
+                install.source_ref[:12],
+            ) if install.source_ref else (),
             notes=(
                       _i(_ik.install_snapshot_note_full()),
                       _i(_ik.install_snapshot_note_short()),
@@ -730,7 +737,7 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
     if install.build_age_s is not None:
         body.kv(
             _i(_ik.label_built()),
-            _i(_ik.install_build_age(build_age_s=str(format_duration(install.build_age_s)))),
+            _i(_ik.install_build_age(build_age_s=info_duration(install.build_age_s))),
         )
     body.kv(
         _i(_ik.label_python()),
@@ -800,8 +807,8 @@ def _latest_notes(install: object) -> tuple[str, ...]:
         return (_i(_ik.latest_current()), _i(_ik.latest_current()))
     stale = _i(_ik.latest_stale()) if age > TTL_S else ""
     return (
-        _i(_ik.latest_checked_full(age=str(format_duration(age)), stale=str(stale))),
-        _i(_ik.latest_checked_short(age=str(format_duration(age)))),
+        _i(_ik.latest_checked_full(age=info_duration(age), stale=str(stale))),
+        _i(_ik.latest_checked_short(age=info_duration(age))),
         _i(_ik.latest_current()),
     )
 
@@ -937,7 +944,7 @@ def _session_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState
     body.kv(
         _i(_ik.label_started()),
         (
-            _i(_ik.session_started(uptime_s=str(format_duration(process.uptime_s))))
+            _i(_ik.session_started(uptime_s=info_duration(process.uptime_s)))
             if process.uptime_s
             else '—'
         ),
@@ -1112,11 +1119,10 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # The measurement, ahead of uptime and memory for the same reason: on
         # this row the age is the reason the reader is looking at it at all.
         if line.state == "wedged":
-            # The age is format_duration's own string, passed verbatim: the
-            # key carries only the words around it, so its digits cannot be
-            # regrouped or reformatted by the catalogue path.
+            # The nested duration owns its localized units and ungrouped
+            # digits; the outer message only owns the surrounding sentence.
             bits.append(
-                _t(_x.info_panel_last_heartbeat_ago(age=format_duration(line.heartbeat_age_s)))
+                _t(_x.info_panel_last_heartbeat_ago(age=info_duration(line.heartbeat_age_s)))
             )
         # THE UPDATE WINDOW RANKS ABOVE THE DRAIN, AND IS APPENDED FIRST SO THAT IT
         # SHEDS LAST (design review round 1, D2; round 2, D7). The shed drops whole
@@ -1146,7 +1152,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             bits.append(info_update(phase, pair))
         if line.leaving:
             bits.append(info_leaving(line.leaving))
-        bits.append(format_duration(line.uptime_s))
+        bits.append(info_duration(line.uptime_s))
         # BOTH of these are shed on a row that is not answering, not merely
         # ordered after the facts (design round 2, D4): usage is sampled for
         # LIVE pids only, so the figure here would be a measurement that was
@@ -2008,6 +2014,9 @@ class InfoScreen(ModalScreen[None]):
             title = getattr(self, "_title", None)
             if title is not None and title.is_mounted:
                 title.update(self._title_text())
+            # Publish every localized Static in the same frame. Re-measure after
+            # layout too: the new body may change whether scrolling is possible.
+            self._sync_hint()
             self.call_after_refresh(self._sync_hint)
 
     def _info_hint(self) -> str:

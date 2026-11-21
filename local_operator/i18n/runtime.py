@@ -509,18 +509,21 @@ def _render(
     params: Mapping[str, Any],
     locale: str,
     plural_value: Any,
-) -> str:
-    out: list[str] = []
+) -> list[tuple[str, str | None]]:
+    # Retain interpolation ownership through selected ICU branches. Paint clients
+    # can compose nested localized messages without rediscovering their offsets
+    # by searching rendered strings (which fails on repeated/reordered values).
+    out: list[tuple[str, str | None]] = []
     for node in nodes:
         if isinstance(node, _Text):
-            out.append(node.value)
+            out.append((node.value, None))
             continue
         if isinstance(node, _Hash):
-            out.append(
+            out.append((
                 _format_value(
                     plural_value, "plural number", lambda: fmt.format_number(plural_value, locale)
-                )
-            )
+                ), None
+            ))
             continue
         assert isinstance(node, _Arg)
         if node.name not in params:
@@ -530,43 +533,43 @@ def _render(
             )
         value = params[node.name]
         if node.kind == "simple":
-            out.append(_interpolate(value, locale, label=f"argument {node.name!r}"))
+            out.append((_interpolate(value, locale, label=f"argument {node.name!r}"), node.name))
         elif node.kind == "number":
             skeleton = node.skeleton or None
-            out.append(
+            out.append((
                 _format_value(
                     value,
                     f"number argument {node.name!r}",
                     lambda: fmt.format_number(value, locale, skeleton=skeleton),
-                )
-            )
+                ), None
+            ))
         elif node.kind == "date":
             style = node.skeleton or "medium"
-            out.append(
+            out.append((
                 _format_value(
                     value,
                     f"date argument {node.name!r}",
                     lambda: fmt.format_date(value, locale, style=style),
-                )
-            )
+                ), None
+            ))
         elif node.kind == "time":
             style = node.skeleton or "short"
-            out.append(
+            out.append((
                 _format_value(
                     value,
                     f"time argument {node.name!r}",
                     lambda: fmt.format_time(value, locale, style=style),
-                )
-            )
+                ), None
+            ))
         elif node.kind == "plural":
             body = _select_plural(locale, value, node.parts)
-            out.append(_render(body, params, locale, plural_value=value))
+            out.extend(_render(body, params, locale, plural_value=value))
         elif node.kind == "select":
             body = _select_string(value, node.parts)
-            out.append(_render(body, params, locale, plural_value=plural_value))
+            out.extend(_render(body, params, locale, plural_value=plural_value))
         else:  # pragma: no cover - the parser admits no other kinds
             raise MessageFormatError(f"unknown argument kind {node.kind!r}")
-    return "".join(out)
+    return out
 
 
 def is_passthrough_message(source: str) -> bool:
@@ -589,4 +592,15 @@ def render_message(source: str, params: Mapping[str, Any], locale: str) -> str:
     the checker and parity tests let it fly, because a red locus beats a
     silent literal.
     """
-    return _render(parse_message(source), params, locale, plural_value=None)
+    return "".join(text for text, _ in render_message_parts(source, params, locale))
+
+
+def render_message_parts(
+    source: str, params: Mapping[str, Any], locale: str,
+) -> tuple[tuple[str, str | None], ...]:
+    """Render once, retaining the argument name of each simple interpolation.
+
+    Literal/formatted ink has no nested owner. Selection and formatting use the
+    same walker as plain rendering, so provenance cannot change ICU semantics.
+    """
+    return tuple(_render(parse_message(source), params, locale, plural_value=None))

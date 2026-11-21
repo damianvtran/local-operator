@@ -13,7 +13,7 @@ from typing import Any
 
 from rich.text import Text
 
-from local_operator.i18n.keys import tui_info as keys
+from local_operator.i18n.keys import tui_info as keys, wire_session_status as duration_keys
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import tr_record
 from local_operator.tui.i18n_status import localized_display
@@ -56,12 +56,14 @@ def join_info(separator: str, values: Iterable[str]) -> InfoText:
     return InfoText(tuple(parts))
 
 
-_resolve = {name: tr_record(name) for name in ("tui.info", "tui.small", "tui.welcome")}
-# Explicit ownership, not ASCII detection: these are IDs, durations, versions,
+_resolve = {name: tr_record(name) for name in (
+    "tui.info", "tui.small", "tui.welcome", "wire.session_status",
+)}
+# Explicit ownership, not ASCII detection: these are IDs and versions,
 # key chords and paths. Human labels, free error prose and conversation names
 # are deliberately absent. Commands below are protected as whole instructions.
 _TECHNICAL_ARGS = frozenset({
-    "age", "uptime_s", "build_age_s", "latest", "latest_known", "version",
+    "latest", "latest_known", "version",
     "protocol", "variable", "kind", "stamp", "source_ref",
     "info_copy_key", "copy_key", "INFO_COPY_KEY", "target", "time_strftime",
 })
@@ -88,7 +90,46 @@ def info_text(message: Msg) -> InfoText:
         literals.extend((f"'lop stop --pid {pid}'", f"'/stop {pid}'",
                          f"'lop stop --pid {pid} --force'"))
     literals.extend(("'lop stop --pid N'", "'/stop N'", "'lop stop --pid N --force'"))
-    return InfoText((_Part(record.text, record.source_locale, tuple(literals)),))
+    parts: list[_Part] = []
+    pending: list[str] = []
+    for text, owner in record.parts or ((record.text, None),):
+        nested = message.params.get(owner) if owner is not None else None
+        if isinstance(nested, InfoText):
+            # ICU already selected/reordered this interpolation. Preserve its
+            # actual source (including fallback) and whole command ownership.
+            if pending:
+                parts.append(_Part("".join(pending), record.source_locale, tuple(literals)))
+                pending.clear()
+            parts.extend(nested.parts)
+        else:
+            pending.append(text)
+    if pending:
+        parts.append(_Part("".join(pending), record.source_locale, tuple(literals)))
+    return InfoText(tuple(parts))
+
+
+def info_duration(seconds: float) -> InfoText:
+    """Localized human units with Info's unchanged ASCII numeric thresholds.
+
+    Reuse the audited session-status keys, but resolve in the enclosing Info
+    locale, not the heavyweight catalogue's independently configured locale.
+    None is a missing field, handled by the whole field message, never zero.
+    """
+    total = int(max(0.0, seconds))
+    if total < 60:
+        message = duration_keys.duration_seconds(count=total)
+    elif total < 3600:
+        message = duration_keys.duration_minutes(count=total // 60)
+    elif total < 86400:
+        message = duration_keys.duration_hours_minutes(
+            hours=total // 3600, minutes=(total % 3600) // 60,
+        )
+    else:
+        # Keep ungrouped 1000-day output, matching the legacy formatter.
+        message = duration_keys.duration_days_hours(
+            days=str(total // 86400), hours=(total % 86400) // 3600,
+        )
+    return info_text(message)
 
 
 class InfoRow(Text):
@@ -121,9 +162,43 @@ def copy_slice(value: str, start: int, end: int) -> InfoText:
     for part in _parts(value):
         left, right = max(start - offset, 0), min(end - offset, len(part.text))
         if left < right:
-            parts.append(_Part(part.text[left:right], part.source, part.literals))
+            # A command wider than the viewport must fold, but each surviving
+            # fragment still belongs to the same technical island.
+            literals = tuple(
+                part.text[max(left, start):min(right, end)]
+                for start, end in _literal_ranges(part)
+                if max(left, start) < min(right, end)
+            )
+            parts.append(_Part(part.text[left:right], part.source, literals))
         offset += len(part.text)
     return InfoText(tuple(parts))
+
+
+def _literal_ranges(part: _Part) -> Iterable[tuple[int, int]]:
+    for literal in part.literals:
+        start = 0
+        while literal and (start := part.text.find(literal, start)) >= 0:
+            yield start, start + len(literal)
+            start += len(literal)
+
+
+def info_wrap_end(value: str, start: int, end: int, width: int) -> int:
+    """Keep a fitting RTL technical instruction whole across a cell wrap.
+
+    English's established wrapping is unchanged. Oversized instructions retain
+    fragment ownership via copy_slice rather than overflowing the viewport.
+    """
+    from rich.cells import cell_len
+
+    offset = 0
+    for part in _parts(value):
+        if part.source == "ur":
+            for left, right in _literal_ranges(part):
+                left, right = left + offset, right + offset
+                if start < left < end < right and cell_len(value[left:right]) <= width:
+                    return left
+        offset += len(part.text)
+    return end
 
 
 def paint_info_row(row: Text) -> Text:

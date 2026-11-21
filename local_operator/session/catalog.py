@@ -666,8 +666,9 @@ def status_duration(seconds: float) -> str:
     the unit letters are product copy inside a localized label, so an ASCII
     ``4m`` inside a French sentence was English leaking into a translated row
     (the operator's "no English anywhere" requirement). ``info.model`` stays
-    stdlib-only by contract and keeps its own ASCII spelling for ``/info``;
-    migrating that screen is a separate slice.
+    stdlib-only by contract and keeps its ASCII spelling for machine/CLI users.
+    Info's presentation helper now reuses these audited keys with its own active
+    locale; it must not import this heavyweight catalogue or borrow our locale.
 
     CONSTRAINTS:
 

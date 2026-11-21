@@ -38,14 +38,13 @@ from pathlib import Path
 
 from local_operator.i18n.keys import tui_info as _ik
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.info.copy import info_state, info_text as _i
+from local_operator.info.copy import info_duration, info_state, info_text as _i
 from local_operator.info.model import (
     UNKNOWN,
     InfoSnapshot,
     SessionsInfo,
     SubagentLine,
     format_bytes,
-    format_duration,
     is_shadowed_install,
 )
 
@@ -179,7 +178,7 @@ def _latest_line(snapshot: InfoSnapshot) -> str:
     return _i(
                _ik.latest_line_checked(
                    latest_known=str(install.latest_known),
-                   age=str(format_duration(age)),
+                   age=info_duration(age),
                    stale=str(stale),
                ),
            )
@@ -271,9 +270,9 @@ def not_answering_clause(sessions: SessionsInfo | None) -> str:
         _i(
             _ik.not_answering_clause_full(
                 count=count,
-                age=str(format_duration(worst.heartbeat_age_s)),
+                age=info_duration(worst.heartbeat_age_s),
                 pids=str(pids),
-                remedy=str(remedy),
+                remedy=remedy,
             ),
         )
     )
@@ -340,7 +339,8 @@ def build_export(snapshot: InfoSnapshot) -> str:
                 source_ref=str(install.source_ref[:12]),
             ),
         ),
-        _i(_ik.export_build_age(build_age_s=str(format_duration(install.build_age_s)))),
+        _i(_ik.export_build_age(build_age_s=(info_duration(install.build_age_s)
+                         if install.build_age_s is not None else "unmeasured"))),
         _i(
             _ik.export_python(
                 has_install_python_version_and_install_python_implementation=str(
@@ -389,7 +389,8 @@ def build_export(snapshot: InfoSnapshot) -> str:
                 ),
             ),
         ),
-        _i(_ik.export_uptime(uptime_s=str(format_duration(process.uptime_s)))),
+        _i(_ik.export_uptime(uptime_s=(info_duration(process.uptime_s)
+                      if process.uptime_s is not None else "unmeasured"))),
         _i(_ik.export_working_dir(cwd=str(_value(relativise_home(process.cwd))))),
         _i(
             _ik.export_config_dir(
@@ -456,7 +457,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
                          line.kind,
                          _i(_ik.export_pid_fallback(pid=str(line.pid))),
                      ]
-            fields.append(format_duration(line.uptime_s))
+            fields.append(info_duration(line.uptime_s))
             if line.state == "wedged":
                 # The measured half of "not answering", beside the state token
                 # rather than only in the caveat below: a pasted export is read
@@ -465,7 +466,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
                 fields.append(
                     _i(
                         _x.info_panel_last_heartbeat_ago(
-                            age=str(format_duration(line.heartbeat_age_s)),
+                            age=info_duration(line.heartbeat_age_s),
                         ),
                     ),
                 )

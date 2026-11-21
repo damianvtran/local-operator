@@ -328,7 +328,7 @@
   "tui.info.status.bound_held": {
     "role": "diagnostic message",
     "tone": "plain, precise, non-alarmist diagnostic facts",
-    "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:247. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. The runtime exceeded its stall bound, dumped diagnostics, and is STILL ALIVE with the turn inside it; only stopping ends it. Bound means a liveness/time bound, not a key binding.",
+    "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:247. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. The runtime exceeded its stall bound, wrote a held diagnostic marker, and remains alive. The label includes both HELD_PROVEN and HELD_UNPROVEN readings: old-format markers or missing/foreign/old-format deadline siblings cannot prove recovery, so the diagnostic conservatively stays held. This is NOT proof that the runtime is hung or unresponsive, and does not authorize the kill ladder. A later observed-no-work marker or proven re-arm clears it. Bound means a liveness/time bound, not a key binding; preserve the uncertainty rather than asserting a diagnosed hang.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {}
   },
@@ -473,7 +473,7 @@
     "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:596. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
-      "build_age_s": "source: format_duration(install.build_age_s); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
+      "build_age_s": "source: info_duration(install.build_age_s); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained; stable select value unmeasured means no measurement, never zero"
     }
   },
   "tui.info.install.shadow_explanation": {
@@ -547,7 +547,7 @@
     "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:652. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
-      "age": "source: format_duration(age); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner.",
+      "age": "source: info_duration(age); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained",
       "stale": "source: stale; meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
     }
   },
@@ -557,7 +557,7 @@
     "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:653. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
-      "age": "source: format_duration(age); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
+      "age": "source: info_duration(age); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained"
     }
   },
   "tui.info.kind_of_runtime.daemon_full": {
@@ -745,7 +745,7 @@
     "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:758. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
-      "uptime_s": "source: format_duration(process.uptime_s); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
+      "uptime_s": "source: info_duration(process.uptime_s); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained; stable select value unmeasured means no measurement, never zero"
     }
   },
   "tui.info.session.protocol": {
@@ -897,7 +897,7 @@
   "tui.info.fleet_caveats.lower_bound": {
     "role": "diagnostic message",
     "tone": "plain, precise, non-alarmist diagnostic facts",
-    "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:1076. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound.",
+    "note": "Human /info readout; local_operator/tui/widgets/info_panel.py:1076. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. The lower bound qualifies the fleet TRAJECTORY total (session trajectories plus reported running subagents), NOT the number of runtimes. count is the number of older-build runtimes missing subagent reporting; their existence does not make the runtime census incomplete.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
       "count": "expression: sessions.subagents_unreported; meaning: Runtimes whose old build did not report; absent counts, not measured zero."
@@ -1441,7 +1441,7 @@
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
       "latest_known": "source: install.latest_known; meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner.",
-      "age": "source: format_duration(age); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner.",
+      "age": "source: info_duration(age); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained",
       "stale": "source: stale; meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
     }
   },
@@ -1486,7 +1486,7 @@
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
       "count": "source: count; meaning: Runtime count",
-      "age": "source: format_duration(worst.heartbeat_age_s); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner.",
+      "age": "source: info_duration(worst.heartbeat_age_s); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained",
       "pids": "source: pids; meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner.",
       "remedy": "source: remedy; meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
     }
@@ -1494,7 +1494,7 @@
   "tui.info.tree_lines.deeper": {
     "role": "diagnostic message",
     "tone": "plain, precise, non-alarmist diagnostic facts",
-    "note": "Human /info readout; local_operator/info/render.py:284. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound.",
+    "note": "Human /info readout; local_operator/info/render.py:284. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. deeper is a COUNT OF HIDDEN DESCENDANT NODES beyond the displayed tree depth cap, NOT a depth, number of levels, or children of just the last visible row. For example, three hidden siblings at depth 4 means +3 hidden descendants, not three additional levels.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
       "deeper": "source: deeper; meaning: Runtime count"
@@ -1577,10 +1577,10 @@
   "tui.info.export.build_age": {
     "role": "diagnostic message",
     "tone": "plain, precise, non-alarmist diagnostic facts",
-    "note": "Human /info readout; local_operator/info/render.py:332. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. Human clipboard report, not JSON. English spacing is compatibility evidence only; locale wording/order may change. Keep machine identifiers/paths/model names untouched; redact homes/secrets before export. The first local-operator triage line and raw [state] diagnostic codes remain stable machine-facing syntax; all other human report prose in this namespace is translatable.",
+    "note": "Human /info readout; local_operator/info/render.py:332. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. Human clipboard report, not JSON. English spacing is compatibility evidence only; locale wording/order may change. Keep machine identifiers/paths/model names untouched; redact homes/secrets before export. The first local-operator triage line and raw [state] diagnostic codes remain stable machine-facing syntax; all other human report prose in this namespace is translatable. build_age_s is either a nested localized duration (human unit labels, NOT a technical identifier), or the stable selector unmeasured when no measurement exists. Translate the WHOLE unmeasured field idiomatically with a grammatically correct missing-value phrase; unmeasured is never zero. Keep the selector and the other-branch interpolation unchanged.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
-      "build_age_s": "source: format_duration(install.build_age_s); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
+      "build_age_s": "source: info_duration(install.build_age_s); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained; stable select value unmeasured means no measurement, never zero"
     }
   },
   "tui.info.export.python": {
@@ -1660,10 +1660,10 @@
   "tui.info.export.uptime": {
     "role": "diagnostic message",
     "tone": "plain, precise, non-alarmist diagnostic facts",
-    "note": "Human /info readout; local_operator/info/render.py:347. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. Human clipboard report, not JSON. English spacing is compatibility evidence only; locale wording/order may change. Keep machine identifiers/paths/model names untouched; redact homes/secrets before export. The first local-operator triage line and raw [state] diagnostic codes remain stable machine-facing syntax; all other human report prose in this namespace is translatable.",
+    "note": "Human /info readout; local_operator/info/render.py:347. Translate the whole message and reorder arguments idiomatically. Technical paths, model/provider/source/job/session IDs, version/build IDs, env-variable and credential names, commands/flags/key chords, probe keys and markup syntax are protected, not English prose. Unknown is not zero; queued is not running; retained settled jobs are history, not live work. A lower bound must remain explicitly a lower bound. Human clipboard report, not JSON. English spacing is compatibility evidence only; locale wording/order may change. Keep machine identifiers/paths/model names untouched; redact homes/secrets before export. The first local-operator triage line and raw [state] diagnostic codes remain stable machine-facing syntax; all other human report prose in this namespace is translatable. uptime_s is either a nested localized duration (human unit labels, NOT a technical identifier), or the stable selector unmeasured when no measurement exists. Translate the WHOLE unmeasured field idiomatically with a grammatically correct missing-value phrase; unmeasured is never zero. Keep the selector and the other-branch interpolation unchanged.",
     "width": "Measured terminal cells, not Python string length. Full/short/terse variants describe the same fact; never remove a safety qualifier to fit. Clipboard messages are unbounded semantic text, without bidi controls. Terminal projection happens after fitting, with actual source-locale fallback provenance.",
     "placeholders": {
-      "uptime_s": "source: format_duration(process.uptime_s); meaning: Runtime diagnostic value; preserve technical identifiers; human clauses already localized by their owner."
+      "uptime_s": "source: info_duration(process.uptime_s); meaning: human elapsed duration with localized unit labels, not a technical identifier; nested actual source provenance must be retained; stable select value unmeasured means no measurement, never zero"
     }
   },
   "tui.info.export.working_dir": {
@@ -2153,7 +2153,7 @@
   "tui.info.state.stale": {
     "role": "human state",
     "tone": "plain, factual diagnostic readout",
-    "note": "Human rendering of the corresponding stable machine code; do not translate the stored code. Queued work has not started; settled jobs are retained history.",
+    "note": "Human rendering of the corresponding stable machine code; do not translate the stored code. Registry classification stale means the operating-system PID no longer exists, NOT an expired heartbeat. A live PID with an expired heartbeat is instead wedged/not answering, even if the stored heartbeat on the dead-PID record was fresh.",
     "width": "Full/short/terse variants are selected by measured terminal cells, not English character counts. Clipboard messages are plain text.",
     "placeholders": {}
   },

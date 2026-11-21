@@ -156,6 +156,10 @@ class RenderedMessage:
 
     text: str
     source_locale: str | None
+    # Simple interpolation owners, in rendered order; plain/wire clients ignore
+    # these. Nested paint messages retain their own source instead of acquiring
+    # the enclosing sentence's language or losing technical-token ownership.
+    parts: tuple[tuple[str, str | None], ...] = ()
 
 
 def render(code: str, params: Mapping[str, Any], *, locale: str | None = None) -> str:
