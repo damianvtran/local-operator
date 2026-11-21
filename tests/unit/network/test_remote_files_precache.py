@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -156,44 +158,116 @@ async def test_a_pass_stops_at_the_budget_and_evicts_nothing_it_landed(
     assert len(worker.landed) == 2
 
 
-@pytest.mark.asyncio
-async def test_an_on_screen_request_completes_while_the_precache_queue_is_full(
-    viewer, monkeypatch: pytest.MonkeyPatch  # noqa: F811
-) -> None:
+async def _on_screen_while_precaching(viewer: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     client, (server_a, server_b, *_rest) = viewer
-    _pad_media(server_a, {f"slow{i}.mp4": 300_000 for i in range(5)})
-    on_screen = os.urandom(150_000)
-    ref = AttachmentStore(Path(server_a.root) / "attachments").put_bytes(on_screen, "image/png")
-    assert ref is not None
-    append_journal(
-        Path(server_a.root) / "sessions" / SESSION,
-        [{"id": "os1", "content": [{"attachment": ref.digest}]}],
-    )
+    written = _pad_media(server_a, {f"slow{i}.mp4": 300_000 for i in range(5)})
+    worker = precache.Precacher(Path(server_b.root))
+    row = _catalogue_row(server_a)
+    candidates = await worker.candidates(row)
+    assert len(candidates) == 5
+    batches = iter((candidates[:1], candidates[1:]))
+
+    async def independent_candidates(_row: dict[str, Any]) -> Any:
+        # Two independent passes share the REAL per-owner precache gate. One
+        # serial prepare cannot expose a regression that gives background work
+        # both owner slots. Keep real, disjoint candidate identities/sources.
+        return next(batches)
+
+    monkeypatch.setattr(worker, "candidates", independent_candidates)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    competing = asyncio.Event()
+    release = threading.Event()
     transfer = files._transfer
 
     def slow(asker: Any, fd: int, meta: dict[str, Any], start: int) -> None:
         if str(meta.get("name", "")).startswith("slow"):
-            time.sleep(1.5)
+            # Publication happens INSIDE the transfer thread: a pending fetch
+            # could still be waiting for its owner slot and proves nothing.
+            loop.call_soon_threadsafe(entered.set)
+            release.wait()
         transfer(asker, fd, meta, start)
 
     monkeypatch.setattr(files, "_transfer", slow)
-    worker = precache.Precacher(Path(server_b.root))
-    running = asyncio.ensure_future(worker.prepare(_catalogue_row(server_a)))
-    # Ask only once a precache pull is IN FLIGHT (holding the owner's semaphore):
-    # asking between two pulls would prove nothing.
-    for _ in range(200):
-        if remote_fetch.pending_count() >= 1:
-            break
-        await asyncio.sleep(0.02)
-    assert remote_fetch.pending_count() >= 1
-    started = time.monotonic()
-    response = await client.get(f"/v1/desktop/sessions/{SESSION}/attachments/{ref.digest}")
-    elapsed = time.monotonic() - started
-    assert response.status_code == 200 and response.content == on_screen
-    assert not running.done(), "the precache finished first; the cell proved nothing"
-    assert elapsed < 1.0, f"the on-screen request waited {elapsed:.2f}s behind precache"
-    await running
+    semaphore = worker._semaphore(row["owner_device"])
+    attempts = admissions = 0
+
+    @asynccontextmanager
+    async def observe_admission():
+        nonlocal attempts, admissions
+        attempts += 1
+        if attempts == 2:
+            competing.set()
+        # Event.set does not yield: on resumption the observer sees either a
+        # blocked acquire or an admitted second pass, never an untried gate.
+        async with semaphore:
+            admissions += 1
+            yield
+
+    monkeypatch.setattr(worker, "_semaphore", lambda _owner: observe_admission())
+    owned: list[asyncio.Task[Any]] = []
+    fetches_before = set(remote_fetch._TASKS.values())
+    # Failure-only watchdog, based on the existing route wait; no elapsed-time
+    # acceptance bound. Healthy HTTP must finish while release is still unset.
+    watchdog = 2 * remote_fetch.REMOTE_FETCH_WAIT_S
+    try:
+        owned.append(asyncio.create_task(worker.prepare(row)))
+        await asyncio.wait_for(entered.wait(), watchdog)
+        owned.append(asyncio.create_task(worker.prepare(row)))
+        await asyncio.wait_for(competing.wait(), watchdog)
+        assert admissions == 1, "background work consumed the reserved owner slot"
+
+        # Register only AFTER the slow transfer entered and both candidate
+        # snapshots were fixed: cache hits/single-flight cannot satisfy HTTP.
+        on_screen = os.urandom(150_000)
+        ref = AttachmentStore(Path(server_a.root) / "attachments").put_bytes(
+            on_screen, "image/png"
+        )
+        assert ref is not None
+        append_journal(
+            Path(server_a.root) / "sessions" / SESSION,
+            [{"id": "os1", "content": [{"attachment": ref.digest}]}],
+        )
+        assert not _cached(server_b, on_screen)
+        request = asyncio.create_task(
+            client.get(f"/v1/desktop/sessions/{SESSION}/attachments/{ref.digest}")
+        )
+        owned.append(request)
+        response = await asyncio.wait_for(asyncio.shield(request), watchdog)
+        assert response.status_code == 200, "on-screen HTTP did not finish before release"
+        assert response.content == on_screen
+        assert not release.is_set()
+    finally:
+        # Cancelling prepare does NOT stop shielded fetches or to_thread. Unblock
+        # first, then drain our passes/HTTP AND their pulls before fixture teardown.
+        release.set()
+        await asyncio.gather(*owned, return_exceptions=True)
+        pulls = set(remote_fetch._TASKS.values()) - fetches_before
+        await asyncio.gather(*pulls, return_exceptions=True)
     assert len(worker.landed) == 5
+    assert all(_cached(server_b, payload) for payload in written.values())
+
+
+@pytest.mark.asyncio
+async def test_an_on_screen_request_completes_while_the_precache_queue_is_full(
+    viewer, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    await _on_screen_while_precaching(viewer, monkeypatch)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken_gate", ["owner", "precache"])
+async def test_the_capacity_oracle_rejects_broken_gates(
+    viewer, monkeypatch: pytest.MonkeyPatch, broken_gate: str  # noqa: F811
+) -> None:
+    if broken_gate == "owner":
+        monkeypatch.setattr(remote_fetch, "OWNER_CONCURRENCY", 1)
+        failure = "on-screen HTTP did not finish before release"
+    else:
+        monkeypatch.setattr(precache, "PRECACHE_PER_OWNER", 2)
+        failure = "background work consumed the reserved owner slot"
+    with pytest.raises(AssertionError, match=failure):
+        await _on_screen_while_precaching(viewer, monkeypatch)
 
 
 def _rss_bytes() -> int:
