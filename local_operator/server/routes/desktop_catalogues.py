@@ -192,7 +192,10 @@ async def models(
             # `_refresh_catalogue` and the mobile daemon pass, for the same
             # reason; a document YOUNGER than the cadence is still served as-is,
             # because the cadence bounds the refetch rather than removing it.
-            from local_operator.providers.controller import PICKER_TTL_S
+            from local_operator.providers.controller import (
+                PICKER_TTL_S,
+                ProviderController,
+            )
 
             # The engagement view this route's live read fetches by is one extra
             # synchronous cost on the loop thread, and it belongs in this list for
@@ -223,7 +226,10 @@ async def models(
             # exceptions can carry response bodies or credential URLs, so an
             # unvetted reason string must never reach the wire here.
             failures = controller.catalogue_failures(entries, statuses)
-            provider_status = controller.provider_notices(statuses)
+            # Called on the CLASS, as the mobile daemon does: it is a pure
+            # function of ``statuses``, and the route's stand-in controllers
+            # (tests, older embedders) predate the method (code review R1-1).
+            provider_status = ProviderController.provider_notices(statuses)
         else:
             # NOT `asyncio.to_thread`, and the reason is CORRECTNESS rather than
             # cost: the AuthStore's sqlite connection is created on the event-loop

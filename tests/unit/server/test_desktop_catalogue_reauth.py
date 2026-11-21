@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -73,7 +74,7 @@ def _vertex_sign_in(*, dead: bool) -> None:
             assert store._mark_grant_dead(row.id, rejected_refresh_token="synthetic-vertex-refresh")
 
 
-async def _vertex(client: AsyncClient) -> tuple[list[dict], dict]:
+async def _vertex(client: AsyncClient) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     response = await client.get("/v1/desktop/models", params={"live": "true"})
     assert response.status_code == 200, response.text
     result = response.json()["result"]
