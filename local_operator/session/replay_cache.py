@@ -65,7 +65,10 @@ reader can price the trade rather than rediscover it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import os
 import threading
 from collections import OrderedDict
 from collections.abc import Coroutine
@@ -431,20 +434,152 @@ def build_cold_replay(
     return publish_replay(key, messages=messages, **values)
 
 
-def build_cold_tail_metadata(key: ReplayKey, path: Path) -> ColdMetadata | None:
+#: Version of the absence-proof sidecar (:func:`_prior_absence`). A different or
+#: missing version is ignored, so a later shape can never be misread as this one.
+_ABSENCE_PROOF_VERSION = 1
+
+
+def absence_proof_path(metadata_path: Path) -> Path:
+    """The absence-proof sidecar beside a cold metadata record.
+
+    A SEPARATE FILE, not a field of the record, because the record is single-slot
+    and keyed on the exact journal version: after an append it is a MISS, and
+    reading its 0.3-1.4 MB body only to salvage one small proof would cost the
+    open more than the proof saves. The sidecar is a few hundred bytes.
+    """
+    return metadata_path.with_name(f"{metadata_path.stem}.absence.json")
+
+
+def _row_digest(journal: Path, boundary: int) -> str | None:
+    """sha256 of the row ending at ``boundary`` (newline included), or ``None``.
+
+    The same witness ``tail_anchor`` validates its sidecar with: the complete row
+    ending exactly at the recorded offset. ``None`` when ``boundary`` is not a row
+    end (the byte before it is not a newline) or cannot be read.
+    """
+    from local_operator.session.tail_anchor import _last_complete_row
+
+    row = _last_complete_row(journal, boundary)
+    if not row or not row.endswith(b"\n"):
+        return None
+    return hashlib.sha256(row).hexdigest()
+
+
+def _prior_absence(key: ReplayKey, path: Path) -> tuple[int, frozenset[bytes]] | None:
+    """A validated earlier absence proof for ``key``'s journal, or ``None``.
+
+    THE INVALIDATION CONTRACT. The sidecar says "these spellings are absent from
+    ``[0, boundary)`` of the journal on inode N". It is honoured only while that
+    region is provably the same bytes, by the append-prefix rule
+    ``index_read_model._extends`` and ``tail_anchor.validate_anchor`` already rely
+    on: a journal is append-only between compactions, and a compaction (or any
+    rewrite through ``os.replace``) swaps in a NEW inode. So it requires
+
+    * the same inode as the journal version being opened (a rewrite: full proof);
+    * that version to be at least ``boundary`` long (a truncation: full proof);
+    * the row ending at ``boundary`` to hash to the recorded digest (a rollback
+      that cut below the boundary and appended different rows: full proof).
+
+    What it does NOT detect, exactly like ``_extends``: a same-inode, in-place
+    rewrite of an EARLIER row that leaves the boundary row intact. No writer
+    does that (``_write_entries`` only appends or truncates its own batch).
+    Anything unreadable, malformed or of another version is ``None``, which costs
+    the caller today's whole-journal scan and nothing else.
+    """
+    try:
+        raw = json.loads(absence_proof_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("version") != _ABSENCE_PROOF_VERSION:
+        return None
+    inode, boundary, digest, needles = (
+        raw.get("inode"),
+        raw.get("boundary"),
+        raw.get("digest"),
+        raw.get("needles"),
+    )
+    if type(inode) is not int or type(boundary) is not int or not isinstance(digest, str):
+        return None
+    if not isinstance(needles, list) or not all(isinstance(n, str) for n in needles):
+        return None
+    if inode != key.inode or boundary <= 0 or boundary > key.size:
+        return None
+    journal, codec = compression.transcript_source(Path(key.directory))
+    if codec is not None or _row_digest(journal, boundary) != digest:
+        return None
+    return boundary, frozenset(n.encode("latin-1") for n in needles)
+
+
+def _record_absence(key: ReplayKey, path: Path, boundary: int, needles: tuple[bytes, ...]) -> None:
+    """File the proof a tail read just established, for the next grown open.
+
+    Write-behind and never load-bearing, like the record beside it: a failure
+    only means the next grown open pays the whole scan once more.
+    """
+    if boundary <= 0 or not needles:
+        return
+    journal, codec = compression.transcript_source(Path(key.directory))
+    digest = None if codec is not None else _row_digest(journal, boundary)
+    if digest is None:
+        return
+    target = absence_proof_path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "version": _ABSENCE_PROOF_VERSION,
+                    "inode": key.inode,
+                    "boundary": boundary,
+                    "digest": digest,
+                    # latin-1 round-trips any byte; the spellings are ASCII today.
+                    "needles": sorted(n.decode("latin-1") for n in needles),
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(target)
+    except (OSError, ValueError):
+        logger.debug("cold metadata: absence proof not recorded at %s", target, exc_info=True)
+
+
+def build_cold_tail_metadata(
+    key: ReplayKey, path: Path, stats: dict[str, Any] | None = None
+) -> ColdMetadata | None:
     """Defer a desktop record MISS only when bounded tail facts prove its state.
 
     This never publishes a replay-cache entry: the tail's rows are evidence,
     not the whole message list. Hydration still uses the exact eager replay.
     Selection keeps its existing authority/rules; it is not guessed from the
     checkpoint and the final journal witness covers both reads before filing.
+
+    INCREMENTAL ON A GROWN JOURNAL. The record is keyed on the exact journal
+    version, so an ACTIVE session's every append makes the next open a miss.
+    When the tail has to prove a fact absent (a journal with no spend row, no
+    checkpoint or no usage receipt), that proof scans every byte below the tail
+    -- O(journal) per open. A validated earlier proof (:func:`_prior_absence`)
+    lets the scan start at its boundary instead, so a grown open reads only the
+    appended span; the answer is byte-for-byte the full scan's. ``stats``, when
+    given, receives ``absence_scan_bytes`` and ``proof_mode`` for the open trace.
     """
     if key.through_id is not None or key.strict_cut or not key.checkpoint_types:
         return None
+    prior = _prior_absence(key, path)
     suffix = read_cold_tail(
         key.directory,
         checkpoint_types=key.checkpoint_types + key.opportunistic_types,
+        known_absent=prior,
     )
+    if stats is not None:
+        if suffix is None or not suffix.absence_needles:
+            stats["proof_mode"] = "declined" if suffix is None else "met"
+        elif prior is not None and set(suffix.absence_needles) <= prior[1]:
+            stats["proof_mode"] = "incremental"
+        else:
+            stats["proof_mode"] = "full"
+        stats["absence_scan_bytes"] = suffix.absence_scan_bytes if suffix is not None else None
     if suffix is None:
         return None
     seed = seed_reported_usage(usages_since_newest_shrink(suffix.entries))
@@ -476,6 +611,9 @@ def build_cold_tail_metadata(key: ReplayKey, path: Path) -> ColdMetadata | None:
         selection=selection,
     )
     write_cold_metadata(path, record)
+    # Filed only after the witness re-check above, so the proof describes the
+    # journal version this record does.
+    _record_absence(key, path, suffix.absence_covered_end, suffix.absence_needles)
     return record
 
 
