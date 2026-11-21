@@ -1677,10 +1677,14 @@ def refuse_real_secret_broker_spawn(request, monkeypatch):
         return
     from local_operator.secrets import client as secrets_client
 
+    # Match the explicit broker budget keywords: secret access forwards its
+    # shared deadline even when this guard selects the keyfile fallback. Accepting
+    # that budget must never start a daemon or change the fallback result; avoid
+    # **kwargs so future API drift still fails rather than silently going untested.
     monkeypatch.setattr(
         secrets_client,
         "ensure_broker",
-        lambda base=None, *, timeout=None: False,
+        lambda base=None, *, timeout=None, deadline=None: False,
     )
 
 
