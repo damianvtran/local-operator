@@ -30,6 +30,14 @@ from local_operator.library import indexer
 from local_operator.server.app import app
 
 _INDEXER_THREADS = frozenset({"library-indexer", "library-thumbs"})
+# The org-hub gate refresh the lifespan starts at boot (``hub-org-enrol-<boundary>``).
+_HUB_ENROL_PREFIX = "hub-org-enrol-"
+
+
+def _hub_enrol_threads() -> list[threading.Thread]:
+    return [
+        t for t in threading.enumerate() if t.name.startswith(_HUB_ENROL_PREFIX) and t.is_alive()
+    ]
 
 
 def _cached(root: Path) -> indexer.LibraryIndexer | None:
@@ -77,6 +85,15 @@ def test_lifespan_exit_stops_the_indexer_and_never_recreates_a_deleted_root(
     # request: a leaked worker answers it by reopening the database, which
     # mkdirs the deleted root back (the SIGBUS precursor). On a stopped
     # instance ``wake`` only enqueues, and nothing is left to read the queue.
+    #
+    # Asserted BEFORE the rmtree on purpose. Two CI runs of this very test died
+    # inside ``shutil.rmtree`` (FileNotFoundError on ``hub/.org_catalogue.json.
+    # <rand>.tmp``; main run 44621337652): a daemon thread of the boot was still
+    # writing under the root, and the failure named the victim (rmtree) rather
+    # than the thread. Naming the live threads here makes a regression fail
+    # attributably, at the boundary that was supposed to join them.
+    leaked = [t.name for t in (*_indexer_threads(), *_hub_enrol_threads())]
+    assert leaked == [], f"lifespan shutdown left background writers alive: {leaked}"
     shutil.rmtree(scratch_root)
     booted.wake()
     # A condition wait, not a sleep: it ends the moment the root reappears or
@@ -102,3 +119,48 @@ def test_lifespan_leaves_an_indexer_it_did_not_start_running(scratch_root: Path)
     with TestClient(app):
         pass
     assert owned.running, "the lifespan stopped an indexer it did not start"
+
+
+def test_lifespan_exit_joins_the_org_hub_boundary_thread(
+    scratch_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for the rmtree race: a boundary thread that is still mid-write.
+
+    The real thread's timing is the host's (it is a no-network, signed-out
+    refresh that usually finishes before the client exits, which is why the
+    race flaked instead of failing). Here the thread is made deterministically
+    slow with a condition wait that is NEVER set, so it is guaranteed to still
+    be running when the lifespan starts tearing down, and it then does what the
+    real one does: an atomic write of ``hub/org_catalogue.json`` under the
+    config root. On main the lifespan returns with the thread alive; after the
+    fix it is joined first, so the file is complete and nothing can write
+    under the root once the client has exited.
+    """
+    from local_operator.hub_org import eligibility
+    from local_operator.hub_org import enrol as hub_org_enrol
+
+    started = threading.Event()
+    never = threading.Event()
+
+    class _SlowBoundary(threading.Thread):
+        def __init__(self, config_dir: Path) -> None:
+            super().__init__(name=f"{_HUB_ENROL_PREFIX}daemon-start", daemon=True)
+            self.config_dir = Path(config_dir)
+
+        def run(self) -> None:
+            started.set()
+            never.wait(0.5)  # still running when the teardown begins
+            eligibility._atomic_write(eligibility.record_path(self.config_dir), {"orgs": []})
+
+    def _slow_on_boundary(config_dir, boundary, **_kw):  # type: ignore[no-untyped-def]
+        thread = _SlowBoundary(config_dir)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(hub_org_enrol, "on_boundary", _slow_on_boundary)
+
+    with TestClient(app):
+        assert started.wait(5.0), "the boot never started the boundary thread"
+
+    assert _hub_enrol_threads() == [], "lifespan exit returned with the boundary thread alive"
+    assert eligibility.record_path(scratch_root).is_file()

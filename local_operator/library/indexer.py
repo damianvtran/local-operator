@@ -228,7 +228,7 @@ def is_running(config_dir: str | Path) -> bool:
     return instance is not None and instance.running
 
 
-def stop_started(instance: "LibraryIndexer") -> None:
+def stop_started(instance: "LibraryIndexer") -> bool:
     """Stop an indexer :func:`ensure_started` returned and forget it.
 
     WHY IT EXISTS: the worker threads are daemons, so an in-process owner that
@@ -238,12 +238,14 @@ def stop_started(instance: "LibraryIndexer") -> None:
     file's live connections (a SIGBUS in CI). Evicting the cache entry lets the
     next boot of the same root start a fresh instance, and the held idle
     connection for THIS root's database is closed too, leaving other roots'.
+    Returns :meth:`LibraryIndexer.stop`'s ``stopped_cleanly``.
     """
-    instance.stop()
+    stopped_cleanly = instance.stop()
     with _INSTANCES_LOCK:
         if _INSTANCES.get(str(instance.config_dir)) is instance:
             del _INSTANCES[str(instance.config_dir)]
     release_keepers(Path(instance.store._key))
+    return stopped_cleanly
 
 
 def reset_for_tests() -> None:
@@ -531,15 +533,38 @@ class LibraryIndexer:
             )
             self._thumb_thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Ask both workers to stop and wait for them; return whether they did.
+
+        Returns ``stopped_cleanly``: ``True`` only when neither worker thread is
+        alive after the join. WHY A RESULT: the join is bounded (a worker stuck
+        in a long unit of work must not hold a shutdown forever) but it used to
+        be silent, so a worker that outlived the bound looked exactly like a
+        clean stop while it could still write ``-wal``/``-shm``/db files under
+        the config root. A caller that is about to delete or reuse that root
+        (the server lifespan, a test's ``rmtree``) needs to know the root is
+        not yet quiet. The remaining teardown (observer, writer lock, registry)
+        still runs either way: a stuck worker is reported, never allowed to
+        wedge the exit, and the daemon threads cannot outlive the process.
+        """
         self._stop.set()
         # Unblock both queue waits without inventing work.
         self._queue.put("")
         # Same unblock, in the queue's own item type; the worker skips an empty id.
         self._thumb_queue.put(("", 0))
+        survivors: list[str] = []
         for thread in (self._thread, self._thumb_thread):
             if thread is not None and thread.is_alive():
                 thread.join(timeout)
+                if thread.is_alive():
+                    survivors.append(thread.name)
+        if survivors:
+            logger.warning(
+                "library: %s still running %.1f s after stop; it may write under %s",
+                " and ".join(survivors),
+                timeout,
+                self.config_dir,
+            )
         self._stop_observer()
         # Another process may now take over. The lock is also released by the
         # kernel on exit, which is why a crashed run cannot wedge the next one.
@@ -549,6 +574,7 @@ class LibraryIndexer:
         # instance still owns work.
         with _INSTANCES_LOCK:
             _LIVE.discard(self)
+        return not survivors
 
     def _stop_observer(self) -> None:
         observer = self._observer
