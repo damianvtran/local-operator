@@ -509,7 +509,11 @@ def test_a_peer_table_never_brings_a_receiver_local_grant() -> None:
         added_via="invite",
     ).to_json()
 
-    changed, added = relay.adopt_members(record, [row], sender_device_id=admin, allow_new=True)
+    # Verified supplier: an unverified one is refused outright, which would make the
+    # "no receiver-local grant" check pass vacuously; this is about a VERIFIED admin's table.
+    changed, added = relay.adopt_members(
+        record, [row], sender_device_id=admin, allow_new=True, supplier_verified=True
+    )
 
     assert changed and added == [newcomer]
     adopted = record.member(newcomer)
