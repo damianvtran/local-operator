@@ -58,9 +58,7 @@ from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.resolve import resolve_language
 from local_operator.i18n.text import tr
 from local_operator.network.types import MeshRefusal
-from local_operator.remote_compute import RunSpec, is_enabled
-from local_operator.remote_compute import repo as repo_module
-from local_operator.remote_compute import resolve_network
+from local_operator.remote_compute import RunSpec, is_enabled, resolve_network
 from local_operator.remote_compute.arguments import (
     LOCAL_ONLY_FLAGS,
     REMOTE_ONLY_FLAGS,
@@ -82,33 +80,17 @@ from local_operator.remote_compute.client import (
     run_network,
     run_outcome,
     run_status,
+    without_secrets,
 )
 from local_operator.remote_compute.defaults import DEFAULT_MAX_HOURS, DEFAULT_SIZE
-from local_operator.remote_compute.errors import (
-    CapacityUnavailable,
-    Conflict,
-    IdempotencyConflict,
-    InsufficientCredit,
-    InvalidApiOverride,
-    InvalidIdempotencyKey,
-    InvalidRequest,
-    NetworkMismatch,
-    PreviewNotEnabled,
-    RunBusy,
-    RunIdentityMismatch,
-    RunLimitReached,
-    RunNotFound,
-    Unreachable,
-    UnreadableEnvelope,
-    UnusableRepo,
-)
+from local_operator.remote_compute.errors import InvalidIdempotencyKey
+from local_operator.remote_compute.messages import refusal_message
 from local_operator.remote_compute.request import (
     RunCreateRequest,
     is_commit_sha,
     is_repo_url,
 )
 from local_operator.tunnels import api as tunnels_api
-from local_operator.tunnels.errors import LoginRequired
 
 _t = tr("wire.remote_compute")
 
@@ -145,14 +127,6 @@ EXIT_BY_OUTCOME: dict[str, int] = {
 
 #: The exit code for a terminal run whose outcome this build cannot read.
 EXIT_UNKNOWN_OUTCOME = 1
-
-#: The keys a GET body cannot carry, filtered from ``--remote-status`` anyway.
-#:
-#: Defence in depth, not a response to a known leak: the contract returns
-#: ``run_token`` and ``tunnel`` only on the create, where this CLI never stores
-#: them. A status command prints a whole run to stdout, so the two fields are
-#: dropped by name rather than trusted to never arrive.
-SECRET_RUN_FIELDS = ("run_token", "tunnel")
 
 #: The defaults the flags fall back to when the operator does not pass them.
 #:
@@ -198,78 +172,15 @@ def _hours(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
-def _key_refusal(failure: InvalidIdempotencyKey) -> int:
-    """One sentence per reason the key was refused, all of them local.
-
-    The client supplies the REASON rather than a sentence because these are
-    keyed messages (see ``errors.InvalidIdempotencyKey``); this is the surface
-    that owns their wording.
-    """
-    if failure.reason == "empty":
-        return _refuse(_t(_wr.key_empty()))
-    if failure.reason == "too_long":
-        return _refuse(_t(_wr.key_too_long(max_bytes=str(failure.max_bytes))))
-    return _refuse(_t(_wr.key_not_printable()))
-
-
 def _report(failure: BaseException) -> int:
-    """One sentence per typed failure — and never a word of a provider body.
+    """Print the sentence for one typed failure and fail the command.
 
-    The mapping lives here rather than in the client so the client stays a
-    transport: which failures deserve their own remedy is a presentation
-    decision, and the sentences it picks are the ones an operator can act on.
+    THE SENTENCES ARE NOT HERE. ``messages.refusal_message`` owns the ladder
+    because the desktop's remote-compute route returns the same sentences in a
+    JSON body, and one refusal worded twice is the defect this delegation
+    removes; what stays here is what a CLI owns — the stream and the exit code.
     """
-    if isinstance(failure, LoginRequired):
-        return _refuse(str(failure))
-    if isinstance(failure, InvalidIdempotencyKey):
-        return _key_refusal(failure)
-    if isinstance(failure, NetworkMismatch):
-        return _refuse(_t(_wr.network_mismatch()))
-    if isinstance(failure, RunIdentityMismatch):
-        return _refuse(
-            _t(_wr.run_identity_mismatch(asked_for=failure.asked_for, answered=failure.answered))
-        )
-    if isinstance(failure, UnreadableEnvelope):
-        return _refuse(_t(_wr.unreadable_envelope()))
-    if isinstance(failure, Unreachable):
-        return _refuse(_t(_wr.unreachable()))
-    if isinstance(failure, InvalidApiOverride):
-        return _refuse(_t(_wr.api_override_invalid()))
-    if isinstance(failure, PreviewNotEnabled):
-        return _refuse(_t(_wr.preview_not_enabled()))
-    if isinstance(failure, InsufficientCredit):
-        return _refuse(_t(_wr.no_credit()))
-    if isinstance(failure, CapacityUnavailable):
-        return _refuse(_t(_wr.no_capacity()))
-    if isinstance(failure, RunNotFound):
-        return _refuse(_t(_wr.unknown_run()))
-    if isinstance(failure, IdempotencyConflict):
-        return _refuse(_t(_wr.conflict()))
-    if isinstance(failure, RunLimitReached):
-        return _refuse(_t(_wr.run_limit()))
-    if isinstance(failure, RunBusy):
-        return _refuse(_t(_wr.run_busy()))
-    if isinstance(failure, Conflict):
-        return _refuse(_t(_wr.refusal_conflict()))
-    if isinstance(failure, UnusableRepo):
-        return _refuse(_repo_refusal(failure))
-    if isinstance(failure, InvalidRequest):
-        return _refuse(_t(_wr.invalid_request()))
-    return _refuse(_t(_wr.failed(error=str(failure))))
-
-
-def _repo_refusal(failure: UnusableRepo) -> str:
-    """One sentence per reason a directory cannot be used for a remote run.
-
-    The client supplies the REASON rather than a sentence because these are keyed
-    messages (see ``errors.UnusableRepo``); this is the surface that owns their
-    wording, exactly as it does for a refused idempotency key.
-    """
-    if failure.reason == repo_module.REASON_UNPUSHED:
-        return _t(_wr.repo_unpushed_commit(detail=failure.detail))
-    if failure.reason == repo_module.REASON_NOT_HTTPS:
-        return _t(_wr.repo_not_https_remote())
-    return _t(_wr.repo_no_remote())
+    return _refuse(refusal_message(failure))
 
 
 def _credential() -> int:
@@ -380,11 +291,6 @@ def _run_options_set(args: argparse.Namespace, *, allow: tuple[str, ...] = ()) -
     ) or bool(getattr(args, "command", None))
 
 
-def _without_secrets(payload: dict[str, Any]) -> dict[str, Any]:
-    """The run without the two fields that are secrets when they appear at all."""
-    return {key: value for key, value in payload.items() if key not in SECRET_RUN_FIELDS}
-
-
 def _network_verdict(payload: dict[str, Any], *, network: str | None) -> str:
     """Whether this run is a run of THIS device's network, in one sentence.
 
@@ -430,7 +336,7 @@ def _remote_status(identifier: str | None, *, network: str | None = None) -> int
         return 130
     except (ValueError, OSError) as failure:
         return _report(failure)
-    print(json.dumps(_without_secrets(payload), ensure_ascii=False))
+    print(json.dumps(without_secrets(payload), ensure_ascii=False))
     print(_network_verdict(payload, network=network), file=sys.stderr)
     return 0
 
