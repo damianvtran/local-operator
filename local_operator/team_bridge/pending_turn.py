@@ -117,6 +117,60 @@ class FetchedBody:
     conversation_kind: str | None = None
 
 
+class _FrameAnchor:
+    """Where a turn's frame block goes: after the Call 1 predecessor, or last.
+
+    Shared by the one-body turn and :class:`PendingTurnBatch` (whose K frames
+    are inserted as ONE contiguous block at this single index), so the two
+    cannot drift on the tool_use/tool_result safety rules below.
+    """
+
+    def __init__(self) -> None:
+        self._anchor_after: Any = None
+        self._anchor_after_id: str | None = None
+
+    def index(self, messages: list[Any]) -> int:
+        """Where this call's frame goes: after the Call 1 predecessor, or last.
+
+        The anchor is matched by object identity first (the harness loop
+        passes the same message objects from step to step), then by the
+        message's own ``id`` in case a caller re-validated or copied them.
+        Inserting there is refused -- and the frame appended instead -- when
+        the predecessor is gone (compaction summarised it away), when it is an
+        assistant message carrying tool calls, or when the message after it is
+        a tool result: in all three the frame would sit between a tool_use and
+        its tool_result, which neither Anthropic nor OpenAI-compat accepts.
+        Appending forfeits the cache saving for that call, never validity.
+        """
+
+        if self._anchor_after is None:
+            # Call 1: the frame goes last; remember what it follows.
+            if messages:
+                self._anchor_after = messages[-1]
+                self._anchor_after_id = getattr(messages[-1], "id", None) or None
+            else:
+                self._anchor_after = _ANCHOR_AT_START
+            return len(messages)
+        if self._anchor_after is _ANCHOR_AT_START:
+            pos = 0
+        else:
+            pos = -1
+            # Scan from the end: the anchor sits before this turn's steps.
+            for i in range(len(messages) - 1, -1, -1):
+                candidate = messages[i]
+                if candidate is self._anchor_after or (
+                    self._anchor_after_id is not None
+                    and getattr(candidate, "id", None) == self._anchor_after_id
+                ):
+                    pos = i + 1
+                    break
+            if pos < 0 or getattr(messages[pos - 1], "tool_calls", None):
+                return len(messages)
+        if pos < len(messages) and getattr(messages[pos], "role", None) == "tool":
+            return len(messages)
+        return pos
+
+
 class PendingTurn:
     """One turn's claim on one pending reservation, and its per-call gate."""
 
@@ -152,6 +206,10 @@ class PendingTurn:
         self._consent_version: str | None = None
         self._drifted = False
         self._drift_reason = "admission_drift"
+        #: An ambient-digest member of a batch: claimed/released through the
+        #: digest CAS so it returns to ``deferred``, never ``pending``.
+        self._digest = False
+        self._row: dict[str, Any] | None = None
         self._injected: InjectedBody | None = None
         #: The message Call 1 placed the ephemeral frame right after (``None``
         #: until Call 1; :data:`_ANCHOR_AT_START` when Call 1's history was
@@ -161,8 +219,7 @@ class PendingTurn:
         #: the whole list (``[summary, *preserved, *kept]``), so a saved index
         #: points into unrelated history and can split a tool_use from its
         #: tool_result -- a 400 on both wires for the rest of the turn.
-        self._anchor_after: Any = None
-        self._anchor_after_id: str | None = None
+        self._anchor = _FrameAnchor()
         self._presentation_ref: Any = None
         #: Held only so a COMPLETED settlement can hand the verified bytes to
         #: the display store; cleared with the claim either way.
@@ -220,12 +277,55 @@ class PendingTurn:
         )
         if row is None:
             return False
+        if not self.claim(row):
+            return False
+        if not await self.hydrate(fetch):
+            return False
+        return self.render(budget)
+
+    # -- member steps (shared with PendingTurnBatch) ------------------------
+    #
+    # WHY ``open`` is split into claim / hydrate / render: a multi-frame turn
+    # must claim and verify EVERY member before it can decide which ones fit
+    # and which frame carries the rules, and only then render. Each step keeps
+    # the single-body contract it had inside ``open``: a failed step releases
+    # this member's own claim and answers False, never raises.
+
+    @property
+    def identity(self) -> tuple[str, str] | None:
+        if self._conversation_id is None or self._message_id is None:
+            return None
+        return (self._conversation_id, self._message_id)
+
+    @property
+    def is_digest(self) -> bool:
+        return self._digest
+
+    @property
+    def conversation_seq(self) -> int:
+        return int(self._row["conversation_seq"]) if self._row is not None else 0
+
+    @property
+    def conversation_kind(self) -> str | None:
+        return self._fetched.conversation_kind if self._fetched is not None else None
+
+    @property
+    def frame_size(self) -> int:
+        return self._injected.size_bytes if self._injected is not None else 0
+
+    def claim(self, row: dict[str, Any], *, digest: bool = False) -> bool:
+        """CAS ``row`` into this member's claim (digest rows by their own CAS)."""
+
         claim_token = f"pt:{uuid.uuid4().hex}"
         turn_token = f"tt:{uuid.uuid4().hex}"
         conversation_id = str(row["conversation_id"])
         message_id = str(row["message_id"])
+        # A digest row is CLAIMED through its own CAS so it stays classed:
+        # ``claim_body_reservation`` only takes ``pending`` rows, and a digest
+        # row must never become one (see ``Store.claim_digest_reservation``).
+        cas = self._store.claim_digest_reservation if digest else self._store.claim_body_reservation
         try:
-            won = self._store.claim_body_reservation(
+            won = cas(
                 self._owner,
                 conversation_id=conversation_id,
                 message_id=message_id,
@@ -239,6 +339,8 @@ class PendingTurn:
         if not won:
             # Another turn won the row; injecting here would serve one body twice.
             return False
+        self._digest = digest
+        self._row = row
         self._claim_token = claim_token
         self._turn_token = turn_token
         self._conversation_id = conversation_id
@@ -246,7 +348,16 @@ class PendingTurn:
         self._policy_epoch = int(row["policy_epoch"])
         consent = row["consent_version"]
         self._consent_version = consent if isinstance(consent, str) else None
+        return True
 
+    async def hydrate(self, fetch: Callable[[str, str], Awaitable[FetchedBody | None]]) -> bool:
+        """Fetch the claimed row's body and verify it is the screened bytes."""
+
+        row = self._row
+        if row is None or self._claim_token is None:
+            return False
+        conversation_id = str(row["conversation_id"])
+        message_id = str(row["message_id"])
         try:
             fetched = await fetch(row["conversation_id"], str(row["message_id"]))
         except asyncio.CancelledError:
@@ -283,27 +394,74 @@ class PendingTurn:
             # unknown root from the hub at post time (tool._default_thread_root).
             thread_root_known=False,
         ).validated()
-        reservation_id = f"{conversation_id}/{message_id}"
-        try:
-            pending = PendingBody(
-                reservation_id=reservation_id,
-                source=_source_ref(row, conversation_kind=fetched.conversation_kind),
-                conversation_label=fetched.conversation_label,
-                sender_label=fetched.sender_label,
-                sender_kind=_closed_sender_kind(fetched.sender_kind),
-                body=fetched.body,
-                authority=RequestAuthority(
-                    admission_digest=admission_digest(
-                        _owner_key(self._owner),
-                        str(row["screening_fingerprint"]),
-                        fetched.body_sha256,
-                        reservation_id,
-                    ),
-                    receipt_id=str(row["screening_fingerprint"]),
-                    policy_digest=str(row["policy_epoch"]),
+        return True
+
+    def _pending_body(self, **shape: Any) -> PendingBody:
+        row, fetched = self._row, self._fetched
+        assert row is not None and fetched is not None
+        reservation_id = f"{row['conversation_id']}/{row['message_id']}"
+        return PendingBody(
+            reservation_id=reservation_id,
+            source=_source_ref(row, conversation_kind=fetched.conversation_kind),
+            conversation_label=fetched.conversation_label,
+            sender_label=fetched.sender_label,
+            sender_kind=_closed_sender_kind(fetched.sender_kind),
+            body=fetched.body,
+            authority=RequestAuthority(
+                admission_digest=admission_digest(
+                    _owner_key(self._owner),
+                    str(row["screening_fingerprint"]),
+                    fetched.body_sha256,
+                    reservation_id,
                 ),
+                receipt_id=str(row["screening_fingerprint"]),
+                policy_digest=str(row["policy_epoch"]),
+            ),
+            **shape,
+        )
+
+    def measure(self, **shape: Any) -> int | None:
+        """This member's frame size under ``shape``, WITHOUT caching it.
+
+        The batch sizes every member before it decides who fits; caching here
+        would fix the bytes before the rule carrier is known. ``None`` = the
+        frame itself is refused (the member is released as drift).
+        """
+
+        from .body_frame import build_body_frame, request_size
+
+        if self._row is None or self._fetched is None or self._claim_token is None:
+            return None
+        try:
+            pending = self._pending_body(**shape)
+            source = pending.source
+            if pending.sender_kind != source.sender_kind:
+                from dataclasses import replace
+
+                source = replace(source, sender_kind=pending.sender_kind).validated()
+            return request_size(
+                build_body_frame(
+                    source,
+                    conversation_label=pending.conversation_label,
+                    sender_label=pending.sender_label,
+                    body=pending.body,
+                    with_rules=pending.with_rules,
+                    participation=pending.participation,
+                    delivery=pending.delivery,
+                    omitted_ambient=pending.omitted_ambient,
+                )
             )
-            self._injected = assemble_injection(pending, budget, self._fence)
+        except BodyFrameRefused:
+            self._release("binding_drift")
+            return None
+
+    def render(self, budget: BodyBudget, **shape: Any) -> bool:
+        """Render and cache this member's frame, or release it."""
+
+        if self._row is None or self._fetched is None or self._claim_token is None:
+            return False
+        try:
+            self._injected = assemble_injection(self._pending_body(**shape), budget, self._fence)
         except BodyNotFitted:
             # Capacity is a fact about THIS request, not a verdict on the
             # message: the row goes back to pending so a roomier turn can serve it.
@@ -337,62 +495,25 @@ class PendingTurn:
         text = self.for_call()
         if text is None:
             return messages
-        from .card_projection import mark_admitted_frame
         from .request_body import CustomFrameInjection
 
-        insert_idx = self._insert_index(messages)
+        insert_idx = self._anchor.index(messages)
         shaped = CustomFrameInjection.insert(
             messages, text, message_id=self._frame_message_id(), index=insert_idx
         )
-        if self._presentation_ref is not None:
-            mark_admitted_frame(
-                shaped[insert_idx], self._presentation_ref, self._card_admission_intact
-            )
+        self.mark(shaped[insert_idx])
         # This native frame contains screened source metadata AND body. Raw
         # journal cards never borrow its admission by repeating the same ids;
         # they remain content-free markers even in this very request.
         return shaped
 
-    def _insert_index(self, messages: list[Any]) -> int:
-        """Where this call's frame goes: after the Call 1 predecessor, or last.
+    def mark(self, frame: Any) -> None:
+        """Stamp THIS member's admission proof on its own injected frame."""
 
-        The anchor is matched by object identity first (the harness loop
-        passes the same message objects from step to step), then by the
-        message's own ``id`` in case a caller re-validated or copied them.
-        Inserting there is refused -- and the frame appended instead -- when
-        the predecessor is gone (compaction summarised it away), when it is an
-        assistant message carrying tool calls, or when the message after it is
-        a tool result: in all three the frame would sit between a tool_use and
-        its tool_result, which neither Anthropic nor OpenAI-compat accepts.
-        Appending forfeits the cache saving for that call, never validity.
-        """
+        if self._presentation_ref is not None:
+            from .card_projection import mark_admitted_frame
 
-        if self._anchor_after is None:
-            # Call 1: the frame goes last; remember what it follows.
-            if messages:
-                self._anchor_after = messages[-1]
-                self._anchor_after_id = getattr(messages[-1], "id", None) or None
-            else:
-                self._anchor_after = _ANCHOR_AT_START
-            return len(messages)
-        if self._anchor_after is _ANCHOR_AT_START:
-            pos = 0
-        else:
-            pos = -1
-            # Scan from the end: the anchor sits before this turn's steps.
-            for i in range(len(messages) - 1, -1, -1):
-                candidate = messages[i]
-                if candidate is self._anchor_after or (
-                    self._anchor_after_id is not None
-                    and getattr(candidate, "id", None) == self._anchor_after_id
-                ):
-                    pos = i + 1
-                    break
-            if pos < 0 or getattr(messages[pos - 1], "tool_calls", None):
-                return len(messages)
-        if pos < len(messages) and getattr(messages[pos], "role", None) == "tool":
-            return len(messages)
-        return pos
+            mark_admitted_frame(frame, self._presentation_ref, self._card_admission_intact)
 
     def _card_admission_intact(self) -> bool:
         """Reused ephemeral copies cannot outlive their exact admission lease."""
@@ -622,18 +743,32 @@ class PendingTurn:
             return False
         return facts.get("consent_version") == self._consent_version
 
-    def _release(self, reason: str) -> None:
+    def _release(self, reason: str, *, count_attempt: bool = True) -> None:
         if self._claim_token is None:
             return
         try:
-            self._store.release_body_claim(
-                self._owner,
-                conversation_id=self._conversation_id or "",
-                message_id=self._message_id or "",
-                claim_token=self._claim_token,
-                reason=reason,
-                now=time.time(),
-            )
+            if self._digest:
+                # Back to ``deferred`` (or retired after its attempt cap) —
+                # never ``pending``, which would make an ambient post nobody
+                # was woken for a full turn of its own.
+                self._store.release_digest_claim(
+                    self._owner,
+                    conversation_id=self._conversation_id or "",
+                    message_id=self._message_id or "",
+                    claim_token=self._claim_token,
+                    reason=reason,
+                    now=time.time(),
+                    count_attempt=count_attempt,
+                )
+            else:
+                self._store.release_body_claim(
+                    self._owner,
+                    conversation_id=self._conversation_id or "",
+                    message_id=self._message_id or "",
+                    claim_token=self._claim_token,
+                    reason=reason,
+                    now=time.time(),
+                )
         except StoreRefused as failure:
             # A lost token is a no-op by contract, but a REFUSED release is not
             # nothing: the row would stay claimed with no ``last_error`` until
@@ -644,6 +779,408 @@ class PendingTurn:
         self._turn_token = None
         # A released row was not completed: nothing may reach the display store.
         self._fetched = None
+
+
+#: Woken rows that may ride ONE turn beside its primary. Bounded so a 47-post
+#: burst becomes a handful of turns, not one request whose size and blast
+#: radius (one failed verdict releases every member) grow with the burst.
+MAX_COMPANIONS = 7
+#: Ambient-digest rows per turn, and their combined frame bytes. A digest is
+#: context, not work: it must never crowd out a woken body, so it is fitted
+#: LAST, newest first, and capped well under one 16 KiB body pair.
+DIGEST_MAX = 10
+DIGEST_MAX_BYTES = 24 * 1024
+#: Rows the digest reader scans to count what it did NOT show (the "N older
+#: ambient messages not shown" head line). A count only; no row is claimed.
+_DIGEST_SCAN = 200
+
+
+class PendingTurnBatch:
+    """One turn serving SEVERAL admitted bodies, each as its own frame.
+
+    WHY (operator request, 2026-11-21: "if there are multiple messages arriving
+    at a time or in close proximity ... respond to all at once"): half of all
+    inbound bridge messages arrive <=30 s after the previous one, and the drain
+    ran one full-context turn per body — a 5-post burst was 5 consecutive Opus
+    turns, mostly ``no_reply``. Here a burst is ONE request carrying K frames.
+
+    K FRAMES, NOT ONE FRAME WITH K OBJECTS: ``build_body_frame`` and
+    ``decode_untrusted_object`` stay one-message-per-frame, so the whole-message
+    and exact-bytes contracts are untouched. Every member is a full
+    :class:`PendingTurn` with its OWN claim/lease CAS, sha verification,
+    admission digest, per-call renewal and admission stamp — nothing about one
+    member's authority is inferred from another's.
+
+    MEMBERS: a primary (the drain's oldest eligible woken row, with today's
+    refusal path), up to :data:`MAX_COMPANIONS` woken rows of the SAME
+    conversation admitted no later than the drain's horizon, then up to
+    :data:`DIGEST_MAX` deferred ambient rows (newest first, <=
+    :data:`DIGEST_MAX_BYTES`). Order on the wire: digest frames first (oldest
+    to newest), then the woken frames in ``conversation_seq`` order, so the
+    message that woke the turn reads last — one contiguous block at the single
+    anchor :class:`_FrameAnchor` computes. Only the first frame carries the
+    receiver/participation rules.
+
+    SETTLEMENT: one turn-level verdict applied to every member (all complete
+    or all release, as a one-body turn would); a member that lost its claim or
+    drifted mid-turn has already dropped out of later calls (its ``for_call``
+    answers None) and settles its own way. Residual, stated: if the RULE
+    CARRIER drops out mid-turn, later calls carry the remaining frames without
+    the rules (bytes are fixed at open so the prefix stays cacheable).
+    """
+
+    def __init__(
+        self,
+        owner: OwnerSnapshot,
+        session_id: str,
+        *,
+        config_dir: Path,
+        store: Store | None = None,
+        lease_ttl_seconds: float | None = None,
+        binding_guard: Callable[[], bool] | None = None,
+        admissible: Callable[[dict[str, Any]], bool] | None = None,
+        admitted_before: float | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        max_companions: int = MAX_COMPANIONS,
+        digest_max: int = DIGEST_MAX,
+        digest_max_bytes: int = DIGEST_MAX_BYTES,
+    ) -> None:
+        self._owner = owner
+        self._session_id = session_id
+        self._config_dir = config_dir
+        self._store = store if store is not None else Store(config_dir)
+        self._ttl = lease_ttl_seconds
+        self._binding_guard = binding_guard
+        #: The session's per-row authority (receipt verdict + sha, designation,
+        #: consent, policy, routed scope): the SAME test its drain applies to a
+        #: primary, applied to every companion and digest row before claiming.
+        self._admissible = admissible
+        self._admitted_before = admitted_before
+        self._exclude = exclude
+        self._max_companions = max(0, int(max_companions))
+        self._digest_max = max(0, int(digest_max))
+        self._digest_max_bytes = max(0, int(digest_max_bytes))
+        self._primary: PendingTurn | None = None
+        self._members: list[PendingTurn] = []
+        self._anchor = _FrameAnchor()
+        #: Companions released for CAPACITY: the drain must NOT count them as
+        #: attempted, so the next pass serves one as its primary.
+        self.deferred_for_capacity: list[tuple[str, str]] = []
+        self.last_outcomes: list[tuple[tuple[str, str] | None, str]] = []
+        self._tried: list[tuple[str, str]] = []
+
+    def _member(self) -> PendingTurn:
+        return PendingTurn(
+            self._owner,
+            self._session_id,
+            config_dir=self._config_dir,
+            store=self._store,
+            lease_ttl_seconds=self._ttl,
+            binding_guard=self._binding_guard,
+        )
+
+    # -- the surface Session calls on a one-body turn ------------------------
+
+    @property
+    def reservation_id(self) -> str | None:
+        return self._primary.reservation_id if self._primary is not None else None
+
+    @property
+    def has_claim(self) -> bool:
+        return any(member.has_claim for member in self._members)
+
+    @property
+    def appended_calls(self) -> int:
+        return self._primary.appended_calls if self._primary is not None else 0
+
+    @property
+    def members(self) -> tuple[PendingTurn, ...]:
+        return tuple(self._members)
+
+    @property
+    def identities(self) -> tuple[tuple[str, str], ...]:
+        """Every row the batch CLAIMED (served or not) — the drain's attempted set.
+
+        Minus companions released for capacity (:attr:`deferred_for_capacity`):
+        those were never tried, and the next pass must be free to serve one as
+        its primary.
+        """
+
+        return tuple(i for i in self._tried if i not in self.deferred_for_capacity)
+
+    def binding_intact(self) -> bool:
+        # Every member shares the host guard; asking each one lets each release
+        # its own claim on a rebind, exactly as a one-body turn does.
+        intact = True
+        for member in self._members or ([self._primary] if self._primary else []):
+            intact = member.binding_intact() and intact
+        return intact
+
+    async def open(
+        self,
+        *,
+        budget: BodyBudget,
+        fetch: Callable[[str, str], Awaitable[FetchedBody | None]],
+        selected: tuple[str, str] | None = None,
+    ) -> bool:
+        """Claim, verify, fit and render the batch. False = no transform at all."""
+
+        primary = self._member()
+        self._primary = primary
+        if not primary.binding_intact():
+            return False
+        row = self._store.pending_body_reservation_for(
+            self._owner, self._session_id, selected=selected
+        )
+        if row is None or not primary.claim(row):
+            return False
+        self._tried = [primary.identity] if primary.identity is not None else []
+        # The PRIMARY is verified BEFORE any companion is claimed: a primary
+        # whose fetch or sha fails must cost exactly what it cost a one-body
+        # turn (its own release, its own attempt) and must not drag the rows
+        # behind it into this pass's attempted set — the next one is then the
+        # drain's next primary, as before (test_dm_runtime_transport's
+        # retained-failed-body cases pin this).
+        if not await primary.hydrate(fetch):
+            return False
+        claimed: list[PendingTurn] = [primary]
+        try:
+            companions = self._claim_companions(row)
+            claimed.extend(companions)
+            digest, scanned = self._claim_digest(
+                {*self._exclude, *(m.identity for m in claimed if m.identity)}
+            )
+            claimed.extend(digest)
+            self._tried = [m.identity for m in claimed if m.identity is not None]
+            others = await self._hydrate_all(claimed[1:], fetch)
+        except BaseException:
+            for member in claimed:
+                member._release("binding_drift", count_attempt=False)
+            raise
+        return self._fit_and_render(primary, [primary, *others], budget, scanned)
+
+    def _claim_companions(self, primary_row: dict[str, Any]) -> list[PendingTurn]:
+        if self._max_companions == 0:
+            return []
+        identity = (str(primary_row["conversation_id"]), str(primary_row["message_id"]))
+        rows = self._store.pending_body_reservations_for(
+            self._owner,
+            self._session_id,
+            exclude=frozenset({*self._exclude, identity}),
+            admitted_before=self._admitted_before,
+            conversation_id=identity[0],
+            limit=self._max_companions,
+        )
+        out: list[PendingTurn] = []
+        for row in rows:
+            if self._admissible is not None and not self._admissible(row):
+                # Stale admission: left pending, untouched, exactly as the
+                # drain's own skip does for a primary candidate.
+                continue
+            member = self._member()
+            if member.claim(row):
+                out.append(member)
+        return out
+
+    def _claim_digest(self, taken: set[tuple[str, str]]) -> tuple[list[PendingTurn], int]:
+        if self._digest_max == 0:
+            return [], 0
+        rows = self._store.deferred_body_reservations_for(
+            self._owner, self._session_id, limit=_DIGEST_SCAN, exclude=frozenset(taken)
+        )
+        out: list[PendingTurn] = []
+        for row in rows[: self._digest_max]:
+            if self._admissible is not None and not self._admissible(row):
+                continue
+            member = self._member()
+            if member.claim(row, digest=True):
+                out.append(member)
+        return out, len(rows)
+
+    async def _hydrate_all(
+        self,
+        members: list[PendingTurn],
+        fetch: Callable[[str, str], Awaitable[FetchedBody | None]],
+    ) -> list[PendingTurn]:
+        # Sequential on purpose: each fetch is one hub round trip on the
+        # runtime's single client, and a failed member must release before the
+        # next is fetched (a CancelledError mid-way releases the rest above).
+        out: list[PendingTurn] = []
+        for member in members:
+            if await member.hydrate(fetch):
+                out.append(member)
+        return out
+
+    def _fit_and_render(
+        self,
+        primary: PendingTurn,
+        hydrated: list[PendingTurn],
+        budget: BodyBudget,
+        scanned: int,
+    ) -> bool:
+        from .body_frame import DELIVERY_AMBIENT_DIGEST, frame_rules_head, request_size
+        from .request_body import BodyBudget as _Budget
+
+        try:
+            budget = budget.validated()
+        except BodyFrameRefused:
+            for member in hydrated:
+                member._release("binding_drift", count_attempt=False)
+            return False
+        woken = [m for m in hydrated if not m.is_digest]
+        digest = [m for m in hydrated if m.is_digest]
+        participation = any(m.conversation_kind in ("group", "channel") for m in hydrated)
+        # The rules head is counted ONCE, before anyone is fitted, with the
+        # worst-case omitted count: which member carries it is not known until
+        # the digest is fitted, and its bytes must never be under-measured.
+        head_bytes = (
+            request_size(
+                "\n".join(frame_rules_head(participation=participation, omitted_ambient=scanned))
+            )
+            + 1
+        )
+        remaining = budget.available_bytes - head_bytes
+        sizes: dict[int, int] = {}
+
+        def fits(member: PendingTurn, *, delivery: str | None) -> int | None:
+            # Sized WITHOUT the rules: their bytes are already reserved above.
+            return member.measure(with_rules=False, delivery=delivery)
+
+        # PRIMARY: today's refusal path — if it cannot fit, nothing is served.
+        size = fits(primary, delivery=None)
+        if size is None or size > remaining:
+            if size is not None:
+                primary._release("body_not_fitted")
+            for member in hydrated:
+                if member is not primary:
+                    # Never tried on their own merits: keep them out of the
+                    # drain's attempted set so the next primary can be one.
+                    if member.identity is not None and not member.is_digest:
+                        self.deferred_for_capacity.append(member.identity)
+                    member._release("body_not_fitted", count_attempt=False)
+            return False
+        remaining -= size
+        sizes[id(primary)] = size
+        kept_woken = [primary]
+        for member in woken:
+            if member is primary:
+                continue
+            size = fits(member, delivery=None)
+            if size is None:
+                continue
+            if size > remaining:
+                # Capacity, not a verdict: released WITHOUT joining the
+                # drain's attempted set, so it is the next pass's primary.
+                identity = member.identity
+                member._release("body_not_fitted")
+                if identity is not None:
+                    self.deferred_for_capacity.append(identity)
+                continue
+            remaining -= size
+            sizes[id(member)] = size
+            kept_woken.append(member)
+        kept_digest: list[PendingTurn] = []
+        digest_bytes = 0
+        # Newest first (the reader's order): the most recent context wins.
+        for member in digest:
+            size = fits(member, delivery=DELIVERY_AMBIENT_DIGEST)
+            if size is None:
+                continue
+            if size > remaining or digest_bytes + size > self._digest_max_bytes:
+                # Dropped for the digest's own bounds before any request
+                # carried it: un-counted, back to ``deferred``.
+                member._release("body_not_fitted", count_attempt=False)
+                continue
+            remaining -= size
+            digest_bytes += size
+            sizes[id(member)] = size
+            kept_digest.append(member)
+        omitted = max(0, scanned - len(kept_digest))
+        kept_digest.sort(key=lambda m: (m._row or {}).get("created_at") or 0.0)
+        kept_woken.sort(key=lambda m: m.conversation_seq)
+        ordered = [*kept_digest, *kept_woken]
+        rendered: list[PendingTurn] = []
+        for index, member in enumerate(ordered):
+            shape: dict[str, Any] = {
+                "with_rules": index == 0,
+                "participation": participation,
+                "delivery": DELIVERY_AMBIENT_DIGEST if member.is_digest else None,
+                "omitted_ambient": omitted if index == 0 else 0,
+            }
+            allowance = sizes[id(member)] + (head_bytes if index == 0 else 0)
+            if member.render(_Budget(allowance, budget.measured_from), **shape):
+                rendered.append(member)
+            elif member is primary:
+                for other in rendered:
+                    other._release("body_not_fitted", count_attempt=False)
+                for other in ordered[index + 1 :]:
+                    other._release("body_not_fitted", count_attempt=False)
+                return False
+        self._members = rendered
+        return primary in rendered
+
+    def transform(self, messages: list[Any]) -> list[Any]:
+        """Insert every live member's frame as ONE contiguous block at the anchor.
+
+        Each member runs its own ``for_call`` (renew + four local facts) every
+        physical call; a member that fails drops out for the rest of the turn
+        while the others still ride. The block's position is the one-body
+        frame's: after the Call 1 predecessor, or last when that is unsafe.
+        """
+
+        from .request_body import CustomFrameInjection
+
+        live = [(member, member.for_call()) for member in self._members]
+        frames = [(member, text) for member, text in live if text is not None]
+        if not frames:
+            return messages
+        at = self._anchor.index(messages)
+        shaped = list(messages)
+        for offset, (member, text) in enumerate(frames):
+            shaped = CustomFrameInjection.insert(
+                shaped, text, message_id=member._frame_message_id(), index=at + offset
+            )
+            member.mark(shaped[at + offset])
+        return shaped
+
+    def renew(self) -> bool:
+        """Renew EVERY member (each its own lease); answer for the primary."""
+
+        primary_held = False
+        for member in self._members:
+            held = member.renew()
+            if member is self._primary:
+                primary_held = held
+        return primary_held
+
+    def settle(
+        self,
+        *,
+        entry_id: str | None,
+        error: str | None,
+        stop_reason: str | None,
+        aborted: bool,
+    ) -> str:
+        """Apply ONE turn verdict to every member; answer the primary's outcome."""
+
+        outcomes: list[tuple[tuple[str, str] | None, str]] = []
+        for member in self._members:
+            identity = member.identity
+            outcomes.append(
+                (
+                    identity,
+                    member.settle(
+                        entry_id=entry_id, error=error, stop_reason=stop_reason, aborted=aborted
+                    ),
+                )
+            )
+        self.last_outcomes = outcomes
+        if self._primary is None:
+            return "not_claimed"
+        for member, (_, outcome) in zip(self._members, outcomes):
+            if member is self._primary:
+                return outcome
+        return "not_claimed"
 
 
 def _closed_sender_kind(value: Any) -> str:

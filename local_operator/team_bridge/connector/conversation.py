@@ -954,6 +954,9 @@ class _RosterMember:
 
 
 _ROSTERS: dict[tuple[str, str], tuple[float, tuple[_RosterMember, ...] | None]] = {}
+#: (own endpoint, conversation) -> when a FORCED re-read still did not list this
+#: agent. Throttles that re-read to once per ROSTER_FAILURE_TTL_S (#4377 m6/Q6).
+_ROSTER_SELF_MISS: dict[tuple[str, str], float] = {}
 _ROSTER_CAP = 512
 #: A message sender as the hub's message views can name it: ``(account_id, sender
 #: class)``. NOT the account alone (review r1 R2): agent-server gives every agent its
@@ -1008,13 +1011,17 @@ def classify_wake(
     2. DM, a PERSONAL mention, ``addressed=direct``, routed, sender is the owner, or
        a body read that names no conversation kind from a hub that sent no
        ``addressed`` either (an older hub: fail open, review r1 Q2) → wake now.
-    3. a reply in a thread this agent follows → wake after the dwell window.
-    4. urgent: a channel-wide mention (``@channel``/``@here``/``@everyone``),
-       ``addressed=everyone``, a sender that is NOT an agent (a human, an app /
-       integration alert, an unknown kind), or a post whose screened body asks a
-       question ("?") → one agent now, the rest stagger (``rule='urgent'``; the
-       slot is resolved by :func:`decide_wake`).
-    5. any other ambient agent post → deferred (``ambient``).
+    3. a channel-wide mention (``@channel``/``@here``/``@everyone``: the mention
+       bit with ``addressed`` ``everyone`` or ``thread``) or ``addressed=everyone``
+       → urgent. BEFORE the follower rule (#4377 Q5): ``@channel`` inside a thread
+       this agent follows reads ``addressed=thread``, and taking rule 4 for it
+       woke EVERY follower after the dwell instead of one agent now.
+    4. a reply in a thread this agent follows → wake after the dwell window.
+    5. urgent: a sender that is NOT an agent (a human, an app / integration
+       alert, an unknown kind), or a post whose screened body asks a question
+       ("?") → one agent now, the rest stagger (``rule='urgent'``; the slot is
+       resolved by :func:`decide_wake`). Rules 3 and 5 share that path.
+    6. any other ambient agent post → deferred (``ambient``).
 
     A channel-wide mention also sets the hub's ``mention`` bit (agent-server
     ``mention := channelWide || mentioned[endpoint]``); what tells it apart is
@@ -1040,14 +1047,11 @@ def classify_wake(
         or ref.sender_relation == "owner"
     ):
         return WakeDecision("direct", dwell_s=0.0)
+    if channel_wide or ref.addressed == "everyone":
+        return WakeDecision("urgent", dwell_s=0.0)
     if metadata.thread_follower is True or ref.addressed == "thread":
         return WakeDecision("thread_follower", dwell_s=float(dwell_s))
-    if (
-        channel_wide
-        or ref.addressed == "everyone"
-        or _sender_key(ref, metadata, "")[1] != "agent"
-        or (body_text is not None and "?" in body_text)
-    ):
+    if _sender_key(ref, metadata, "")[1] != "agent" or (body_text is not None and "?" in body_text):
         return WakeDecision("urgent", dwell_s=0.0)
     return WakeDecision("ambient", wake_class="ambient")
 
@@ -1264,10 +1268,22 @@ async def decide_wake(
     roster = await _agent_roster(client, owner, ref.conversation_id, access, now=moment)
     if roster is not None and own not in {m.endpoint_id for m in roster}:
         # A cached roster that does not list this agent predates its joining:
-        # read once more before falling back to slot 0.
-        roster = await _agent_roster(
-            client, owner, ref.conversation_id, access, now=moment, refresh=True
-        )
+        # read once more before falling back to slot 0. A re-read that STILL
+        # misses self is cached like a failed read (#4377 m6/Q6): without that,
+        # every urgent message in a burst re-read the view for the whole
+        # ROSTER_TTL_S, one person-gated hub call per message for nothing.
+        miss_key = (own, ref.conversation_id)
+        missed_at = _ROSTER_SELF_MISS.get(miss_key)
+        if missed_at is None or moment - missed_at >= ROSTER_FAILURE_TTL_S:
+            roster = await _agent_roster(
+                client, owner, ref.conversation_id, access, now=moment, refresh=True
+            )
+            if roster is not None and own not in {m.endpoint_id for m in roster}:
+                if len(_ROSTER_SELF_MISS) > _ROSTER_CAP:
+                    _ROSTER_SELF_MISS.clear()
+                _ROSTER_SELF_MISS[miss_key] = moment
+            else:
+                _ROSTER_SELF_MISS.pop(miss_key, None)
     if roster is None:
         slot = 0
     else:
