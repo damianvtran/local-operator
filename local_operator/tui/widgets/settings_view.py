@@ -1044,10 +1044,11 @@ class SettingsPreview(Message):
 #: value and never its advice — and the floor MARKS a cut instead of hiding it.
 #:
 #: Cell counts are against `_detail_width()`: 74 at 80x24, 54 at 60x24, 38 at
-#: 44x20. Rung 2 (40) is what a 60-column footer shows, rung 3 (26) is what
+#: 44x20. Rung 2 (54) is what a 60-column footer shows, rung 3 (26) is what
 #: survives 44 — the widths where the row help has already shed to its clause.
 #: A function rather than a tuple so the rungs resolve at paint, in the live
-#: language. The English widths are 61 / 40 / 26 cells.
+#: language. The English widths are 61 / 41 / 26 cells; the catalogue context
+#: caps (`maxCells`) are 61 / 54 / 26, each rung's real slot.
 def _gate_kept_alert_rungs() -> tuple[str, ...]:
     command = "/approvals auto"  # i18n: ignore slash command
     return (

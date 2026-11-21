@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tui.settings_view.chrome",
+  "history_sha256": "f54888050a3980bc19d8ac8555515a2f024c97c40d2a59440b63957b7135e046",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tui.settings_view.chrome",
+      "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+      "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+      "target_sha256": "a3172ba4d3682606e1169eb0b010609b965011d3bb9ab2632c77a0580d60ebc6",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "a2e5ccd4b223",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 1
+        },
+        "finding_ids": [
+          "T1",
+          "T2"
+        ],
+        "fallback_used": true,
+        "fallback_note": "pinned openai/gpt-6.1-sol hit a provider quota (HTTP 429); the audit was performed by anthropic/claude-opus-5-5 — the same model family as the translator: an independent agent instance and context, not model-independent",
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 1) of the new tui.settings_view.chrome namespace (49 keys), source commit 3c1b6a24f035. Auditor a2e5ccd4b223 (anthropic/claude-opus-5-5, quota fallback from openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 1 nit (T1, T2). Superseded: target_sha256 is the round-1 file; the translator then revised it and the round-2 audit (row sc2) covers the current bytes. Record: i18n/audits/evidence/hi/tui.settings_view.chrome/sc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/hi/tui.settings_view.chrome/sc1/record.json",
+      "round": "sc1"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.settings_view.chrome",
+      "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+      "context_sha256": "4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40",
+      "target_sha256": "6288211ff1eeb5fba6e374d0b2abfdf64edeb4ecc63b0e53c90948107029e50f",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "77dfdac3e1ac",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 1
+        },
+        "finding_ids": [
+          "T1",
+          "T2"
+        ],
+        "fallback_used": true,
+        "fallback_note": "pinned openai/gpt-6.1-sol hit a provider quota (HTTP 429); the audit was performed by anthropic/claude-opus-5-5 — the same model family as the translator: an independent agent instance and context, not model-independent",
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)",
+        "session_source": "auditor receipt carries no session field; id taken from the session scratchpad directory holding the receipt (77dfdac3e1ac)"
+      },
+      "status": "passed",
+      "note": "Independent re-audit (round 2, final) of tui.settings_view.chrome after the translator folded in the round-1 findings and the context caps were corrected (183ed01e92cc). Auditor 77dfdac3e1ac (anthropic/claude-opus-5-5, quota fallback from openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 1 nit (T1, T2). Remaining minors/nits deferred in the PR thread. Record: i18n/audits/evidence/hi/tui.settings_view.chrome/sc2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/hi/tui.settings_view.chrome/sc2/record.json",
+      "round": "sc2"
+    }
+  ]
+}

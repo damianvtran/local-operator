@@ -534,3 +534,49 @@ async def test_urdu_projection_paints_every_surface(
     assert "\u2066r\u2069" in got["cascade_malformed"][0], got["cascade_malformed"]
     assert "\u2066d\u2069" in got["confirm_short"][1], got["confirm_short"]
     assert "disk full   reversed" in hostile, hostile
+
+
+@pytest.fixture
+def shipped_tree(monkeypatch: pytest.MonkeyPatch):
+    """The REAL shipped catalogue tree and shipped set — no synthetic locale.
+
+    The pseudo/synthetic fixtures prove the wiring; this one proves each audited
+    translation reaches the painted frame. A locale missing its ledger rows
+    would drop out of ``shipped.json`` and the page would silently paint
+    English, and a real RTL/Devanagari value the display boundary refuses would
+    only crash at paint — neither is visible to the synthetic fixtures.
+    """
+    monkeypatch.setattr(text, "_active_locale", "en")
+    monkeypatch.setattr(text, "_refreshers", [])
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    text._sources.cache_clear()
+    yield
+    text.set_active_locale("en")
+    text._sources.cache_clear()
+
+
+#: Surfaces whose copy carries no technical placeholder, so the catalogue value
+#: must appear verbatim in the painted string (RTL isolates wrap, never split, it).
+_PLAIN_SURFACES = {"err_retired": "error.retired", "err_not_text": "error.not_text"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["fr", "es", "zh-CN", "ru", "vi", "hi", "ur"])
+async def test_shipped_catalogue_paints_every_surface(
+    shipped_tree, locale: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert locale in resolve.shipped_locales()
+    shipped = json.loads((EN_ROOT / locale / f"{NS}.json").read_text(encoding="utf-8"))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(180, 40)) as pilot:
+        await pilot.pause()
+        text.set_active_locale(locale)
+        got = await _surfaces(pilot, app, monkeypatch)
+    for surface, key in _PLAIN_SURFACES.items():
+        assert shipped[f"{NS}.{key}"] in got[surface], (surface, got[surface])
+    left = {
+        k: v
+        for k, v in got.items()
+        if k in ("foot_rest", "notice_discarded", *_PLAIN_SURFACES) and v == ENGLISH[k]
+    }
+    assert not left, left

@@ -1,0 +1,111 @@
+{
+ "locale": "fr",
+ "namespace": "tui.settings_view.chrome",
+ "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+ "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+ "target_sha256": "1316f5e5f69cac8b66b46d5f181c3964a72f7cbe44d9a796e68085000d8d1bea",
+ "translator": {
+  "agent": "translator (lopdev team)",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "as reported by brief; not observed by auditor",
+  "date": "2026-11-21"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev team, task chrome-audit-fr, session 699dbb528a57; independent of the translator)",
+  "session": "699dbb528a57",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "session primary openai/gpt-6.1-sol hit quota HTTP 429; this audit ran on anthropic/claude-opus-5-5 (same family as translator)",
+  "date": "2026-11-21",
+  "result": "failed",
+  "findings": 6,
+  "unresolved_blocker_major": 1,
+  "major": 1,
+  "minor": 2,
+  "nit": 3
+ },
+ "status": "failed",
+ "keys_read": 49,
+ "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers @ 3c1b6a24f035 (fr file uncommitted)",
+ "checks": {
+  "key_set_and_order": "pass 49/49",
+  "message_arguments_parity": "pass 49/49",
+  "plural_categories": "pass (value.chains, clause.would_remove, confirm.ask: one/many/other, no =N, no few)",
+  "nfc_no_bidi_no_ascii_apostrophe": "pass",
+  "u202f_before_colon_semicolon_question_and_inside_guillemets": "pass",
+  "maxCells_rendered": "pass for all capped keys (at cap: capture.press_another 24, footer.any_key 12, footer.back_to_conversation 24, footer.default 10, footer.move_cancel 14 — consumers shed whole hints/reason rungs by measurement, so no clip); uncapped clause.would_remove fails the 74-cell detail line (F1)",
+  "glossary_shipped_consistency": "chaîne/étape/{shown} étape(s) byte-identical to tui.small hop_count; enreg./déplacer/Retirées/dictée/auto match shipped; drift F2, F6"
+ },
+ "probe": "scratchpad probe_would_remove.py (run_test 80x24 and 100x30, en/fr): fr 80x24 detail lost the clause; fr 100x30 and en both sizes show it",
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "major",
+   "key": "tui.settings_view.chrome.clause.would_remove",
+   "current": "{count, plural, one {supprimerait {shown} session au prochain lancement} many {supprimerait {shown} de sessions au prochain lancement} other {supprimerait {shown} sessions au prochain lancement}} · aperçu : {command}",
+   "proposed": "{count, plural, one {supprimerait {shown} au relancement} many {supprimerait {shown} au relancement} other {supprimerait {shown} au relancement}} · aperçu : {command}",
+   "reason": "Rendered 86-89 cells with the real command vs the 74-cell detail width at 80x24 (en 71-73), so the clause ladder sheds the safety clause entirely; verified by run_test probe: fr 80x24 paints the truncated help 'Désactivé : rien n’est jamais supprimé. Activé : les limites ci-dessous s…' instead of the count, en paints the clause. Proposal mirrors en (no noun), 71-73 cells for 1-999, all three fr categories kept."
+  },
+  {
+   "id": "F2",
+   "severity": "minor",
+   "key": [
+    "tui.settings_view.chrome.capture.contract_cancel",
+    "tui.settings_view.chrome.capture.contract_confirm",
+    "tui.settings_view.chrome.confirm.contract_long",
+    "tui.settings_view.chrome.confirm.contract_short"
+   ],
+   "current": [
+    "{cancel_key} annule",
+    "{save_key} confirme · {cancel_key} annule",
+    "{key} à nouveau pour confirmer · {cancel_key} annule",
+    "{key} confirme · {cancel_key} annule"
+   ],
+   "proposed": [
+    "{cancel_key} annuler",
+    "{save_key} confirmer · {cancel_key} annuler",
+    "{key} à nouveau pour confirmer · {cancel_key} annuler",
+    "{key} confirmer · {cancel_key} annuler"
+   ],
+   "reason": "Same page's shipped key contracts render en 'saves · cancels' as infinitives (tui.settings_view.editor.contract '{save_key} enregistrer · {cancel_key} annuler'), so 'esc annule' here vs 'esc annuler' in the editor is register drift on one screen; proposals measure 11/16, 29/30, 40/40, 25/26 rendered."
+  },
+  {
+   "id": "F3",
+   "severity": "minor",
+   "key": "tui.settings_view.chrome.cascade.first_hop",
+   "current": "la chaîne doit avoir une première étape — {problem}",
+   "proposed": "première étape requise — {problem}",
+   "reason": "Prefix is 16 cells longer than en (42 vs 26) on an error line the rejection ladder crops with … at 74 cells, so the validator's explanation (the actionable part) loses those cells first."
+  },
+  {
+   "id": "F4",
+   "severity": "nit",
+   "key": "tui.settings_view.chrome.hotkey.hold_refusal",
+   "current": "à régler dans l’app de bureau — un terminal ne capte pas une touche maintenue",
+   "proposed": "à régler dans l’app de bureau — un terminal ne capte pas de touche maintenue",
+   "reason": "Standard negation takes 'pas de' for the generic case; 76/80 cells."
+  },
+  {
+   "id": "F5",
+   "severity": "nit",
+   "key": "tui.settings_view.chrome.hotkey.desktop_detail",
+   "current": "Raccourci global (app de bureau) — touches captées par le terminal, ou réglez-le dans l’app.",
+   "proposed": "Raccourci global (app de bureau) — appuyez sur des touches reçues ici, ou réglez-le dans l’app.",
+   "reason": "Noun phrase drops en's instruction 'press keys…' and breaks parallelism with the imperative second half; proposal 95/96 cells."
+  },
+  {
+   "id": "F6",
+   "severity": "nit",
+   "key": [
+    "tui.settings_view.chrome.hotkey.desktop_detail",
+    "tui.settings_view.chrome.hotkey.hold_detail",
+    "tui.settings_view.chrome.hotkey.hold_refusal",
+    "tui.settings_view.chrome.hotkey.recording_detail"
+   ],
+   "current": "app de bureau / l’app",
+   "proposed": "no change; record a width exception in i18n/style-guides/fr.md",
+   "reason": "Shipped fr wire.settings uses 'application de bureau' (desktop.title, asks.description); 'application' does not fit these budgets (desktop_detail 92/96, hold_detail 55/60, hold_refusal 77/80, recording_detail 59/60), and 'l’app' already ships in relay.pairing."
+  }
+ ],
+ "verdict": "fail",
+ "note": "Source-side observation, not a translation finding: en sidecar declares no maxCells for clause.would_remove although the consumer paints it on the 74-cell detail line at 80x24; adding one would have surfaced F1 to the translator."
+}
