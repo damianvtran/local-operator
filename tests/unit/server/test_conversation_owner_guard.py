@@ -62,6 +62,8 @@ CASES = [
         False,
         id="admit",
     ),
+    # Rename carries a body, so its receipt rides in the body like create/send.
+    pytest.param("POST", "/bcv_01234567/rename", {"name": "Renamed"}, False, id="rename"),
     pytest.param("POST", "/bcv_01234567/archive", None, True, id="archive"),
     pytest.param("POST", "/bcv_01234567/unarchive", None, True, id="unarchive"),
     pytest.param("POST", "/bcv_01234567/leave", None, True, id="leave"),
@@ -103,6 +105,16 @@ async def rig(tmp_path, monkeypatch):
         # not the authority for target membership; only this upstream policy is.
         if tenant == "org_forbidden":
             return httpx.Response(403, json={"code": "forbidden", "error": "No membership"})
+        if request.url.path.endswith("/rename") and body.get("name") == "Taken":
+            # The hub's uniqueness refusal, in its own wire shape.
+            return httpx.Response(
+                409,
+                json={
+                    "code": "conversation_name_taken",
+                    "error": "A conversation with that name already exists",
+                    "details": {"conversation_id": "bcv_99999999", "name": "Taken"},
+                },
+            )
         effects.append((request.method, request.url.path))
         return httpx.Response(200, json={"msg": "ok", "result": {"ok": True}})
 
@@ -514,3 +526,64 @@ async def test_thread_and_reaction_capabilities_ship_with_their_guard():
         assert (
             "expected_account_id" in inspect.signature(getattr(TeamBridgeClient, method)).parameters
         ), method
+
+
+# RENAME through the real route, real TeamBridgeClient and a simulated hub: the
+# request must reach the hub's own path with the trimmed name and the tenant as
+# the query (as archive sends it), and a hub refusal must reach the renderer
+# with its code and details intact so the UI can say WHICH name is taken.
+async def test_rename_reaches_the_hub_path_with_the_trimmed_name(rig):
+    response = await rig.http.post(
+        PREFIX + "/bcv_01234567/rename",
+        json={"name": "  Renamed  ", "tenant_id": "org_other", "expected_account_id": "acc_a"},
+    )
+    assert response.status_code == 200, response.text
+    assert len(rig.calls) == 1
+    request = rig.calls[0]
+    assert request.method == "POST"
+    assert request.url.path == "/v1/messaging/conversations/bcv_01234567/rename"
+    assert dict(request.url.params) == {"tenant_id": "org_other"}
+    assert json.loads(request.content) == {"name": "Renamed"}
+
+
+async def test_rename_name_taken_passes_through_intact(rig):
+    response = await rig.http.post(
+        PREFIX + "/bcv_01234567/rename",
+        json={"name": "Taken", "tenant_id": "org_other", "expected_account_id": "acc_a"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "conversation_name_taken",
+        "message": "A conversation with that name already exists",
+        "details": {"conversation_id": "bcv_99999999", "name": "Taken"},
+    }
+    assert len(rig.calls) == 1
+    assert rig.effects == []
+
+
+async def test_rename_refuses_a_blank_name_and_a_query_receipt_before_dispatch(rig):
+    # Whitespace-only passes pydantic's min_length, so the client's trim is the
+    # guard; a query receipt would be silently ignored, so it is refused.
+    blank = await rig.http.post(PREFIX + "/bcv_01234567/rename", json={"name": "   "})
+    assert blank.status_code == 422, blank.text
+    assert blank.json()["detail"]["code"] == "invalid_request"
+    query = await rig.http.post(
+        PREFIX + "/bcv_01234567/rename",
+        params={"tenant_id": "org_other", "expected_account_id": "acc_a"},
+        json={"name": "Renamed"},
+    )
+    assert query.status_code == 422, query.text
+    assert rig.calls == rig.effects == []
+
+
+async def test_client_rename_refuses_an_empty_name_without_io(rig):
+    wire = rig.wire()
+    with pytest.raises(ValueError):
+        await wire.conversation_rename("bcv_01234567", " \t ")
+    assert rig.calls == []
+
+
+async def test_rename_capability_is_advertised():
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["team_bridge_conversation_rename"] == 1

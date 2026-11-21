@@ -24,6 +24,7 @@ make old clients protected from stale-action replay.
 | POST conversations/{id}/read (cursor, muted, notify) | JSON object |
 | POST conversations/{id}/members/{account}/consent | JSON object |
 | POST conversations/{id}/messages/{message}/admit | JSON object |
+| POST conversations/{id}/rename | JSON object (`{name}`); refuses a query receipt |
 | POST conversations/{id}/archive or unarchive | Query |
 | POST conversations/{id}/leave | Query |
 | POST conversations/{id}/members (add members) | Query; body remains a member list |
@@ -58,6 +59,13 @@ This capability covers create, send/retry, join, read/notification policy,
 consent, admit, archive/unarchive, member add/remove and leave. It does not
 claim to protect the existing GET/list/body read surfaces. The capability is
 not an automatic guard on a future endpoint.
+
+Rename was added after this capability and is advertised by its own key,
+`team_bridge_conversation_rename`. Its body carries the receipt like the other
+object writes; the target tenant is forwarded upstream as the `tenant_id`
+query, the way archive sends it. A `tenant_id` or `expected_account_id` in the
+rename QUERY is refused with 422 `invalid_request`, because the route would
+otherwise ignore it and dispatch unguarded.
 
 ## Threads and reactions: REQUIRED receipts
 

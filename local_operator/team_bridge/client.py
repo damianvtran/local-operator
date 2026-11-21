@@ -4151,6 +4151,44 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def conversation_rename(
+        self,
+        conversation_id: str,
+        name: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename a channel or group; answers the updated conversation.
+
+        Same authority as archive (the conversation owner or, on a channel, an
+        organization owner/admin) and the server decides it, along with every
+        other rule: name validation (``400 field=name``, same as create),
+        uniqueness (``409 conversation_name_taken``), archived, built-in or dm
+        (``409 conversation_archived`` / ``invalid_transition``), and the opaque
+        404 for a non-member. Those refusals surface unchanged as
+        ``BridgeRefusal`` so the renderer can show the server's own reason.
+
+        The name is trimmed here only because a whitespace-only name can never
+        succeed, and refusing it before I/O keeps a blank submit from becoming a
+        round trip. Renaming to the current name is a server-side 200 no-op.
+        Human acts only: no ``actor_endpoint_id`` (an agent act is a server
+        ``400 not_allowed`` in v1).
+        """
+
+        trimmed = name.strip()
+        if not trimmed:
+            raise ValueError("name must be nonempty")
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/rename",
+            params={"tenant_id": tenant_id} if tenant_id else None,
+            body={"name": trimmed},
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
     async def conversation_delete(
         self,
         conversation_id: str,

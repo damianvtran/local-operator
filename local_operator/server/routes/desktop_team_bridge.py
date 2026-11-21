@@ -2026,6 +2026,17 @@ class ConversationCreateIn(ConversationOwnerIn):
     members: list[ConversationMemberIn] = Field(default_factory=list, max_length=500)
 
 
+class ConversationRenameIn(ConversationOwnerIn):
+    """A rename carries a body, so its owner receipt rides in the body (as create
+    and send do) rather than the query the bodyless archive/unarchive use.
+
+    ``max_length`` matches ``ConversationCreateIn.name`` so a name create accepts
+    is never refused here; the server owns the real grammar (``400 field=name``).
+    """
+
+    name: str = Field(min_length=1, max_length=128)
+
+
 class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
     #: Empty only for an image-only message (``attachment_ids`` non-empty).
@@ -2513,6 +2524,51 @@ async def conversation_unarchive(
             )
         )
     )
+
+
+# Rename is its own static path for the same reason as archive/unarchive:
+# never a dynamic ``{action}`` segment that could swallow ``/messages``.
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/rename",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_rename(
+    conversation_id: str,
+    request: Request,
+    body: ConversationRenameIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Rename a channel or group (same authority as archive, server-enforced).
+
+    Answers the updated conversation, the same shape as the detail GET, so the
+    renderer can replace its row and header without a refetch. Every refusal
+    (``conversation_name_taken`` with its ``details``, ``conversation_archived``,
+    ``invalid_transition`` with its ``rule``, 403, the opaque 404, 503) is
+    carried through ``_conversation_reply`` unchanged.
+    """
+
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    if {"tenant_id", "expected_account_id"} & set(request.query_params):
+        # The receipt belongs in the body here. A query copy would be silently
+        # ignored, so a caller that mirrored archive's query receipt would rename
+        # without the owner guard (or in the default tenant): refuse it instead.
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    try:
+        # The client's ValueError (a whitespace-only name) is raised when the
+        # coroutine runs, so the await is what has to sit inside the try.
+        result = await _conversation_reply(
+            client.conversation_rename(
+                conversation_id,
+                body.name,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    except ValueError:
+        _raise_read("invalid_request")
+    return reply(result)
 
 
 @router.delete(
