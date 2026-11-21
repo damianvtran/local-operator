@@ -293,9 +293,19 @@ def test_the_participation_rule_lets_a_reply_to_you_through() -> None:
 
 
 def test_a_frame_without_rules_starts_at_verified_source_and_decodes_the_same() -> None:
-    kwargs = {"conversation_label": "qa", "sender_label": "Ben", "body": "ok?"}
-    full = build_body_frame(_source(conversation_kind="channel"), **kwargs)
-    bare = build_body_frame(_source(conversation_kind="channel"), with_rules=False, **kwargs)
+    full = build_body_frame(
+        _source(conversation_kind="channel"),
+        conversation_label="qa",
+        sender_label="Ben",
+        body="ok?",
+    )
+    bare = build_body_frame(
+        _source(conversation_kind="channel"),
+        with_rules=False,
+        conversation_label="qa",
+        sender_label="Ben",
+        body="ok?",
+    )
     assert bare.startswith("VERIFIED SOURCE\n")
     assert full.endswith(bare) and len(full) > len(bare)
     assert decode_untrusted_object(bare) == decode_untrusted_object(full)

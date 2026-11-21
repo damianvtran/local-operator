@@ -432,7 +432,9 @@ def test_store_reads_several_woken_rows_and_the_newest_digest_rows(tmp_path) -> 
     digest = [_reserve(store, epoch, n, wake_class="passive") for n in range(10, 13)]
     rows = store.pending_body_reservations_for(_owner(), SESSION, limit=5)
     assert [r["message_id"] for r in rows] == woken
-    assert store.pending_body_reservation_for(_owner(), SESSION)["message_id"] == woken[0]
+    pending = store.pending_body_reservation_for(_owner(), SESSION)
+    assert pending is not None
+    assert pending["message_id"] == woken[0]
     newest = store.deferred_body_reservations_for(_owner(), SESSION, limit=2)
     assert [r["message_id"] for r in newest] == digest[::-1][:2]
     # The ordinary claim CAS refuses a deferred row; the digest CAS keeps it classed.
@@ -522,7 +524,13 @@ def test_the_receiver_rules_move_to_the_first_live_frame_when_the_carrier_drops(
     assert _open(batch)
     call1 = _frames(batch.transform([Message.user("wake card")]))
     assert call1[0][1].startswith(BRIDGE_RECEIVER_RULES)
-    carrier = next(m for m in batch.members if m.identity[1] == _message_ids(call1)[0])
+    carrier_id = _message_ids(call1)[0]
+    for carrier in batch.members:
+        assert carrier.identity is not None
+        if carrier.identity[1] == carrier_id:
+            break
+    else:
+        raise AssertionError("the first live frame must have a carrier")
     _flaky_renew(carrier)
     for _ in range(2):  # calls 2 and 3
         frames = _frames(batch.transform([Message.user("wake card")]))
