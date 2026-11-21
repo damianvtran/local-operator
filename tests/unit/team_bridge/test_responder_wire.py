@@ -304,3 +304,36 @@ async def test_status_line_matches_the_hubs_validator():
     assert lease.sanitize_status_line("x" * 300) is not None
     assert len(lease.sanitize_status_line("x" * 300) or "") == 140
     assert lease.sanitize_status_line("https://only.example") is None
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # review S-13: each passed the old denylist unchanged
+        "c2VjcmV0.evil.example.com",
+        "1.2.3.4/x",
+        "1.2.3.4",
+        "evil.example.com./x",
+        "x.xn--p1ai/abc",
+        "evil.рф/abc",
+        "evil\u3002example\u3002com/x",
+        "evil\uff0eexample\uff0ecom",
+        "evil\uff61example",
+        "evil\u2024example",
+        "evil.example.com\\x",
+        "mailto:a@evil.com",
+        "a@evil",
+        "host:8080",
+        "javascript:alert",
+        "[::1]",
+        "::1",
+        "data.evil",
+    ],
+)
+async def test_status_line_drops_every_link_shape(shape: str):
+    assert lease.sanitize_status_line(f"pods {shape} restarting") == "pods restarting"
+
+
+async def test_status_line_keeps_ordinary_prose():
+    text = "Status: sev1 v1.2.3 rollout 99.5% at 18:05, 3 pods (2.1) restarting."
+    assert lease.sanitize_status_line(text) == text

@@ -51,6 +51,13 @@ _ALLOWED_ARGS: frozenset[str] = frozenset(
 )
 
 
+#: ``BridgeToolParams`` fields whose schema DEFAULT is inert for a thread reply
+#: (review n-3): a spawner that echoes them (or a model that spells them out)
+#: must not be refused. Any other value (``target: "human"``, ``type:
+#: "request"``) is still refused. A test pins these against the model's defaults.
+_INERT_DEFAULTS: Mapping[str, Any] = {"target": "agent", "type": "note"}
+
+
 @dataclass(frozen=True)
 class BridgeThreadScope:
     """The one thread a responder may read and reply in: the wake's alert root."""
@@ -66,7 +73,8 @@ def _empty(value: Any) -> bool:
 def scope_refusal(scope: BridgeThreadScope, args: Mapping[str, Any]) -> str | None:
     """``None`` when ``args`` stays inside ``scope``; otherwise the refusal sentence.
 
-    Model-facing (English by design). The arguments are checked as given; the
+    Model-facing (English by design). The arguments are checked as given — the
+    model's raw arguments, not a ``model_dump()`` (``runner.Spawner``); the
     caller passes the SAME mapping on to the executor, never a re-resolved one,
     so a channel NAME that would resolve to this conversation is still refused
     (only the exact id is in scope).
@@ -78,7 +86,13 @@ def scope_refusal(scope: BridgeThreadScope, args: Mapping[str, Any]) -> str | No
             f"bridge_thread refuses op {op or '(none)'!r}: a responder may only read "
             "(channel_thread) and reply in (channel_post) its own alert's thread."
         )
-    extra = sorted(k for k, v in args.items() if k not in _ALLOWED_ARGS and not _empty(v))
+    extra = sorted(
+        k
+        for k, v in args.items()
+        if k not in _ALLOWED_ARGS
+        and not _empty(v)
+        and not (k in _INERT_DEFAULTS and v == _INERT_DEFAULTS[k])
+    )
     if extra:
         return f"bridge_thread refuses argument(s) {', '.join(extra)}: not part of a thread reply."
     if str(args.get("channel_id") or "").strip() != scope.conversation_id:

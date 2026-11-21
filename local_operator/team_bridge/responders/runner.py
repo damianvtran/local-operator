@@ -158,6 +158,17 @@ class ResponderRun(Protocol):
 
 
 class Spawner(Protocol):
+    """Starts one responder session for an admitted, claimed wake.
+
+    Contract for ``bridge_thread`` (review n-3): the spawner hands
+    ``bridge_scope.scope_refusal`` the model's RAW tool arguments — the mapping
+    the model sent — and passes that same mapping to the bridge executor. Never
+    a ``BridgeToolParams(...).model_dump()``: that fills every schema default
+    in, and a default the scope does not know (a new field added later) would
+    refuse every call. The schema's present defaults (``target: "agent"``,
+    ``type: "note"``) are inert and accepted either way.
+    """
+
     async def spawn(self, request: SpawnRequest) -> ResponderRun: ...
 
 
@@ -244,8 +255,12 @@ def _quote_body(body: str) -> str:
     """
 
     cleaned = "".join(ch for ch in str(body) if unicodedata.category(ch) != "Cf")
+    # ``splitlines`` (review n-1): a renderer or model may break a line at
+    # ``\r``, ``\x0b``, ``\x0c``, ``\x1c``-``\x1e``, ``\x85``, U+2028/2029 too,
+    # so a marker-shaped line after any of them is indented like one after
+    # ``\n``. Rejoined with ``\n``: the frame then has one line convention.
     return "\n".join(
-        " " + line if line.lstrip().startswith("<<<") else line for line in cleaned.split("\n")
+        " " + line if line.lstrip().startswith("<<<") else line for line in cleaned.splitlines()
     )
 
 
@@ -435,7 +450,7 @@ class ResponderRunner:
         finally:
             active = self._active.pop(wake.root_message_id, None)
             lease_now = active.lease if active is not None else result.lease
-            self._charge(run)
+            self._charge(run, channel.budgets.max_tokens_per_day)
             # Unconditional and best-effort (``release`` never raises): every
             # exit — normal, stopped, lost, crashed — gives the alert back.
             released = await _lease.release(self.client, lease_now)
@@ -550,19 +565,25 @@ class ResponderRunner:
 
         return sum(max(int(a.run.tokens_used()), 0) for a in self._active.values())
 
-    def _charge(self, run: ResponderRun) -> None:
+    def _charge(self, run: ResponderRun, day_limit: int) -> None:
         # Charged on the day the run ENDS (review m1): charging the admission
         # day replaced today's bucket with yesterday's for a run spanning midnight.
-        key = self.now().date().isoformat()
+        now = self.now()
+        key = now.date().isoformat()
         try:
-            used = int(run.tokens_used())
+            used = max(int(run.tokens_used()), 0)
         except Exception:  # noqa: BLE001 — teardown accounting must not raise
+            # Fail CLOSED (review S-14): a meter that cannot be read must not make
+            # the run free. Charge whatever is left of today's allowance, so the
+            # next admission refuses with ``policy:daily_budget`` until the day
+            # rolls over (or a restart, the bound S-8 already accepted).
+            used = max(int(day_limit) - self._day_used(now), 0)
             logger.warning(
-                "responder token meter unreadable; day budget not charged", exc_info=True
+                "responder token meter unreadable; charging the rest of the day budget",
+                exc_info=True,
             )
-            used = 0
         # Only today's bucket is kept: yesterday's spend never limits today.
-        self._day_tokens = {key: int(self._day_tokens.get(key, 0)) + max(used, 0)}
+        self._day_tokens = {key: int(self._day_tokens.get(key, 0)) + used}
 
 
 async def _cancel_quietly(run: ResponderRun, reason: str) -> None:

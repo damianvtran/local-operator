@@ -790,6 +790,62 @@ def _policy_reason(target: Target, prot: _Protected) -> str | None:
     return None
 
 
+#: The reason a bulk copy into a state root carries (``_bulk_reason``).
+BULK_INTO_STATE_REASON = (
+    "a bulk copy, sync, extract or checkout into the Local Operator state directory "
+    "(it can land the owner's alert responder policy or the guardrail's records)"
+)
+
+
+def _bulk_reason(target: Target, prot: _Protected) -> str | None:
+    """Does a tree-landing write (``Target.bulk``) reach into a state root?
+
+    WHY (PR #4383 security round 2, S-12). ``rsync -a ~/forged/ ~/.local-operator/``,
+    ``ditto``, ``cp -R x/``, ``cp --parents``, ``tar -x``/``unzip`` or a ``git
+    checkout`` there each plant ``team_bridge/responders.yaml`` (or the
+    ``guardrails/`` ledger) while naming only the state root, which is not itself
+    evidence, so they all ranked LOW. An agent has no routine reason to bulk-write
+    into the state root, so:
+
+    * destination == a state root → CRITICAL, whatever lands;
+    * destination == an ANCESTOR of a state root (``~``, ``/``) → CRITICAL when
+      what lands there is unknowable (contents copies, archives, checkouts) or
+      names the next component toward the state root (``rsync -a
+      ~/x/.local-operator ~``). ``cp -R ~/proj ~/`` stays as it was.
+
+    Every spelling ``_policy_reason`` judges (lexical, realpath, the kernel's
+    ``..`` landing) is judged here too, case-folded on a case-insensitive volume.
+    """
+    if not target.bulk:
+        return None
+    spellings: set[str] = set()
+    for word in (target.path, target.raw_path):
+        if not word:
+            continue
+        spellings.add(_norm(word))
+        try:
+            spellings.add(os.path.realpath(word))
+        except OSError:
+            pass
+    if target.raw_path and (kernel := kernel_path(target.raw_path)):
+        spellings.add(kernel)
+    for state in prot.state_roots:
+        fold = _case_insensitive(state)
+        root = state.casefold() if fold else state
+        names = None
+        if target.bulk_names is not None:
+            names = {n.casefold() if fold else n for n in target.bulk_names}
+        for spelling in spellings:
+            dest = (spelling.casefold() if fold else spelling).rstrip("/") or "/"
+            if dest == root:
+                return BULK_INTO_STATE_REASON
+            if _under(root, dest):
+                step = os.path.relpath(root, dest).split(os.sep, 1)[0]
+                if names is None or step in names:
+                    return BULK_INTO_STATE_REASON
+    return None
+
+
 def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
     """Does ``target`` land in the guard's evidence?
 
@@ -2614,6 +2670,14 @@ def classify_targets(
         )
         pad_hits: set[str | None] = set()
         for t in writes:
+            bulk = _bulk_reason(t, prot)
+            if bulk is not None:
+                evidence_hits.append(RankedTarget(t, Risk.CRITICAL, bulk))
+                continue
+            if t.op == "bulk":
+                # A git work tree recorded only for the rule above: the rest of
+                # its ranking is the backstop's ordinary cwd touch.
+                continue
             reason = _touch_reason(t, prot, globstar=globstar)
             if reason == OTHER_SCRATCHPAD:
                 # Not evidence, but another session's files: every write there

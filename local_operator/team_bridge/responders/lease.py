@@ -350,10 +350,36 @@ async def release(client: LeaseClient, lease: Lease) -> str:
     return "released"
 
 
-#: A scheme-less link: ``host.tld/path?q=…``. The hub accepts it (no ``://``, no
-#: ``www.``), but a card must not carry a fetchable URL an injected run composed
-#: (review S-10: ~140 chars/minute of exfiltration to channel members otherwise).
-_BARE_URL = re.compile(r"[^\s/]*[A-Za-z0-9-]\.[A-Za-z]{2,}(?::\d+)?[/?]")
+#: Link-shaped words are dropped by SHAPE, not by a list of URL forms (review
+#: S-10 then S-13: every denylist round missed a shape — a bare subdomain carrying
+#: data, ``1.2.3.4/x``, a trailing-dot FQDN, punycode and IDN TLDs, ideographic
+#: full stops, ``\`` paths, ``mailto:``). The status line is plain prose on a card
+#: every channel member sees, so a word survives only if it cannot be a host, a
+#: path or a scheme:
+#:
+#: * no ``@`` ``/`` ``\`` anywhere;
+#: * no ``:`` followed by more of the word (a scheme, ``host:port``, IPv6) — a
+#:   trailing ``:`` (``status:``) and a clock time (``18:05``) are prose;
+#: * no dot-like character between two label characters (``a.b``, ``a。b``,
+#:   ``a｡b``…), checked AFTER NFKC so compatibility forms (``．`` ``․`` ``﹒``)
+#:   fold to ``.`` first — unless the whole word is a short version or number
+#:   (``v1.2.3``, ``99.5%``), which has at most three numeric parts, so a
+#:   dotted-quad IP never qualifies.
+_DOTS = frozenset(".\u3002\uff61\uff0e\u2024\ufe52")
+_DOTTED_LABEL = re.compile(r"[\w-][" + "".join(sorted(_DOTS)) + r"][\w-]")
+_SCHEMEISH = re.compile(r":(?=\S)")
+_NUMBERISH = re.compile(r"[(]?v?\d+(?:\.\d+){0,2}%?[).,;:!?]*")
+_CLOCK = re.compile(r"[(]?\d{1,2}(?::\d{2}){1,2}[).,;!?]*")
+
+
+def _link_shaped(word: str) -> bool:
+    if any(ch in word for ch in "@/\\"):
+        return True
+    if _SCHEMEISH.search(word) and not _CLOCK.fullmatch(word):
+        return True
+    return bool(_DOTTED_LABEL.search(word)) and not _NUMBERISH.fullmatch(word)
+
+
 _MARKUP = frozenset("<>[]`*_#|")
 
 
@@ -380,17 +406,15 @@ def sanitize_status_line(text: str) -> str | None:
 
     from local_operator.redaction_shapes import scrub_shapes
 
-    line = scrub_shapes(" ".join(str(text or "").split()))
+    # NFKC first so the shape test below judges the characters a renderer will
+    # show (fullwidth/compatibility dots fold to ``.``), and send that same form.
+    line = scrub_shapes(" ".join(unicodedata.normalize("NFKC", str(text or "")).split()))
     for _ in range(8):
         before = line
         # Characters first (the hub's markup and control runes), THEN links, so
         # a stripped character can never splice a link back together unseen.
         line = "".join(ch for ch in line if ch not in _MARKUP and unicodedata.category(ch) != "Cc")
-        words = [
-            w
-            for w in line.split()
-            if "://" not in w.lower() and "www." not in w.lower() and not _BARE_URL.match(w)
-        ]
+        words = [w for w in line.split() if not _link_shaped(w) and "www." not in w.lower()]
         line = " ".join(words)
         if line == before:
             break

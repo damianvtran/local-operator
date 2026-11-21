@@ -14,13 +14,20 @@ after ``..`` — is CRITICAL and refused, the same tier as the guardrail's own r
 so is the policy path handed to an unknown program (``python3 -c``). The owner edits
 it with their own editor (or, later, the desktop Responder dialog, RFC Phase 4).
 
+A bulk copy, sync, extract or checkout whose DESTINATION is the state root (or an
+ancestor that would land ``team_bridge`` in it) — ``rsync -a ~/forged/ ~/.local-operator/``,
+``ditto``, ``cp -R x/``, ``cp --parents``, ``tar -x``/``unzip`` there, ``git checkout``
+in it — is CRITICAL too (``guardrails.classify._bulk_reason``, review S-12), and so
+is ``cp -l``/``--link``/``-al`` with the policy as its source (S-11).
+
 What a command classifier CANNOT see: a write whose path is computed at run time
-inside an interpreter or a script file (``python3 x.py`` that builds the path), or
-an archive extracted at the state root that carries ``team_bridge/responders.yaml``.
+inside an interpreter or a script file (``python3 x.py`` that builds the path).
 The real boundary for those is the S-41 spawner's OS-level write-deny on the state
-root; until it lands, :func:`load_policy` adds what it can: it refuses a symlinked
-file or a symlinked ``team_bridge`` directory, a non-regular file, a file not owned
-by this user, and a group- or world-writable one — each is "no policy" (OFF).
+root; until it lands, :func:`load_policy` closes what it can on the descriptor it
+reads (:func:`_read_fenced`): a symlinked file, ``team_bridge`` or state directory,
+a non-regular file, a file with a second name (hardlink, ``st_nlink != 1``), and a
+file or either directory not owned by this user or group/world-writable — each is
+"no policy" (OFF).
 
 FAIL CLOSED, DEFAULT OFF. A missing file, an unreadable one, a YAML error, an
 unknown key, a wrong type, an unknown tier or severity — every one of them yields
@@ -413,48 +420,89 @@ def parse_policy(raw: bytes) -> ResponderPolicy:
     return ResponderPolicy(channels=channels, sha256=policy_sha256(raw))
 
 
+def _open_dir_nofollow(name: str | Path, what: str, *, dir_fd: int | None = None) -> int:
+    """Open one directory level without following a link at that level."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(name, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        # A link under O_NOFOLLOW is ELOOP on Linux; with O_DIRECTORY darwin may
+        # answer ENOTDIR instead. Either way it is not the directory we vetted.
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise PolicyError(f"{what} is a symlink or not a directory") from None
+        raise
+
+
+def _owned_and_private(st: os.stat_result, what: str) -> None:
+    """Owned by this user and not writable by group or world: otherwise another
+    principal (or a planted copy carrying foreign bits) chose these bytes."""
+
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise PolicyError(f"{what} is not owned by this user")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise PolicyError(f"{what} is group- or world-writable")
+
+
 def _read_fenced(path: Path) -> bytes:
     """The policy's bytes, refusing every shape an agent could have planted.
 
-    Why (PR #4383 review M1/S-1): ``Path.read_bytes`` follows links, so one
-    ``ln -sf ~/forged.yaml …/responders.yaml`` (or a linked ``team_bridge``
-    directory) would turn later plain writes to an agent-owned file into policy
-    writes the guardrail never sees. ``O_NOFOLLOW`` refuses a linked leaf; the
-    directory is ``lstat``-ed (``config_dir`` itself may legitimately be a link
-    the owner made, and the classifier already fences renaming it). The
-    ``fstat`` checks run on the descriptor actually read, so a swap between
-    check and read cannot slip past them.
+    WHY THE LOADER, NOT ONLY THE CLASSIFIER (PR #4383 security rounds 1-2: M1/S-1,
+    S-11, n-2). Two rounds showed that enumerating write commands in the guardrail
+    classifier keeps losing a route (``cp -l``, ``rsync`` into the state root, an
+    interpreter's ``os.link``). So the loader proves, on the descriptors it
+    actually reads, that the bytes can only have come from the owner writing this
+    one name:
+
+    * the state directory and ``team_bridge`` are each opened ``O_DIRECTORY |
+      O_NOFOLLOW`` and walked by ``dir_fd`` (``openat``), so the directory that
+      was checked is the directory read — no lstat-then-open-by-path window, and
+      no symlinked level (a linked state root is refused too: the owner keeps it
+      a real directory, and a link there would hand the policy to whoever owns
+      the link target);
+    * both directories must be owned by this uid and not group/world-writable;
+    * the file is opened ``O_NOFOLLOW`` relative to ``team_bridge`` and ``fstat``
+      on that fd must show a regular file, owned by this uid, not
+      group/world-writable, and ``st_nlink == 1``. The link count is the S-11
+      closure: a hardlink (``ln``, ``cp -l``, ``cp -al``, ``os.link``) gives the
+      policy inode a second, agent-writable name, and no command classifier can
+      see every way to make one; a policy with another name is not a policy.
+
+    ``FileNotFoundError`` at any level is "no policy" (OFF); every other refusal
+    is :class:`PolicyError` → OFF with a problem the owner can read.
     """
 
-    directory = path.parent
-    dir_stat = os.lstat(directory)  # FileNotFoundError -> OFF, like a missing file
-    if stat.S_ISLNK(dir_stat.st_mode):
-        raise PolicyError("the team_bridge directory is a symlink")
-    if not stat.S_ISDIR(dir_stat.st_mode):
-        raise PolicyError("team_bridge is not a directory")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    team_bridge = path.parent
+    state = team_bridge.parent
+    fds: list[int] = []
     try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        # O_NOFOLLOW on a link (dangling or not) is ELOOP on darwin and Linux.
-        if exc.errno == errno.ELOOP:
-            raise PolicyError("the policy file is a symlink") from None
-        raise
-    try:
+        fds.append(_open_dir_nofollow(state, "the state directory"))
+        st = os.fstat(fds[-1])
+        _owned_and_private(st, "the state directory")
+        fds.append(_open_dir_nofollow(team_bridge.name, "team_bridge", dir_fd=fds[-1]))
+        st = os.fstat(fds[-1])
+        _owned_and_private(st, "the team_bridge directory")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(path.name, flags, dir_fd=fds[-1])
+        except OSError as exc:
+            # O_NOFOLLOW on a link (dangling or not) is ELOOP on darwin and Linux.
+            if exc.errno == errno.ELOOP:
+                raise PolicyError("the policy file is a symlink") from None
+            raise
+        fds.append(fd)
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise PolicyError("the policy is not a regular file")
-        if hasattr(os, "getuid") and st.st_uid != os.getuid():
-            raise PolicyError("the policy file is not owned by this user")
-        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise PolicyError("the policy file is group- or world-writable")
+        if st.st_nlink != 1:
+            raise PolicyError("the policy file has another name (hardlink)")
+        _owned_and_private(st, "the policy file")
         if st.st_size > _MAX_FILE_BYTES:
             raise PolicyError("the policy file is larger than 64 KiB")
-        with os.fdopen(fd, "rb", closefd=True) as handle:
-            fd = -1
+        with os.fdopen(fds.pop(), "rb", closefd=True) as handle:
             return handle.read(_MAX_FILE_BYTES + 1)
     finally:
-        if fd >= 0:
+        for fd in fds:
             os.close(fd)
 
 
