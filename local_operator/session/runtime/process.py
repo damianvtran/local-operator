@@ -7096,6 +7096,17 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     if configure_file_logging(path=target, level=logging.INFO) is None:
         logger.warning("session runtime could not open a log file; records stay on stderr")
+    # THE RUNTIME'S LANGUAGE. This child is its own process: ``cli.main``'s boot
+    # activation belongs to whoever spawned it (often the server or the desktop
+    # relay, never the runtime), so without this every active-locale render here
+    # — the notices re-rendered for viewers (``serving._notice_text_for_viewer``),
+    # ``tr`` resolvers, the settings registry copy — stayed on the renderer's
+    # ``en`` default under an ``fr`` config (desktop fr census, 2026-11). Once,
+    # before the session exists; later switches are followed by
+    # ``serving.attach_language_config_watch``. Read-only and never raises.
+    from local_operator.i18n.boot import activate_resolved_locale
+
+    activate_resolved_locale()
     # THE OPERATOR CAPABILITY IS READ HERE, and it is read from a DESCRIPTOR
     # rather than from argv/env/a file: a model-run ``bash`` tool can read any of
     # those (the record is 0600 under this same uid, which is the defect), and

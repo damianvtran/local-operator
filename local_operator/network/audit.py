@@ -514,7 +514,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "member_removed": frozenset({"initiated_by", "rekeyed", "epoch_after"}),
     "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
     "member_left": frozenset({"epoch"}),
-    "membership_ended": frozenset({"notice_epoch", "credentials_dropped"}),
+    # ``recorded`` appears only as ``False``: the drop ran but the self-tombstone
+    # could not be saved (relay ``_apply_verified_removal``, #4394 review R2-2).
+    "membership_ended": frozenset({"notice_epoch", "credentials_dropped", "recorded"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
     "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),

@@ -350,22 +350,27 @@ def test_field_removal_loop_resolves_both_literal_paths(home: Path, infra: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ignored", [False, True], ids=["clean", "unwitnessed"])
 async def test_field_case_sibling_cleanup_settles_without_the_judge(
-    home: Path, infra: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, infra: Path, monkeypatch: pytest.MonkeyPatch, ignored: bool
 ) -> None:
-    """The whole field case: K creates by loop, C (K's sibling) removes by loop.
-
-    The parent is live (it is waiting on C) and must not count as an owner.
-    """
+    """A live parent waiting on C is not a holder, but kinship is not a payload witness."""
     _run_recorded(home, FIELD_CREATE, K)
-    for repo in REPOS:
-        _ignore_only(infra / repo / ".worktrees" / "tfc-acm-sbx-auth")
+    if ignored:
+        for repo in REPOS:
+            _ignore_only(infra / repo / ".worktrees" / "tfc-acm-sbx-auth")
     _set_running(monkeypatch, {P: str(home), C: str(home)})
     verdict = _rank(home, FIELD_REMOVE, C)
-    assert verdict.risk is Risk.LOW, [t.reason for t in verdict.targets]
     judge = _Judge()
     outcome = await _check(home, FIELD_REMOVE, C, judge)
-    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    if ignored:
+        reason = "2 ignored entries the guard cannot prove regenerable"
+        assert verdict.risk is Risk.HIGH and len(verdict.targets) == len(REPOS)
+        assert all(t.cleanup_hold and reason in t.reason for t in verdict.targets)
+        assert outcome is not None and outcome.blocked and reason in outcome.text
+    else:
+        assert verdict.risk is Risk.LOW, verdict.reasons
+        assert outcome is None or not outcome.blocked, outcome and outcome.text
     assert judge.prompts == []
 
 

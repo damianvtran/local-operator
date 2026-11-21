@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hmac
 import socket
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from secrets import token_bytes
@@ -296,11 +297,27 @@ def _mint_dummy_public_key() -> str:
     return b64u(raw)
 
 
-#: Minted at IMPORT, not on first use (review R1-5): a lazy mint made the first
-#: non-tombstone probe in each process pay for a keygen the tombstoned path never
-#: pays — a one-time timing difference between the two classes ``_probe_tombstone``
-#: exists to make indistinguishable. Import happens before any listener accepts.
-_DUMMY_PUBLIC_KEY: str = _mint_dummy_public_key()
+#: ONCE PER PROCESS, minted at RELAY START (``prime_dummy_public_key``, called by
+#: ``RelayServer.start`` before its accept loop), never per probe. Two reviews
+#: pull in opposite directions and this satisfies both: a lazy mint on the first
+#: non-tombstone probe made that one probe pay for a keygen the tombstoned path
+#: never pays (#4394 review R1-5), while minting at IMPORT made every CLI path
+#: that merely imports this module (``invite``, ``onboard``) load
+#: ``cryptography.hazmat`` for a key only a listener uses (#4394 review R2-3).
+#: ``_dummy_public_key`` still mints on first use under a lock when nothing primed
+#: it — only a listener driven without ``start`` (test doubles, a doctor probe) —
+#: so the value is still one key for the life of the process.
+_DUMMY_PUBLIC_KEY: str = ""
+_DUMMY_PUBLIC_KEY_LOCK = threading.Lock()
+
+
+def prime_dummy_public_key() -> str:
+    """Mint the process's discarded-private-half key now, if not already minted."""
+    global _DUMMY_PUBLIC_KEY
+    with _DUMMY_PUBLIC_KEY_LOCK:
+        if not _DUMMY_PUBLIC_KEY:
+            _DUMMY_PUBLIC_KEY = _mint_dummy_public_key()
+        return _DUMMY_PUBLIC_KEY
 
 
 def _dummy_public_key() -> str:
@@ -309,10 +326,9 @@ def _dummy_public_key() -> str:
     Used by ``Handshake._probe_tombstone`` when no notice-eligible tombstone
     matches, so an unknown id, a never-member and a tombstoned id with a random key
     all run one signature verification and all fail it. Nobody holds the private
-    key (it is minted once per process at import and dropped), so this can never
-    verify.
+    key (it is minted once per process and dropped), so this can never verify.
     """
-    return _DUMMY_PUBLIC_KEY
+    return _DUMMY_PUBLIC_KEY or prime_dummy_public_key()
 
 
 def welcome_proof(
@@ -1150,9 +1166,10 @@ class Handshake:
     def send_challenge(self, sock: socket.socket, policy: ListenerPolicy) -> dict[str, Any]:
         """Validate everything the inviter must before showing a challenge.
 
-        Epoch, trust and the invite all belong HERE rather than after the
-        challenge: the challenge is the first frame that tells an attacker
-        anything, and a listener that challenged first and validated second would
+        Trust and the invite belong HERE rather than after the challenge (a member
+        hello's epoch moved to ``verify_auth``'s step 4 — see the comment below):
+        the challenge is the first frame that tells an attacker anything, and a
+        listener that challenged first and validated second would
         hand a stranger a fresh X25519 public key and salt before deciding whether
         it would speak to them at all.
         """
@@ -1181,21 +1198,20 @@ class Handshake:
                     "a join handshake was started without a validated invite",
                 )
             self.phase = "pair"
-        else:
-            if self.epoch not in (policy.current_epoch, policy.previous_epoch):
-                # KNOWN BOUND OF THE G9-B NOTICE (security P3 ruling, review R1-1/S2):
-                # this refusal runs BEFORE the tombstone probe, so a removed device
-                # that is two or more rotations behind (``member rm`` it, then any
-                # other rotation — a second removal, a ``leave``, a ``panic`` — inside
-                # the notice window) is refused here and gets SILENCE, exactly as
-                # before G9-B, until its offline hold ends. Probing every stale member
-                # hello uniformly changes the pre-challenge contract for live stale
-                # members, so it is a security-reviewed follow-up, not a patch here.
-                raise HandshakeRefusal(
-                    REASON_EPOCH,
-                    "the other device is at an epoch this one no longer accepts; it must "
-                    "reconcile or re-pair",
-                )
+        # A MEMBER HELLO AT A STALE EPOCH IS CHALLENGED, NOT REFUSED HERE (G9-B
+        # follow-up, security P3 / review R1-1). Refusing before the challenge meant a
+        # removed device two or more rotations behind (``member rm`` it, then any
+        # other rotation inside the notice window — a second removal, a ``leave``, a
+        # ``panic``) never reached the tombstone probe and got silence until its
+        # offline hold ended. The epoch check now runs in ``verify_auth`` (step 4),
+        # where it first runs the same ONE probe every non-member gets and then
+        # raises the same ``epoch_stale`` refusal, so a proven removed key is told and
+        # every other stale dialer still gets the silent close it got before.
+        # What a stale hello now sees that it did not: this challenge. It carries
+        # nothing a current-epoch hello from any stranger does not already get (an
+        # unknown id at the right epoch was always challenged; membership is step
+        # 6), and the epoch number it shows was already learnable by trying the few
+        # small integers it can be — silence vs challenge WAS that oracle.
         self.salt = token_bytes(16)
         self.challenge = build_challenge(
             epoch=policy.current_epoch,
@@ -1239,12 +1255,22 @@ class Handshake:
             )
         if self.auth_core.get("mode") != self.mode:
             raise HandshakeRefusal(REASON_FRAME, "the auth frame changed the handshake mode")
-        if self.auth_core.get("epoch") != policy.current_epoch and self.mode == "member":
-            # A member link may authen at the previous epoch only to reconcile.
-            if self.auth_core.get("epoch") != policy.previous_epoch:
-                raise HandshakeRefusal(
-                    REASON_EPOCH, "the auth frame names an epoch this device does not accept"
-                )
+        accepted = (policy.current_epoch, policy.previous_epoch)
+        if self.mode == "member" and (
+            self.epoch not in accepted or self.auth_core.get("epoch") not in accepted
+        ):
+            # STEP 4. A member link may authen at the previous epoch only to
+            # reconcile; anything older is refused — AFTER the one tombstone probe
+            # every non-member gets (see ``send_challenge`` for why it moved here).
+            # The hello's epoch counts too: it was the pre-challenge check, and a
+            # dialer must not escape it by naming a fresh epoch only in its auth.
+            # The probe is unconditional on this branch, so a stale live member, a
+            # stale stranger and a stale tombstoned id walk one path: one lookup, one
+            # verify, the same ``epoch_stale`` refusal. Only its flag differs.
+            self._probe_tombstone(policy, str(signature))
+            raise HandshakeRefusal(
+                REASON_EPOCH, "the auth frame names an epoch this device does not accept"
+            )
 
         # STEP 6, before any key is used: membership is evaluated against the
         # CURRENT epoch's member list, and a tombstoned device resolves to None
@@ -1329,7 +1355,9 @@ class Handshake:
         NO-ORACLE, KEPT: until the signature verifies, a tombstoned id, an unknown
         id and a never-member are indistinguishable — each costs one lookup and one
         Ed25519 verification (a discarded key stands in when no tombstone matches)
-        and each ends in the same ``not_a_member`` refusal with nothing sent. Only a
+        and each ends in the same refusal with nothing sent — ``not_a_member`` at
+        step 6, ``epoch_stale`` at step 4 for a dialer two or more rotations behind
+        (the P3 reorder: both call sites run this probe unconditionally). Only a
         dialer that holds the exact stored key learns anything, and it learns only
         what it already knew it might be: removed.
 
