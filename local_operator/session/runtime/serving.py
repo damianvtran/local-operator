@@ -531,6 +531,55 @@ _ANNOUNCE_FAILED = "failed"
 #: so a test or worker that moves ``LOCAL_OPERATOR_CONFIG_DIR`` gets its own.
 _display_watch_attached: set[str] = set()
 
+#: Config directories this process already subscribed to ``language`` changes
+#: (:func:`attach_language_config_watch`). Same one-per-directory rule as
+#: :data:`_display_watch_attached`: the active locale is process-global.
+_language_watch_attached: set[str] = set()
+
+
+def _notice_text_for_viewer(payload: dict[str, Any]) -> dict[str, Any]:
+    """A catalogued notice's ``text`` re-rendered in this process's language.
+
+    WHY HERE. ``session._notice`` / ``loop._notice`` pin ``text`` to English
+    because the same event object is persisted to the transcript and replayed,
+    and a journal must not depend on the language the runtime happened to have
+    when it wrote the row. The viewers on this relay (the desktop's
+    ``transcript-reducer`` ``case "notice"``, the attached TUI's
+    ``_handle_notice``) paint ``text`` verbatim and carry no ``tui.notices``
+    catalogue, so the pinned English reached a French operator's screen (the
+    2026-11 desktop fr census, row 10). RFC §2.6 allows ``text`` to be "en, or
+    the resolved locale when known": this is the DISPLAY boundary, the last
+    place before bytes, and it is downstream of the transcript write — the
+    journal keeps English and ``code``/``params`` stay for re-rendering.
+
+    The active locale is the runtime's own (``process.main`` activates it at
+    boot; :func:`attach_language_config_watch` follows later switches).
+    Notices without a ``code`` are free prose nobody catalogued and pass
+    through untouched, as does anything that fails to render: copy is never
+    a reason to drop an event.
+    """
+    if payload.get("type") != "notice":
+        return payload
+    code = payload.get("code")
+    if not isinstance(code, str) or not code:
+        return payload
+    try:
+        from local_operator.i18n.messages import render_record
+        from local_operator.i18n.text import active_locale
+
+        params = payload.get("params")
+        rendered = render_record(
+            code, params if isinstance(params, dict) else {}, locale=active_locale()
+        )
+    except Exception:  # noqa: BLE001 — copy is never a reason to drop an event
+        logger.debug("notice re-render failed; keeping the English text", exc_info=True)
+        return payload
+    # An unknown code renders as the code itself (``render_record``'s contract);
+    # the English sentence the producer already wrote is the better fallback.
+    if rendered.text and rendered.text != code:
+        payload["text"] = rendered.text
+    return payload
+
 
 def session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
@@ -4154,7 +4203,7 @@ class ServingSessionHandle(SessionHandle):
                 # fixture measures a 531,082-byte payload, and
                 # ``fit_frame_for_wire`` returns it byte-identical.
                 payload = bound_agent_end_for_wire(
-                    event.model_dump(mode="json"),
+                    _notice_text_for_viewer(event.model_dump(mode="json")),
                     session_id=getattr(self._session, "session_id", None),
                 )
                 on_event(payload)
@@ -13369,6 +13418,7 @@ async def spawn_owned_session(
     )
     attach_gate_config_watch(handle, config_directory)
     attach_display_config_watch(config_directory)
+    attach_language_config_watch(config_directory)
     return handle
 
 
@@ -13423,3 +13473,51 @@ def attach_display_config_watch(config_directory: Path) -> None:
         logger.warning(
             "config watcher could not be attached to the runtime display folds", exc_info=True
         )
+
+
+def attach_language_config_watch(config_directory: Path) -> None:
+    """Keep this process's active locale on the configured ``language``.
+
+    A runtime outlives a language switch (the desktop's Settings, the TUI's
+    ``/language``, ``lop config``, all in OTHER processes), and the copy it
+    renders for viewers — notices via :func:`_notice_text_for_viewer`, and
+    every ``tr``/``envelope()`` call that reads the active locale — must move
+    with it rather than stay on the boot language until a restart. The move
+    itself is ``i18n.boot.follow_language``, the same one the server's
+    settings route and desktop feed make, so the registry copy refreshers run
+    here too. Subscribed at the same spawn seams as the display watcher and
+    degraded the same way: a runtime that cannot follow keeps its boot locale.
+    """
+    key = str(config_directory)
+    if key in _language_watch_attached:
+        return
+    unsubscribe = None
+    try:
+        from local_operator.config_watch import process_watcher
+        from local_operator.i18n.boot import follow_language
+
+        def _on_change(change: Any) -> None:
+            if "language" not in change.changed_keys:
+                return
+            raw = change.values.get("language")
+            # ``auto``/absent exercises the chain (``LOP_LANG`` -> OS) without a
+            # second config read, exactly as the desktop feed passes it.
+            follow_language(raw if isinstance(raw, str) else "auto")
+
+        watcher = process_watcher(config_directory)
+        # Subscribe BEFORE start: start's synchronous poll may deliver a write
+        # since construction. Then reconcile the latest snapshot, since a write
+        # since boot may already be the watcher's baseline (no delta to deliver).
+        # All three steps run on this loop without yielding, so later ticks use
+        # the listener and cannot be overwritten by an older captured snapshot.
+        unsubscribe = watcher.subscribe(_on_change)
+        watcher.start(asyncio.get_running_loop())
+        raw = watcher.values.get("language")
+        follow_language(raw if isinstance(raw, str) else "auto")
+        _language_watch_attached.add(key)
+    except Exception:  # noqa: BLE001 — the runtime keeps its boot locale
+        # A failed attachment must not leave a listener behind for the retry.
+        # The watcher is shared with other consumers; do not stop it here.
+        if unsubscribe is not None:
+            unsubscribe()
+        logger.warning("config watcher could not be attached to the runtime locale", exc_info=True)

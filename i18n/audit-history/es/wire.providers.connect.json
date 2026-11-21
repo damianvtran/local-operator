@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.providers.connect",
+  "history_sha256": "f3aa7811abb2987366f9e7e4f8a7465ea0277fffa0b9f1d7b385697dad79f862",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.providers.connect",
+      "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+      "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+      "target_sha256": "040a458aa481fdd4a7e7e39f9ecc64598b7fc5260eab328829632f136490fcaa",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator",
+        "session": "58c43aab0d97",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field); manager brief: actual model openai/gpt-6.1-sol, no fallback"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 1) of the new wire.providers.connect namespace (5 keys: 4 key-check verdicts + suggested_automatic), audited at worktree head b5bb56079c50 (rebased to 18a93a76a0c0, range-diff '='; English source hash unchanged). Auditor 58c43aab0d97 (openai/gpt-6.1-sol, no fallback) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/es/wire.providers.connect/pc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.providers.connect/pc1/record.json",
+      "round": "pc1"
+    }
+  ]
+}

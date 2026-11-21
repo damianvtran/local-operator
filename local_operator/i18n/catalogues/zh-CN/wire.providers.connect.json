@@ -1,0 +1,7 @@
+{
+  "wire.providers.connect.key_invalid_characters": "此密钥包含API密钥中不应出现的字符。请重新复制后重试。",
+  "wire.providers.connect.key_rejected": "{label}拒绝了此API密钥。请检查后重试。",
+  "wire.providers.connect.key_unreachable": "无法连接{label}来检查此密钥。密钥已保存，但未经验证。",
+  "wire.providers.connect.key_unverified": "{label}暂时无法检查此密钥（HTTP {status}）。密钥已保存，但未经验证。",
+  "wire.providers.connect.suggested_automatic": "自动"
+}
