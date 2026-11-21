@@ -1947,7 +1947,9 @@ def destination_outcome(
     return {"transferred": True, "worktrees": rows}
 
 
-def source_receipt(planned: Mapping[str, Any], outcome: Mapping[str, Any] | None) -> dict[str, Any]:
+def source_receipt(
+    planned: Mapping[str, Any], outcome: Mapping[str, Any] | None, *, sent_digest: str = ""
+) -> dict[str, Any]:
     """The SOURCE's receipt block for an offload that carried its working set.
 
     ``planned`` is this device's own pre-invite block (computed before the prepare
@@ -1963,9 +1965,19 @@ def source_receipt(planned: Mapping[str, Any], outcome: Mapping[str, Any] | None
     receipt tells the user to run or where to look. ``side: "source"`` selects the
     source-perspective sentences. No answer reads ``outcome_unknown`` ("check on
     <dest>"), never "stayed": the source committed, so the files may well be there.
+
+    THE PLAN THAT WAS SENT, NOT THE PRE-INVITE ONE (QA Q-2, #4380): ``planned`` says
+    ``carries_files: false`` with the "files stay" digest, which a script reading
+    ``working_set.carries_files`` next to ``transferred: true`` took for a
+    contradiction. This function is only reached once the files were sent, so the
+    block says it carried them, under ``sent_digest`` — the carrying digest the
+    gate bound (the consent's ``confirm``) — when the caller has it.
     """
     out = dict(planned)
     out["side"] = "source"
+    out["carries_files"] = True
+    if sent_digest:
+        out["scope_digest"] = sent_digest
     if not isinstance(outcome, Mapping) or outcome.get("transferred") is not True:
         out["state"] = "outcome_unknown"
         out.pop("transferred", None)

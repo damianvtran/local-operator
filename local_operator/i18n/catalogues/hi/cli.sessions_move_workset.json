@@ -23,7 +23,7 @@
   "cli.sessions_move_workset.help_dry_run": "बातचीत की वे वर्किंग फ़ाइलें दिखाएँ (git worktrees, बिना push और बिना commit का काम) जिन पर यह मूव असर डालेगा, और कुछ न ले जाएँ",
   "cli.sessions_move_workset.help_confirm": "--dry-run द्वारा दिखाई गई वर्किंग फ़ाइलों की पुष्टि करें: उसका working_set.scope_digest दें",
   "cli.sessions_move_workset.help_without": "बातचीत ले जाएँ और उसकी वर्किंग फ़ाइलें जहाँ हैं वहीं रहने दें",
-  "cli.sessions_move_workset.help_yes": "बिना पूछे वर्किंग फ़ाइलों की पुष्टि करें (स्क्रिप्ट के लिए)",
+  "cli.sessions_move_workset.help_yes": "जब गंतव्य वर्किंग फ़ाइलें ले सकता हो, तो बिना पूछे उन्हें भेजें; वरना मना करता है, जैसे एजेंट के शेल से (उन्हें छोड़ने के लिए --without-working-set इस्तेमाल करें)",
   "cli.sessions_move_workset.reason.contended": "कोई दूसरी सक्रिय बातचीत इसका उपयोग कर रही है",
   "cli.sessions_move_workset.reason.outside_home": "यह आपके होम फ़ोल्डर से बाहर है",
   "cli.sessions_move_workset.reason.unmerged": "इसमें merge के अनसुलझे टकराव हैं",
@@ -86,7 +86,8 @@
   "cli.sessions_move_workset.receipt_sent": "वर्किंग फ़ाइलें {device} पर भेजी गईं: वहाँ {count, plural, one {# worktree मिला} other {# worktrees मिले}}; बातचीत पहुँचने पर {device} उन्हें रीस्टोर करता है।",
   "cli.sessions_move_workset.receipt_sent_row": "{path} को {device} पर भेजा गया।",
   "cli.sessions_move_workset.receipt_sent_unknown": "वर्किंग फ़ाइलें {device} पर भेजी गईं, लेकिन उसका जवाब इस डिवाइस तक नहीं पहुँचा; {device} पर देखें कि कौन-से worktrees रीस्टोर हुए। इस डिवाइस पर इसकी कॉपी अब भी है।",
-  "cli.sessions_move_workset.yes_preflight_failed": "--yes ने पुष्टि नहीं की: {device} से पूछा नहीं जा सका कि क्या वह वर्किंग फ़ाइलें ले सकता है ({cause}), इसलिए कुछ नहीं ले जाया गया। फिर से कोशिश करें, या उन्हें जहाँ हैं वहीं छोड़ने के लिए --without-working-set के साथ दोबारा चलाएँ।",
+  "cli.sessions_move_workset.yes_preflight_failed": "--yes ने पुष्टि नहीं की: {device} ने जवाब नहीं दिया कि क्या वह वर्किंग फ़ाइलें ले सकता है, इसलिए कुछ नहीं ले जाया गया। lop network peers से देखें कि {device} तक पहुँचा जा सकता है, फिर से कोशिश करें, या फ़ाइलों को जहाँ हैं वहीं छोड़ने के लिए --without-working-set के साथ दोबारा चलाएँ।",
   "cli.sessions_move_workset.yes_carry_unavailable": "--yes ने पुष्टि नहीं की: {device} वर्किंग फ़ाइलें नहीं ले सकता, इसलिए वे जहाँ हैं वहीं रहतीं। कुछ नहीं ले जाया गया। सिर्फ़ बातचीत मूव करने के लिए --without-working-set के साथ दोबारा चलाएँ, या जब {device} उन्हें ले सके तब फिर से कोशिश करें।",
-  "cli.sessions_move_workset.agent_needs_operator": "{flag} ने पुष्टि नहीं की: वर्किंग फ़ाइलें किसी दूसरे डिवाइस पर भेजने के लिए ऑपरेटर की पुष्टि चाहिए, और यह कमांड एक एजेंट के शेल से चलाई गई थी। कुछ नहीं ले जाया गया; फ़ाइलें जहाँ हैं वहीं हैं। ऑपरेटर डेस्कटॉप या मोबाइल ऐप के मूव कार्ड पर, {command} चलाकर, या {dry_run_command} से मिले डाइजेस्ट के साथ --confirm-working-set देकर पुष्टि कर सकता है। सिर्फ़ बातचीत मूव करने के लिए --without-working-set के साथ दोबारा चलाएँ।"
+  "cli.sessions_move_workset.agent_needs_operator": "{flag} ने पुष्टि नहीं की: वर्किंग फ़ाइलें किसी दूसरे डिवाइस पर भेजने के लिए ऑपरेटर की पुष्टि चाहिए, और यह कमांड एक एजेंट के शेल से चलाई गई थी। कुछ नहीं ले जाया गया; फ़ाइलें जहाँ हैं वहीं हैं। ऑपरेटर डेस्कटॉप या मोबाइल ऐप के मूव कार्ड पर पुष्टि कर सकता है, या अपने टर्मिनल में यह चलाकर:\n  {command}\nया इससे मिले डाइजेस्ट के साथ --confirm-working-set देकर:\n  {dry_run_command}\nसिर्फ़ बातचीत मूव करने के लिए --without-working-set के साथ दोबारा चलाएँ।",
+  "cli.sessions_move_workset.plan_not_honoured": "वर्किंग फ़ाइलें नहीं भेजी गईं। आपने उन्हें {device} पर भेजने की पुष्टि की थी, लेकिन मूव चलते समय {device} उन्हें अब नहीं ले सकता था, इसलिए सिर्फ़ बातचीत मूव हुई; फ़ाइलें अब भी {source} पर हैं, और कुछ भी खोया नहीं। जाँचें कि {device} अब भी {source} को वर्किंग फ़ाइलें भेजने की अनुमति देता है और lop का मौजूदा वर्शन चलाता है, फिर बातचीत को वापस {source} पर मूव करके दोबारा मूव करें, या {source} से काम push करें।"
 }

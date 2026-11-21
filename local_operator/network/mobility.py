@@ -287,8 +287,9 @@ AUDIT_WORKSET_CONSENT = "session.workset.consent"
 #: The surfaces a working-set consent may name (``_consent_frame``'s ``surface``).
 #: A CLOSED SET because the value crosses the wire and lands in the audit log: a
 #: peer can only ever put one of these tokens there, never free text. It is
-#: ATTRIBUTION, not authority — any same-uid process can claim any of them — so
-#: nothing branches on it except the audit row.
+#: ATTRIBUTION, not authority: CLAIMED by the requesting surface and not verified
+#: (any same-uid process, or a relayed hop, can claim any of them), so nothing
+#: branches on it except the audit row, and the row is never proof of who consented.
 CONSENT_SURFACES: frozenset[str] = frozenset(
     {
         "cli-prompt",  # the y/N prompt after the carrying preflight was shown
@@ -4369,12 +4370,15 @@ def _session_roles_refusal(
 
 
 def _consent_frame(working_set: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The wire form of the user's consent: ``{version, confirm, without}``.
+    """The wire form of the user's consent: ``{surface, version, confirm, without}``.
 
     ONE SPELLING for every hop (request → relay → invite → prepare → queue record →
     resume invite), so a hop that forwards it cannot drop a field the gate reads.
     ``confirm`` is a scope digest or ``None``; ``without`` is the explicit "leave the
-    working set behind" consent (``--without-working-set``).
+    working set behind" consent (``--without-working-set``). ``surface`` is the
+    consenting surface's token from :data:`CONSENT_SURFACES` (anything else becomes
+    ``""``): CLAIMED by the requester and forwarded as given, never verified, so it
+    attributes the audit row and proves nothing about who consented.
     """
     from local_operator.network.workset import WORKSET_TRANSFER_VERSION
 
@@ -4383,7 +4387,8 @@ def _consent_frame(working_set: Mapping[str, Any] | None) -> dict[str, Any]:
     surface = str(raw.get("surface") or "")
     return {
         # WHO CONSENTED, for the owner's audit row only (``AUDIT_WORKSET_CONSENT``).
-        # Additive: an older hop drops it and the row says ""; the gate never reads it.
+        # Additive: an older hop drops it and the audit row says "unattributed"; the
+        # gate never reads it.
         "surface": surface if surface in CONSENT_SURFACES else "",
         # THIS BUILD'S working-set protocol, re-stamped at every hop on purpose: the
         # prepare frame a DESTINATION sends therefore says what the destination
@@ -8223,7 +8228,11 @@ def _offload(
                 # decided at the prepare, after this block was computed.
                 from local_operator.network import workset_move
 
-                offload_workset = workset_move.source_receipt(offload_workset, ws_answer)
+                offload_workset = workset_move.source_receipt(
+                    offload_workset,
+                    ws_answer,
+                    sent_digest=str(offload_consent.get("confirm") or ""),
+                )
             result_doc["working_set"] = offload_workset
         # WHAT THIS DEVICE ASKED THE DESTINATION TO DO ON ARRIVAL (UI #1978 QA Q-1).
         # The engage is the destination's post-``done`` work and its outcome is never

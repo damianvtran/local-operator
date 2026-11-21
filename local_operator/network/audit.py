@@ -844,7 +844,8 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # fixed result codes only — never a path, a URL path, userinfo or git output.
     "session.workset.preflight": frozenset({"peer", "worktrees", "planned", "bytes", "excluded"}),
     "session.workset.probe": frozenset({"peer", "hosts", "results", "refused"}),
-    # ``surface`` is a closed token (mobility.CONSENT_SURFACES, or "unattributed");
+    # ``surface`` is a closed token (mobility.CONSENT_SURFACES, or "unattributed"),
+    # CLAIMED by the requesting surface and not verified: attribution, never proof;
     # ``digest`` the scope digest the gate matched (a hash of the manifest, never a
     # path); ``carry_decision`` "carry"/"stay"; ``lease_epoch`` binds the row to the
     # move it gated.

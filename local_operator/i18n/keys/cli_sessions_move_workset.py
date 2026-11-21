@@ -124,6 +124,10 @@ def none() -> Msg:
     return Msg("cli.sessions_move_workset.none", {})
 
 
+def plan_not_honoured(*, device: str, source: str) -> Msg:
+    return Msg("cli.sessions_move_workset.plan_not_honoured", {"device": device, "source": source})
+
+
 def prereq_missing_tools(*, device: str, tools: str) -> Msg:
     return Msg("cli.sessions_move_workset.prereq_missing_tools", {"device": device, "tools": tools})
 
@@ -422,5 +426,5 @@ def yes_carry_unavailable(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.yes_carry_unavailable", {"device": device})
 
 
-def yes_preflight_failed(*, device: str, cause: str) -> Msg:
-    return Msg("cli.sessions_move_workset.yes_preflight_failed", {"device": device, "cause": cause})
+def yes_preflight_failed(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.yes_preflight_failed", {"device": device})

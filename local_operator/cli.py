@@ -7936,7 +7936,7 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     given_digest = str(getattr(args, "confirm_working_set", "") or "")
     if given_digest and in_agent_shell() and not bool(args.keep):
         declined, shown = _sessions_move_agent_digest_declined(
-            session_id, to=to, given_digest=given_digest
+            session_id, to=to, given_digest=given_digest, args=args
         )
         if declined is not None:
             refusal: dict[str, Any] = {
@@ -7970,8 +7970,16 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         and block is not None
         and block.get("scope_digest")
     )
+    if given_digest and not scope_refusal:
+        # AN EXPLICIT CARRYING DIGEST THE OWNER NARROWED (security S1, round 1): the
+        # gate honours a carrying digest that reaches a prepare which can no longer
+        # carry by moving the conversation WITHOUT the files. That is safe, but the
+        # same case under `--yes`/the prompt exits 1, so a script that named the
+        # digest itself must get the same verdict, not a silent exit 0.
+        result = _sessions_move_bind_digest(result, given_digest)
     preflighted = False
     preflight_error = ""
+    preflight_message = ""
     if scope_refusal:
         # THE PROBED BLOCK, NOT THE GATE'S, ON EVERY ENTRY (review R6 / UX U3, round 1;
         # widened to `--yes` and `--json` by the v0.111.0 offload fix). The owner's
@@ -7990,11 +7998,21 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         if probed.get("ok") and isinstance(fresh, dict) and fresh.get("scope_digest"):
             block = fresh
             result = {**result, "working_set": fresh}
-            preflighted = True
+            # AN UNANSWERED DESTINATION IS NOT A "NO" (QA Q-1, round 1): the dry run
+            # stays `ok` when the destination does not answer the probe (offline,
+            # rate-limited, too old to serve it) and recomputes the plan as "files
+            # stay" with `destination_probe.state: unknown_destination`. That plan
+            # says nothing about whether the files CAN travel, so `--yes` must treat
+            # it as a failed preflight, never as "the destination cannot take them".
+            if _sessions_move_destination_unanswered(fresh):
+                preflight_error = "destination_unanswered"
+            else:
+                preflighted = True
         else:
-            preflight_error = str(
-                probed.get("message") or probed.get("code") or "the preflight gave no answer"
-            )
+            # The machine code goes on the JSON; the English relay message is kept
+            # beside it but never put into a localized sentence (review R1-6).
+            preflight_error = str(probed.get("code") or "preflight_failed")
+            preflight_message = str(probed.get("message") or "")
     if scope_refusal and block is not None:
         # ONE CONFIRMATION ROUND, never a loop: the owner answered with the manifest,
         # the user (or `--yes`) confirms THAT scope, and the move is re-issued with its
@@ -8009,12 +8027,21 @@ def sessions_move_command(args: argparse.Namespace) -> int:
                 to=to,
                 preflighted=preflighted,
                 preflight_error=preflight_error,
+                preflight_message=preflight_message,
                 given_digest=given_digest,
+                args=args,
             )
             if declined is not None:
                 # REFUSED, NOTHING MOVED: the refusal document keeps the owner's code
                 # and gains the reason `--yes` did not consent, machine-readable.
                 result = {**result, "consent_declined": declined}
+                if declined["reason"] in _SESSIONS_MOVE_SOLE_VOICE:
+                    # The owner's top-level `message` offers `--confirm-working-set
+                    # <digest>`, the route this refusal just closed (QA Q-4 / UX U2).
+                    result["message"] = declined["message"]
+                    if not as_json:
+                        _sessions_move_print_declined(declined, block, session_id, to)
+                        return 1
                 # A mismatched digest is already said once by the refusal's own
                 # lines (``mistyped`` below); every other reason is said here.
                 if not as_json and declined["reason"] != "explicit_digest_mismatch":
@@ -8022,6 +8049,20 @@ def sessions_move_command(args: argparse.Namespace) -> int:
             else:
                 result = _sessions_move_bind_plan(_issue(digest, "cli-yes"), block)
         elif not as_json and sys.stdin.isatty() and sys.stdout.isatty():
+            if in_agent_shell() and block.get("carries_files"):
+                # THE PROMPT IS NOT AN OPERATOR SURFACE FROM AN AGENT'S SHELL (review
+                # R1-2): an agent can fake a tty and answer `y`. The same advisory
+                # restriction as `--yes` — it only adds a refusal, never a grant; a
+                # files-stay plan still prompts, as on the human path.
+                surfaces = _sessions_move_operator_surfaces(session_id, to, args)
+                declined = _sessions_move_declined(
+                    "agent_shell",
+                    _sessions_move_agent_message("lop sessions move", surfaces),
+                    block,
+                    surfaces,
+                )
+                _sessions_move_print_declined(declined, block, session_id, to)
+                return 1
             # A mistyped `--confirm-working-set` is told apart from a list that moved
             # (review U8): the owner can only say "this is not the current scope".
             shown = "digest_mismatch" if (code == "working_set_changed" and given_digest) else code
@@ -8045,6 +8086,15 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         # A move that ran but did not deliver the plan the user consented to is not
         # a success to a script: exit 1 even though the conversation moved.
         return 0 if result.get("ok") and not plan_broken else 1
+    if plan_broken:
+        # A CONFIRMED CARRY THAT DID NOT HAPPEN LEADS, ON STDERR (UX U1, round 1):
+        # "Moved … (done)" plus a row saying the files stayed "as confirmed" read as
+        # success and misstated what the user agreed to. The keyed line says the
+        # files were NOT sent, that the user had confirmed sending them, and what to
+        # do; the rows below then name the real cause instead of `kept_as_confirmed`.
+        result = _sessions_move_plan_broken_rows(result)
+        print(_sessions_move_plan_broken_text(result, to), file=sys.stderr)
+        sys.stderr.flush()
     workset_lines = _sessions_move_workset_words(
         dict(result),
         session_id=session_id,
@@ -8077,19 +8127,71 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     return 1
 
 
-def _sessions_move_operator_surfaces(session_id: str, to: str) -> list[str]:
+#: ``consent_declined`` reasons whose sentence is the WHOLE text answer (UX U2/U3,
+#: round 1). The gate's summary and its "re-run with --confirm-working-set <digest>"
+#: line would follow an agent-shell refusal with the route it just refused, and a
+#: failed preflight with a "the files stay" verdict nobody actually knows.
+_SESSIONS_MOVE_SOLE_VOICE = frozenset({"agent_shell", "preflight_failed"})
+
+#: Move flags that change WHAT the operator's own run does, carried into the command
+#: an agent-shell refusal hands over (UX U6) so the operator re-runs the same move.
+_SESSIONS_MOVE_CARRIED_FLAGS = (
+    ("queue", "--queue"),
+    ("engage_on_arrival", "--engage-on-arrival"),
+    ("no_engage_on_arrival", "--no-engage-on-arrival"),
+    ("from_replica", "--from-replica"),
+    ("drop_session_roles", "--drop-session-roles"),
+)
+
+
+def _sessions_move_operator_surfaces(
+    session_id: str, to: str, args: argparse.Namespace | None = None
+) -> list[str]:
     """Where an OPERATOR can confirm a carrying working set (agent-path ruling).
 
     Machine tokens, never prose (the sentence that names them is keyed):
     ``desktop_move_card`` is the desktop/mobile app's move card; the other two are
     the operator's own `lop sessions move` (which shows the plan and asks) and the
-    `--dry-run` whose digest the operator reads and passes back themselves.
+    `--dry-run` whose digest the operator reads and passes back themselves. The
+    first command keeps the caller's own move flags (``args``), so the operator
+    runs the move the agent asked for, not a different one.
     """
+    extra = "".join(
+        f" {flag}" for attr, flag in _SESSIONS_MOVE_CARRIED_FLAGS if getattr(args, attr, False)
+    )
     return [
         "desktop_move_card",
-        f"lop sessions move {session_id} --to {to}",
+        f"lop sessions move {session_id} --to {to}{extra}",
         f"lop sessions move {session_id} --to {to} --dry-run",
     ]
+
+
+def _sessions_move_destination_unanswered(block: dict[str, Any]) -> bool:
+    """Did the destination fail to answer the preflight's probe? (QA Q-1, round 1)
+
+    ``mobility._probe_destination`` turns any failed ask (unreachable link, timeout,
+    a ``rate_limited`` refusal, a destination too old to serve the probe) into
+    ``destination_probe.state == "unknown_destination"`` inside an ``ok`` dry run.
+    """
+    probe = block.get("destination_probe")
+    return isinstance(probe, dict) and probe.get("state") == "unknown_destination"
+
+
+def _sessions_move_print_declined(
+    declined: dict[str, Any], block: dict[str, Any], session_id: str, to: str
+) -> None:
+    """The text answer for a refusal that speaks alone (``_SESSIONS_MOVE_SOLE_VOICE``).
+
+    The sentence, then — for an agent-shell refusal only — the list of what WOULD be
+    sent, so the agent can relay it, without the closing advice or the digest line:
+    both tell the reader to continue, and that route is the operator's.
+    """
+    from local_operator.network import workset_text
+
+    print(_sessions_move_declined_text(declined), file=sys.stderr)
+    if declined.get("reason") == "agent_shell":
+        for line in workset_text.summary_lines(block, session=session_id, device=to, advice=False):
+            print(line, file=sys.stderr)
 
 
 def _sessions_move_yes_declined(
@@ -8100,6 +8202,8 @@ def _sessions_move_yes_declined(
     preflighted: bool,
     preflight_error: str,
     given_digest: str,
+    preflight_message: str = "",
+    args: argparse.Namespace | None = None,
 ) -> dict[str, Any] | None:
     """Why ``--yes`` must NOT consent to ``block``, or ``None`` when it may.
 
@@ -8113,21 +8217,31 @@ def _sessions_move_yes_declined(
       "files stay" digest still narrows, in the owner's gate); ``--yes`` never swaps
       in a different scope the caller did not name.
     * ``preflight_failed`` — the destination could not be asked, so whether the files
-      can travel is unknown. Confirming the owner's own block here is exactly the
-      v0.111.0 defect (a "files stay" digest confirmed as if it were the plan).
+      can travel is unknown: the dry run itself failed, or it answered ``ok`` but
+      the destination did not answer its probe (``unknown_destination``, QA Q-1).
+      Confirming the owner's own block here is exactly the v0.111.0 defect (a
+      "files stay" digest confirmed as if it were the plan).
     * ``agent_shell`` — this process descends from an agent's tool call
       (``agent_shell.in_agent_shell()``). An agent's tool call is not the
-      operator's consent to send files to another device (security-owner ruling):
-      the agent path stays files-stay, and carrying needs an operator surface. The
-      marker is ADVISORY — any same-uid process can unset it — so this is
-      defence in depth, never a security boundary; the receiver's own
-      ``workset_import`` grant stays the enforcement point.
+      operator's consent to send files to another device (security-owner ruling),
+      so ``--yes`` from an agent refuses whatever the plan: the agent's own route
+      is ``--without-working-set`` only (a files-stay digest it passes explicitly
+      follows the human path, ``_sessions_move_agent_digest_declined``), and
+      carrying needs an operator surface. The marker is ADVISORY — any same-uid
+      process can unset it — so this is defence in depth, never a security
+      boundary; the receiver's own ``workset_import`` grant stays the enforcement
+      point.
     * ``carry_unavailable`` — the preflight says the files cannot travel (no
       ``workset_import`` grant on the destination, an older destination). Leaving
       them behind is a decision the caller states with ``--without-working-set`` or
       the "stays" digest, never one ``--yes`` makes silently.
     """
-    surfaces = _sessions_move_operator_surfaces(session_id, to)
+    from local_operator.network import workset_text
+
+    surfaces = _sessions_move_operator_surfaces(session_id, to, args)
+    # The device as the lines under the refusal name it, not the `--to` argument as
+    # typed (a mesh id reads as noise next to "device-b"; UX U5 / QA Q-3).
+    device = workset_text.device_label(block, to)
     if given_digest:
         # The existing sentence is the truthful one: the digest the caller named does
         # not match. The human refusal already prints it (``mistyped``), once.
@@ -8135,13 +8249,18 @@ def _sessions_move_yes_declined(
             "explicit_digest_mismatch", _wsh.digest_mismatch(), block, surfaces
         )
     if not preflighted:
-        message = _wsh.yes_preflight_failed(device=to, cause=preflight_error)
-        return _sessions_move_declined("preflight_failed", message, block, surfaces)
+        message = _wsh.yes_preflight_failed(device=device)
+        declined = _sessions_move_declined("preflight_failed", message, block, surfaces)
+        # Machine truth for a script; the localized sentence carries no relay English.
+        declined["preflight_error"] = preflight_error or "preflight_failed"
+        if preflight_message:
+            declined["preflight_message"] = preflight_message
+        return declined
     if in_agent_shell():
         message = _sessions_move_agent_message("--yes", surfaces)
         return _sessions_move_declined("agent_shell", message, block, surfaces)
     if not block.get("carries_files"):
-        message = _wsh.yes_carry_unavailable(device=to)
+        message = _wsh.yes_carry_unavailable(device=device)
         return _sessions_move_declined("carry_unavailable", message, block, surfaces)
     return None
 
@@ -8170,7 +8289,10 @@ def _sessions_move_declined(
         "message": str(wire["text"]),
         "message_envelope": wire,
         "files": "not_moved",
-        "operator_confirmation_required": True,
+        # Only the agent-shell refusal waits on the OPERATOR (QA Q-3); a mismatch, a
+        # failed preflight or a destination that cannot take the files is something
+        # the caller itself can act on.
+        "operator_confirmation_required": reason == "agent_shell",
         "operator_surfaces": surfaces,
         "scope_digest": str(block.get("scope_digest") or ""),
         "carries_files": bool(block.get("carries_files")),
@@ -8187,7 +8309,7 @@ def _sessions_move_declined_text(declined: dict[str, Any]) -> str:
 
 
 def _sessions_move_agent_digest_declined(
-    session_id: str, *, to: str, given_digest: str
+    session_id: str, *, to: str, given_digest: str, args: argparse.Namespace | None = None
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """``(declined, preflight_block)`` for an explicit digest typed in an agent's shell.
 
@@ -8195,11 +8317,20 @@ def _sessions_move_agent_digest_declined(
     digest an agent passes is not the operator's consent to send files, so in an
     agent shell (``in_agent_shell()`` — advisory, defence in depth, never a
     boundary) a digest that the destination-aware preflight shows WOULD CARRY files
-    is refused, as is one that cannot be judged because the preflight failed. A
-    digest for a plan that leaves the files here passes untouched, so the agent path
-    stays exactly files-stay; a human shell never reaches this function.
+    is refused.
+
+    A digest the preflight CANNOT JUDGE is refused too (review R1-4), whatever plan it
+    names, because telling a files-stay digest from a carrying one needs the
+    destination's answer: the dry run failed, or the destination did not answer its
+    probe (QA Q-1 — a rate-limited destination that IS granted would otherwise let
+    an old carrying digest through to a gate that carries it). The reason stays
+    ``agent_shell`` because the agent restriction is what refuses (a human shell
+    passes the digest straight to the owner), with ``preflight_error`` saying why it
+    could not be judged. Once the preflight answers, a digest for a plan that leaves
+    the files here passes untouched and follows the human path; a human shell never
+    reaches this function.
     """
-    surfaces = _sessions_move_operator_surfaces(session_id, to)
+    surfaces = _sessions_move_operator_surfaces(session_id, to, args)
     message = _sessions_move_agent_message("--confirm-working-set", surfaces)
     probed = _sessions_move_preflight(session_id, to=to)
     fresh = probed.get("working_set")
@@ -8209,6 +8340,10 @@ def _sessions_move_agent_digest_declined(
         # operator-confirmation one, which is true either way.
         declined["preflight_error"] = str(probed.get("code") or "preflight_failed")
         return declined, None
+    if _sessions_move_destination_unanswered(fresh):
+        declined = _sessions_move_declined("agent_shell", message, fresh, surfaces)
+        declined["preflight_error"] = "destination_unanswered"
+        return declined, fresh
     if fresh.get("carries_files") and str(fresh.get("scope_digest") or "") == given_digest:
         return _sessions_move_declined("agent_shell", message, fresh, surfaces), fresh
     return None, fresh
@@ -8229,29 +8364,97 @@ def _sessions_move_bind_plan(result: dict[str, Any], block: dict[str, Any]) -> d
     between the preflight and the move) moves the conversation WITHOUT the files.
     That is safe but must never read as the plan the user approved, so the result
     names the consented plan and ``honoured: false`` with a machine ``reason``; the
-    caller exits 1 on it. No sentence of its own: the receipt lines already say the
-    files stayed (``receipt_not_transferred`` and its rows).
+    caller exits 1 on it and its text leads with the keyed "not sent" line (U1).
+
+    ``honoured`` IS A VERDICT ON A MOVE THAT RAN (review R1-1): a refused re-issue
+    (e.g. ``working_set_changed``) or a queued move has no verdict yet, so the key is
+    absent there. A carry the destination never answered for (``side: source``,
+    ``state: outcome_unknown``) is not "not sent" either — the files may well have
+    arrived — so it gets ``reason: outcome_unknown`` and no ``honoured``; its receipt
+    already says where to check.
     """
     planned = bool(block.get("carries_files"))
     plan: dict[str, Any] = {
         "scope_digest": str(block.get("scope_digest") or ""),
         "carries_files": planned,
     }
-    received = result.get("working_set") if isinstance(result.get("working_set"), dict) else {}
-    # A QUEUED move has not run yet: its block says ``transferred: false`` because
-    # nothing has happened, not because the plan broke.
-    queued = isinstance(result.get("queue"), dict)
-    if (
-        result.get("ok")
-        and planned
-        and not queued
-        and (received or {}).get("transferred") is not True
-    ):
+    raw = result.get("working_set")
+    received: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    if not result.get("ok") or isinstance(result.get("queue"), dict):
+        return {**result, "confirmed_plan": plan}
+    if not planned or received.get("transferred") is True:
+        plan["honoured"] = True
+    elif received.get("side") == "source" and received.get("state") == "outcome_unknown":
+        plan["reason"] = "outcome_unknown"
+    else:
         plan["honoured"] = False
         plan["reason"] = "files_not_sent"
-    else:
-        plan["honoured"] = True
     return {**result, "confirmed_plan": plan}
+
+
+def _sessions_move_bind_digest(result: dict[str, Any], given_digest: str) -> dict[str, Any]:
+    """``confirmed_plan`` for an explicit ``--confirm-working-set`` the owner NARROWED.
+
+    The gate accepts a digest that names either carry answer of the same scope and
+    returns the receipt of the scope it actually used (``workset.arrival_block``
+    keeps that manifest's digest). So a move that ran, did not transfer, and whose
+    receipt digest differs from the one the caller named was a CARRYING digest the
+    gate narrowed (security S1) — stamped like the ``--yes``/prompt case. A digest
+    that matches, a transfer, or a move that did not run is returned untouched.
+    """
+    raw = result.get("working_set")
+    received: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    shown = str(received.get("scope_digest") or "")
+    if (
+        not result.get("ok")
+        or isinstance(result.get("queue"), dict)
+        or received.get("consent") != "confirmed"
+        or received.get("transferred") is not False
+        or not shown
+        or shown == given_digest
+    ):
+        return result
+    return _sessions_move_bind_plan(result, {"scope_digest": given_digest, "carries_files": True})
+
+
+def _sessions_move_plan_broken_rows(result: dict[str, Any]) -> dict[str, Any]:
+    """The receipt with each ``kept_as_confirmed`` row re-reasoned for the text answer.
+
+    That reason renders "it stays on the source, as confirmed for this move" — the
+    opposite of what a user who confirmed SENDING the files agreed to (UX U1). The
+    narrowing happens only because the destination could not take them at the
+    prepare, which ``unsupported_by_peer`` ("the other device cannot receive it")
+    says truthfully. A copy: the JSON document keeps the owner's own codes.
+    """
+    raw = result.get("working_set")
+    if not isinstance(raw, dict):
+        return result
+    block = dict(raw)
+    block["worktrees"] = [
+        (
+            {**row, "reason": "unsupported_by_peer"}
+            if isinstance(row, dict) and row.get("reason") == "kept_as_confirmed"
+            else row
+        )
+        for row in raw.get("worktrees") or []
+    ]
+    return {**result, "working_set": block}
+
+
+def _sessions_move_plan_broken_text(result: dict[str, Any], to: str) -> str:
+    """The keyed lead line for ``confirmed_plan.honoured: false`` (UX U1)."""
+    from local_operator.network import workset_text
+
+    raw = result.get("working_set")
+    block: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    sender = result.get("from_device")
+    origin: dict[str, Any] = sender if isinstance(sender, dict) else {}
+    source = workset_text.source_label(
+        block, str(origin.get("name") or origin.get("device_id") or "?")
+    )
+    return render_resolved(
+        _wsh.plan_not_honoured(device=workset_text.device_label(block, to), source=source)
+    )
 
 
 def _sessions_move_dry_run(session_id: str, *, to: str, as_json: bool) -> int:

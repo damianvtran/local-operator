@@ -23,7 +23,7 @@
   "cli.sessions_move_workset.help_dry_run": "show the conversation's working files (git worktrees, unpushed and uncommitted work) this move would affect, and move nothing",
   "cli.sessions_move_workset.help_confirm": "confirm the working files shown by --dry-run: pass its working_set.scope_digest",
   "cli.sessions_move_workset.help_without": "move the conversation and leave its working files where they are",
-  "cli.sessions_move_workset.help_yes": "confirm the working files without a prompt (for scripts)",
+  "cli.sessions_move_workset.help_yes": "send the working files without a prompt when the destination can take them; otherwise refuses, as it does from an agent's shell (use --without-working-set to leave them)",
   "cli.sessions_move_workset.reason.contended": "another live conversation is using it",
   "cli.sessions_move_workset.reason.outside_home": "it is outside your home folder",
   "cli.sessions_move_workset.reason.unmerged": "it has unresolved merge conflicts",
@@ -86,7 +86,8 @@
   "cli.sessions_move_workset.receipt_sent": "Working files went to {device}: {count, plural, one {# worktree} other {# worktrees}} received there; {device} restores them as the conversation arrives.",
   "cli.sessions_move_workset.receipt_sent_row": "Sent {path} to {device}.",
   "cli.sessions_move_workset.receipt_sent_unknown": "Working files were sent to {device}, but its answer did not reach this device; check on {device} which worktrees were restored. This device still has its copy.",
-  "cli.sessions_move_workset.yes_preflight_failed": "--yes did not confirm: {device} could not be asked whether it can take the working files ({cause}), so nothing was moved. Try again, or re-run with --without-working-set to leave them where they are.",
+  "cli.sessions_move_workset.yes_preflight_failed": "--yes did not confirm: {device} did not answer whether it can take the working files, so nothing was moved. Check that {device} is reachable with lop network peers, then try again, or re-run with --without-working-set to leave the files where they are.",
   "cli.sessions_move_workset.yes_carry_unavailable": "--yes did not confirm: {device} cannot take the working files, so they would stay where they are. Nothing was moved. Re-run with --without-working-set to move only the conversation, or try again once {device} can take them.",
-  "cli.sessions_move_workset.agent_needs_operator": "{flag} did not confirm: sending working files to another device needs the operator's confirmation, and this command ran from an agent's shell. Nothing was moved; the files stay where they are. The operator can confirm on the move card in the desktop or mobile app, by running {command}, or by passing --confirm-working-set with the digest from {dry_run_command}. To move only the conversation, re-run with --without-working-set."
+  "cli.sessions_move_workset.agent_needs_operator": "{flag} did not confirm: sending working files to another device needs the operator's confirmation, and this command ran from an agent's shell. Nothing was moved; the files stay where they are. The operator can confirm on the move card in the desktop or mobile app, or in their own terminal by running:\n  {command}\nor by passing --confirm-working-set with the digest this prints:\n  {dry_run_command}\nTo move only the conversation, re-run with --without-working-set.",
+  "cli.sessions_move_workset.plan_not_honoured": "The working files were not sent. You confirmed sending them to {device}, but when the move ran {device} could no longer take them, so only the conversation moved; the files are still on {source}, and nothing was lost. Check that {device} still allows {source} to send it working files and runs a current lop, then move the conversation back to {source} and move it again, or push the work from {source}."
 }
