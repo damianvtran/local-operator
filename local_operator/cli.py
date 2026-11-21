@@ -8234,6 +8234,9 @@ def _sessions_move_yes_declined(
       process can unset it — so this is defence in depth, never a security
       boundary; the receiver's own ``workset_import`` grant stays the enforcement
       point.
+    * ``cwd_unknown`` — the session's working folder is not recorded and it mentions
+      git folders (``Manifest.cwd_gap``): whether they hold its work is the user's
+      call, which ``--yes`` cannot make.
     * ``carry_unavailable`` — the preflight says the files cannot travel (no
       ``workset_import`` grant on the destination, an older destination). Leaving
       them behind is a decision the caller states with ``--without-working-set`` or
@@ -8262,6 +8265,16 @@ def _sessions_move_yes_declined(
     if in_agent_shell():
         message = _sessions_move_agent_message("--yes", surfaces)
         return _sessions_move_declined("agent_shell", message, block, surfaces)
+    if block.get("cwd_known") is False and block.get("mentioned"):
+        # THE CWD GAP IS ITS OWN REASON (review #4403, U1/R1-m1/Q-2; coordinator ruling
+        # 2). Its plan never carries files, so it used to fall into
+        # ``carry_unavailable`` below — "{device} cannot take the working files … try
+        # again once it can" — which is false when the destination holds the grant,
+        # and a retry that can never work. The truth: nobody knows whether the
+        # mentioned folders are this conversation's work, and ``--yes`` must not decide
+        # that. Same condition as ``workset.Manifest.cwd_gap``.
+        message = _wsh.yes_cwd_unknown(source=workset_text.source_label(block, "?"))
+        return _sessions_move_declined("cwd_unknown", message, block, surfaces)
     if not block.get("carries_files"):
         message = _wsh.yes_carry_unavailable(device=device)
         return _sessions_move_declined("carry_unavailable", message, block, surfaces)
@@ -8529,7 +8542,13 @@ def _sessions_move_workset_words(
     if code in ("working_set_unconfirmed", "working_set_changed"):
         digest = str(block.get("scope_digest") or "")
         keeper = workset_text.source_label(block, "?")
-        lines.append(render_resolved(_wsh.needs_confirmation(source=keeper, digest=digest)))
+        if workset_text.cwd_gap(block):
+            # UX #4403 U4: "has working files … --confirm-working-set" read as "send
+            # them"; in the gap, confirming LEAVES the mentioned folders, so say so.
+            line = _wsh.needs_confirmation_cwd_unknown(source=keeper, digest=digest)
+        else:
+            line = _wsh.needs_confirmation(source=keeper, digest=digest)
+        lines.append(render_resolved(line))
     return lines
 
 

@@ -436,3 +436,25 @@ def yes_carry_unavailable(*, device: str) -> Msg:
 
 def yes_preflight_failed(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.yes_preflight_failed", {"device": device})
+
+
+def yes_cwd_unknown(*, source: str) -> Msg:
+    return Msg("cli.sessions_move_workset.yes_cwd_unknown", {"source": source})
+
+
+def needs_confirmation_cwd_unknown(*, source: str, digest: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.needs_confirmation_cwd_unknown",
+        {"source": source, "digest": digest},
+    )
+
+
+def receipt_cwd_unknown(*, source: str, paths: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_cwd_unknown", {"source": source, "paths": paths})
+
+
+def receipt_keep_cwd_unknown(*, device: str, source: str, paths: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.receipt_keep_cwd_unknown",
+        {"device": device, "source": source, "paths": paths},
+    )

@@ -15,7 +15,7 @@ in-process two-relay rig, with real git) and pins one part of the fix:
 * (b) a session older than ``cwd.json`` is planned from its latest checkpoint row;
 * (c) a relative ``cwd.json`` or one naming the session directory is ignored (S-2);
 * (d) no cwd anywhere plus a mentioned worktree asks for confirmation, plans
-  nothing, says why, and ``--yes`` is refused by #4380's existing rules;
+  nothing, says why, and ``--yes`` is refused (reason ``cwd_unknown`` since review round 1);
 * (e) ``cwd.json`` travels on a move and is remapped under the destination's home,
   and a sender path outside that home is dropped.
 """
@@ -23,6 +23,7 @@ in-process two-relay rig, with real git) and pins one part of the fix:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -226,14 +227,15 @@ def test_d_unknown_cwd_with_a_mentioned_worktree_asks_and_yes_is_refused(
 
     code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--dry-run")
     assert code == 0
-    assert "working folder isn't recorded" in out.out, out.out
+    assert "working folder is not recorded" in out.out, out.out
     assert RETEST in out.out
 
     code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--yes", "--json")
     document = json.loads(out.out)
     assert code == 1 and document["ok"] is False, document
     assert document["code"] == "working_set_unconfirmed", document
-    assert document["consent_declined"]["reason"] == "carry_unavailable", document
+    # Its own reason since review round 1 (L6): the destination CAN take files here.
+    assert document["consent_declined"]["reason"] == "cwd_unknown", document
     assert (server_a.root / "sessions" / SESSION).is_dir()
     assert not (server_b.root / "sessions" / SESSION).exists()
 
@@ -252,11 +254,15 @@ def test_e_cwd_json_travels_and_is_remapped_under_the_destination_home(
     _write_cwd_record(source, "/Users/x/proj")  # the Mac's path; ``bhome/proj`` exists on B
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
 
-    moved = mobility.request_move(SESSION, root=server_b.root, to="local")
+    # ``--without-working-set``: on A this Mac path does not exist, so A's resolver
+    # rejects it (review round 1, L4) and the transcript's mention makes a cwd gap.
+    # What this cell pins is the record's travel and remap, not A's plan.
+    moved = mobility.request_move(SESSION, root=server_b.root, to="local", without_working_set=True)
 
     assert moved["ok"] is True, moved
     arrived = json.loads((server_b.root / "sessions" / SESSION / "cwd.json").read_text())
-    assert arrived["cwd"] == str(bhome / "proj"), arrived
+    # Canonical (``realpath``) since review round 1 (L2): what was checked is stored.
+    assert arrived["cwd"] == os.path.realpath(bhome / "proj"), arrived
     assert arrived["v"] == 1 and arrived["source"] == "birth"
 
 
@@ -277,7 +283,7 @@ def test_e_a_sender_cwd_outside_the_destination_home_is_dropped(
     _write_cwd_record(target, "/Users/x/proj/.worktrees/feat")
     assert carry.remap_cwd_record(target, SESSION, home=str(home)) == {
         "from": "/Users/x/proj/.worktrees/feat",
-        "to": str(home / "proj" / ".worktrees" / "feat"),
+        "to": os.path.realpath(home / "proj" / ".worktrees" / "feat"),
     }
 
     for foreign in (str(outside), "/etc", "relative/dir"):
@@ -285,5 +291,407 @@ def test_e_a_sender_cwd_outside_the_destination_home_is_dropped(
         with caplog.at_level("INFO", logger="local_operator.network.carry"):
             assert carry.remap_cwd_record(target, SESSION, home=str(home))["to"] == ""
         assert json.loads((target / "cwd.json").read_text())["cwd"] == ""
-    assert "does not resolve under this device's home" in caplog.text
+    assert "does not resolve to a usable directory under this device's home" in caplog.text
     assert oct((target / "cwd.json").stat().st_mode & 0o777) == "0o600"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 remediation (PR #4403 ledger L1–L12). Each cell names its ID.
+# ---------------------------------------------------------------------------
+
+
+def _checkpoint(session: Path, cwd: str) -> None:
+    """One ``frontend_state_checkpoint_v1`` row naming ``cwd`` (the step-5 source)."""
+    with (session / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": "cp-x",
+                    "type": "custom",
+                    "payload": {
+                        "custom_type": "frontend_state_checkpoint_v1",
+                        "details": {"checkpoint_id": "c", "state": {"cwd": cwd}},
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+def _bare_root(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A config root with one session, and a home holding a dirty git repository, a
+    protected ``~/.ssh`` repository and nothing else. Returns (root, session, home)."""
+    home = tmp_path / "home"
+    for repo in (home / "proj", home / ".ssh"):
+        repo.mkdir(parents=True)
+        git(repo, "init", "-q")
+        (repo / "dirty.txt").write_text("x\n", encoding="utf-8")
+    root = home / ".local-operator"
+    session = root / "sessions" / SESSION
+    session.mkdir(parents=True)
+    (session / "transcript.jsonl").write_text("", encoding="utf-8")
+    return root, session, home
+
+
+@pytest.mark.parametrize("where", ["outside_home", "protected_ssh", "config_root"])
+def test_l1_a_hostile_cwd_record_is_never_a_discovery_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """L1/S1: ``cwd.json`` naming a path outside home, a protected dot directory
+    (``~/.ssh``) or the config root is not a cwd: nothing is discovered there (no
+    ``git status`` in it) and the cwd stays unknown."""
+    root, session, home = _bare_root(tmp_path)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    git(outside, "init", "-q")
+    target = {"outside_home": outside, "protected_ssh": home / ".ssh", "config_root": session}
+    named = target[where] if where != "config_root" else root / "sessions"
+    _write_cwd_record(session, str(named))
+    monkeypatch.setenv("HOME", str(home))  # the resolver's default home
+
+    assert mobility._session_cwd_at(root, SESSION) == ""
+    from local_operator.network import workset
+
+    manifest = workset.compute_manifest(root, SESSION, to_device="d", home=home)
+    assert manifest.worktrees == () and manifest.cwd_known is False
+
+
+def test_l1_an_imported_checkpoint_is_passive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L1/S1: a checkpoint row in a session that ARRIVED from another device (its
+    stamp names a ``source_device``) is transcript content written elsewhere, so it is
+    never this device's cwd seed. The same row in a local session still is."""
+    root, session, home = _bare_root(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    _checkpoint(session, str(home / "proj"))
+    assert os.path.realpath(mobility._session_cwd_at(root, SESSION)) == os.path.realpath(
+        home / "proj"
+    )
+
+    (session / "mesh.json").write_text(
+        json.dumps({"session_id": SESSION, "origin": {"kind": "moved", "source_device": "dev-x"}}),
+        encoding="utf-8",
+    )
+    assert mobility._session_cwd_at(root, SESSION) == ""
+    # An unreadable stamp proves nothing about where the rows came from: passive too.
+    (session / "mesh.json").write_text("{not json", encoding="utf-8")
+    assert mobility._session_cwd_at(root, SESSION) == ""
+
+
+def test_l1_a_markerless_arrival_never_writes_the_cwd_record_into_desktop_json(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Rig,
+    bhome: Path,
+) -> None:
+    """L1/S1 (QA O2): the durable hints stay off the wire ``cwd``, so the legacy
+    marker path (``rewrite_host_cwd`` → ``desktop.json`` → wake index) never adopts
+    them. Here A and B share one host, so A's path EXISTS on B — the case where the
+    legacy "keep a path that exists here" rule wrote A's directory, outside B's home,
+    as B's marker."""
+    server_a, server_b, _host, _port = pair
+    source = _idle_cli_session(pair, monkeypatch, rig, bhome)
+    _write_cwd_record(source, str(rig.primary))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    moved = mobility.request_move(SESSION, root=server_b.root, to="local", without_working_set=True)
+
+    assert moved["ok"] is True, moved
+    landed = server_b.root / "sessions" / SESSION
+    marker = landed / "desktop.json"
+    if marker.exists():
+        cwd = json.loads(marker.read_text(encoding="utf-8")).get("cwd") or ""
+        assert os.path.realpath(cwd).startswith(os.path.realpath(bhome) + os.sep), cwd
+    arrived = json.loads((landed / "cwd.json").read_text(encoding="utf-8"))
+    assert arrived["cwd"] == "" or arrived["cwd"].startswith(os.path.realpath(bhome)), arrived
+
+
+def test_l2_a_cwd_record_that_cannot_be_validated_refuses_the_promote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L2/S2: the carried record is validated IN STAGING, before the atomic promote;
+    a record that can be neither remapped nor blanked refuses the adoption."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from local_operator.network import carry
+
+    root = tmp_path / "config"
+    staged = root / "network" / "staging" / "staged"
+    staged.mkdir(parents=True)
+    (staged / "transcript.jsonl").write_text("", encoding="utf-8")
+    _write_cwd_record(staged, "/etc")
+
+    def refuse(*_a: Any, **_k: Any) -> dict[str, str]:
+        raise carry.CwdRecordUntrusted("cannot rewrite")
+
+    monkeypatch.setattr(carry, "remap_cwd_record", refuse)
+    outcome = mobility._promote(cast(Any, SimpleNamespace(root=root)), staged, "moved0000001")
+    assert outcome.ok is False, outcome
+    assert not (root / "sessions" / "moved0000001").exists()
+
+
+def test_l2_the_remap_reports_a_failed_write_and_blanks_garbage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L2/S2: a writer failure is raised, never reported as a rewrite; an unreadable
+    record is blanked like a foreign path; the persisted path is CANONICAL."""
+    from local_operator.network import carry
+    from local_operator.session import creation
+
+    home = tmp_path / "home"
+    (home / "real" / "proj").mkdir(parents=True)
+    (home / "link").symlink_to(home / "real")
+    target = tmp_path / "arrived"
+    target.mkdir()
+
+    _write_cwd_record(target, str(home / "link" / "proj"))
+    report = carry.remap_cwd_record(target, SESSION, home=str(home))
+    assert report["to"] == os.path.realpath(home / "real" / "proj"), report
+    assert json.loads((target / "cwd.json").read_text())["cwd"] == report["to"]
+
+    (target / "cwd.json").write_text("{not json", encoding="utf-8")
+    carry.remap_cwd_record(target, SESSION, home=str(home))
+    assert json.loads((target / "cwd.json").read_text())["cwd"] == ""
+
+    _write_cwd_record(target, "/etc")
+    monkeypatch.setattr(creation, "write_session_cwd", lambda *a, **k: False)
+    with pytest.raises(carry.CwdRecordUntrusted):
+        carry.remap_cwd_record(target, SESSION, home=str(home))
+
+
+def test_l2_replica_recovery_contains_the_copied_cwd_record(tmp_path: Path) -> None:
+    """L2/S2: ``sync.promote_replica`` copies ``cwd.json``; the owner's path is
+    remapped or blanked before the recovered session can read it as its cwd."""
+    from tests.unit.network.test_sync import _ask, seed
+
+    root = tmp_path / "holder"
+    root.mkdir()
+    seed(root, "9f3ac1e0b7d2")
+    _write_cwd_record(root / "sessions" / "9f3ac1e0b7d2", "/etc")
+    sync.sync_from(
+        root,
+        "9f3ac1e0b7d2",
+        ask=_ask(root),
+        owner_device="d_owner",
+        into=sync.replica_dir(root, "9f3ac1e0b7d2"),
+    )
+    (root / "sessions" / "9f3ac1e0b7d2").rename(tmp_path / "elsewhere")
+    promoted = sync.promote_replica(root, "9f3ac1e0b7d2", new_id="recovered0001")
+    record = json.loads(
+        (root / "sessions" / promoted["session_id"] / "cwd.json").read_text(encoding="utf-8")
+    )
+    assert record["cwd"] == "", record
+
+
+def test_l4_a_stale_cwd_record_plus_a_live_mentioned_worktree_still_asks(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Rig,
+    bhome: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """L4/S4: a recorded folder that no longer exists is not a known cwd, so the
+    live worktree the session mentions keeps the gap and the move asks."""
+    server_a, server_b, _host, _port = pair
+    source = _idle_cli_session(pair, monkeypatch, rig, bhome)
+    _retest_worktree(rig)
+    _write_cwd_record(source, str(rig.home / "removed-folder"))
+
+    code, out = _cli(
+        server_a, monkeypatch, capsys, "--to", server_b.identity.device_id, "--dry-run", "--json"
+    )
+    answer = json.loads(out.out)
+    assert code == 0, answer
+    assert answer["working_set"]["cwd_known"] is False, answer
+    assert answer["working_set"]["mentioned"] == [RETEST]
+    assert answer["confirmation_required"] is True
+
+
+def test_l4_a_stale_legacy_marker_cwd_is_not_known_either(tmp_path: Path) -> None:
+    """L4/S4 for the legacy sources too: the manifest counts only a seed that
+    resolves to an existing directory under home."""
+    from local_operator.network import workset
+
+    root, session, home = _bare_root(tmp_path)
+    (session / "desktop.json").write_text(json.dumps({"cwd": str(home / "gone")}), "utf-8")
+    assert mobility._session_cwd_at(root, SESSION) == str(home / "gone")
+    _mention(session, f"cd {home / 'proj'}")
+    manifest = workset.compute_manifest(root, SESSION, to_device="d", home=home)
+    assert manifest.cwd_known is False and manifest.cwd_gap is True
+
+
+def _gap(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Rig,
+    bhome: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[Any, Any, str, str]:
+    """Test (d)'s state with B granted: (server_a, server_b, target id, dry-run digest)."""
+    server_a, server_b, _host, _port = pair
+    _idle_cli_session(pair, monkeypatch, rig, bhome)
+    _retest_worktree(rig)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--dry-run", "--json")
+    assert code == 0, out
+    return server_a, server_b, target, json.loads(out.out)["working_set"]["scope_digest"]
+
+
+def _b_sessions(server_b: Any) -> list[str]:
+    sessions = server_b.root / "sessions"
+    return sorted(p.name for p in sessions.iterdir() if p.is_dir()) if sessions.is_dir() else []
+
+
+def test_l5_keep_is_gated_on_the_cwd_gap_and_its_answer_names_the_folders(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Rig,
+    bhome: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """L5 (R1-M1/U8/Q-1, QA Q8's shape): ``--keep`` with no consent is refused and
+    copies nothing; confirmed, the copy's answer and receipt name the folders."""
+    server_a, server_b, target, digest = _gap(pair, monkeypatch, rig, bhome, capsys)
+    before = _b_sessions(server_b)
+
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--keep", "--json")
+    refused = json.loads(out.out)
+    assert code == 1 and refused["ok"] is False, refused
+    assert refused["code"] == "working_set_unconfirmed", refused
+    assert _b_sessions(server_b) == before, "an unconfirmed keep copied the conversation"
+
+    code, out = _cli(
+        server_a,
+        monkeypatch,
+        capsys,
+        "--to",
+        target,
+        "--keep",
+        "--confirm-working-set",
+        digest,
+        "--json",
+    )
+    answer = json.loads(out.out)
+    assert code == 0 and answer["ok"] is True, answer
+    block = answer["working_set"]
+    assert block["cwd_known"] is False and block["mentioned"] == [RETEST], block
+    assert block["transferred"] is False
+
+    code, out = _cli(
+        server_a, monkeypatch, capsys, "--to", target, "--keep", "--confirm-working-set", digest
+    )
+    assert code == 0, out
+    assert "does not have the folders this conversation mentions" in out.out, out.out
+    assert RETEST in out.out
+
+
+def test_l6_l8_yes_on_the_gap_says_why_and_never_blames_the_destination(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Rig,
+    bhome: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """L6 (U1/R1-m1/Q-2) and L8 (U3/Q-3): the destination CAN take files, so the
+    refusal must not say it cannot; the owner's message must not count 0 worktrees."""
+    server_a, server_b, target, _digest = _gap(pair, monkeypatch, rig, bhome, capsys)
+
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--yes", "--json")
+    document = json.loads(out.out)
+    assert code == 1 and document["consent_declined"]["reason"] == "cwd_unknown", document
+    assert "does not know which folder" in document["consent_declined"]["message"]
+    assert "cannot take" not in json.dumps(document)
+    assert "0 git worktrees" not in document["message"], document["message"]
+    assert "working folder is not recorded" in document["message"]
+
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--yes")
+    assert code == 1
+    assert "does not know which folder" in out.err and "cannot take" not in out.err, out.err
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_l7_l11_the_confirmed_move_receipt_names_the_folders_that_stayed(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Rig,
+    bhome: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """L7 (U2/R1-m2): the receipt lists the mentioned folder that stayed instead of
+    "0 worktrees stay". L11 (U4/U7): the refusal's closing line says confirming
+    LEAVES the folders, and the summary reads "is not recorded"."""
+    server_a, server_b, target, digest = _gap(pair, monkeypatch, rig, bhome, capsys)
+
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target)
+    assert code == 1
+    assert "working folder is not recorded" in out.err, out.err
+    assert f"--confirm-working-set {digest} to leave them on" in out.err, out.err
+
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--confirm-working-set", digest)
+    assert code == 0, out
+    assert "Working files were not transferred: this conversation's working folder" in out.out
+    assert RETEST in out.out and "0 worktrees" not in out.out, out.out
+    assert (server_b.root / "sessions" / SESSION).is_dir()
+
+
+def test_l9_the_gap_is_part_of_the_scope_digest() -> None:
+    """L9 (Q-4): a gap's digest differs from the empty plan's and from another gap's,
+    and the block recompute agrees with the owner's; a non-gap digest is unchanged."""
+    from local_operator.network import workset
+
+    empty = workset.Manifest(to_device="d", to_name="")
+    gap = workset.Manifest(to_device="d", to_name="", mentioned=("~/a",), cwd_known=False)
+    other = workset.Manifest(to_device="d", to_name="", mentioned=("~/a", "~/b"), cwd_known=False)
+    known = workset.Manifest(to_device="d", to_name="", mentioned=("~/a",), cwd_known=True)
+
+    assert workset.scope_digest(gap) != workset.scope_digest(empty)
+    assert workset.scope_digest(gap) != workset.scope_digest(other)
+    assert workset.scope_digest(known) == workset.scope_digest(empty)
+    assert workset.block_scope_digest(gap.to_dict(), to_device="d") == workset.scope_digest(gap)
+
+
+def test_l10_the_checkpoint_fallback_reads_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L10 (R1-m3): the preview never restores a compressed transcript in place."""
+    from local_operator.session import compression
+
+    root, session, home = _bare_root(tmp_path)
+    seen: list[bool] = []
+    real = compression.transcript_for_read
+
+    def spy(directory: Path, *, read_only: bool = False) -> Any:
+        seen.append(read_only)
+        return real(directory, read_only=read_only)
+
+    monkeypatch.setattr(compression, "transcript_for_read", spy)
+    monkeypatch.setenv("HOME", str(home))
+    mobility._session_cwd_at(root, SESSION)
+    assert seen == [True], seen
+
+
+def test_l12_an_answered_root_cwd_is_not_resolved_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L12 (R1-n2): the owner's "" is an answer; only ``None`` resolves the root."""
+    from local_operator.network import workset
+
+    root, _session, home = _bare_root(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(workset, "recorded_cwd", lambda _root, sid, **_k: calls.append(sid) or "")
+    workset.candidate_seeds(root, [SESSION], cwd_hint="", home=home)
+    assert calls == []
+    workset.candidate_seeds(root, [SESSION], home=home)
+    assert calls == [SESSION]
+
+
+def test_l1_the_cwd_containment_rules_match_the_restore_policy() -> None:
+    """``carry`` is stdlib-only, so it spells the restore policy's component rules
+    locally; they must never drift from ``workset_transfer``'s."""
+    from local_operator.network import carry, workset_transfer
+
+    assert carry._CWD_DENY_TOP == workset_transfer._RESTORE_DENY_TOP
+    assert carry._CWD_DENY_ANY == workset_transfer._RESTORE_DENY_ANY

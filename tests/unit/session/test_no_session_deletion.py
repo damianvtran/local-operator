@@ -3977,13 +3977,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/creation.py::write_session_cwd",
         "os.replace",
-        "Atomic write of the session's own cwd.json record through a sibling "
-        "pid/thread-temp FILE; it never creates, moves or removes a directory",
+        "Atomic write of the session's own cwd.json record through a private, "
+        "randomly named O_EXCL staging FILE under a verified directory handle; it "
+        "never creates, moves or removes a directory",
     ),
     (
         "local_operator/session/creation.py::write_session_cwd",
         "os.unlink",
-        "Drops only this call's own temp FILE after a failed write; never a journal or directory",
+        "Drops only this call's own staging FILE name (after a link, a failure or a "
+        "replace that already consumed it); never a journal or directory",
     ),
     (
         "local_operator/network/carry.py::_write_marker",

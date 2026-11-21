@@ -4134,6 +4134,15 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         from local_operator.network.origin import downgrade_stamps
 
         downgrade_stamps(target)
+        # THE COPIED ``cwd.json`` NAMES A PATH ON THE OWNER'S DEVICE (security review
+        # #4403, S2): remapped under this user's home, canonical and contained
+        # (``carry.contained_cwd``), or blanked — while the new id is still claimed and
+        # before anything can read it as this session's cwd, the same rule the move's
+        # promote applies in staging. A record that can be neither remapped nor blanked
+        # raises, and the handler below refuses the recovery (fail closed).
+        from local_operator.network import carry
+
+        carry.remap_cwd_record(target, new_id, home=str(Path.home()), config_root=Path(root))
     except Exception as exc:  # noqa: BLE001 — every failure here is a refusal, not a crash
         # ``Exception``, not ``(OSError, SyncRefused)`` (security review S-1): the
         # replica is peer-authored, so the downgrade can fail in ways no file API

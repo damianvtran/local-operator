@@ -448,5 +448,25 @@
     "role": "closing advice under cwd_unknown, before the y/N prompt or the confirmation command",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "{source} keeps the folders and {device} is the destination, both verbatim. 'They' = the folders listed on the line above. 'push' is the git verb. Mirrors advice_stays: continuing is the user's decision, not a recommendation."
+  },
+  "cli.sessions_move_workset.yes_cwd_unknown": {
+    "role": "CLI refusal when `lop sessions move --yes` meets a conversation whose working folder is not recorded but which mentions git folders that may hold its work",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --yes, --dry-run, --confirm-working-set and --without-working-set verbatim. {source} is the device that keeps the folders, verbatim. Nothing was moved. 'lop does not know which folder this conversation worked in' = no record of its working directory exists. 'the digest it prints' = the sha256: token the --dry-run output shows. Must NOT say the destination cannot take files: that is not the reason here."
+  },
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": {
+    "role": "closing CLI line when a move is refused for confirmation because the conversation's working folder is not recorded (cwd_unknown above)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --dry-run, --confirm-working-set and --without-working-set verbatim; {digest} is a sha256: token, verbatim. {source} is the device that keeps the folders, verbatim. Confirming here means LEAVING the folders on {source}, never sending them; the sentence must keep that reading."
+  },
+  "cli.sessions_move_workset.receipt_cwd_unknown": {
+    "role": "CLI receipt line after a confirmed move of a conversation whose working folder is not recorded; lists the folders that stayed",
+    "tone": "plain, factual, calm; must not read as an error: the user confirmed this",
+    "note": "{source} is the device that keeps the folders, verbatim. {paths} is a comma-separated list of ~/ paths, verbatim. 'not transferred' = the folders were not sent to the destination. This is the lasting record that they stayed."
+  },
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": {
+    "role": "CLI receipt line after a --keep copy of a conversation whose working folder is not recorded; lists the folders the copy does not have",
+    "tone": "plain, factual, calm; must not read as an error: the user confirmed this",
+    "note": "{device} is where the copy now is and {source} the device that keeps the folders, both verbatim. {paths} is a comma-separated list of ~/ paths, verbatim. Mirrors receipt_keep."
   }
 }

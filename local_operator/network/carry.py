@@ -65,6 +65,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -147,7 +148,11 @@ def _iter_lines_backward(
 
 
 def latest_custom_details(
-    session_dir: Path, custom_type: str, *, max_bytes: int | None = None
+    session_dir: Path,
+    custom_type: str,
+    *,
+    max_bytes: int | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any] | None:
     """The newest ``custom_type`` row's ``payload.details``, or ``None``.
 
@@ -167,7 +172,12 @@ def latest_custom_details(
     # bytes. Opening the plain name here read ``None`` for every compressed
     # session, and opening an archive raw would decode compressed bytes as JSONL
     # and silently carry nothing.
-    path = compression.transcript_for_read(Path(session_dir))
+    #
+    # ``read_only`` is for a PREVIEW (review #4403, R1-m3: the move's cwd fallback runs
+    # on every dry run): it refuses ``transcript_for_read``'s last-resort restore of
+    # the plain transcript into the session directory, which runs without the writer
+    # lock. The carry itself keeps the default.
+    path = compression.transcript_for_read(Path(session_dir), read_only=read_only)
     if path is None:
         return None
     try:
@@ -446,56 +456,133 @@ def rewrite_host_cwd(
     return {"from": recorded_value, "to": mapped}
 
 
-def remap_cwd_record(target: Path, session_id: str, *, home: str) -> dict[str, str]:
+#: The restore policy's component rules (``workset_transfer._RESTORE_DENY_TOP`` /
+#: ``_RESTORE_DENY_ANY``), spelled here for this module's stdlib-only rule (see the
+#: module docstring); ``test_workset_cwd_record.py`` pins them equal to the originals.
+_CWD_DENY_TOP = frozenset({"library", "applications"})
+_CWD_DENY_ANY = frozenset({"autostart", "launchagents", "launchdaemons", "systemd"})
+
+
+def contained_cwd(value: str, *, home: str | Path, config_root: str | Path | None = None) -> str:
+    """``value``'s canonical path when it is a usable LOCAL working directory, else "".
+
+    THE ONE CONTAINMENT RULE FOR THE DURABLE CWD HINTS (security review #4403, S1/S2/S4):
+    ``cwd.json`` and the frontend checkpoint's ``state.cwd`` are new places a
+    working directory comes from, and either can hold a value this device did not
+    choose (a carried record, an imported transcript row). Before such a value seeds
+    working-set discovery (``git status`` and file-fact reads) or is persisted as an
+    arrived session's cwd, it must be:
+
+    * absolute, and resolve (``realpath``: symlinks followed on purpose, so a link
+      under home pointing outside it is outside) under ``home``'s own realpath — the
+      only tree both devices of a move share (design §7);
+    * not under a hidden first component of home (``~/.ssh``, ``~/.gnupg``,
+      ``~/.config``, ``~/.local``, the lop config dir) nor a platform/login-time code
+      directory — the same component rules the restore policy applies
+      (``workset_transfer.primary_path_refusal``), minus its any-depth hidden rule,
+      because ``<repo>/.worktrees/<name>`` is exactly where sessions work;
+    * not inside ``config_root`` (session stores are never a working folder);
+    * an EXISTING directory owned by this user (S4: a stale or foreign path is not a
+      known cwd; ``git`` refuses another owner's tree anyway).
+
+    Returns the canonical (``realpath``) spelling, which is what callers persist, so
+    a later reader never re-resolves a symlinked spelling the check did not see.
+    Never raises.
+    """
+    try:
+        text = os.path.expanduser(str(value or "").strip())
+        if not text or not os.path.isabs(text) or not str(home or ""):
+            return ""
+        real = os.path.realpath(text)
+        real_home = os.path.realpath(str(home))
+        if not _under(real, real_home):
+            return ""
+        if real != real_home:
+            parts = os.path.relpath(real, real_home).split(os.sep)
+            if parts[0].startswith(".") or parts[0].casefold() in _CWD_DENY_TOP:
+                return ""
+            if any(p.casefold() in _CWD_DENY_ANY for p in parts):
+                return ""
+        if config_root is not None and _under(real, os.path.realpath(str(config_root))):
+            return ""
+        info = os.stat(real)
+    except (OSError, ValueError):
+        return ""
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return ""
+    return real
+
+
+class CwdRecordUntrusted(OSError):
+    """An arrived ``cwd.json`` could be neither remapped nor cleared (fail closed)."""
+
+
+def remap_cwd_record(
+    target: Path, session_id: str, *, home: str, config_root: str | Path | None = None
+) -> dict[str, str]:
     """Map an arrived session's ``cwd.json`` onto THIS host, or blank it.
 
     ``cwd.json`` (``session.creation.CWD_RECORD_NAME``) travels in the copy set so a
     later move from here still finds the session's worktree, but the value it carries
     was written on the SENDER. It is remapped through the same home map the marker's
     cwd and the monitors use (:func:`translate_host_path`, which keeps a path that
-    exists here, else the same basename or home-relative tail under ``home``).
+    exists here, else the same basename or home-relative tail under ``home``), and
+    then must pass :func:`contained_cwd` — under this home, not a protected
+    directory, an existing directory this user owns.
 
-    NEVER TRUST A SENDER PATH OUTSIDE THIS HOME (security review of the plan, note
-    1): a sender-supplied absolute path that does not resolve under ``home`` after
-    the remap — ``/etc``, ``/tmp/x``, another user's tree that happens to exist here —
-    is never written as this session's cwd. The record is rewritten with ``cwd: ""``
-    (every reader then falls back, the session directory last) and the drop is
-    logged, so the next move's preflight reads "cwd unknown" rather than a path the
-    sender chose. ``home`` is the DESTINATION home the move resolved
-    (``workset_move.home_of``) and is never defaulted; empty means "cannot map", so
-    the record is blanked too. Returns ``{"from", "to"}`` when it rewrote, ``{}``
-    when the file is absent or already fits. Never raises.
+    RUN ON THE STAGED COPY, BEFORE IT IS ADOPTED (security review #4403, S2): both
+    import doors (the move's ``_promote`` and ``sync.promote_replica``) call this
+    while the directory is not yet readable as a local session, so an unvalidated
+    sender path is never a local cwd, not even briefly. The record is rewritten with
+    the CANONICAL contained directory, or with ``cwd: ""`` (every reader then falls
+    back) and the drop is logged. ``home`` is the DESTINATION home the import
+    resolved and is never defaulted; empty means "cannot map", so the record is
+    blanked too.
+
+    FAIL CLOSED, AND SAY SO. A record that exists but cannot be read safely (a
+    symlink, a FIFO, oversized, not JSON) is blanked like a foreign path. When the
+    rewrite itself fails, nothing is claimed: :class:`CwdRecordUntrusted` is raised so
+    the caller refuses the adoption rather than land a session whose cwd record still
+    names a path this device never validated. Returns ``{"from", "to"}`` when it
+    rewrote, ``{}`` when the file is absent or already canonical and contained.
     """
-    from local_operator.session.creation import CWD_RECORD_NAME, write_session_cwd
+    from local_operator.session.creation import (
+        CWD_RECORD_NAME,
+        read_session_cwd_document,
+        write_session_cwd,
+    )
 
     path = Path(target) / CWD_RECORD_NAME
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        os.lstat(path)
+    except FileNotFoundError:
         return {}
-    if not isinstance(document, dict):
-        document = {}
+    except OSError as exc:
+        raise CwdRecordUntrusted(f"cannot stat {CWD_RECORD_NAME}: {exc}") from exc
+    document = read_session_cwd_document(Path(target))
     recorded = document.get("cwd")
     recorded = recorded if isinstance(recorded, str) else ""
     mapped = translate_host_path(recorded, home=home) if os.path.isabs(recorded) else ""
-    # Resolved on BOTH sides: a symlink under home that points outside it is outside,
-    # and a symlinked home (macOS ``/var`` -> ``/private/var``) is still this home.
-    if mapped and not (home and _under(os.path.realpath(mapped), os.path.realpath(home))):
-        mapped = ""
-    if mapped == recorded:
+    mapped = contained_cwd(mapped, home=home, config_root=config_root) if mapped else ""
+    if document and mapped == recorded:
         return {}
-    if not mapped:
+    if not mapped and recorded:
         logger.info(
-            "carry: dropped %s's carried cwd record (%r): it does not resolve under this "
-            "device's home %s after the home map, so the session falls back to its directory",
+            "carry: dropped %s's carried cwd record (%r): it does not resolve to a usable "
+            "directory under this device's home %s after the home map, so the session "
+            "falls back to its directory",
             session_id,
             recorded,
             home,
         )
+    if not document and not recorded and not mapped:
+        logger.info("carry: blanked %s's unreadable carried cwd record", session_id)
     source = document.get("source")
-    write_session_cwd(
+    written = write_session_cwd(
         Path(target), mapped, source=source if isinstance(source, str) and source else "birth"
     )
+    if not written:
+        raise CwdRecordUntrusted(f"could not rewrite {session_id}'s {CWD_RECORD_NAME}")
     return {"from": recorded, "to": mapped}
 
 

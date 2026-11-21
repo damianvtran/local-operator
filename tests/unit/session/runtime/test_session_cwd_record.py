@@ -101,3 +101,93 @@ async def test_f_the_runtime_start_rewrites_cwd_json_when_the_cwd_changes(tmp_pa
         assert _record(session)["cwd"] == str(moved)
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 remediation (PR #4403): L3 (S3) writer identity, L12 heartbeat.
+# ---------------------------------------------------------------------------
+
+
+def test_l3_a_symlinked_or_oversized_record_is_never_read(tmp_path: Path) -> None:
+    session = tmp_path / "s"
+    session.mkdir()
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"cwd": "/planted"}), encoding="utf-8")
+    (session / "cwd.json").symlink_to(elsewhere)
+    assert creation.read_session_cwd(session) == ""
+
+    (session / "cwd.json").unlink()
+    (session / "cwd.json").write_text(
+        json.dumps({"cwd": "/big", "pad": "x" * (128 * 1024)}), encoding="utf-8"
+    )
+    assert creation.read_session_cwd(session) == ""
+
+
+def test_l3_staging_never_writes_through_a_planted_name(tmp_path: Path) -> None:
+    """The old staging name was predictable (pid + thread id) and opened with
+    truncation, so a symlink planted there redirected the write. Every staging name is
+    random and exclusively created now; nothing outside the session is touched."""
+    import os
+    import threading
+
+    session = tmp_path / "s"
+    session.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    planted = session / f"cwd.json.{os.getpid()}.{threading.get_ident()}.tmp"
+    planted.symlink_to(victim)
+
+    assert creation.write_session_cwd(session, str(tmp_path / "w"), source="runtime") is True
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert _record(session)["cwd"] == str(tmp_path / "w")
+    assert oct((session / "cwd.json").stat().st_mode & 0o777) == "0o600"
+    assert sorted(p.name for p in session.iterdir()) == sorted(["cwd.json", planted.name])
+
+
+def test_l3_birth_publication_never_clobbers_a_winner(tmp_path: Path) -> None:
+    """A birth publishes link-or-fail (like ``ensure_session_created_at``): a record
+    another writer already published is never overwritten, whoever checked first."""
+    session = tmp_path / "s"
+    session.mkdir()
+    assert creation.write_session_cwd(session, "/first", source="birth", exclusive=True) is True
+    assert creation.write_session_cwd(session, "/second", source="birth", exclusive=True) is False
+    assert _record(session)["cwd"] == "/first"
+    assert [p.name for p in session.iterdir()] == ["cwd.json"]  # no staging left behind
+
+
+def test_l3_a_symlinked_session_directory_is_never_written_through(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "s"
+    link.symlink_to(real, target_is_directory=True)
+    assert creation.write_session_cwd(link, "/x", source="runtime") is False
+    assert list(real.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_l12_the_heartbeat_itself_records_a_cwd_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-n1: drive real beats (not the seam directly) and see the record follow."""
+    import asyncio
+
+    from local_operator.session.runtime import server as server_module
+    from local_operator.session.runtime.server import RuntimeServer
+
+    monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL_S", 0.05)
+    session = Path(config_dir()) / "sessions" / "s1"
+    session.mkdir(parents=True)
+    started, moved = tmp_path / "started-here", tmp_path / "moved-here"
+    handle = _MovableHandle(str(started))
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    try:
+        await _wait_record()
+        handle.set_cwd(str(moved))
+        for _ in range(200):  # the event is the file changing; bounded at ~10 s
+            if (session / "cwd.json").exists() and _record(session)["cwd"] == str(moved):
+                break
+            await asyncio.sleep(0.05)
+        assert _record(session)["cwd"] == str(moved)
+    finally:
+        server.close()

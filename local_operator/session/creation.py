@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import secrets
+import stat
 import tempfile
-import threading
 import time
 from pathlib import Path
+from typing import Any
 
 CREATED_AT_NAME = "created_at.json"
 
@@ -107,34 +109,132 @@ def ensure_session_created_at(directory: Path, proposed: float) -> float:
     return stored if stored is not None else session_created_at(directory)
 
 
+#: Upper bound on a ``cwd.json`` read. The record is one short JSON object (a path, a
+#: version, a timestamp and a source word: well under 1 KiB for any real path, and
+#: ``PATH_MAX`` is 4 KiB on Linux, 1 KiB on macOS). 64 KiB leaves room for any path a
+#: filesystem accepts while keeping a planted multi-gigabyte file from being read
+#: whole by a move's preflight.
+_CWD_RECORD_MAX_BYTES = 64 * 1024
+
+
+def _open_session_dir(directory: Path) -> int | None:
+    """A verified handle on the session directory, or ``None``.
+
+    WHY A HANDLE (security review #4403, S3): every later step — the bounded read,
+    the private staging file, the publish — is done relative to this descriptor, so
+    a session directory swapped for a symlink between steps cannot redirect a write
+    elsewhere. ``O_NOFOLLOW`` refuses a symlinked final component, and the ``fstat``
+    confirms it is a directory this user owns (a directory another user controls
+    could swap entries under us). Never creates anything.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(directory), flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            os.close(descriptor)
+            return None
+    except OSError:
+        os.close(descriptor)
+        return None
+    return descriptor
+
+
+def _read_record_at(dir_fd: int) -> dict[str, Any]:
+    """The record under ``dir_fd`` as a dict, or ``{}``. Never raises.
+
+    Bounded, no-follow and regular-file-only (S3): a symlink planted as ``cwd.json``
+    is refused by ``O_NOFOLLOW``, a FIFO cannot block the read (``O_NONBLOCK``, then
+    the ``S_ISREG`` check), and at most :data:`_CWD_RECORD_MAX_BYTES` are read.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(CWD_RECORD_NAME, flags, dir_fd=dir_fd)
+    except OSError:
+        return {}
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CWD_RECORD_MAX_BYTES:
+            return {}
+        raw = os.read(descriptor, _CWD_RECORD_MAX_BYTES + 1)
+    except OSError:
+        return {}
+    finally:
+        os.close(descriptor)
+    if len(raw) > _CWD_RECORD_MAX_BYTES:
+        return {}
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
 def read_session_cwd(directory: Path) -> str:
     """The ``cwd`` :data:`CWD_RECORD_NAME` records for this session, or ``""``.
 
     Returns the stored string unvalidated beyond its type: whether it is usable
-    (absolute, not the session directory) is the reader's rule, applied in one place
-    (``mobility._session_cwd_at``'s ``usable``), so a relative or stale value is
-    rejected there rather than silently here. Never raises.
+    (absolute, an existing directory under this home, not a protected one) is the
+    reader's rule, applied in one place (``mobility._session_cwd_at``), so a relative
+    or stale value is rejected there rather than silently here. The read itself is
+    the safe one (:func:`_read_record_at`). Never raises.
     """
-    try:
-        document = json.loads((Path(directory) / CWD_RECORD_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    cwd = document.get("cwd") if isinstance(document, dict) else None
+    cwd = read_session_cwd_document(directory).get("cwd")
     return cwd if isinstance(cwd, str) else ""
 
 
-def write_session_cwd(directory: Path, cwd: str, *, source: str, at: float | None = None) -> bool:
-    """Write :data:`CWD_RECORD_NAME` atomically (temp + ``os.replace``), 0600.
+def read_session_cwd_document(directory: Path) -> dict[str, Any]:
+    """The whole :data:`CWD_RECORD_NAME` document (``{}`` when absent or unsafe).
+
+    For the arrival remap, which keeps the record's ``source`` while it rewrites the
+    path. Same safe read as :func:`read_session_cwd`. Never raises.
+    """
+    dir_fd = _open_session_dir(Path(directory))
+    if dir_fd is None:
+        return {}
+    try:
+        return _read_record_at(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def write_session_cwd(
+    directory: Path,
+    cwd: str,
+    *,
+    source: str,
+    at: float | None = None,
+    exclusive: bool = False,
+) -> bool:
+    """Publish :data:`CWD_RECORD_NAME`, 0600, through private staging. Never raises.
 
     ``cwd`` may be ``""`` only for the arrival remap's "dropped" case
     (``network.carry.remap_cwd_record``), which must overwrite a foreign path rather
     than leave it. NEVER CREATES THE SESSION DIRECTORY: a speculatively warmed
     runtime (``Transcript(defer_materialise=True)``) must leave nothing on disk, so a
     missing directory is a ``False`` the caller retries later, never a ``mkdir``.
-    Never raises: this is metadata, and it must not cost a turn or a boot.
+
+    THE FILESYSTEM-IDENTITY CONTRACT (security review #4403, S3). Everything happens
+    relative to one verified directory handle (:func:`_open_session_dir`). The bytes
+    go to a randomly named staging file created ``O_EXCL | O_NOFOLLOW`` with mode
+    0600, so no pre-existing inode (a planted file or symlink at a predictable name)
+    is ever written through. Then:
+
+    * ``exclusive=True`` (a birth) publishes with a hard link, which fails if a
+      record already exists — the same no-clobber publication
+      ``ensure_session_created_at`` uses — so two racing births cannot overwrite each
+      other's winner; returns ``False`` when another writer won;
+    * otherwise (a runtime change of directory, the arrival remap) ``os.replace``
+      swaps the complete record in atomically.
+
+    The staging name keeps the ``cwd.json.<token>.tmp`` shape that
+    ``sync.assert_complete`` already tolerates as a crash leftover.
     """
-    directory = Path(directory)
-    if not directory.is_dir():
+    dir_fd = _open_session_dir(Path(directory))
+    if dir_fd is None:
         return False
     document = {
         "v": CWD_RECORD_VERSION,
@@ -142,19 +242,36 @@ def write_session_cwd(directory: Path, cwd: str, *, source: str, at: float | Non
         "at": float(at if at is not None else time.time()),
         "source": str(source),
     }
-    temporary = directory / f"{CWD_RECORD_NAME}.{os.getpid()}.{threading.get_ident()}.tmp"
+    temporary = f"{CWD_RECORD_NAME}.{secrets.token_hex(8)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    published = False
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=dir_fd)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(document, sort_keys=True))
-        os.replace(temporary, directory / CWD_RECORD_NAME)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if exclusive:
+            try:
+                os.link(temporary, CWD_RECORD_NAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                published = True
+            except FileExistsError:
+                published = False
+        else:
+            os.replace(temporary, CWD_RECORD_NAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            published = True
     except OSError:
+        published = False
+    finally:
+        # The staging name is this call's own (random, O_EXCL): after a link it is a
+        # second name for the record, after a replace it is already gone, and after
+        # a failure it is a partial file. Dropping it is never another writer's data.
         try:
-            os.unlink(temporary)
+            os.unlink(temporary, dir_fd=dir_fd)
         except OSError:
             pass
-        return False
-    return True
+        os.close(dir_fd)
+    return published
 
 
 def record_session_cwd(directory: Path, cwd: str | None, *, source: str) -> bool:
@@ -163,10 +280,12 @@ def record_session_cwd(directory: Path, cwd: str | None, *, source: str) -> bool
     ``source="birth"`` writes only when no record exists yet: a transcript is
     constructed on EVERY open (resume, viewer, monitor arm), and a later open from
     another folder must not overwrite what the creator recorded — the runtime's own
-    record (``source="runtime"``) is what follows a real change of directory.
-    ``source="runtime"`` writes when the recorded value differs. A relative or empty
-    ``cwd`` is never written (S-2: it would resolve against whatever process reads
-    it). Returns whether the file now holds ``cwd``. Never raises.
+    record (``source="runtime"``) is what follows a real change of directory. The
+    birth publish is exclusive (:func:`write_session_cwd`), so the "no record yet"
+    check cannot race another writer. ``source="runtime"`` writes when the recorded
+    value differs. A relative or empty ``cwd`` is never written (S-2: it would
+    resolve against whatever process reads it). Returns whether the file now holds
+    ``cwd``. Never raises.
     """
     if not isinstance(cwd, str) or not cwd.strip():
         return False
@@ -176,8 +295,8 @@ def record_session_cwd(directory: Path, cwd: str | None, *, source: str) -> bool
     existing = read_session_cwd(directory)
     if existing == value:
         return True
-    if source == "birth" and (Path(directory) / CWD_RECORD_NAME).exists():
-        return False
+    if source == "birth":
+        return write_session_cwd(directory, value, source=source, exclusive=True)
     return write_session_cwd(directory, value, source=source)
 
 
