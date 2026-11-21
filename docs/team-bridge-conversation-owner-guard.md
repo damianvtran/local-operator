@@ -62,8 +62,10 @@ not an automatic guard on a future endpoint.
 
 Rename was added after this capability and is advertised by its own key,
 `team_bridge_conversation_rename`. Its body carries the receipt like the other
-object writes; the target tenant is forwarded upstream as the `tenant_id`
-query, the way archive sends it. A `tenant_id` or `expected_account_id` in the
+object writes; the target tenant is forwarded upstream as `tenant_id` in the
+rename BODY, the way members-add and consent send it (the hub's rename handler
+reads only its strict body `{name, tenant_id?}`, so a query tenant would be
+ignored). A `tenant_id` or `expected_account_id` in the
 rename QUERY is refused with 422 `invalid_request`, because the route would
 otherwise ignore it and dispatch unguarded.
 

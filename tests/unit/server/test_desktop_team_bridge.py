@@ -4959,7 +4959,7 @@ async def test_rename_refusals_pass_through_untouched(api, status, code, details
     assert response.json()["detail"] == expected
 
 
-@pytest.mark.parametrize("body", [{}, {"name": ""}, {"name": "x", "topic": "nope"}])
+@pytest.mark.parametrize("body", [{}, {"name": "x", "topic": "nope"}, {"name": "x" * 129}])
 async def test_rename_refuses_a_malformed_body_before_io(api, body):
     client, _root, _d = api
     calls = FakeClient.calls
@@ -4977,3 +4977,16 @@ async def test_rename_forwards_a_name_over_the_server_limit(api):
     response = await client.post(RENAME, json={"name": "é" * 65})
     assert response.status_code == 200, response.text
     assert FakeClient.behavior["last_rename"][1] == "é" * 65
+
+
+@pytest.mark.parametrize("name", ["", "   "], ids=["empty", "blank"])
+async def test_rename_forwards_an_empty_name_for_the_server_rule(api, name):
+    """The server is the authority on name rules: an empty name is not a local
+    422 (no ``min_length``), so ``""`` reaches it and its ``rule=empty`` refusal
+    is what the renderer shows, exactly as for a whitespace-only name."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": name})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == name

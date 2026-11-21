@@ -529,8 +529,9 @@ async def test_thread_and_reaction_capabilities_ship_with_their_guard():
 
 
 # RENAME through the real route, real TeamBridgeClient and a simulated hub: the
-# request must reach the hub's own path with the trimmed name and the tenant as
-# the query (as archive sends it), and a hub refusal must reach the renderer
+# request must reach the hub's own path with the trimmed name and the tenant in
+# the BODY (the hub's strict rename body is ``{name, tenant_id?}`` and it never
+# reads a query tenant), and a hub refusal must reach the renderer
 # with its code and details intact so the UI can say WHICH name is taken.
 async def test_rename_reaches_the_hub_path_with_the_trimmed_name(rig):
     response = await rig.http.post(
@@ -542,8 +543,24 @@ async def test_rename_reaches_the_hub_path_with_the_trimmed_name(rig):
     request = rig.calls[0]
     assert request.method == "POST"
     assert request.url.path == "/v1/messaging/conversations/bcv_01234567/rename"
-    assert dict(request.url.params) == {"tenant_id": "org_other"}
-    assert json.loads(request.content) == {"name": "Renamed"}
+    assert dict(request.url.params) == {}
+    assert json.loads(request.content) == {"name": "Renamed", "tenant_id": "org_other"}
+
+
+async def test_rename_sends_the_tenant_in_the_body_never_the_query(rig):
+    # Regression (R1): the tenant used to ride as ``?tenant_id=``, which the
+    # hub's strict rename body ignores, so a multi-org caller got
+    # ``400 tenant_id required``. Exercised on the client directly so the wire
+    # shape is pinned independently of the route.
+    await rig.wire().conversation_rename("bcv_01234567", "Renamed", tenant_id="org_other")
+    assert len(rig.calls) == 1
+    request = rig.calls[0]
+    assert request.url.query == b""
+    assert json.loads(request.content) == {"name": "Renamed", "tenant_id": "org_other"}
+    # No tenant at all: the body stays the bare ``{name}`` and the query stays empty.
+    await rig.wire().conversation_rename("bcv_01234567", "Renamed")
+    assert rig.calls[1].url.query == b""
+    assert json.loads(rig.calls[1].content) == {"name": "Renamed"}
 
 
 async def test_rename_name_taken_passes_through_intact(rig):
@@ -561,26 +578,34 @@ async def test_rename_name_taken_passes_through_intact(rig):
     assert rig.effects == []
 
 
-async def test_rename_refuses_a_blank_name_and_a_query_receipt_before_dispatch(rig):
-    # Whitespace-only passes pydantic's min_length, so the client's trim is the
-    # guard; a query receipt would be silently ignored, so it is refused.
-    blank = await rig.http.post(PREFIX + "/bcv_01234567/rename", json={"name": "   "})
-    assert blank.status_code == 422, blank.text
-    assert blank.json()["detail"]["code"] == "invalid_request"
+async def test_rename_refuses_a_query_receipt_before_dispatch(rig):
+    # A query receipt would be silently ignored, so it is refused before I/O.
     query = await rig.http.post(
         PREFIX + "/bcv_01234567/rename",
         params={"tenant_id": "org_other", "expected_account_id": "acc_a"},
         json={"name": "Renamed"},
     )
     assert query.status_code == 422, query.text
+    assert query.json()["detail"]["code"] == "invalid_request"
     assert rig.calls == rig.effects == []
 
 
-async def test_client_rename_refuses_an_empty_name_without_io(rig):
-    wire = rig.wire()
-    with pytest.raises(ValueError):
-        await wire.conversation_rename("bcv_01234567", " \t ")
-    assert rig.calls == []
+@pytest.mark.parametrize("name", ["", "   ", " \t "], ids=["empty", "spaces", "space-tab"])
+async def test_rename_forwards_an_empty_or_blank_name_to_the_server(rig, name):
+    # R2/Q2: the server owns the name rules, so an empty and a whitespace-only
+    # name behave identically: both reach the hub as ``{"name": ""}`` and its
+    # ``rule=empty`` refusal (not a local rule-less error) is what the UI shows.
+    response = await rig.http.post(PREFIX + "/bcv_01234567/rename", json={"name": name})
+    assert response.status_code == 200, response.text
+    assert len(rig.calls) == 1
+    assert json.loads(rig.calls[0].content) == {"name": ""}
+
+
+async def test_client_rename_trims_only_ascii_space_and_tab(rig):
+    # NBSP (and every other non-ASCII space) is the server's to judge
+    # (``rule=unsupported_space``), so it is forwarded untrimmed.
+    await rig.wire().conversation_rename("bcv_01234567", " \t\u00a0Renamed\u00a0\t ")
+    assert json.loads(rig.calls[0].content) == {"name": "\u00a0Renamed\u00a0"}
 
 
 async def test_rename_capability_is_advertised():

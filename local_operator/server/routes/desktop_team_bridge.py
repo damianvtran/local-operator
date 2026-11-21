@@ -2033,10 +2033,12 @@ class ConversationRenameIn(ConversationOwnerIn):
     ``max_length`` is a loose transport bound (create's 128), deliberately NOT
     the server's 64-code-point limit: a name over 64 must reach the server so the
     renderer gets its ``400 invalid_request`` with ``details.rule=too_long``
-    (and the other sanitizing rules) rather than a local 422 with no rule.
+    (and the other sanitizing rules) rather than a local 422 with no rule. For
+    the same reason there is no ``min_length``: an empty name is forwarded so
+    ``""`` and a whitespace-only name both get the server's ``rule=empty``.
     """
 
-    name: str = Field(min_length=1, max_length=128)
+    name: str = Field(max_length=128)
 
 
 class ConversationSendIn(ConversationOwnerIn):
@@ -2557,19 +2559,14 @@ async def conversation_rename(
         # without the owner guard (or in the default tenant): refuse it instead.
         _raise_read("invalid_request")
     client = _conversation_client(config_manager)
-    try:
-        # The client's ValueError (a whitespace-only name) is raised when the
-        # coroutine runs, so the await is what has to sit inside the try.
-        result = await _conversation_reply(
-            client.conversation_rename(
-                conversation_id,
-                body.name,
-                tenant_id=body.tenant_id,
-                expected_account_id=body.expected_account_id,
-            )
+    result = await _conversation_reply(
+        client.conversation_rename(
+            conversation_id,
+            body.name,
+            tenant_id=body.tenant_id,
+            expected_account_id=body.expected_account_id,
         )
-    except ValueError:
-        _raise_read("invalid_request")
+    )
     return reply(result)
 
 

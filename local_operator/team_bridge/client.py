@@ -4172,23 +4172,31 @@ class TeamBridgeClient:
         404 for a non-member. Those refusals surface unchanged as
         ``BridgeRefusal`` so the renderer can show the server's own reason.
 
-        The name is trimmed here only because a whitespace-only name can never
-        succeed, and refusing it before I/O keeps a blank submit from becoming a
-        round trip. Renaming to the current name is a server-side 200 no-op.
-        The answer carries the server's CANONICAL name, which can differ from
-        what was typed; the renderer displays that one.
+        Only ASCII space and tab are trimmed here, the two characters a typed
+        name picks up at its edges; every other character (NBSP included) is
+        the server's to judge, because it is the authority on name rules and
+        answers with a ``rule`` the renderer can show. An empty or
+        whitespace-only name is therefore FORWARDED, not refused locally, so
+        ``""`` and ``"   "`` both come back as the server's
+        ``400 invalid_request`` with ``details.rule=empty`` rather than a
+        local error with no rule. Renaming to the current name is a
+        server-side 200 no-op. The answer carries the server's CANONICAL name,
+        which can differ from what was typed; the renderer displays that one.
+        The target tenant rides in the BODY as ``tenant_id`` (as members-add
+        and consent send it), never the query: the hub's rename handler reads
+        only its strict body ``{name, tenant_id?}``, so a query tenant is
+        ignored and a multi-org caller is refused ``tenant_id required``.
         Human acts only: no ``actor_endpoint_id`` (an agent act is a server
-        ``400 not_allowed`` in v1).
+        ``400 invalid_request`` with ``details.rule=not_allowed`` in v1).
         """
 
-        trimmed = name.strip()
-        if not trimmed:
-            raise ValueError("name must be nonempty")
+        body: dict[str, Any] = {"name": name.strip(" \t")}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/rename",
-            params={"tenant_id": tenant_id} if tenant_id else None,
-            body={"name": trimmed},
+            body=body,
             access=access,
             expected_account_id=expected_account_id,
         )
