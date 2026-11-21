@@ -370,12 +370,12 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
     for state in prot.state_roots:
         if _under(path, os.path.join(state, _LEDGER_DIRNAME)):
             return "the guardrail's own records"
-        if path == os.path.join(state, *_RESPONDER_POLICY_PARTS):
+        if _in_policy_region(path, state):
             # Team Integrations RFC §7.1 (S-34/S-40): the owner's alert-responder policy
             # is the ONLY thing that authorizes work from an inbound alert, so the agent
             # it authorizes must never be able to write, move or delete it — by the file
             # tools or by bash. Evidence class = CRITICAL for every op, no ask can lift it.
-            return "the owner's alert responder policy"
+            return RESPONDER_POLICY_REASON
         sessions = os.path.join(state, _SESSIONS_DIRNAME)
         if not _under(path, sessions) or path == sessions:
             continue
@@ -719,6 +719,77 @@ def _in_own_pad(path: str, prot: _Protected) -> bool:
     return any(_under_evidence(path, pad) for pad in prot.own_scratchpad)
 
 
+#: The reason every route onto the responder policy carries. A module constant
+#: so ``classify_targets`` can rank even an UNKNOWN program handed the policy
+#: (``python3 -c "open(P, 'w')"``) CRITICAL, where other evidence is only HIGH.
+RESPONDER_POLICY_REASON = "the owner's alert responder policy"
+
+
+def _in_policy_region(path: str, state: str) -> bool:
+    """Is ``path`` the responder policy, something under that name, or its
+    ``team_bridge`` directory itself?
+
+    Why the directory too (PR #4383 review M1/S-1): the loader reads
+    ``<state>/team_bridge/responders.yaml`` by name, so whoever can replace,
+    link, move or extract INTO the directory chooses the policy — ``ln -s
+    ~/forged team_bridge``, ``mv ~/forged team_bridge``, ``cp -R x/.
+    team_bridge/``, ``tar -C``/``unzip -d``/``git -C`` all name only the
+    directory. Only the directory ITSELF is fenced, not everything under it:
+    ``team_bridge/`` also holds the connector's locks and caches, which an
+    agent may legitimately repair (those stay at their ordinary HIGH).
+    Case-folded on a case-insensitive volume so ``RESPONDERS.yaml`` spelled
+    before the file exists still lands on it; ``..`` is already normalised
+    away by every caller (``_norm``/``realpath``).
+    """
+    directory = os.path.join(state, _RESPONDER_POLICY_PARTS[0])
+    policy = os.path.join(directory, _RESPONDER_POLICY_PARTS[1])
+    candidates = [(path, directory, policy)]
+    if _case_insensitive(state):
+        candidates.append((path.casefold(), directory.casefold(), policy.casefold()))
+    return any(p == d or _under(p, pol) for p, d, pol in candidates)
+
+
+def _policy_by_pattern(pattern: str, state: str) -> bool:
+    """Could glob ``pattern`` name the policy or its directory (component-wise,
+    so ``*`` never crosses ``/``)? Fails closed on case like the paths do."""
+    directory = os.path.join(state, _RESPONDER_POLICY_PARTS[0])
+    policy = os.path.join(directory, _RESPONDER_POLICY_PARTS[1])
+    fold = _case_insensitive(state)
+    pat = [c for c in (pattern.casefold() if fold else pattern).split("/") if c]
+    for root in (directory, policy):
+        parts = [c for c in (root.casefold() if fold else root).split("/") if c]
+        if len(pat) == len(parts) and all(
+            fnmatch.fnmatchcase(r, q) for r, q in zip(parts, pat, strict=True)
+        ):
+            return True
+    return False
+
+
+def _policy_reason(target: Target, prot: _Protected) -> str | None:
+    """The responder-policy fence for one resolved word, on every spelling:
+    lexical, realpath (a link already pointing there) and the kernel's landing
+    for a ``..`` word, plus any glob that could match it."""
+    spellings: set[str] = set()
+    for word in (target.path, target.raw_path):
+        if not word:
+            continue
+        spellings.add(_norm(word))
+        try:
+            spellings.add(os.path.realpath(word))
+        except OSError:
+            pass
+    if target.raw_path:
+        kernel = kernel_path(target.raw_path)
+        if kernel:
+            spellings.add(kernel)
+    for state in prot.state_roots:
+        if any(_in_policy_region(s, state) for s in spellings):
+            return RESPONDER_POLICY_REASON
+        if target.pattern is not None and _policy_by_pattern(_norm(target.pattern), state):
+            return RESPONDER_POLICY_REASON
+    return None
+
+
 def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
     """Does ``target`` land in the guard's evidence?
 
@@ -738,6 +809,9 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
     path = target.path
     if path is None:
         return None
+    policy = _policy_reason(target, prot)
+    if policy is not None:
+        return policy
     lexical = {path, target.pattern or path}
     # Cheap prefilter: realpath/F_GETPATH only for words that could be there.
     # The raw (un-normalised) word's realpath resolves ``..`` physically, the
@@ -2564,6 +2638,14 @@ def classify_targets(
             if reason is None:
                 continue
             shown = f"{reason}, handed to {t.program or 'a program'}"
+            if reason == RESPONDER_POLICY_REASON:
+                # An unknown program (an interpreter's ``-c``/``-e``) handed the
+                # policy or its directory may write it, and nothing here can
+                # tell; the policy authorizes the agent asking, so no judge or
+                # ask may lift it (review M1/S-1). Reads go through ``cat`` or
+                # the read tool, which stay LOW.
+                evidence_hits.append(RankedTarget(t, Risk.CRITICAL, shown))
+                continue
             if reason == OTHER_SCRATCHPAD:
                 tree = _tree_read(
                     t,

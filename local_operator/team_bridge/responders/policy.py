@@ -6,12 +6,21 @@ text, never in anything the agent can write. The hub only learns the non-sensiti
 projection (enable bit, tier, pause, consent hash, :func:`policy_sha256`); repos,
 credential profile, link hosts and budgets never leave this machine.
 
-THE FENCE. The file is in the guardrail EVIDENCE class
-(``guardrails.classify._evidence_reason``): an agent's ``write``/``edit`` or any bash
-redirect, ``mv``, ``cp`` or ``rm`` onto it is CRITICAL and refused, the same tier as
-the guardrail's own records. The owner edits it with their own editor (or, later,
-the desktop Responder dialog, RFC Phase 4). That is what makes "the human's
-standing policy is the authority" true rather than a prompt-level hope.
+THE FENCE. The file AND its ``team_bridge`` directory itself are in the guardrail
+EVIDENCE class (``guardrails.classify._in_policy_region``): an agent's
+``write``/``edit``, any bash redirect, ``mv``, ``cp``/``cp -R``, ``rsync``, ``ln``,
+``tar -C``/``unzip -d``, ``git -C … checkout`` or ``rm`` onto either — case-folded and
+after ``..`` — is CRITICAL and refused, the same tier as the guardrail's own records;
+so is the policy path handed to an unknown program (``python3 -c``). The owner edits
+it with their own editor (or, later, the desktop Responder dialog, RFC Phase 4).
+
+What a command classifier CANNOT see: a write whose path is computed at run time
+inside an interpreter or a script file (``python3 x.py`` that builds the path), or
+an archive extracted at the state root that carries ``team_bridge/responders.yaml``.
+The real boundary for those is the S-41 spawner's OS-level write-deny on the state
+root; until it lands, :func:`load_policy` adds what it can: it refuses a symlinked
+file or a symlinked ``team_bridge`` directory, a non-regular file, a file not owned
+by this user, and a group- or world-writable one — each is "no policy" (OFF).
 
 FAIL CLOSED, DEFAULT OFF. A missing file, an unreadable one, a YAML error, an
 unknown key, a wrong type, an unknown tier or severity — every one of them yields
@@ -50,8 +59,11 @@ this slice: a schedule this build cannot evaluate must refuse, never be ignored.
 from __future__ import annotations
 
 import datetime as _dt
+import errno
 import hashlib
+import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -88,7 +100,8 @@ _CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
 _APP_ID = re.compile(r"^iap_[0-9a-f]{8,64}$")
 _HOOK_ID = re.compile(r"^ihk_[0-9a-f]{8,64}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# A segment of only dots (``..``) is a path climb, never a GitHub name (review n3).
+_REPO = re.compile(r"^(?!\.{1,2}/)[A-Za-z0-9_.-]+/(?!\.{1,2}$)[A-Za-z0-9_.-]+$")
 _HOST = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
@@ -329,6 +342,46 @@ def _channel(conversation_id: str, raw: Any) -> ChannelPolicy:
     )
 
 
+class _DuplicateKey(Exception):
+    def __init__(self, key: object) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+def _unique_key_loader() -> type:
+    """A ``SafeLoader`` that refuses a repeated mapping key.
+
+    Why (review m2): ``safe_load`` keeps the LAST duplicate, so ``min_severity:
+    sev1`` … ``min_severity: sev4`` parses as sev4 — exactly the silent widening
+    the all-or-nothing parse exists to rule out. Built per call so the subclass
+    never leaks a constructor into the shared ``SafeLoader``.
+    """
+
+    import yaml
+
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    def _mapping(
+        loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Any, Any]:
+        loader.flatten_mapping(node)
+        seen: set[object] = set()
+        for key_node, _value in node.value:
+            key = loader.construct_object(key_node, deep=True)
+            try:
+                duplicate = key in seen
+            except TypeError:  # an unhashable key: the shape check refuses it later
+                continue
+            if duplicate:
+                raise _DuplicateKey(key)
+            seen.add(key)
+        return loader.construct_mapping(node, deep=deep)
+
+    _Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
+    return _Loader
+
+
 def parse_policy(raw: bytes) -> ResponderPolicy:
     """Parse the file's bytes. Raises :class:`PolicyError`; :func:`load_policy` maps it to OFF."""
 
@@ -337,7 +390,9 @@ def parse_policy(raw: bytes) -> ResponderPolicy:
     if len(raw) > _MAX_FILE_BYTES:
         raise PolicyError("the policy file is larger than 64 KiB")
     try:
-        doc = yaml.safe_load(raw.decode("utf-8"))
+        doc = yaml.load(raw.decode("utf-8"), Loader=_unique_key_loader())  # noqa: S506
+    except _DuplicateKey as exc:
+        raise PolicyError(f"the policy repeats the key {exc.key!r}") from None
     except (UnicodeDecodeError, yaml.YAMLError):
         raise PolicyError("the policy file is not valid UTF-8 YAML") from None
     if not isinstance(doc, Mapping) or set(doc) - _TOP_KEYS:
@@ -358,14 +413,61 @@ def parse_policy(raw: bytes) -> ResponderPolicy:
     return ResponderPolicy(channels=channels, sha256=policy_sha256(raw))
 
 
+def _read_fenced(path: Path) -> bytes:
+    """The policy's bytes, refusing every shape an agent could have planted.
+
+    Why (PR #4383 review M1/S-1): ``Path.read_bytes`` follows links, so one
+    ``ln -sf ~/forged.yaml …/responders.yaml`` (or a linked ``team_bridge``
+    directory) would turn later plain writes to an agent-owned file into policy
+    writes the guardrail never sees. ``O_NOFOLLOW`` refuses a linked leaf; the
+    directory is ``lstat``-ed (``config_dir`` itself may legitimately be a link
+    the owner made, and the classifier already fences renaming it). The
+    ``fstat`` checks run on the descriptor actually read, so a swap between
+    check and read cannot slip past them.
+    """
+
+    directory = path.parent
+    dir_stat = os.lstat(directory)  # FileNotFoundError -> OFF, like a missing file
+    if stat.S_ISLNK(dir_stat.st_mode):
+        raise PolicyError("the team_bridge directory is a symlink")
+    if not stat.S_ISDIR(dir_stat.st_mode):
+        raise PolicyError("team_bridge is not a directory")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        # O_NOFOLLOW on a link (dangling or not) is ELOOP on darwin and Linux.
+        if exc.errno == errno.ELOOP:
+            raise PolicyError("the policy file is a symlink") from None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PolicyError("the policy is not a regular file")
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            raise PolicyError("the policy file is not owned by this user")
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise PolicyError("the policy file is group- or world-writable")
+        if st.st_size > _MAX_FILE_BYTES:
+            raise PolicyError("the policy file is larger than 64 KiB")
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            fd = -1
+            return handle.read(_MAX_FILE_BYTES + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def load_policy(config_dir: Path | str) -> ResponderPolicy:
     """Read the policy NOW. Absent or invalid -> :data:`OFF`-shaped (no channel enabled)."""
 
     path = policy_path(config_dir)
     try:
-        raw = path.read_bytes()
+        raw = _read_fenced(path)
     except FileNotFoundError:
         return OFF
+    except PolicyError as exc:
+        return ResponderPolicy(channels={}, sha256=None, problem=f"invalid: {exc}")
     except OSError as exc:
         return ResponderPolicy(
             channels={}, sha256=None, problem=f"invalid: unreadable ({exc.__class__.__name__})"

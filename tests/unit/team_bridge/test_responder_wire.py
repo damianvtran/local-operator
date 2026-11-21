@@ -9,6 +9,7 @@ real ``BridgeRefusal``s rather than hand-built exceptions.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 from typing import Any
@@ -164,11 +165,61 @@ async def test_heartbeat_epoch_change_is_a_fence():
 
 async def test_heartbeat_5xx_keeps_the_lease_until_local_expiry():
     client = _make_client(lambda r: _err(503, "bridge_unavailable"))
-    kept = await lease.heartbeat(client, _held(), now=NOW)
-    assert kept == _held()
+    held = dataclasses.replace(_held(), deadline=500.0)
+    kept = await lease.heartbeat(client, held, now=NOW, monotonic=lambda: 499.0)
+    assert kept == held
+    # Review m5: the MONOTONIC deadline decides. A wall clock that says the lease
+    # is far from over (a laptop running behind) cannot keep it alive.
     with pytest.raises(lease.LeaseLost) as lost:
-        await lease.heartbeat(client, _held(), now=NOW + dt.timedelta(minutes=3))
+        await lease.heartbeat(
+            client, held, now=NOW - dt.timedelta(hours=1), monotonic=lambda: 500.0
+        )
     assert lost.value.code == "local_expiry"
+
+
+@pytest.mark.parametrize(
+    ("expires", "now_offset_s", "remaining"),
+    [
+        # The hub's 3-minute lease from when the request was SENT…
+        ("2026-11-21T12:03:00Z", 0, 180.0),
+        # …never lengthened by a wall clock running behind (says 13 min left)…
+        ("2026-11-21T12:03:00Z", -600, 180.0),
+        # …and shortened when the wall clock says less is left.
+        ("2026-11-21T12:03:00Z", 120, 60.0),
+    ],
+)
+async def test_renewed_deadline_is_the_sooner_of_lease_and_wall_reading(
+    expires, now_offset_s, remaining
+):
+    renewed = await lease.heartbeat(
+        _make_client(lambda r: _ok(_claim_row(3, expires=expires))),
+        _held(3),
+        now=NOW + dt.timedelta(seconds=now_offset_s),
+        monotonic=lambda: 1000.0,
+    )
+    assert renewed.deadline == 1000.0 + remaining
+
+
+async def test_unreadable_2xx_claim_is_released_when_it_names_an_epoch():
+    """S-7: a 2xx we cannot read as our lease is given back, not left to lapse."""
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.method)
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return _ok({"lease_epoch": 7, "holder_endpoint_id": EP, "lease_expires_at": "garbage"})
+
+    got = await lease.claim(
+        _make_client(handler),
+        tenant_id="org_1",
+        conversation_id=CID,
+        root_message_id=ROOT,
+        endpoint_id=EP,
+    )
+    assert (got.outcome, got.code, got.lease) == ("refused", "invalid_claim_response", None)
+    assert seen == ["POST", "DELETE"]
 
 
 async def test_release_sends_epoch_in_a_delete_body_and_accepts_204():
