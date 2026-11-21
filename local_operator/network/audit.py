@@ -242,6 +242,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # counts only, never the token.
         "credential.held_served",
         "credential.held_lapsed",
+        # A SUBAGENT session first using its ancestor session's held GitHub grant
+        # while the owner was away (credentials/client.py ``_bridge_ancestor_hold``,
+        # 2026-11-21): names the child as the consumer and the ancestor it came from,
+        # so the serve is never silently attributed to the parent. Ids only.
+        "credential.held_bridged",
         # The BORROWER's own record that a dial did not get a grant (credentials/client.py
         # ``_note_borrow_failed``): the 2026-11-17 owner_busy burst was visible only in
         # the owner's log. Coalesced per (owner, key) per window, codes only.
@@ -661,6 +666,12 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "credential.held_lapsed": frozenset(
         {"credential_key", "act", "sub", "grant_id", "serves", "pending", "bound"}
+    ),
+    # `consumer` is the session that used the grant, `bridged_from` the ancestor
+    # session whose held grant it was (both opaque session ids), `grant_id` the
+    # ORIGINAL grant, `hold_until` that grant's (never extended) hold end.
+    "credential.held_bridged": frozenset(
+        {"credential_key", "act", "sub", "grant_id", "consumer", "bridged_from", "hold_until"}
     ),
     # `code`/`reason` are the owner's machine answer (never its sentence), `held`
     # whether this device's held grant bridged it, `retry_after_ms` the owner's
