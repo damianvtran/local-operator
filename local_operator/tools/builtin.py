@@ -4583,6 +4583,37 @@ def _github_borrow_timeout_note(outcome: Any) -> str:
     return _failure_copy(_cli_failures.github_borrow_timeout(owner=owner, seconds=seconds))
 
 
+def _github_owner_offline_note(outcome: Any) -> str:
+    """The ONE stderr line an owner outage with no saved GitHub access adds.
+
+    WHY (2026-11-21): a review/QA subagent on a remote node, its lender offline
+    and no grant of its own or its ancestors' to serve, got ``({}, "")`` in
+    silence, and ``gh`` said only "set the GH_TOKEN environment variable".
+    CONSTRAINTS: only the owner-outage codes (``github.OUTAGE_REFUSALS``) reach
+    here; the line carries the owner's display label, never a token.
+    """
+    owner = str(
+        getattr(outcome, "owner_device_name", "") or getattr(outcome, "owner_device", "") or "?"
+    )
+    return _failure_copy(_cli_failures.github_owner_offline(owner=owner))
+
+
+def _hold_fallback_session_ids(context: Any) -> tuple[str, ...]:
+    """The session's ancestors, from the harness's task tree ONLY.
+
+    ``ToolContext.ancestor_session_ids`` is set by the Session that builds the
+    context, from its live parent objects (``Session._ancestor_session_ids``);
+    the model cannot write it through a tool argument and no env var or peer
+    message feeds it. That provenance is what lets a subagent bridge an owner
+    outage on its parent's held GitHub grant without a forged id borrowing an
+    unrelated session's slot. Never read this from anywhere else.
+    """
+    raw = getattr(context, "ancestor_session_ids", ()) or ()
+    if not isinstance(raw, tuple):
+        return ()
+    return tuple(str(item) for item in raw if isinstance(item, str) and item)
+
+
 async def _github_git_injections(
     context: ToolContext | None, notes: list[str] | None = None
 ) -> dict[str, str]:
@@ -4604,6 +4635,10 @@ async def _github_git_injections(
     extra: dict[str, Any] = {}
     if notes is not None:
         extra["on_timeout"] = lambda outcome: notes.append(_github_borrow_timeout_note(outcome))
+        extra["on_refusal"] = lambda outcome: notes.append(_github_owner_offline_note(outcome))
+    ancestors = _hold_fallback_session_ids(context)
+    if ancestors:
+        extra["hold_fallback_session_ids"] = ancestors
     try:
         from local_operator.network.credentials import github
 
@@ -4723,6 +4758,8 @@ def bash_guard_forge_auth(
                 lent, _token = github.lent_github_env(
                     session_id=session_id,
                     register=getattr(store, "register_redaction", None),
+                    # The harness task tree only: see ``_hold_fallback_session_ids``.
+                    hold_fallback_session_ids=_hold_fallback_session_ids(context),
                 )
             except Exception:  # noqa: BLE001 — a broker fault leaves the bare env
                 lent = {}

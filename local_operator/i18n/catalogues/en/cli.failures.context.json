@@ -23,5 +23,10 @@
   "role": "diagnostic",
   "tone": "concise and actionable",
   "note": "One stderr line in a bash tool result after the existing local GitHub borrow deadline expired. No credential was injected. owner is a sanitized device display name, not a token/account; seconds is the existing numeric deadline. Keep GitHub unchanged. Do not imply a denial, revoke, login requirement, extra retry, or any token/lease extension."
+ },
+ "cli.failures.github_owner_offline": {
+  "role": "diagnostic",
+  "tone": "concise and factual",
+  "note": "One stderr line in a bash tool result when the device lending this machine its GitHub login is offline (or unreachable or busy) and this session has no saved access from that login to use until it returns. No credential was injected. owner is a sanitized device display name, not a token/account. Keep GitHub unchanged. Do not imply a denial, revoke, or that the user must sign in."
  }
 }
