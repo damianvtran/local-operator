@@ -178,13 +178,7 @@ _MAX_EXPANDED_ROWS = 200
 #: Restated here rather than imported because reading the store is the only
 #: reason this module ever touches the tools package, and it does that behind a
 #: function-local import (see :func:`todo_items`).
-STATUS_MARKS = {
-    # i18n: ignore checkbox glyphs; the x is a mark, not a letter of copy
-    "pending": " ",
-    "done": "x",
-    "blocked": "~",
-    "dropped": "-",
-}
+STATUS_MARKS = {"pending": " ", "done": "x", "blocked": "~", "dropped": "-"}
 
 #: Statuses needing no further work. ``blocked`` is absent deliberately — it is
 #: open work waiting on a decision, and counting it would make a stalled list

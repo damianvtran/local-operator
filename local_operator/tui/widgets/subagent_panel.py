@@ -348,7 +348,7 @@ SCOPE_CEILING = 24
 
 #: The dock's one key binding, spelled once because both captions charge its
 #: cells to the scope before the scope is truncated (:func:`_scope_width`).
-_HOTKEY = "ctrl+g"  # i18n: ignore key binding token, not copy
+_HOTKEY = "ctrl+g"
 
 #: Cells ``Subagents of `` costs before the scope itself. Both captions name
 #: the level with these words, and both charge them to the row budget before

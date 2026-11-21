@@ -123,7 +123,7 @@ _t = tr("tui.small")
 #: scanner counts any `.append("...")` argument as prose, and the one sink
 #: this key flows through (`_order.append`) would otherwise register a false
 #: literal that no catalogue should ever carry.
-_PROMPT_KEY = "__prompt__"  # i18n: ignore machine identifier (see comment above)
+_PROMPT_KEY = "__prompt__"
 
 #: Events read per fold. The engine caps the retained list at the same number
 #: (``subagent.TRAJECTORY_CAP``), so this is the TUI's half of one shared
