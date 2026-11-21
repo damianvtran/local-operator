@@ -8079,7 +8079,10 @@ def sessions_move_command(args: argparse.Namespace) -> int:
             else:
                 print(render_resolved(_wsh.aborted()), file=sys.stderr)
                 return 1
-    plan = result.get("confirmed_plan") if isinstance(result.get("confirmed_plan"), dict) else {}
+    # Narrow once so the type checker sees a dict on every path (a ``.get()`` re-read
+    # inside ``isinstance`` does not narrow the second lookup); behaviour unchanged.
+    confirmed_plan = result.get("confirmed_plan")
+    plan: dict[str, Any] = confirmed_plan if isinstance(confirmed_plan, dict) else {}
     plan_broken = plan.get("honoured") is False
     if as_json:
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))

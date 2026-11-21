@@ -89,5 +89,5 @@
   "cli.sessions_move_workset.yes_preflight_failed": "--yes未确认：{device}没有答复能否接收工作文件，因此没有移动任何内容。请用lop network peers检查{device}是否可达后重试，或使用--without-working-set重新运行，把文件留在原处。",
   "cli.sessions_move_workset.yes_carry_unavailable": "--yes未确认：{device}无法接收工作文件，它们会留在原处。没有移动任何内容。请使用--without-working-set重新运行以只迁移对话，或等{device}能够接收后再试。",
   "cli.sessions_move_workset.agent_needs_operator": "{flag}未确认：把工作文件发送到另一台设备需要操作者确认，而此命令是在智能体的shell中运行的。没有移动任何内容，文件仍留在原处。操作者可以在桌面或移动应用的迁移卡片上确认，或在自己的终端中运行：\n  {command}\n或者用以下命令显示的摘要传入--confirm-working-set：\n  {dry_run_command}\n若只迁移对话，请使用--without-working-set重新运行。",
-  "cli.sessions_move_workset.plan_not_honoured": "工作文件没有发送。你已确认把它们发送到{device}，但迁移执行时{device}已无法接收，因此只迁移了对话；文件仍在{source}上，没有丢失任何内容。请检查{device}是否仍允许{source}向其发送工作文件，并运行当前版本的lop，然后把对话迁回{source}再重新迁移，或从{source}push这些工作。"
+  "cli.sessions_move_workset.plan_not_honoured": "工作文件没有发送。你已确认把它们发送到{device}，但迁移执行时{device}已无法接收，因此只迁移了对话；文件仍在{source}上，没有丢失任何内容。请检查{device}是否仍允许{source}向其发送工作文件、是否运行当前版本的lop，然后把对话迁回{source}再重新迁移，或从{source}push这些工作。"
 }
