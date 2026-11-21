@@ -329,6 +329,7 @@ class _LocalOps:
             exclude_credential_ids=list(peer_credential_ids(frame.get("exclude_credential_ids"))),
             affinity=peer_affinity(frame.get("affinity")),
             demote_credential_ids=peer_credential_ids(frame.get("demote_credential_ids")),
+            asker=_control_asker(frame),
         )
 
     def report(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -462,6 +463,33 @@ class _LocalOps:
         if client is None:
             return {"kind": "ack", "key": "", "changed": [], "owners": 0, "newly_borrowable": []}
         return client.pull_placement()
+
+
+def _control_asker(frame: dict[str, Any]) -> Any:
+    """The VERIFIED process incarnation that sent this leg-1 ask, or ``None``.
+
+    G10 Q3: the pre-expiry renewal (``renew_push``) runs only while a live local
+    session that borrowed the key still exists, checked by pid AND start time.
+    The control socket is TCP loopback, so the kernel offers no peer pid
+    (``SO_PEERCRED``/``LOCAL_PEERTOKEN`` are AF_UNIX-only); the session states its
+    own ``asker_pid``/``asker_start`` and this relay accepts them only when that
+    pid is alive NOW with exactly that start time (``secrets.peer.process_info``),
+    which pins the incarnation against pid reuse. The claim grants nothing: the
+    caller already holds the 0600 control key and could borrow directly, and a
+    false claim can at most keep renewals going while the named process lives,
+    every other gate unchanged. Missing or unverifiable: no renewal (fail closed).
+    """
+    from local_operator.secrets.peer import ProcessIdentity, process_info
+
+    pid, start = frame.get("asker_pid"), frame.get("asker_start")
+    if type(pid) is not int or type(start) is not int or pid <= 0:
+        return None
+    try:
+        live = process_info(pid)
+    except Exception:  # noqa: BLE001 — unverifiable is no renewal, never a refusal
+        return None
+    claimed = ProcessIdentity(pid=pid, start_time=start)
+    return live if live is not None and claimed.same_process_as(live) else None
 
 
 def _detail(code: str, key: str, message: str) -> dict[str, Any]:

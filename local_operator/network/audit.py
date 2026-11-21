@@ -252,6 +252,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # counts only, never the token.
         "credential.held_served",
         "credential.held_lapsed",
+        # The HOLDER's record that its relay's pre-expiry renewal ask was refused BY
+        # NAME (credentials/renew_push.py ``pre_expiry_step``, G10): the step stops
+        # renewing that key until a session borrows it again. Ids and the code only.
+        "credential.renewal_refused",
         # A SUBAGENT session first using its ancestor session's held GitHub grant
         # while the owner was away (credentials/client.py ``_bridge_ancestor_hold``,
         # 2026-11-21): names the child as the consumer and the ancestor it came from,
@@ -614,6 +618,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             # basis:ordinal within the winning eligible tier, never global best.
             "account_label",
             "ranked_reason",
+            # What made a holder relay's ``relay-renew`` ask (``pre_expiry`` |
+            # ``link_up``, G10): a closed audit label only, never authority.
+            "trigger",
         }
     ),
     # -- the refresh delegation (mesh-refresh-delegation.md §3.7f) ------------
@@ -679,6 +686,8 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.held_lapsed": frozenset(
         {"credential_key", "act", "sub", "grant_id", "serves", "pending", "bound"}
     ),
+    # `act` the owner asked, `sub` this holder, `code` the owner's machine answer.
+    "credential.renewal_refused": frozenset({"credential_key", "act", "sub", "code"}),
     # `consumer` is the session that used the grant, `bridged_from` the ancestor
     # session whose held grant it was (both opaque session ids), `grant_id` the
     # ORIGINAL grant, `hold_until` that grant's (never extended) hold end.
