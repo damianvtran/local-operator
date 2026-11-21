@@ -2937,7 +2937,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str,
         state: str,
-        screening: Mapping[str, Any],
+        screening: Mapping[str, Any] | None,
         client_ref: str,
         access: OAuthAccess | None = None,
         screening_observation: ScreeningObservation | None = None,
@@ -2957,7 +2957,12 @@ class TeamBridgeClient:
         the block, so that 400 is about the body (``_send_observed``).
         """
 
-        body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
+        # ``screening=None`` is the working/done progress ack: the key is OMITTED,
+        # not sent as null — the hub gates working on the verdict it stored at
+        # read, and an attached tuple may only repeat that record (§7.2).
+        body: dict[str, Any] = {"state": state, "client_ref": client_ref}
+        if screening is not None:
+            body["screening"] = dict(screening)
         _attach_observation(body, self.base_url, screening_observation)
         return await self._send(
             "POST",
