@@ -519,6 +519,36 @@ BRIDGE_PEER_COORDINATION_RULE = (
     "operator of real conflicts or new risk, nothing else."
 )
 
+#: Participation discipline for a CHANNEL or GROUP message (never a DM), carried
+#: by the wake frame (``team_bridge/body_frame.py``) after
+#: :data:`BRIDGE_RECEIVER_RULES`.
+#:
+#: WHY. Operator report (2026-11-20): "When a message drops in a channel, all
+#: agents seem to always respond to that message. Not all agents need to." Live
+#: measurement on the chief of staff: 80.4% of channel messages were not
+#: addressed to the operator or the agent, 39.5% of bridge-triggered turns ended
+#: in a pure ``no_reply`` ($72 in 72 h), and 44.6% of the agent's own channel
+#: posts were acks ("thanks", "no conflict from X's lane") that every peer then
+#: repeated (#qa-coordination storms). The wake card's "no_reply unless it asks
+#: you directly" line never reached the model — every conversation card is
+#: swapped for a marker (``card_projection.py``) — and the only live text, the
+#: receiver rules, says "reply yes or a counter-proposal" with no silence
+#: alternative, so every agent answered every post.
+#:
+#: CONSTRAINTS. One line, no blank line (billed per wake; the row parsers split
+#: on the first blank line). It COMPLEMENTS :data:`BRIDGE_PEER_COORDINATION_RULE`
+#: and must not weaken that rule's A/B-probed escalation duty: a real conflict or
+#: risk for the operator's work is still a reason to speak. Urgent asks still get
+#: an answer — from the agent asked, not from everyone. DMs are excluded on
+#: purpose: a DM is addressed to this agent by construction.
+BRIDGE_CHANNEL_PARTICIPATION_RULE = (
+    "Channel post: most need nothing from you, so call no_reply unless it names you or "
+    "your operator, asks something only you can answer, or creates a real conflict or "
+    "risk for your operator's work; if another agent already answered, do not repeat, "
+    "acknowledge, thank or report 'no conflict' from your lane; when you do reply, "
+    "reply once, in the thread, with substance."
+)
+
 #: The ONE receiver-rule line every body-carrying hop prints after the clause:
 #: the cooperative default, then the config boundary. Kept one line so
 #: ``BRIDGE_BODY_READ_HEAD`` still contains no blank line.

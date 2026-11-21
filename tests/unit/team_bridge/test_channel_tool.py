@@ -894,3 +894,99 @@ async def test_thread_ops_reach_the_hub_with_the_exact_upstream_shape() -> None:
     )
     assert requests[2].url.params["endpoint_id"] == "bep_1"
     assert requests[2].url.params["tenant_id"] == TENANT
+
+
+# -- Payload diet (operator 2026-11-20: channel participation must be token
+# efficient). The model-facing copy of a channel read is compact and drops the
+# per-row fields the model cannot use; ``details["content"]`` keeps the raw page
+# the transcript renderers parse.
+
+
+def _wide_row(seq: int) -> dict[str, Any]:
+    return {
+        "id": f"bcmsg_{seq:08d}",
+        "seq": seq,
+        "sender": {"kind": "agent", "account_id": "acc_2", "display_label": "Peer agent"},
+        "body": f"status update {seq}: nothing blocking on my side",
+        "body_hash": "a" * 64,
+        "sender_delivery_summary": {"delivered": 3, "pending": 0, "failed": 0},
+        "origin": "agent",
+        "created_at": "2026-11-20T10:00:00Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_channel_history_defaults_to_twenty_and_honours_an_explicit_limit() -> None:
+    client = RecordingClient()
+    await execute_bridge(_runtime(client), {"op": "channel_history", "channel_id": "bcv_abcd1234"})
+    await execute_bridge(
+        _runtime(client), {"op": "channel_history", "channel_id": "bcv_abcd1234", "limit": 50}
+    )
+    await execute_bridge(
+        _runtime(client),
+        {"op": "channel_thread", "channel_id": "bcv_abcd1234", "thread_root_id": "bcmsg_root0001"},
+    )
+    assert [call["limit"] for call in client.calls] == [20, 50, 20]
+
+
+@pytest.mark.asyncio
+async def test_channel_reads_model_copy_is_compact_and_drops_unused_row_fields() -> None:
+    from local_operator.harness.rows import _bridge_json_tail
+    from local_operator.team_bridge.tool import _INLINE_DATA_KEY
+
+    rows = [_wide_row(seq) for seq in range(1, 21)]
+    client = RecordingClient(messages={"messages": rows, "has_more": True})
+    client.replies_result = {"root": _wide_row(1), "replies": rows[1:3], "has_more": False}
+    history = await execute_bridge(
+        _runtime(client), {"op": "channel_history", "channel_id": "bcv_abcd1234"}
+    )
+    thread = await execute_bridge(
+        _runtime(client),
+        {"op": "channel_thread", "channel_id": "bcv_abcd1234", "thread_root_id": "bcmsg_root0001"},
+    )
+    for outcome in (history, thread):
+        model = outcome[_INLINE_DATA_KEY]
+        assert model.startswith(f"{BRIDGE_BODY_READ_HEAD}\n\n")
+        body = model[len(BRIDGE_BODY_READ_HEAD) + 2 :]
+        assert '": ' not in body and '", "' not in body
+        assert "body_hash" not in body and "sender_delivery_summary" not in body
+        # The raw page the renderers parse is untouched, fields included.
+        raw = _bridge_json_tail(outcome["content"])
+        assert isinstance(raw, dict)
+        assert "body_hash" in json.dumps(raw) and "sender_delivery_summary" in json.dumps(raw)
+    page = json.loads(history[_INLINE_DATA_KEY][len(BRIDGE_BODY_READ_HEAD) + 2 :])
+    assert [row["seq"] for row in page["messages"]] == list(range(1, 21))
+    assert page["messages"][0]["body"] == rows[0]["body"]
+    assert page["has_more"] is True
+    # The scripted rows themselves were not mutated by the projection.
+    assert all("body_hash" in row for row in rows)
+    assert len(history[_INLINE_DATA_KEY].encode()) < len(history["content"].encode())
+
+
+# -- Advisory guidance once per distinct note per session (operator
+# 2026-11-20: token efficiency). Hub-served advice used to ride EVERY result.
+
+
+@pytest.mark.asyncio
+async def test_advisory_guidance_is_appended_once_per_distinct_note() -> None:
+    client = RecordingClient()
+    notes = ["Keep channel replies short."]
+    client.guidance_note = lambda: notes[0]  # type: ignore[attr-defined]
+    runtime = _runtime(client)
+    context = ToolContext(bridge_runtime=runtime, session_id="sess_1")
+    tool = build_bridge_tool(context)
+    assert tool is not None
+    args = {"op": "channel_history", "channel_id": "bcv_abcd1234"}
+    marker = "[bridge guidance — advisory]"
+
+    first = await tool.execute("call-1", args, None, None, context)
+    second = await tool.execute("call-2", args, None, None, context)
+    notes[0] = "Prefer no_reply in busy channels."
+    third = await tool.execute("call-3", args, None, None, context)
+    other = ToolContext(bridge_runtime=runtime, session_id="sess_2")
+    fourth = await tool.execute("call-4", args, None, None, other)
+
+    assert first.text.count(marker) == 1 and "Keep channel replies short." in first.text
+    assert marker not in second.text
+    assert third.text.count(marker) == 1 and "Prefer no_reply" in third.text
+    assert fourth.text.count(marker) == 1

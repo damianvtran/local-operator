@@ -111,6 +111,10 @@ class FetchedBody:
     #: provenance fact the frame's trusted section may state; an older backend
     #: that omits it reads as "unknown" rather than being inferred from a name.
     sender_kind: str = "unknown"
+    #: The hub's conversation kind (dm|group|channel) from the same body read;
+    #: ``None`` when an older hub omits it. It selects the frame's channel
+    #: participation line and is never inferred from a label.
+    conversation_kind: str | None = None
 
 
 class PendingTurn:
@@ -283,7 +287,7 @@ class PendingTurn:
         try:
             pending = PendingBody(
                 reservation_id=reservation_id,
-                source=_source_ref(row),
+                source=_source_ref(row, conversation_kind=fetched.conversation_kind),
                 conversation_label=fetched.conversation_label,
                 sender_label=fetched.sender_label,
                 sender_kind=_closed_sender_kind(fetched.sender_kind),
@@ -656,7 +660,7 @@ def _closed_sender_kind(value: Any) -> str:
     return value if isinstance(value, str) and value in SENDER_KINDS else "unknown"
 
 
-def _source_ref(row: dict[str, Any]) -> Any:
+def _source_ref(row: dict[str, Any], *, conversation_kind: Any = None) -> Any:
     """Rebuild the frame's source locator from the reservation row.
 
     The row carries the ids, the sequence and the mention flag precisely so a
@@ -680,4 +684,10 @@ def _source_ref(row: dict[str, Any]) -> Any:
         mention=bool(mention) if isinstance(mention, (int, bool)) else False,
         tenant_id=str(row["tenant_id"]),
         sender_kind=_closed_sender_kind(row.get("sender_kind")),
+        # The row has no kind column (contentless); the fetched body does. An
+        # unexpected value degrades to "did not say" rather than refusing the
+        # whole frame, the same posture as ``_closed_sender_kind``.
+        conversation_kind=(
+            conversation_kind if conversation_kind in ("dm", "group", "channel") else None
+        ),
     ).validated()
