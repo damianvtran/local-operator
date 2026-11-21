@@ -236,7 +236,12 @@ def test_workflow_runs_only_shard_zero_of_an_affected_lane_and_skips_coverage() 
     wf = yaml.safe_load(Path(".github/workflows/full-suite.yml").read_text())["jobs"]
     test = wf["test"]
     assert test["strategy"]["matrix"]["shard"] == [0, 1, 2, 3, 4, 5]
-    assert test["strategy"]["matrix"]["python-version"] == ["3.12", "3.13"]
+    # PR merge gates run Python 3.13 only; push/schedule/workflow_dispatch keep
+    # both ["3.12", "3.13"] while shard stays a literal six-element YAML list.
+    assert test["strategy"]["matrix"]["python-version"] == (
+        "${{ fromJSON(github.event_name == 'pull_request' "
+        '&& \'["3.13"]\' || \'["3.12", "3.13"]\') }}'
+    )
     assert (
         test["env"]["LEG_IDLE"]
         == "${{ needs.changes.outputs.lane == 'affected' && matrix.shard != 0 }}"
