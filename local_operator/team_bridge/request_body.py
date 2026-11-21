@@ -329,6 +329,7 @@ def assemble_injection(
             sender_kind=pending.sender_kind,
             mention=source.mention,
             conversation_seq=source.conversation_seq,
+            conversation_kind=source.conversation_kind,
         ).validated()
     frame = build_body_frame(
         source,

@@ -717,3 +717,38 @@ def test_anchor_holds_a_stable_prefix_across_ordinary_tool_steps(tmp_path) -> No
     prefix = [m.model_dump() for m in shapes[0][:3]]
     assert all([m.model_dump() for m in s[:3]] == prefix for s in shapes)
     assert all(_wire_pairing_failures(s) == [] for s in shapes)
+
+
+@pytest.mark.parametrize(
+    ("kind", "carries_rule"),
+    [("channel", True), ("group", True), ("dm", False), (None, False), ("bogus", False)],
+)
+def test_a_hydrated_frame_carries_the_participation_rule_only_for_channels(
+    tmp_path, kind, carries_rule
+) -> None:
+    """The fetched body's conversation kind reaches the frame (operator
+    2026-11-20: every agent answered every channel post). ``sender_kind="agent"``
+    also exercises ``assemble_injection``'s source rebuild, which must keep the
+    kind; an unexpected kind degrades to "did not say", never a refusal."""
+
+    from local_operator.harness.message_types import BRIDGE_CHANNEL_PARTICIPATION_RULE
+
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+
+    async def kind_fetch(conversation_id: str, message_id: str) -> FetchedBody | None:
+        return FetchedBody(
+            body=BODY_TEXT,
+            body_sha256=DIGEST,
+            conversation_label="#qa",
+            sender_label="Ada",
+            sender_kind="agent",
+            conversation_kind=kind,
+        )
+
+    turn = _turn(tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=kind_fetch)) is True
+    text = turn.for_call()
+    assert text is not None
+    assert "sender_kind: agent" in text
+    assert (BRIDGE_CHANNEL_PARTICIPATION_RULE in text) is carries_rule

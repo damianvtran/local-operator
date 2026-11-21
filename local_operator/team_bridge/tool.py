@@ -290,6 +290,59 @@ READ_OPS: tuple[str, ...] = (
 #: turns an over-wide ask into a typed refusal instead of a server 400.
 CONVERSATION_PAGE_MAX = 100
 
+#: Default page for ``channel_history``/``channel_thread`` when the model names
+#: no ``limit``. WHY 20, not the schema's shared 50: every row is a whole
+#: untrusted body billed into context, and the reads exist to catch up on the
+#: recent turn of a conversation (operator 2026-11-20: channel participation
+#: must be token efficient). An explicit ``limit`` is honoured up to
+#: :data:`CONVERSATION_PAGE_MAX`. The schema default stays 50 because other ops
+#: (inbox, shared_history, channel lists) share the field, and a per-op schema
+#: would grow the billed tool surface.
+CONVERSATION_READ_DEFAULT_LIMIT = 20
+
+#: Per-row fields dropped from the MODEL-FACING copy of a channel read only.
+#: ``body_hash`` is a 64-hex integrity digest the model cannot use (bodies are
+#: verified host-side in ``_restore_own_bodies``); ``sender_delivery_summary``
+#: is the hub's per-recipient delivery rollup for the sender's UI. Nothing reads
+#: either from the model text: the transcript renderers (``harness/rows.py``
+#: ``_bridge_json_tail``) parse ``details["content"]``, which keeps the raw page.
+_MODEL_PAGE_DROPPED_ROW_KEYS = frozenset({"body_hash", "sender_delivery_summary"})
+
+
+def _conversation_read_limit(params: Any) -> int:
+    """The page size for a channel read: explicit ``limit`` wins, else 20."""
+
+    if "limit" in getattr(params, "model_fields_set", ()):
+        return int(params.limit)
+    return CONVERSATION_READ_DEFAULT_LIMIT
+
+
+def _model_page_json(result: Any) -> str:
+    """Serialise a channel read's page for the MODEL, compactly and without
+    per-row fields it cannot use.
+
+    Never mutates ``result`` (``details`` keeps the raw page). Compact
+    separators drop ~2 bytes per key and item; ``json.loads`` reads the same
+    structure, so any parser of the text is unaffected.
+    """
+
+    def _row(row: Any) -> Any:
+        if isinstance(row, dict) and _MODEL_PAGE_DROPPED_ROW_KEYS.intersection(row):
+            return {k: v for k, v in row.items() if k not in _MODEL_PAGE_DROPPED_ROW_KEYS}
+        return row
+
+    page = result
+    if isinstance(result, dict):
+        page = dict(result)
+        for key in ("messages", "replies"):
+            rows = page.get(key)
+            if isinstance(rows, list):
+                page[key] = [_row(row) for row in rows]
+        if isinstance(page.get("root"), dict):
+            page["root"] = _row(page["root"])
+    return json.dumps(bound_inline_data_payload(page), ensure_ascii=False, separators=(",", ":"))
+
+
 #: Display label for the auto-added creator member. The label is display-only
 #: and taken from the member row by the server; this one is what another
 #: member sees until the channel's members relabel it.
@@ -378,6 +431,14 @@ class BridgeRuntime:
     #: of queueing their own fetch, and it is cancelled/discarded when the
     #: bound authority is revoked. Lazily created (no loop-bound default).
     _admission_task: Any = None
+    #: session id -> sha256 of the last served §11.3 guidance note appended to
+    #: a bridge result in that session. WHY: the note (hub-served, up to 2 KiB)
+    #: was appended to EVERY successful bridge result, re-billing identical
+    #: advice on each read/post; once per distinct note is enough, and a CHANGED
+    #: note is appended again. Keyed by session id although the runtime is
+    #: session-scoped, so a context that ever shares a runtime still gets the
+    #: note once itself. Process-lifetime: a restart shows it once more.
+    advised_guidance: dict[str, str] = field(default_factory=dict)
 
     def note_presented(self, ref: Any) -> None:
         """Remember where a presented message lives, for default thread placement."""
@@ -3545,7 +3606,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             result = await runtime.client.conversation_messages(
                 channel_id,
                 tenant_id=runtime.tenant_id,
-                limit=int(params.limit),
+                limit=_conversation_read_limit(params),
                 before_seq=params.before_seq,
                 after_seq=params.after_seq,
                 endpoint_id=endpoint_id,
@@ -3588,8 +3649,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             # "bytes never ride details" is the rule the raw page has to keep.
             "content": f"{BRIDGE_BODY_READ_HEAD}\n\n{json.dumps(result, ensure_ascii=False)}",
             _INLINE_DATA_KEY: _with_files(
-                f"{BRIDGE_BODY_READ_HEAD}\n\n"
-                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}",
+                f"{BRIDGE_BODY_READ_HEAD}\n\n{_model_page_json(result)}",
                 files,
             ),
             _IMAGES_KEY: images,
@@ -3611,7 +3671,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 channel_id,
                 thread_root_id,
                 tenant_id=runtime.tenant_id,
-                limit=int(params.limit),
+                limit=_conversation_read_limit(params),
                 after_seq=params.after_seq,
                 endpoint_id=endpoint_id,
             )
@@ -3649,8 +3709,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             # "bytes never ride details" is the rule the raw page has to keep.
             "content": f"{BRIDGE_BODY_READ_HEAD}\n\n{json.dumps(result, ensure_ascii=False)}",
             _INLINE_DATA_KEY: _with_files(
-                f"{BRIDGE_BODY_READ_HEAD}\n\n"
-                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}",
+                f"{BRIDGE_BODY_READ_HEAD}\n\n{_model_page_json(result)}",
                 files,
             ),
             _IMAGES_KEY: images,
@@ -4501,6 +4560,17 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 except Exception:  # noqa: BLE001 — advice only, never a failure
                     note = ""
             blocks: list[Content] = [TextContent(text=content)]
+            if note:
+                # Append only when this session has not already been shown this
+                # exact note (see ``BridgeRuntime.advised_guidance``).
+                digest = hashlib.sha256(note.encode("utf-8", "replace")).hexdigest()
+                memo_key = str(getattr(context, "session_id", "") or runtime.session_id)
+                memo = getattr(runtime, "advised_guidance", None)
+                if isinstance(memo, dict):
+                    if memo.get(memo_key) == digest:
+                        note = ""
+                    else:
+                        memo[memo_key] = digest
             if note:
                 if peer_receipt:
                     # Preserve existing advice without appending prose to the

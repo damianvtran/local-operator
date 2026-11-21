@@ -22668,12 +22668,17 @@ class Session:
         name = fetched.get("conversation_name")
         kind = fetched.get("sender_kind")
         sender = fetched.get("sender_label")
+        # The body read's ``conversation_kind`` (pinned in the body-response
+        # fixture) decides whether the frame carries the channel participation
+        # rule; absent on an older hub, which keeps the pre-rule frame.
+        conversation_kind = fetched.get("conversation_kind")
         return FetchedBody(
             body=body,
             body_sha256=body_hash,
             conversation_label=name if isinstance(name, str) else "",
             sender_label=sender if isinstance(sender, str) else "",
             sender_kind=kind if isinstance(kind, str) else "unknown",
+            conversation_kind=conversation_kind if isinstance(conversation_kind, str) else None,
         )
 
     def _pending_body_followup_row(
