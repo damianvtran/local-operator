@@ -470,7 +470,6 @@ def _nothing_to_carry_here(root: Path, session_id: str) -> bool:
             # Emptiness does not depend on the destination; its id only feeds the
             # scope digest, which nothing reads on this path.
             to_device="",
-            cwd_hint=_session_cwd_at(Path(root), session_id),
         )
     except Exception:  # noqa: BLE001 — unknown is not empty (fail closed)
         logger.info("mobility: could not read %s's working set", session_id, exc_info=True)
@@ -4485,6 +4484,8 @@ def _workset_manifest(
     from local_operator.network import workset, workset_move
 
     try:
+        rejected: list[str] = []
+        cwd = _source_session_cwd(server, session_id, rejected=rejected)
         manifest = workset.compute_manifest(
             Path(server.root),
             session_id,
@@ -4492,7 +4493,8 @@ def _workset_manifest(
             to_name=to_name or server._member_name(to_device),  # noqa: SLF001
             home=workset_move.home_of(server),
             cap=workset.cap_bytes(Path(server.root)),
-            cwd_hint=_source_session_cwd(server, session_id),
+            cwd_hint=cwd,
+            cwd_rejected=tuple(rejected),
             from_device=server.identity.device_id,
             from_name=str(server._own_label()),  # noqa: SLF001
         )
@@ -4501,7 +4503,9 @@ def _workset_manifest(
         # here" whatever the destination could take. Saying so is also what makes
         # ``--yes`` refuse it (#4380's ``carry_unavailable``) instead of consenting
         # to a carrying plan that would send nothing.
-        stays = manifest.empty and manifest.cwd_gap
+        stays = (manifest.empty and manifest.cwd_gap) or (
+            not manifest.planned and manifest.cwd_rejected
+        )
         return replace(manifest, carries_files=bool(carries) and not stays)
     except workset.WorksetUnknown:
         logger.warning(
@@ -4556,6 +4560,10 @@ def _workset_keep_gate(
     ``transferred: false``, each worktree ``left_behind``. ``(None, None)`` when the
     session has no working set.
 
+    REJECTED CWD RECORDS ARE ALSO GATED: their metadata-only rows say the files
+    stay without ever reading the rejected folder. Copying must not bypass that
+    files-stay choice just because the source keeps running.
+
     THE CWD GAP IS GATED LIKE A MOVE (review #4403, R1-M1/U8/Q-1; coordinator ruling
     1). With no record of where the session worked, its mentioned folders may be the
     very work the user means to continue on the destination, and a fork that arrives
@@ -4575,7 +4583,7 @@ def _workset_keep_gate(
         block["transferred"] = False
         block["consent"] = "not_applicable_keep"
         return None, block
-    if manifest.cwd_gap:
+    if manifest.cwd_gap or manifest.cwd_rejected:
         refusal, arrival, _manifest = _workset_gate_full(
             server,
             session_id,
@@ -5363,7 +5371,11 @@ def _last_row_ts(path: Path) -> float:
 
 
 def _source_session_cwd(
-    server: "RelayServer", session_id: str, *, durable_hints: bool = True
+    server: "RelayServer",
+    session_id: str,
+    *,
+    durable_hints: bool = True,
+    rejected: list[str] | None = None,
 ) -> str:
     """The working directory this device's copy of ``session_id`` was last used in.
 
@@ -5397,7 +5409,11 @@ def _source_session_cwd(
     from local_operator.network import workset_move as _wm
 
     return _session_cwd_at(
-        Path(server.root), session_id, home=_wm.home_of(server), durable_hints=durable_hints
+        Path(server.root),
+        session_id,
+        home=_wm.home_of(server),
+        durable_hints=durable_hints,
+        rejected=rejected,
     )
 
 
@@ -5407,6 +5423,7 @@ def _session_cwd_at(
     *,
     home: Path | str | None = None,
     durable_hints: bool = True,
+    rejected: list[str] | None = None,
 ) -> str:
     """:func:`_source_session_cwd` by config root, for a caller with no relay server
     object (``request_move``'s stale-relay check runs in the CLI process).
@@ -5423,10 +5440,16 @@ def _session_cwd_at(
     value may have arrived from another device, so they must never reach that path:
     the wire callers pass ``False``, and the destination gets ``cwd.json`` through
     the copy set instead, where its promote contains it (``carry.remap_cwd_record``).
-    Discovery (the manifest's seeds) validates all four.
+    Discovery (the manifest's seeds) validates all four. ``rejected``, when
+    supplied, collects reason CODES only after every candidate fails. It is a
+    display-only consent signal, never an alternate cwd or discovery input; a
+    valid later candidate suppresses earlier refusals. Wire callers return above
+    disclosure and retain their historical authority unchanged.
     """
     session_dir = root / "sessions" / session_id
     home_text = str(home) if home is not None else str(Path.home())
+
+    rejected_values: list[str] = []
 
     def usable(value: Any) -> str:
         """``value`` as an absolute path, or "" to fall through to the next source.
@@ -5442,9 +5465,13 @@ def _session_cwd_at(
             return ""
         try:
             expanded = os.path.expanduser(value.strip())
-            if not os.path.isabs(expanded) or Path(expanded) == session_dir:
+            if Path(expanded) == session_dir:
+                return ""  # resolve_cwd's fallback is absence, not a recorded cwd
+            rejected_values.append(value)
+            if not os.path.isabs(expanded) or (durable_hints and not value.isprintable()):
                 return ""
         except (OSError, ValueError):  # a path this host cannot even spell
+            rejected_values.append(value)
             return ""
         return expanded
 
@@ -5478,6 +5505,7 @@ def _session_cwd_at(
         # absolute legacy value, exactly what a destination's marker rule has always
         # received. Only discovery below validates and falls through.
         return legacy[0] if legacy else ""
+
     # DISCOVERY VALIDATES EACH LEGACY CANDIDATE (security review #4403 r2, S4). A
     # stale marker (a folder since removed, a path adopted from another device) used
     # to win just by being absolute, and so HID a valid ``cwd.json`` behind it: the
@@ -5486,8 +5514,20 @@ def _session_cwd_at(
     # ``carry.contained_cwd`` rule the durable hints do. The value returned keeps its
     # recorded spelling (not the realpath): the prepare sends it home-relative, which
     # a symlinked home spelling must not change.
+    def discovery_cwd(value: str) -> str:
+        # Reject lexical escapes BEFORE realpath/ownership/existence checks. The
+        # source may have recorded an arbitrary other-host path; disclosure must
+        # not inspect that target just to explain why it cannot travel.
+        if not value:
+            return ""
+        allowed = os.path.abspath(home_text)
+        lexical = os.path.abspath(value)
+        if lexical != allowed and not lexical.startswith(allowed.rstrip(os.sep) + os.sep):
+            return ""
+        return carry_mod.contained_cwd(value, home=home_text, config_root=root)
+
     for value in legacy:
-        if carry_mod.contained_cwd(value, home=home_text, config_root=root):
+        if discovery_cwd(value):
             return value
     # THE DURABLE RECORD: idle exec/TUI sessions have no legacy source once their
     # runtime exits. Verify the sidecar and contain its cwd before discovery can run
@@ -5498,11 +5538,26 @@ def _session_cwd_at(
         # 4. ``cwd.json``, written at birth and on every runtime start/change, and
         # validated at arrival by both import doors (``carry.remap_cwd_record``).
         found = usable(read_session_cwd(session_dir))
-        found = carry_mod.contained_cwd(found, home=home_text, config_root=root) if found else ""
+        found = discovery_cwd(found)
         if found:
             return found
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's cwd record", session_id, exc_info=True)
+    # Rejection is disclosure, NEVER cwd authority. Collect only a disposition,
+    # with no recorded bytes: even a protected/malformed path can contain secrets.
+    # A later valid candidate wins above, preserving discovery and wire authority.
+    if rejected is not None and rejected_values:
+        rejected.append("unsafe_path")
+        for value in rejected_values:
+            # Lexical only: do not resolve/stat a rejected target to explain it.
+            # Symlink/ownership/protected-path refusals stay the generic safe code.
+            if not value.isprintable() or not os.path.isabs(value):
+                continue
+            normalized = os.path.abspath(value.strip())
+            allowed = os.path.abspath(home_text)
+            if normalized != allowed and not normalized.startswith(allowed.rstrip(os.sep) + os.sep):
+                rejected[-1] = "outside_home"
+                break
     # Exhausted validated sources means UNKNOWN, never a rejected legacy value.
     # Transcript rows (including inherited fork checkpoints) are content, not cwd
     # authority. Older sessions acquire a durable record when their runtime starts.

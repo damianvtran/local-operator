@@ -314,12 +314,13 @@ class Manifest:
     #: session that only read about a repository needs no confirmation.
     mentioned: tuple[str, ...] = ()
     #: Whether ANY source named the root session's working directory
-    #: (``mobility._session_cwd_at``: wake index, marker, runtime record, ``cwd.json``,
-    #: latest checkpoint). ``False`` means the plan cannot know where the session
+    #: (``mobility._session_cwd_at``: wake index, marker, runtime record, ``cwd.json``).
+    #: ``False`` means the plan cannot know where the session
     #: worked, so a ``mentioned`` worktree may be its real work rather than something
     #: it only read about — see :attr:`cwd_gap`. Not a digest input.
     cwd_known: bool = True
-    #: Machine reason when ``cwd_known`` is false (``"not_recorded"``), else "".
+    #: Machine reason when ``cwd_known`` is false: ``not_recorded`` or ``rejected``.
+    #: Rejected records are disclosed through metadata-only left-behind rows.
     cwd_unknown_reason: str = ""
 
     @property
@@ -341,6 +342,11 @@ class Manifest:
         non-empty manifest, which is what makes ``--yes`` refuse it (#4380).
         """
         return not self.cwd_known and bool(self.mentioned)
+
+    @property
+    def cwd_rejected(self) -> bool:
+        """Display-only cwd refusals require consent even for a keep copy."""
+        return any(row.sources == ("cwd:rejected",) for row in self.worktrees)
 
     @property
     def planned(self) -> tuple[WorktreeFacts, ...]:
@@ -685,6 +691,7 @@ def candidate_seeds(
     *,
     cwd_hint: str | None = None,
     home: Path | None = None,
+    rejected: list[str] | None = None,
 ) -> list[Seed]:
     """Path seeds for every session in the tree (§3.2 step 2).
 
@@ -714,7 +721,7 @@ def candidate_seeds(
         if index == 0 and cwd_hint is not None:
             recorded = cwd_hint
         else:
-            recorded = recorded_cwd(root, sid, home=home_path)
+            recorded = recorded_cwd(root, sid, home=home_path, rejected=rejected)
         cwd = _absolute_seed(recorded, home_path)
         if cwd and os.path.realpath(cwd) != os.path.realpath(directory):
             seeds.append(Seed(cwd, tag or "cwd"))
@@ -746,20 +753,23 @@ def candidate_seeds(
     return seeds
 
 
-def recorded_cwd(root: Path, session_id: str, *, home: Path | None = None) -> str:
+def recorded_cwd(
+    root: Path, session_id: str, *, home: Path | None = None, rejected: list[str] | None = None
+) -> str:
     """``session_id``'s recorded working directory, or "" — the move's one resolver.
 
     Delegates to ``mobility._session_cwd_at`` (wake index → marker → runtime record
-    → ``cwd.json`` → latest checkpoint, each through the S-2 ``usable`` rule) so the
+    → ``cwd.json``, each through the S-2 ``usable`` rule) so the
     manifest, the prepare's ``source_cwd`` and the stale-relay check can never
     disagree about where a session worked. Imported lazily: mobility imports this
     module the same way. Never raises — an unreadable record is "unknown", which
-    the manifest reports (``cwd_known``) rather than failing the move.
+    the manifest reports (``cwd_known``) rather than failing the move. ``rejected``
+    receives only safe reason codes for consent disclosure, never a rejected path.
     """
     try:
         from local_operator.network.mobility import _session_cwd_at
 
-        return _session_cwd_at(Path(root), session_id, home=home)
+        return _session_cwd_at(Path(root), session_id, home=home, rejected=rejected)
     except Exception:  # noqa: BLE001
         logger.debug("workset: could not resolve %s's cwd", session_id, exc_info=True)
         return ""
@@ -1605,6 +1615,7 @@ def compute_manifest(
     home: Path | None = None,
     cap: int = DEFAULT_CAP_BYTES,
     cwd_hint: str | None = None,
+    cwd_rejected: tuple[str, ...] = (),
     from_device: str = "",
     from_name: str = "",
 ) -> Manifest:
@@ -1617,7 +1628,8 @@ def compute_manifest(
     """
     home_path = Path(home) if home is not None else Path.home()
     tree = session_tree(Path(root), session_id)
-    seeds = candidate_seeds(Path(root), tree, cwd_hint=cwd_hint, home=home_path)
+    rejected = list(cwd_rejected)
+    seeds = candidate_seeds(Path(root), tree, cwd_hint=cwd_hint, home=home_path, rejected=rejected)
     # Whether the ROOT session's cwd was known: its seed is the only one tagged
     # plain "cwd" (a child's is ``subagent:<id>``). A cwd that resolved but is not in
     # a repository is still KNOWN — the session worked there, so its mentions really
@@ -1644,7 +1656,23 @@ def compute_manifest(
     )
     candidates = [c for c in candidates if not mention_only(c.sources)]
     live = _live_cwds(Path(root), set(tree))
-    facts: list[WorktreeFacts] = []
+    # Rejected cwd metadata cannot enter discovery or transfer: no absolute path,
+    # repository, git facts or recorded bytes survive. The existing left-behind
+    # disposition supplies truthful translated disclosure AND binds the consent
+    # digest, including a recorded cwd with no transcript mentions at all.
+    facts: list[WorktreeFacts] = [
+        WorktreeFacts(
+            path="…",
+            repo="",
+            abs_path="",
+            abs_repo="",
+            sources=("cwd:rejected",),
+            state="left_behind",
+            reason=reason,
+        )
+        for reason in sorted(set(rejected))
+        if reason in {"outside_home", "unsafe_path"}
+    ]
     for candidate in candidates:
         fact = worktree_facts(candidate, home=home_path)
         real = os.path.realpath(candidate.path)
@@ -1670,7 +1698,7 @@ def compute_manifest(
         from_name=from_name,
         mentioned=mentioned,
         cwd_known=cwd_known,
-        cwd_unknown_reason="" if cwd_known else "not_recorded",
+        cwd_unknown_reason="" if cwd_known else ("rejected" if rejected else "not_recorded"),
     )
 
 

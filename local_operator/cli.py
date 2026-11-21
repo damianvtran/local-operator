@@ -8294,6 +8294,18 @@ def _sessions_move_yes_declined(
     if in_agent_shell():
         message = _sessions_move_agent_message("--yes", surfaces)
         return _sessions_move_declined("agent_shell", message, block, surfaces)
+    if block.get("cwd_unknown_reason") == "rejected" or any(
+        isinstance(row, Mapping) and row.get("sources") == ["cwd:rejected"]
+        for row in block.get("worktrees") or []
+    ):
+        # The record exists but is not safe to inspect. Reuse the explicit
+        # files-stay choice, not a claim that it was never recorded or that the
+        # destination could fix this by accepting files on a retry.
+        message = _wsh.needs_confirmation(
+            source=workset_text.source_label(block, "?"),
+            digest=str(block.get("scope_digest") or ""),
+        )
+        return _sessions_move_declined("cwd_rejected", message, block, surfaces)
     if block.get("cwd_known") is False and block.get("mentioned"):
         # THE CWD GAP IS ITS OWN REASON (review #4403, U1/R1-m1/Q-2; coordinator ruling
         # 2). Its plan never carries files, so it used to fall into

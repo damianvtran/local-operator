@@ -235,7 +235,9 @@ def test_c_a_relative_or_session_dir_cwd_json_is_ignored(
 
     manifest = workset.compute_manifest(root, SESSION, to_device="d", home=tmp_path)
     assert manifest.cwd_known is False
-    assert manifest.to_dict()["cwd_unknown_reason"] == "not_recorded"
+    assert manifest.to_dict()["cwd_unknown_reason"] == (
+        "not_recorded" if recorded == "SESSION_DIR" else "rejected"
+    )
 
 
 @pytest.mark.parametrize("rejected_legacy", [False, True])
@@ -277,14 +279,22 @@ def test_d_unknown_cwd_with_a_mentioned_worktree_asks_and_yes_is_refused(
     assert code == 0, answer
     assert answer["confirmation_required"] is True, answer
     block = answer["working_set"]
-    assert block["cwd_known"] is False and block["cwd_unknown_reason"] == "not_recorded"
-    assert block["worktrees"] == [] and block["totals"]["worktrees"] == 0
+    assert block["cwd_known"] is False
+    assert block["cwd_unknown_reason"] == ("rejected" if rejected_legacy else "not_recorded")
+    assert block["totals"]["worktrees"] == 0
+    assert [(row["state"], row["reason"]) for row in block["worktrees"]] == (
+        [("left_behind", "unsafe_path")] if rejected_legacy else []
+    )
     assert block["mentioned"] == [RETEST]
     assert block["carries_files"] is False  # nothing planned, so nothing would travel
 
     code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--dry-run")
     assert code == 0
-    assert "working folder is not recorded" in out.out, out.out
+    if rejected_legacy:
+        assert "not recorded" not in out.out
+        assert "stay" in out.out
+    else:
+        assert "working folder is not recorded" in out.out, out.out
     assert RETEST in out.out
 
     code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--yes", "--json")
@@ -292,7 +302,9 @@ def test_d_unknown_cwd_with_a_mentioned_worktree_asks_and_yes_is_refused(
     assert code == 1 and document["ok"] is False, document
     assert document["code"] == "working_set_unconfirmed", document
     # Its own reason since review round 1 (L6): the destination CAN take files here.
-    assert document["consent_declined"]["reason"] == "cwd_unknown", document
+    assert document["consent_declined"]["reason"] == (
+        "cwd_rejected" if rejected_legacy else "cwd_unknown"
+    ), document
     assert (server_a.root / "sessions" / SESSION).is_dir()
     assert not (server_b.root / "sessions" / SESSION).exists()
 
@@ -410,7 +422,12 @@ def test_l1_a_hostile_cwd_record_is_never_a_discovery_seed(
     from local_operator.network import workset
 
     manifest = workset.compute_manifest(root, SESSION, to_device="d", home=home)
-    assert manifest.worktrees == () and manifest.cwd_known is False
+    assert manifest.planned == () and manifest.cwd_known is False
+    assert manifest.cwd_unknown_reason == "rejected"
+    assert [(row.state, row.reason) for row in manifest.worktrees] == [
+        ("left_behind", "outside_home" if where == "outside_home" else "unsafe_path")
+    ]
+    assert all(not row.abs_path and not row.abs_repo for row in manifest.worktrees)
 
 
 @pytest.mark.parametrize("imported", [False, True])
@@ -891,3 +908,149 @@ def test_n1_a_carried_restore_records_the_restored_tree_in_cwd_json(tmp_path: Pa
     rows = [{"state": "restored", "path": "~/proj", "dest_path": "~/proj-moved"}]
     workset_move._retarget_cwd(SimpleNamespace(root=root), SESSION, "~/proj/sub", rows, home)
     assert read_session_cwd(session) == os.path.realpath(home / "proj-moved" / "sub")
+
+
+@pytest.mark.parametrize("source_kind", ["desktop", "durable"])
+@pytest.mark.parametrize(
+    "kind", ["outside_home", "relative", "control", "protected", "missing", "foreign_uid"]
+)
+def test_rejected_cwd_without_mentions_requires_files_stay_consent(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Rig,
+    bhome: Path,
+    capsys: pytest.CaptureFixture[str],
+    source_kind: str,
+    kind: str,
+) -> None:
+    """A positive but unsafe cwd is disclosure, not discovery or transfer authority.
+
+    Exercise the real CLI and owner gates with no transcript mentions. The spies
+    make a silently reintroduced git/facts/gitdir discovery fail even if the
+    consent result happens to remain correct. Recorded bytes never leave owner
+    metadata, including protected names and terminal-control/secret-shaped text.
+    """
+    from local_operator.network import workset
+
+    server_a, server_b, _host, _port = pair
+    source = _idle_cli_session(pair, monkeypatch, rig, bhome)
+    (source / "transcript.jsonl").write_text("", encoding="utf-8")
+    values = {
+        "outside_home": str(rig.base / "outside-private"),
+        "relative": "private-relative",
+        "control": str(rig.home / "private\x1b[31m\x00cwd"),
+        "protected": str(rig.home / ".ssh" / "private"),
+        "missing": str(rig.home / "missing-private"),
+        "foreign_uid": str(rig.home / "foreign-private"),
+    }
+    recorded = values[kind]
+    if kind == "foreign_uid":
+        Path(recorded).mkdir()
+        real_stat = os.stat
+
+        def foreign_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            info = real_stat(path, *args, **kwargs)
+            if str(path) == recorded:
+                fields = list(info)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+            return info
+
+        monkeypatch.setattr(os, "stat", foreign_stat)
+    if source_kind == "desktop":
+        (source / "desktop.json").write_text(json.dumps({"cwd": recorded}), encoding="utf-8")
+    else:
+        _write_cwd_record(source, recorded)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    calls: list[str] = []
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("discovery")
+        raise AssertionError("a rejected cwd reached git/facts/gitdir discovery")
+
+    for name in ("_git", "worktree_facts", "_walk_up_for_git"):
+        monkeypatch.setattr(workset, name, forbidden)
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--dry-run", "--json")
+    preview = json.loads(out.out)
+    assert code == 0 and preview["confirmation_required"] is True, preview
+    block = preview["working_set"]
+    reason = "outside_home" if kind == "outside_home" else "unsafe_path"
+    assert block["cwd_unknown_reason"] == "rejected"
+    assert block.get("mentioned", []) == [] and block["carries_files"] is False
+    assert [(r["state"], r["reason"]) for r in block["worktrees"]] == [("left_behind", reason)]
+    assert block["totals"]["worktrees"] == 0 and block["totals"]["bytes"] == 0
+    assert "private" not in json.dumps(block) and "\\u001b" not in json.dumps(block)
+    assert workset.block_scope_digest(block, to_device=target) == block["scope_digest"]
+    manifest = mobility._workset_manifest(server_a, SESSION, to_device=target, carries=True)
+    assert not manifest.planned and not manifest.carries_files
+    assert all(not row.abs_path and not row.abs_repo for row in manifest.worktrees)
+    before = _b_sessions(server_b)
+    destination_trees = sorted(bhome.rglob(".git"))
+    stale = workset.scope_digest(workset.Manifest(to_device=target, to_name=""))
+    for mode in ([], ["--keep"]):
+        for flags, expected in (
+            ([], "working_set_unconfirmed"),
+            (["--yes"], "working_set_unconfirmed"),
+            (["--confirm-working-set", stale], "working_set_changed"),
+        ):
+            code, out = _cli(server_a, monkeypatch, capsys, "--to", target, *mode, *flags, "--json")
+            refusal = json.loads(out.out)
+            assert code == 1 and refusal["code"] == expected, refusal
+            if flags == ["--yes"]:
+                assert refusal["consent_declined"]["reason"] == "cwd_rejected", refusal
+                assert "not recorded" not in refusal["consent_declined"]["message"]
+                assert "cannot take" not in refusal["consent_declined"]["message"]
+            assert _b_sessions(server_b) == before
+            assert source.is_dir()
+    code, out = _cli(server_a, monkeypatch, capsys, "--to", target, "--dry-run")
+    assert code == 0 and "stay" in out.out and "private" not in out.out, out
+    assert "not recorded" not in out.out and "needs no confirmation" not in out.out
+    # Confirmed KEEP really copies the session, but never snapshots any worktree.
+    code, out = _cli(
+        server_a,
+        monkeypatch,
+        capsys,
+        "--to",
+        target,
+        "--keep",
+        "--confirm-working-set",
+        block["scope_digest"],
+        "--json",
+    )
+    answer = json.loads(out.out)
+    assert code == 0 and answer["ok"] is True, answer
+    assert answer["working_set"]["transferred"] is False
+    assert len(_b_sessions(server_b)) == len(before) + 1
+    assert sorted(bhome.rglob(".git")) == destination_trees
+    # Explicit MOVE consent likewise sends only the conversation, never work.
+    code, out = _cli(
+        server_a,
+        monkeypatch,
+        capsys,
+        "--to",
+        target,
+        "--confirm-working-set",
+        block["scope_digest"],
+        "--json",
+    )
+    moved = json.loads(out.out)
+    assert code == 0 and moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is False
+    assert sorted(bhome.rglob(".git")) == destination_trees
+    assert rig.feat.is_dir()
+    assert calls == []
+    print(
+        json.dumps(
+            {
+                "case": [source_kind, kind],
+                "confirmation_required": True,
+                "reason": reason,
+                "move_keep_yes": "refused",
+                "stale_digest": "refused",
+                "confirmed_keep": answer["ok"],
+                "transferred": answer["working_set"]["transferred"],
+                "git_facts_gitdir_calls": len(calls),
+            }
+        )
+    )
