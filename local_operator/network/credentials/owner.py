@@ -994,6 +994,22 @@ class MeshCredentialBroker:
             session_id=for_session,
             detail=detail,
         )
+        # G9: ids only, so a later ``member rm`` can name what this holder may still
+        # serve from its hold if it is unreachable when it is removed (``lends.py``).
+        # (Distinct local names: binding ``github_app`` here would make it a local
+        # for the WHOLE function and break its earlier module-level uses.)
+        from local_operator.network.credentials.github import is_installation_grant
+        from local_operator.network.credentials.lends import note_lend
+
+        note_lend(
+            self.root,
+            self.network_id,
+            holder=by,
+            key=key,
+            grant_id=grant.grant_id,
+            until_ms=max(int(grant.grant_expires_at_ms or 0), int(grant.hold_until_ms or 0)),
+            revocable=is_installation_grant(grant),
+        )
         return grant.to_detail()
 
     async def _coalesced_resolve(self, **fields: Any) -> Any:

@@ -23,7 +23,8 @@ tells the operator nothing is the failure mode this module exists to prevent.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Any
 
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
@@ -768,6 +769,54 @@ def render_copy_revoke_notice(
         f"a wipe notice for '{name}' is queued for {peer_name}: the copy is deleted on "
         "its next contact",
     ]
+
+
+def render_removal_lends(
+    peer_name: str,
+    *,
+    revoked: int,
+    open_lends: list[dict[str, Any]],
+    told: int,
+    now_ms: int | None = None,
+) -> list[str]:
+    """What a ``member rm`` receipt says about the credentials it LENT that member (G9).
+
+    The copies sentence covers stored secrets; this one covers lends — bearers the
+    member borrowed and may hold in memory. Three classes, never merged:
+
+    - revoked at the source (an App token DELETEd, a renewal lend ended);
+    - told: the member was reachable, so the removal reached it over its link and
+      its own client drops what it borrowed — told, not confirmed;
+    - left usable: the member was NOT reachable, and no issuer can revoke these, so
+      it keeps serving each from its offline hold until the named moment. A removed
+      member is never contacted again, so nothing will shorten that from here; the
+      only remedy is the copies' one — rotate at the source.
+
+    Ids and times only: the credential key and an absolute UTC moment, no token,
+    no account label.
+    """
+    lines: list[str] = []
+    if revoked > 0:
+        noun = "lend" if revoked == 1 else "lends"
+        lines.append(f"{revoked} {noun} to {peer_name} revoked at the source")
+    if told > 0:
+        noun = "lend" if told == 1 else "lends"
+        lines.append(
+            f"{peer_name} was told over its live link to drop {told} borrowed {noun} "
+            "(its own client ends them; this device cannot confirm it)"
+        )
+    now = time.time() * 1000 if now_ms is None else now_ms
+    for lend in open_lends:
+        until_ms = int(lend.get("until_ms") or 0)
+        if until_ms <= now:
+            continue
+        until = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(until_ms / 1000))
+        lines.append(
+            f"'{lend.get('key')}' stays usable on {peer_name} until {until}: it was not "
+            "reachable, nothing can revoke it from here, and a removed member is never "
+            "contacted again — rotate that credential at its source to end it sooner"
+        )
+    return lines
 
 
 def render_removal_endings(
