@@ -21831,12 +21831,27 @@ class Session:
             return None
         if self._abort_requested or self._graceful_cancel_requested:
             return None
-        from local_operator.team_bridge.host import owner_fence_refusal
+        from local_operator.team_bridge.host import (
+            outbound_tool_fence,
+            owner_fence_refusal,
+        )
         from local_operator.team_bridge.store import Store
 
         try:
-            if owner_fence_refusal(runtime) is not None:
-                return None
+            # THE ROW IS THE AUTHORITY for a non-designated session. The strict
+            # fence answers not_designated for a task session the connector routed
+            # a DM reply to, which left a busy routed session unable to serve its
+            # own row until the sweep handed it back to the designated session.
+            # So a not_designated refusal alone is retried with the binding-only
+            # fence (every owner/generation/consent check, designation relaxed),
+            # and such a session may then serve ONLY a row routed to it; the
+            # per-call facts below re-prove the stamped designation is still live.
+            routed_only = False
+            refusal = owner_fence_refusal(runtime)
+            if refusal is not None:
+                if refusal.get("code") != "not_designated" or outbound_tool_fence(runtime):
+                    return None
+                routed_only = True
             store = Store(runtime.config_dir)
             skipped = set(exclude)
             while True:
@@ -21849,10 +21864,15 @@ class Session:
                 )
                 if row is None:
                     return None
-                facts = store.per_call_admission_state(runtime.owner, runtime.session_id)
+                facts = store.per_call_admission_state(
+                    runtime.owner,
+                    runtime.session_id,
+                    reservation=(str(row["conversation_id"]), str(row["message_id"])),
+                )
                 receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
                 if (
-                    facts
+                    (not routed_only or row.get("routed_session") == runtime.session_id)
+                    and facts
                     and facts.get("designation_matches")
                     and facts.get("consent_version") == row["consent_version"]
                     and facts.get("policy_epoch") == row["policy_epoch"]
