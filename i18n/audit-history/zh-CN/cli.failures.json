@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "cli.failures",
-  "history_sha256": "9140c01d5e38458f261476d7320334ffb1cb5a186714dc1bdca015324c232df6",
+  "history_sha256": "a9a3b22d934af9e56ed9a6dd3b4963ad1c739d9cebcd959bd8225f650f05496d",
   "entries": [
     {
       "locale": "zh-CN",
@@ -54,6 +54,34 @@
         {
           "path": "i18n/audits/evidence/zh-CN/cli.failures/goo1/report.md",
           "sha256": "cddaa69d130fa533e6f0f81881b129a7cc1a8e2a2bb2d109f2ed6e8fe3374f59"
+        }
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.failures",
+      "source_sha256": "da8725bbc324ad5124716489a31616dc4e7d999ae1ae07f9060d206f0137bc95",
+      "translator": {
+        "agent": "manager (lopdev lane 79, PR #4364 commit 6d1afe8c3)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "683ecf30b5dc",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN cli.failures goo2: independent re-audit of github_owner_offline after en reworded to \"isn't answering right now\" (PR #4364, 6d1afe8c3); PASS; round-1 corrections persist; other 5 keys byte-identical. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/zh-CN/cli.failures/goo2/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.failures/goo2/report.md",
+          "sha256": "915e8b3dbc073b9592dfe818fc8669b2553fb53f0d3b79932fbeb70b5cb4c033"
         }
       ]
     }
