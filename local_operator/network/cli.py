@@ -339,7 +339,13 @@ def add_parser(
     # the default `drive` role cannot move, delete or borrow a login, and the only
     # other way to widen it is a re-pair that burns the device id.
     for verb, words in (
-        ("grant", "Allow a peer more on this device (move, delete, broker_credential, ...)"),
+        # ``workset_import`` is named here because ``move`` does not imply it: without
+        # it a move onto this device carries the conversation and leaves the files.
+        (
+            "grant",
+            "Allow a peer more on this device (move, workset_import, delete, "
+            "broker_credential, ...)",
+        ),
         ("revoke", "Take capabilities back from a peer on this device"),
     ):
         caps = member_actions.add_parser(verb, help=words)
@@ -7402,6 +7408,16 @@ def _persist_join(
                 added_via="invite",
             ),
         ]
+    # NO RECEIVER-LOCAL GRANT RIDES THE ADMISSION TABLE (#4245 security round 4, S17,
+    # the join-path sibling of S15): ``workset_import`` is THIS device's own decision
+    # about a peer ("granted on the receiver, never implied by any role incl. admin"),
+    # and a fresh joiner has decided nothing yet, so whatever the inviter's table says
+    # about it is dropped here exactly as ``relay.adopt_members`` drops it from a pull.
+    from local_operator.network.relay import _without_receiver_local
+
+    for row in rows:
+        if row.device_id != identity.device_id:
+            row.capabilities = _without_receiver_local(row.capabilities)
     self_row = next((row for row in rows if row.device_id == identity.device_id), None)
     # WHERE WE CAN BE REACHED, from our own settings rather than from the address
     # we happened to dial.

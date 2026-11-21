@@ -94,6 +94,13 @@ def help_yes() -> Msg:
     return Msg("cli.sessions_move_workset.help_yes", {})
 
 
+def import_not_granted(*, device: str, command: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.import_not_granted",
+        {"device": device, "command": command},
+    )
+
+
 def leaves_behind(*, path: str, command: str) -> Msg:
     return Msg("cli.sessions_move_workset.leaves_behind", {"path": path, "command": command})
 
@@ -138,6 +145,13 @@ def probe_https_rewrite(*, device: str, url: str) -> Msg:
     return Msg("cli.sessions_move_workset.probe_https_rewrite", {"device": device, "url": url})
 
 
+def probe_refused_by_policy(*, device: str, remote: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.probe_refused_by_policy",
+        {"device": device, "remote": remote},
+    )
+
+
 def probe_remedy(*, device: str, command: str) -> Msg:
     return Msg("cli.sessions_move_workset.probe_remedy", {"device": device, "command": command})
 
@@ -157,6 +171,10 @@ def prompt_stays(*, session: str, device: str, source: str) -> Msg:
     )
 
 
+def reason_clone_parent_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.clone_parent_refused", {})
+
+
 def reason_contended() -> Msg:
     return Msg("cli.sessions_move_workset.reason.contended", {})
 
@@ -169,6 +187,10 @@ def reason_destination_conflict() -> Msg:
     return Msg("cli.sessions_move_workset.reason.destination_conflict", {})
 
 
+def reason_destination_declined() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.destination_declined", {})
+
+
 def reason_history_secret() -> Msg:
     return Msg("cli.sessions_move_workset.reason.history_secret", {})
 
@@ -177,12 +199,20 @@ def reason_history_unscannable() -> Msg:
     return Msg("cli.sessions_move_workset.reason.history_unscannable", {})
 
 
+def reason_import_not_granted() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.import_not_granted", {})
+
+
 def reason_in_progress_operation() -> Msg:
     return Msg("cli.sessions_move_workset.reason.in_progress_operation", {})
 
 
 def reason_insufficient_space() -> Msg:
     return Msg("cli.sessions_move_workset.reason.insufficient_space", {})
+
+
+def reason_kept_as_confirmed() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.kept_as_confirmed", {})
 
 
 def reason_lfs() -> Msg:
@@ -201,8 +231,28 @@ def reason_over_cap() -> Msg:
     return Msg("cli.sessions_move_workset.reason.over_cap", {})
 
 
+def reason_primary_absent() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.primary_absent", {})
+
+
+def reason_restore_failed() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.restore_failed", {})
+
+
+def reason_restore_path_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.restore_path_refused", {})
+
+
+def reason_snapshot_failed() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.snapshot_failed", {})
+
+
 def reason_submodule() -> Msg:
     return Msg("cli.sessions_move_workset.reason.submodule", {})
+
+
+def reason_too_many_worktrees() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.too_many_worktrees", {})
 
 
 def reason_unmerged() -> Msg:
@@ -217,8 +267,26 @@ def reason_unsupported_by_peer() -> Msg:
     return Msg("cli.sessions_move_workset.reason.unsupported_by_peer", {})
 
 
+def reason_url_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.url_refused", {})
+
+
+def receipt_branch_moved(*, branch: str, old: str, new: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.receipt_branch_moved",
+        {"branch": branch, "old": old, "new": new},
+    )
+
+
 def receipt_keep(*, device: str, source: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_keep", {"device": device, "source": source})
+
+
+def receipt_left_row(*, path: str, source: str, reason: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.receipt_left_row",
+        {"path": path, "source": source, "reason": reason},
+    )
 
 
 def receipt_not_transferred(*, count: int | float, device: str) -> Msg:
@@ -228,8 +296,40 @@ def receipt_not_transferred(*, count: int | float, device: str) -> Msg:
     )
 
 
+def receipt_pending(*, count: int | float, source: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_pending", {"count": count, "source": source})
+
+
+def receipt_recipe(*, cwd: str, run: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_recipe", {"cwd": cwd, "run": run})
+
+
+def receipt_restored_row(*, path: str, dest: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_restored_row", {"path": path, "dest": dest})
+
+
 def receipt_resumed(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_resumed", {"device": device})
+
+
+def receipt_rewrite(*, detail: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_rewrite", {"detail": detail})
+
+
+def receipt_sent(*, device: str, count: int | float) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_sent", {"device": device, "count": count})
+
+
+def receipt_sent_row(*, path: str, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_sent_row", {"path": path, "device": device})
+
+
+def receipt_sent_unknown(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_sent_unknown", {"device": device})
+
+
+def receipt_transferred(*, source: str, count: int | float) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_transferred", {"source": source, "count": count})
 
 
 def receipt_without(*, device: str) -> Msg:

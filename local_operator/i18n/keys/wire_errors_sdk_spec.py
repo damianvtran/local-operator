@@ -41,6 +41,10 @@ def attach_resume_required() -> Msg:
     return Msg("wire.errors.sdk_spec.attach_resume_required", {})
 
 
+def mcp_ready_timeout_invalid() -> Msg:
+    return Msg("wire.errors.sdk_spec.mcp_ready_timeout_invalid", {})
+
+
 def mode_invalid(*, mode: str) -> Msg:
     return Msg("wire.errors.sdk_spec.mode_invalid", {"mode": mode})
 

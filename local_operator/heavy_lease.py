@@ -54,6 +54,29 @@ command pgid, command preview, start time) so a waiter can say WHO it is
 queued behind. The record is advisory: a record whose ``pid`` is dead is
 stale and ignored, because only the flock can prove a slot is held.
 
+RE-ENTRANT FOR DESCENDANTS
+--------------------------
+A leased command's children are inside its lease. The holder exports
+``LOCAL_OPERATOR_HEAVY_LEASE=<slot>:<fd>`` (:data:`HEAVY_LEASE_INHERITED_ENV`)
+beside the descriptor it passes down, and :func:`acquire` (so the bash tool,
+including a nested lop runtime's, and ``lop services heavy run``) and
+``heavy wait`` first check it with :func:`inherited_lease`. Verified means the
+fd is open on this very ``slot-<i>.lock``, the slot's live record names a pid
+other than the checking process, and a non-blocking ``flock`` on the fd
+succeeds. A separately opened description is refused by the holder's lock, so
+only the holder's own description passes; and since the holder itself also
+passes that probe on its own fd, the pid check rules the holder out, leaving
+its descendants. Then the command runs under that slot without taking another,
+and a ``nested`` audit line is written. Anything less (a closed fd, a different
+file, a lock not held, this process's own lease, a bare or forged variable) is
+ignored and the command queues as before. A nested run SHARES its ancestor's
+slot and never gets one of its own: it is inside the ancestor's lease exactly
+as a backgrounded child is, so if it outlives the ancestor it runs on with no
+slot (the same residual as the self-backgrounding bullet above). Why:
+on 2026-11-20 a bash-tool lease on a ``go test -race`` line held the only slot
+while a ``lop services heavy run`` inside that same line queued behind it for
+its whole 3300 s timeout, and every other heavy command was refused at 900 s.
+
 USING AND DISABLING IT
 ----------------------
 The ``bash`` tool classifies each command with :func:`is_heavy` and, for a
@@ -76,11 +99,12 @@ import math
 import os
 import re
 import shlex
+import stat
 import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 
 from local_operator import heavy_audit
 
@@ -108,6 +132,25 @@ HEAVY_JOBS_ENABLED_DEFAULT = True
 #: slots both of them count.
 HEAVY_JOBS_SLOTS_ENV = "LOCAL_OPERATOR_HEAVY_JOB_SLOTS"
 HEAVY_JOBS_WAIT_SECONDS_ENV = "LOCAL_OPERATOR_HEAVY_JOB_WAIT_S"
+
+#: Names the slot a leased command runs under, as ``"<slot>:<fd>"``, exported to
+#: the command's environment beside the inherited lock descriptor itself (the
+#: bash tool and ``lop services heavy run`` both pass that fd down).
+#:
+#: WHY (the 2026-11-20 deadlock): the bash tool leased a whole line because it
+#: contained ``go test -race`` and handed the lock fd to it; a ``lop services
+#: heavy run --timeout 3300`` INSIDE that same line then queued for the slot its
+#: own ancestor held, and waited out its whole timeout while every other heavy
+#: command on the machine was refused at 900 s. The holder was alive, so no
+#: liveness or pid-reuse check could see anything wrong: the lease simply was not
+#: re-entrant. A descendant of a holder is already inside the lease, so it runs
+#: under that slot instead of queueing for a second one.
+#:
+#: The variable alone is NEVER authority (any process can set it, and a stale one
+#: is inherited by every grandchild): :func:`inherited_lease` trusts it only once
+#: the named descriptor is proved to be the holder's own open lock.
+HEAVY_LEASE_INHERITED_ENV = "LOCAL_OPERATOR_HEAVY_LEASE"
+_INHERITED_MARKER = re.compile(r"(\d{1,6}):(\d{1,9})")
 #: ``0`` (or unset) means "size from the host" (:func:`auto_slot_count`).
 HEAVY_JOBS_SLOTS_DEFAULT = 0
 #: Fifteen minutes: long enough to outlast a typical 5-10 minute build ahead in
@@ -152,6 +195,28 @@ class HeavyClass:
     #: the lease would last as long as the server (PR #4104 R2-1). The caller
     #: prints a note telling the agent to run the build on its own so it queues.
     long_lived: bool = False
+
+    def label(self, command: str) -> str:
+        """The holder label: the segment that made the line heavy, else argv[0].
+
+        :func:`heavy_audit.command_label` names a line by its FIRST command, so
+        on 2026-11-20 ``cd … && rm -rf probe && … go test -race …`` held the
+        machine's slot as ``rm`` and the operator could not tell what was
+        running. ``reason`` is the classifier's own short name for the heavy
+        segment (``go test``, ``pnpm build``); it still goes through
+        ``command_label``'s privacy filter, and a reason that is not a command
+        (``memory_mb=2048``) falls back to the line's label. The line's label
+        also wins when it merely REFINES the reason's: the classifier normalises
+        ``make test-all`` to the reason ``make test``, and the line's own
+        ``make test-all`` (both already privacy-filtered) says more (PR #4351
+        N1). A different first command (``make lint && make test-all``) keeps
+        the reason's label.
+        """
+        named = heavy_audit.command_label(self.reason)
+        line = heavy_audit.command_label(command)
+        if named == "?" or line.startswith(named):
+            return line
+        return named
 
 
 @dataclass(frozen=True)
@@ -1169,6 +1234,10 @@ class Lease:
         self._record["pgid"] = pgid
         _write_record(self._record_path, self._record)
 
+    def marker(self) -> str | None:
+        """The :data:`HEAVY_LEASE_INHERITED_ENV` value for a child given :meth:`fileno`."""
+        return None if self._fd is None else f"{self.slot}:{self._fd}"
+
     def __del__(self) -> None:
         # Safety net only: every caller releases explicitly. A Lease dropped on
         # an unexpected path must not keep the machine's slot until exit.
@@ -1219,6 +1288,184 @@ class Lease:
             )
 
 
+class InheritedLease:
+    """A slot held by an ANCESTOR, proved through the lock descriptor it passed down.
+
+    Shaped like :class:`Lease` (``slot``, ``held``, ``fileno``, ``note_pgid``,
+    ``release``, ``marker``) so the bash tool and ``heavy run`` spawn under it
+    with their ordinary code, but it owns nothing. ``release`` must never
+    unlock: the descriptor is the ancestor's own open file description, and
+    ``LOCK_UN`` on it would free the ANCESTOR's slot while its command is still
+    running. The ancestor's release (or the last copy closing) frees the slot,
+    exactly as before, and its record stays the one ``status`` shows.
+    """
+
+    def __init__(self, slot: int, fd: int, holder: Holder):
+        self.slot = slot
+        self._fd = fd
+        #: The ancestor's slot record, for the note and the audit line.
+        self.holder = holder
+
+    @property
+    def held(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        """The inherited descriptor, passed on so a deeper descendant can verify too."""
+        return self._fd
+
+    def note_pgid(self, pgid: int | None) -> None:
+        """No-op: the record is the ancestor's, and names the ancestor's group."""
+
+    def release(self, exit_code: int | None = None) -> None:
+        """No-op, deliberately (see the class docstring)."""
+
+    def marker(self) -> str:
+        return f"{self.slot}:{self._fd}"
+
+
+def _slot_holder(directory: Path, slot: int) -> Holder | None:
+    return next((holder for holder in read_holders(directory) if holder.slot == slot), None)
+
+
+def inherited_lease(
+    directory: Path, environ: Mapping[str, str] | None = None
+) -> InheritedLease | None:
+    """The ancestor's slot this process runs under, or None to queue normally.
+
+    :data:`HEAVY_LEASE_INHERITED_ENV` is a claim, not a credential, so every
+    step below must hold or the marker is ignored (a spoofed or stale marker
+    therefore only queues, as if it were absent):
+
+    1. it parses as ``<slot>:<fd>``;
+    2. ``fstat(fd)`` is ``slot-<slot>.lock`` in ``directory`` (same device and
+       inode): a closed fd, a recycled fd number, or an fd to any other file
+       fails here;
+    3. the slot has a live holder record: :meth:`Lease.release` unlinks the
+       record BEFORE it unlocks, so a lease already released fails here
+       without the lock being touched; and that record's ``pid`` is NOT this
+       process. A process is never its own ancestor, but its own
+       :class:`Lease` passes steps 2 and 4 (its fd is that lock, and a flock
+       on its own description is a no-op). A bare marker reaches a process
+       routinely (a Python or JVM runner in between keeps the environment and
+       drops the fd), so once the ancestor has released and this process's
+       own later lease lands on the same fd number, the marker would
+       otherwise wave a second heavy job past the queue (PR #4351 R1).
+       Every genuine descendant checks against someone else's record: the
+       bash tool's command, or ``heavy run``'s child, has its own pid, and a
+       nested runtime's record names the outer harness. Subagents share their
+       runtime's pid, so a runtime whose bash tool finds its OWN pid on the
+       slot is looking at a sibling session's lease, never an ancestor's;
+    4. ``flock(fd, LOCK_EX | LOCK_NB)`` succeeds. flock locks belong to the
+       open file DESCRIPTION, so on the holder's own description (inherited
+       through fork/exec) this is a no-op that succeeds, while a description
+       opened separately (a process opening the lock file itself) is refused
+       by the real holder's lock. This is the step that proves the ancestor's
+       lease is the one held;
+    5. the same record is still there afterwards. If the ancestor released
+       between 3 and 4, step 4 may have RE-TAKEN the freed lock on the shared
+       description; it is unlocked again (what the ancestor's release was
+       doing anyway) and the marker refused, so no slot is ever held without
+       a record. The unlock happens ONLY when ``slot-<i>.json`` is provably
+       gone: a mismatch can also be a failed read (``read_holders`` skips a
+       file it cannot read or parse), and a record still on disk means the
+       ancestor has not reached its ``LOCK_UN`` yet (release unlinks first),
+       so step 4 was a no-op on a lock it still holds and unlocking would free
+       its slot mid-build (PR #4351 M1). That case is refused untouched.
+    """
+    if fcntl is None:
+        return None
+    value = (os.environ if environ is None else environ).get(HEAVY_LEASE_INHERITED_ENV, "")
+    match = _INHERITED_MARKER.fullmatch(value.strip())
+    if match is None:
+        return None
+    slot, fd = int(match.group(1)), int(match.group(2))
+    try:
+        held = os.fstat(fd)
+        lock = os.stat(directory / f"slot-{slot}.lock")
+    except (OSError, OverflowError, ValueError):
+        return None
+    if not stat.S_ISREG(held.st_mode) or (held.st_dev, held.st_ino) != (lock.st_dev, lock.st_ino):
+        return None
+    before = _slot_holder(directory, slot)
+    # Refused BEFORE the flock probe, so this process's own lease is never
+    # touched (step 3 above).
+    if before is None or before.pid == os.getpid():
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    after = _slot_holder(directory, slot)
+    if after is None or (after.pid, after.started_at) != (before.pid, before.started_at):
+        if _record_gone(directory, slot):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        return None
+    return InheritedLease(slot, fd, after)
+
+
+def _record_gone(directory: Path, slot: int) -> bool:
+    """True only when ``slot-<slot>.json`` is provably absent (step 5 above).
+
+    Any other ``lstat`` failure counts as present: the one effect of a False
+    here is leaving a lock alone, and that is the safe side when the answer
+    is unknown.
+    """
+    try:
+        os.lstat(directory / f"slot-{slot}.json")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def export_marker(env: MutableMapping[str, str], lease: Lease | InheritedLease | None) -> None:
+    """Name the lock a child inherits in its ``env``; clear any marker otherwise.
+
+    Call it only with a lease whose :meth:`~Lease.fileno` the child really gets
+    (``pass_fds``). Clearing matters as much as setting: a marker inherited
+    from this process's own ancestry would otherwise reach a child that does
+    NOT get the descriptor, where it can only fail verification.
+    """
+    marker = lease.marker() if lease is not None else None
+    if marker is None:
+        env.pop(HEAVY_LEASE_INHERITED_ENV, None)
+    else:
+        env[HEAVY_LEASE_INHERITED_ENV] = marker
+
+
+def record_nested(
+    directory: Path, inherited: InheritedLease, *, session_id: str = "", label: str
+) -> None:
+    """Append the ``nested`` audit line: a descendant ran under its ancestor's slot.
+
+    No ``take``/``release`` pair: the slot changed hands with no one, so the
+    trail's serialization proof (every take released before the next) is
+    unaffected; ``holder`` names the ancestor whose ``take`` covers this.
+    """
+    heavy_audit.record(
+        directory,
+        "nested",
+        slot=inherited.slot,
+        pid=os.getpid(),
+        session=session_id or None,
+        label=label,
+        holder=inherited.holder.pid,
+    )
+
+
+def nested_line(inherited: InheritedLease) -> str:
+    """The one visible note for a command that runs under an ancestor's slot."""
+    return (
+        f"running under heavy-job slot {inherited.slot}, already held by an ancestor"
+        f" ({describe_holders([inherited.holder])}); not queueing for another"
+    )
+
+
 def _write_record(path: Path, record: dict[str, Any]) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{id(record)}.tmp")
     try:
@@ -1241,16 +1488,19 @@ def try_acquire(
     pid: int | None = None,
     waited_s: float = 0.0,
     memory_mb: int | None = None,
+    label: str | None = None,
 ) -> Lease | None:
     """Take a free slot without waiting, or return None when all are held.
 
     Every take is appended to the audit trail (:mod:`local_operator.heavy_audit`)
     with ``waited_s`` (the caller's time in the queue) and the ``memory_mb``
     ceiling; a slot whose previous holder died without releasing is logged as
-    ``stale-reclaim`` first.
+    ``stale-reclaim`` first. ``label`` overrides the one derived from
+    ``command`` (see :meth:`HeavyClass.label`).
     """
     if fcntl is None:
         return None
+    label = label or heavy_audit.command_label(command)
     directory.mkdir(parents=True, exist_ok=True)
     for slot in range(max(1, slots)):
         lock_path = directory / f"slot-{slot}.lock"
@@ -1278,7 +1528,7 @@ def try_acquire(
             # The label, never the command line: this file is readable by the
             # user's other processes and printed by every status surface, and
             # a heavy command line routinely carries a token (PR #4264 Q3).
-            "command": heavy_audit.command_label(command)[:PREVIEW_CHARS],
+            "command": label[:PREVIEW_CHARS],
             "started_at": time.time(),
             "pgid": None,
         }
@@ -1286,7 +1536,7 @@ def try_acquire(
         audit = {
             "pid": holder_pid,
             "session": session_id or None,
-            "label": heavy_audit.command_label(command),
+            "label": label,
             "memory_mb": memory_mb,
         }
         heavy_audit.record(directory, "take", slot=slot, waited_s=round(waited_s, 3), **audit)
@@ -1454,13 +1704,26 @@ async def acquire(
     on_wait: Callable[[str], None] | None = None,
     aborted: Callable[[], bool] | None = None,
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
-) -> Lease | Refusal | None:
+    label: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Lease | InheritedLease | Refusal | None:
     """Wait up to ``wait_seconds`` for a slot.
 
     Returns the :class:`Lease`, a :class:`Refusal` when the wait ran out, or
     ``None`` when ``aborted()`` turned true (the caller handles its own abort).
     ``on_wait`` receives the visible "queued behind …" line about once a second.
+
+    Re-entrant: when this process verifiably runs under an ancestor's slot
+    (:func:`inherited_lease`, read from ``environ``, default this process's
+    environment) it returns that :class:`InheritedLease` at once, with a
+    ``nested`` audit line, instead of queueing behind its own ancestor (the
+    2026-11-20 deadlock, see :data:`HEAVY_LEASE_INHERITED_ENV`).
     """
+    label = label or heavy_audit.command_label(command)
+    inherited = inherited_lease(directory, environ)
+    if inherited is not None:
+        record_nested(directory, inherited, session_id=session_id, label=label)
+        return inherited
     started = time.monotonic()
     last_note = -1.0
     while True:
@@ -1471,6 +1734,7 @@ async def acquire(
             command=command,
             waited_s=time.monotonic() - started,
             memory_mb=memory_mb,
+            label=label,
         )
         if lease is not None:
             return lease
@@ -1484,7 +1748,7 @@ async def acquire(
                 "timeout",
                 pid=os.getpid(),
                 session=session_id or None,
-                label=heavy_audit.command_label(command),
+                label=label,
                 waited_s=round(waited, 3),
                 memory_mb=memory_mb,
                 holders=[holder.pid for holder in holders],

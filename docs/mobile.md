@@ -379,6 +379,22 @@ Screens, following branding.md §7's agent-output hierarchy:
   it would resend — because the field is not where that text necessarily is any
   more.
 
+### Starting a chat as an agent or team (`GET /api/start-targets`)
+
+`POST /api/sessions/start` accepts an optional, mutually exclusive `agent` or
+`team` (a profile or team name). The relay validates it with the desktop's own
+new-chat validator and writes the session's `attachment.json` before the child
+spawns, so the first turn already runs as that agent, or as the team's manager
+with the team brief and roster. The model is not taken from the target. The
+picker's rows come from `GET /api/start-targets` (`agents`, `teams`, painted
+`label`s, avatar hashes, and `degraded` when the registries cannot be read).
+
+Both are licensed by `capabilities.session_start.agent` / `.team`. A client
+MUST read them before offering a picker or sending a field: an older relay's
+unkeyed start silently drops unknown fields, which would start an unbound chat.
+Fields, refusal codes and idempotency rules:
+[mobile-start-receipts.md](design/mobile-start-receipts.md).
+
 ### The armed index — wakes and monitors (`GET /api/schedules`)
 
 The machine-wide read of what is ARMED: every conversation carrying wakes and

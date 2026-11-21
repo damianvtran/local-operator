@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.errors.sdk_spec",
-  "history_sha256": "c7919860b9126a32bb2abf6187d2a5fd9af28ebd86566a2a32da5100defef576",
+  "history_sha256": "20f05a3a2395f8c235f24b5b8aee6676310849fff0753297607031b4d05ff9b3",
   "entries": [
     {
       "locale": "fr",
@@ -69,6 +69,28 @@
       },
       "status": "passed",
       "note": "Round 3 FINAL clean-with-findings at 255b798d112 (0 blocker, 0 major, 2 minor, 2 nit), audited the final fr bytes. Deferred, not fixed: F1 (minor) double 'à' in spawn_fields_unsupported; F2 (minor) 'attacher' vs 'rattacher' in the same group; F3 (nit) 'appelable' on approval_callback_gate_required; F4 (nit) 'lecteur' vs shipped 'visionneuse' for viewer (different surface, possibly deliberate). Reason: wording preferences on developer diagnostics with unambiguous meaning; minors/nits never force another round and the catalogue is dormant until stable codes exist. Target catalogue_sha256 = e0b8217ba430c8d1b686f2bffc4581a3eef2eacc60071ae2e34c107bca76dd8e (fr bytes at 255b798d112; translation: fr v3 typography fix (255b798d112)); en source_sha256 = a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855. Audit comment: https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6757119153. Evidence: i18n/audits/evidence/fr/wire.errors.sdk_spec/sdkfr3/record.json. Audits are static linguistic and mechanical only (en source, context sidecar, locale style guide, glossary, scoped repository validator and runtime ICU parse): no native-speaker review and no rendered fit (SDK exception strings, no width cap). The SDK guards still render locale='en' (the 21-case test_real_guards_preserve_english_bytes test pins the English bytes), so this catalogue is dormant until stable codes exist on SessionSpecError. No second independent pass was run (SDK developer diagnostics, not high-visibility safety copy; the ru exemplar row also carries one audit). Translator and the passing auditors are different models (translator anthropic/claude-sonnet-5-5; auditors openai/gpt-6.1-sol and deepseek/deepseek-flash); the translator and the other locales' auditors share the Claude family, as disclosed on past rows. Dates are UTC (PR comment timestamps); the auditors' own receipts record local dates for some rounds."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "aa91c5029e2807e1fd8aaf53a1b068d06eb23a314624ecc7171acea6325298eb",
+      "translator": {
+        "agent": "coder (lopdev)",
+        "session": "22b4da040af8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (task)",
+        "session": "75e71b9bd834",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4349: independent audit of the new mcp_ready_timeout_invalid diagnostic at cac0388a5296; all 21 carried messages unchanged from the prior passed source. Idiomatic nombre fini; U+202F before the colon. Both technical identifiers are byte-identical, no placeholders or ICU, finite with inclusive lower bound zero. Target catalogue_sha256 = 59324d998bad404da112c7f5655c9e5a962d40972889941cd3167a4b55fb93fe. No native terminal shaping claim."
     }
   ]
 }

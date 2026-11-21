@@ -667,9 +667,7 @@ def _consume_trailing_newline(fd: int, wait_s: float = 0.1) -> None:
     each within ``wait_s`` of the last: a paste's tail is one burst, and a
     human typing ahead is not waited for.
     """
-    import select
-
-    while select.select([fd], [], [], wait_s)[0]:
+    while _readable_within(fd, wait_s):
         try:
             byte = os.read(fd, 1)
         except OSError:
@@ -678,6 +676,48 @@ def _consume_trailing_newline(fd: int, wait_s: float = 0.1) -> None:
             return
         if byte not in b" \t\x1b[0123456789~":
             return
+
+
+# ``select()`` takes an fd_set bitmap of FD_SETSIZE bits (1024 on Linux and
+# macOS); CPython raises ValueError for any fd at or above it.
+_SELECT_FD_LIMIT = 1024
+
+
+def _readable_within(fd: int, wait_s: float) -> bool:
+    """Whether ``fd`` has a byte to read within ``wait_s`` seconds.
+
+    Why not just ``select.select``: it cannot represent an fd >= FD_SETSIZE and
+    raises ``ValueError``. Production reads stdin (fd 0), but a long-lived
+    process -- the test suite, which leaks sqlite connections and sockets --
+    can be handed a terminal at fd 1171 by ``pty.openpty()``, and the raise
+    then escaped the paste reader (CI job 136728521591).
+
+    Why not just ``select.poll``: on macOS ``poll()`` on ttys and other
+    character devices has historically been unreliable (POLLNVAL or never
+    ready), so ``select`` stays the path wherever it works and ``poll`` is only
+    the fallback for high fds. With neither usable, report "not readable":
+    the caller then swallows nothing, which is the safe failure (at worst a
+    stray newline reaches the next prompt) rather than losing the credential.
+    """
+    import select
+
+    if fd < _SELECT_FD_LIMIT:
+        try:
+            return bool(select.select([fd], [], [], wait_s)[0])
+        except ValueError:
+            pass  # a platform with a smaller FD_SETSIZE: try poll below
+        except OSError:
+            return False
+    poll_factory = getattr(select, "poll", None)
+    if poll_factory is None:
+        return False
+    try:
+        poller = poll_factory()
+        poller.register(fd, select.POLLIN)
+        events = poller.poll(max(0, int(wait_s * 1000)))
+    except (OSError, ValueError):
+        return False
+    return any(mask & select.POLLIN for _, mask in events)
 
 
 @contextlib.contextmanager

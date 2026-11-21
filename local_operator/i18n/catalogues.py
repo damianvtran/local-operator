@@ -262,6 +262,19 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "the session notice and the login-status line carry finished text, never "
         "a catalogue key"
     ),
+    # Deferred rather than raising the eager total ceiling (PR #4349, merge gate
+    # run 44849201008): adding mcp_ready_timeout_invalid took hi's eager total to
+    # 77,924 B, 100 B past EAGER_TOTAL_MAX_BYTES (77,824 B); this namespace alone
+    # is 5,603 B in hi. No client resolves one of its keys: the SDK refusals are
+    # rendered in the EMBEDDING process by ``spec_refusal_text`` (active locale)
+    # and raised as a one-string SessionSpecError with no code attribute, so
+    # nothing a desktop/phone client loads at startup ever needs this copy.
+    "wire.errors.sdk_spec": (
+        "SDK specification refusals rendered in-process by session/spec.py and "
+        "sdk.py through spec_refusal_text (active locale) and raised as a "
+        "one-string SessionSpecError; the exception carries finished text, never "
+        "a catalogue key"
+    ),
 }
 
 

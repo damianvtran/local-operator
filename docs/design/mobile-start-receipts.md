@@ -20,7 +20,8 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
 ```json
 "capabilities": {
   "session_start": {
-    "version": 1, "durable_idempotency": true, "receipt_capacity": 4096, "effort": true
+    "version": 1, "durable_idempotency": true, "receipt_capacity": 4096, "effort": true,
+    "agent": true, "team": true
   }
 }
 ```
@@ -33,6 +34,11 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
   NOT send `effort` unless it reads `true` here: an older relay refuses it on a
   keyed request (`invalid_start_request`) and silently drops it on an unkeyed
   one, which would start the session at the configured default instead.
+- `agent: true` / `team: true` mean the start body accepts `agent` / `team`
+  (below) AND the relay serves `GET /api/start-targets`. Same rule, higher
+  stakes: an older relay silently drops the field on an unkeyed start, so a
+  client that sent it blind would start an **unbound** chat while showing the
+  team it picked. Absent flag: no picker, no field.
 - A server may refuse a *new* key when full (`create_capacity`) even while
   advertising the capability: the field is a build fact, not a writability
   promise. Storage faults are reported the same way, as a typed refusal.
@@ -62,10 +68,51 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
   session, as every other birth level is; the configured default the phone
   should display is `GET /api/models` → `default.effort`, and the levels to
   offer per model are that row's `efforts` (below).
+- `agent` / `team` are optional, **mutually exclusive** launch targets, keyed
+  or not: a profile or team name of at most 128 characters, trimmed (`null` or
+  blank means "no target"). The name is validated against the same global
+  registries and with the same validator as the desktop's new-chat target
+  (`validate_target`, which canonicalises case: `LOPDEV` binds `lopdev`; a team
+  is checked through its whole roster). The session's `attachment.json` is
+  written and read back **before** the child spawns, so the session restores
+  that identity at construction and its first turn already runs as the agent,
+  or as the team's manager with the team brief and roster. The target does
+  **not** change the model, exactly as on the desktop.
 - The **fingerprint** is the canonical JSON of
-  `{cwd, provider, model_id}` exactly as requested, plus `effort` only when one
-  was chosen — so a request without `effort` fingerprints byte-for-byte as it
-  did before the field existed. Omitted values are not part of it.
+  `{cwd, provider, model_id}` exactly as requested, plus `effort`, `temporary`,
+  `agent` or `team` only when chosen — so a request without them fingerprints
+  byte-for-byte as it did before the fields existed. Omitted values are not part
+  of it. The target is fingerprinted as the caller spelled it (trimmed) and the
+  canonical name is frozen in the resolution, so `"LOPDEV"` and `"lopdev"`
+  under one key are `create_conflict`. The sidecar is written on the fresh
+  start only: a replay never rewrites it, so it cannot undo a later `/team clear`.
+
+### Listing targets: `GET /api/start-targets`
+
+Gated like every route; licensed by `session_start.agent/team`.
+
+```json
+{
+  "agents": [{ "name": "coder", "label": "Coder", "kind": "role", "source": "builtin",
+               "description": "…", "agent_id": null, "avatar_sha256": null }],
+  "teams":  [{ "name": "lopdev", "label": "lopdev", "description": "…",
+               "manager": "manager", "member_count": 7 }],
+  "degraded": false
+}
+```
+
+- Rows are the desktop menu's own catalogues (`profile_catalogue`,
+  `team_catalogue`) over the global registries, so the phone offers exactly the
+  names the desktop offers and the start route accepts. Project-scoped profiles
+  are out of scope.
+- `label` is pre-painted through the shared display rules; render it as is.
+- `kind` is `role` or `specialist`; `source` is `builtin` (a packaged seed not
+  yet installed, `agent_id: null`), `installed` or `custom`.
+- `avatar_sha256` is the session rows' source (`agent_avatar.agent_index`);
+  fetch the image with `GET /v1/agents/{agent_id}/avatar?v=<sha>&size=64`.
+  Teams carry no avatar; join on `manager` to show the manager's.
+- A registry failure answers `200` with empty lists and `degraded: true`:
+  show "couldn't load", not "no agents".
 
 ### Picking a model and effort: `GET /api/models`
 
@@ -130,10 +177,14 @@ answers `create_indeterminate` (below) instead of a stale number.
 | 400 | `invalid_start_request` | Unknown top-level field, or a non-string value longer than 4096 characters |
 | 400 | `invalid_start_directory` | `cwd` is not an existing directory the spawn gate admits |
 | 400 | `invalid_start_effort` | `effort` is not a string in the level vocabulary (keyed and unkeyed) |
+| 400 | `invalid_start_target` | `agent`/`team` not a string, over 128 characters, **both** set, or a team roster with a cycle or past the nesting limit (keyed and unkeyed) |
+| 404 | `unknown_start_target` | The name, or a team's manager/member, does not resolve; carries `unresolved: {team, slot, member}` when known |
+| 503 | `start_target_registry_unavailable` | The profile/team registry could not be read |
+| 503 | `start_target_unsaved` | The binding did not read back; nothing spawned. Keyed: carries `session_id` (retry answers it, as for any post-claim failure) |
 | 400 | `invalid_start_selection` | The resolved provider/model pair is missing or unusable |
 | 409 | `create_conflict` | Same key, different fingerprint or input |
 | 409 | `create_indeterminate` | Uncertain outcome; carries the authoritative `session_id` |
-| 413 | `start_request_too_large` | Body over 151,552 bytes; refused before it is parsed, keyed or not |
+| 413 | `start_request_too_large` | Body over 153,152 bytes; refused before it is parsed, keyed or not |
 | 503 | `create_capacity` | The receipt bound is full; new key refused before any side effect |
 | 503 | `create_receipts_unavailable` | Store corrupt, unreadable or unwritable |
 
@@ -202,6 +253,13 @@ replaying while the store is full.
   starts a new conversation rather than replaying; let in-flight phone starts
   settle first. Upgrading again needs no action. Do not move the old file back
   afterwards: it would drop every key recorded in the fresh store since.
+- **The same applies to `agent`/`team`.** A relay from before those fields
+  rejects a stored intent carrying them, so a rollback over a store holding a
+  target receipt answers keyed starts with `503 create_receipts_unavailable`
+  until the store is moved aside as above.
+- **A failed spawn after a target is bound leaves an orphan directory**
+  (`sessions/<sid>/attachment.json`, no transcript), the same exposure the
+  temporary mark already has.
 - **A pending row can remain unresolved indefinitely** if the original child
   never becomes adoptable. That is deliberate: it preserves the identity the
   user's intent already owns, at the cost of requiring an operator/client
@@ -215,15 +273,19 @@ replaying while the store is full.
   must scope its own retry identity accordingly.
 - The relay proves the same owner authority as before; it does **not** prove a
   distinct signed-in account.
-- **The whole request body is capped at 151,552 bytes** (`START_BODY_MAX_BYTES`)
+- **The whole request body is capped at 153,152 bytes** (`START_BODY_MAX_BYTES`)
   before any JSON parsing. The cap is checked on `Content-Length` and again on
   the bytes actually read, so a chunked or lying request stops at the cap and
   is never buffered whole. It derives from the field bounds (3 fields × 4096
-  characters × 12 bytes for the widest JSON escape, plus 4 KiB), so no compactly
+  characters × 12 bytes for the widest JSON escape, plus 4 KiB, plus one
+  128-character target name × 12 bytes + 64), so no compactly
   or ordinarily formatted UTF-8 body within the field bounds is refused by it. A
   body padded with more insignificant whitespace than that slack, or sent as
   UTF-16/32 JSON, can exceed it; no real client sends either. It applies to
   unkeyed callers too: the route cannot tell a body is keyed until it parses it.
+  A body naming **both** `agent` and `team` at full escaped length can draw
+  `413` before the `400 invalid_start_target` it would otherwise earn; either
+  refuses it before anything is written.
 
 ## Client obligations
 

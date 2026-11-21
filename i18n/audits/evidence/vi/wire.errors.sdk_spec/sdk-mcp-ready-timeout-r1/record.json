@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "audit_id": "sdk-mcp-ready-timeout-r1",
+  "locale": "vi",
+  "namespace": "wire.errors.sdk_spec",
+  "audit_date": "2026-11-20",
+  "packaged_at_utc": "2026-11-21T03:22:23Z",
+  "key_count": 22,
+  "auditor": {
+    "agent": "i18n-auditor (task)",
+    "sessions": {
+      "round_1": "75e71b9bd834"
+    },
+    "model": "openai/gpt-6.2-sol",
+    "independence": "The auditor session and model differ from the translator; the auditor edited no translations. No provider fallback."
+  },
+  "translator": {
+    "agent": "coder (lopdev)",
+    "session": "22b4da040af8",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "source_audit_revision": "cac0388a5296dfb2919e51ea555fb1a01c330561",
+  "packaging_base_revision": "29084179aae6bc20c6b39649c190e96955ae1d02",
+  "input_hashes": {
+    "en": "aa91c5029e2807e1fd8aaf53a1b068d06eb23a314624ecc7171acea6325298eb",
+    "context": "91a0d24e05b3d42e1915a2ad04b4d330e459c95d40ac45b95065b745832c724c",
+    "target": "9634dd0c193b8be605edc59439642d2479cbc582847bdd7fcbc66827ab1e5832",
+    "style_guide": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.json",
+    "context": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.context.json",
+    "target": "local_operator/i18n/catalogues/vi/wire.errors.sdk_spec.json",
+    "style_guide": "i18n/style-guides/vi.md",
+    "glossary": "i18n/glossary.md"
+  },
+  "audited_patch_values_equal_catalogue_values": true,
+  "source_sha256": "aa91c5029e2807e1fd8aaf53a1b068d06eb23a314624ecc7171acea6325298eb",
+  "target_sha256": "9634dd0c193b8be605edc59439642d2479cbc582847bdd7fcbc66827ab1e5832",
+  "current_report_verdict": "PASS (round 1) — one new developer diagnostic audited; 21 carried messages unchanged from the prior passed source. Zero findings.",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "auditor_session": "75e71b9bd834",
+      "counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      }
+    }
+  ],
+  "notes": [
+    "PR #4349: independent audit of the new mcp_ready_timeout_invalid diagnostic at cac0388a5296; all 21 carried messages unchanged from the prior passed source. Natural phải là số hữu hạn; precomposed NFC. Both technical identifiers are byte-identical, no placeholders or ICU, finite with inclusive lower bound zero. Target catalogue_sha256 = 9634dd0c193b8be605edc59439642d2479cbc582847bdd7fcbc66827ab1e5832. No native terminal shaping claim.",
+    "Evidence-only packaging; no new audit round and no translation changes.",
+    "Original audit: https://github.com/damianvtran/local-operator/pull/4349#issuecomment-7051699445"
+  ]
+}
