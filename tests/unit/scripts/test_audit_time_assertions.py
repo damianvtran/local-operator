@@ -16,6 +16,8 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from scripts.audit_time_assertions import Finding, findings
 
 
@@ -211,3 +213,41 @@ def test_cpu_ceilings_are_labelled_cpu_and_hangs_are_d(tmp_path: Path) -> None:
     assert "wall-clock" not in rows["test_cpu_ceiling"]["why"]
     assert rows["test_hang_detector"]["bucket"] == "D"
     assert "test_subscript_is_not_a_bound" not in rows
+
+
+def test_a_reviewed_row_leaves_b_only_while_its_assertion_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REVIEWED_KEPT verdict is keyed on node AND expression: the reviewed
+    ceiling files as A with its evidence, and an edited assertion in the same
+    test falls back to B for a fresh look instead of inheriting the verdict."""
+    import scripts.audit_time_assertions as audit
+
+    monkeypatch.setattr(
+        audit,
+        "REVIEWED_KEPT",
+        (
+            ("tests/test_synthetic.py::test_reviewed", "cpu < 0.05", "measured fine"),
+            # Reviewed at 0.05; the test has since moved its bound.
+            ("tests/test_synthetic.py::test_edited", "cpu < 0.05", "measured fine"),
+        ),
+    )
+    rows = _sweep(
+        tmp_path,
+        """
+        import time
+
+        def test_reviewed():
+            c0 = time.thread_time()
+            cpu = time.thread_time() - c0
+            assert cpu < 0.05
+
+        def test_edited():
+            c0 = time.thread_time()
+            cpu = time.thread_time() - c0
+            assert cpu < 0.06
+        """,
+    )
+    assert rows["test_reviewed"]["bucket"] == "A"
+    assert rows["test_reviewed"]["why"] == "reviewed and kept — measured fine"
+    assert rows["test_edited"]["bucket"] == "B"

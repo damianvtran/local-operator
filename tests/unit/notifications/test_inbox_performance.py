@@ -162,40 +162,56 @@ def test_a_read_after_the_interval_serves_the_snapshot_and_refreshes_off_thread(
 ) -> None:
     """QA round 1, Q1: the post-interval re-stat must not run on the request.
 
-    The registry's reload is made slow (0.6 s) and records its thread. A read
-    after the interval must return the CURRENT snapshot well before that reload
-    could finish, the reload must run on the refresher thread, and the change
+    The registry's reload is GATED and records its thread. A read after the
+    interval must return the CURRENT snapshot while that reload cannot yet
+    have finished, the reload must run on the refresher thread, and the change
     it picks up must then be served.
+
+    The gate replaces a 0.6 s sleep measured against `elapsed < 0.3`: that
+    ceiling crossed on a runner that stalled the read by 300 ms with the
+    off-thread code intact (docs/TEST_TIME_ASSERTIONS.md). "The reload had not
+    finished when the read answered" is ordering, which load cannot invert.
     """
     from local_operator import projects
 
     shared = inbox.shared_project_registry(tmp_path)
     assert shared.projects_for_session(SID) == []
+    reload_threads: list[int] = []
+    started = threading.Event()
+    gate = threading.Event()
+    reloaded = threading.Event()
+    real_refresh = projects.ProjectRegistry.refresh
+
+    def gated_refresh(self) -> None:
+        reload_threads.append(threading.get_ident())
+        started.set()
+        # Bounded only so a mutant that reloads on the request finishes (and
+        # fails below) rather than hanging; a correct read never waits on it.
+        gate.wait(10.0)
+        real_refresh(self)
+        reloaded.set()
+
+    # Gated BEFORE the change lands: the refresher thread ticks on its own, and
+    # under CPU starvation a tick between the write and the patch reloaded the
+    # change for real, so the read served it and the old arm failed on
+    # `served == []` with the off-thread code intact.
+    monkeypatch.setattr(projects.ProjectRegistry, "refresh", gated_refresh)
     # An in-place-equivalent change the directory mtime alone would also
     # catch; the interval is what is under test, so expire it explicitly.
     projects.ProjectRegistry(tmp_path).create_project(
         projects.ProjectEdit(name="late-proj", title="Late"), sessions=[SID]
     )
-    reload_threads: list[int] = []
-    started = threading.Event()
-    real_refresh = projects.ProjectRegistry.refresh
-
-    def slow_refresh(self) -> None:
-        reload_threads.append(threading.get_ident())
-        started.set()
-        time.sleep(0.6)
-        real_refresh(self)
-
-    monkeypatch.setattr(projects.ProjectRegistry, "refresh", slow_refresh)
     rows, dir_mtime, _loaded = shared._snapshot
     shared._snapshot = (rows, dir_mtime, time.monotonic() - 3600)
 
-    t0 = time.monotonic()
-    served = shared.projects_for_session(SID)
-    elapsed = time.monotonic() - t0
+    try:
+        served = shared.projects_for_session(SID)
+        reloaded_at_answer = reloaded.is_set()
+    finally:
+        gate.set()
     assert served == [], "the read serves the snapshot it already has"
-    assert elapsed < 0.3, f"the read waited on a reload ({elapsed:.3f} s)"
-    assert started.wait(2.0), "the read woke the background refresher"
+    assert not reloaded_at_answer, "the read waited on a reload"
+    assert started.wait(5.0), "the read woke the background refresher"
     assert reload_threads and threading.get_ident() not in reload_threads
     _wait_for(lambda: shared.projects_for_session(SID), within=4.0)
     assert [p.name for p in shared.projects_for_session(SID)] == ["late-proj"]
@@ -223,16 +239,27 @@ def test_server_startup_warms_the_registry_without_blocking(tmp_path: Path, monk
     release = threading.Event()
     real_init = inbox.SharedProjectRegistry.__init__
 
+    built = threading.Event()
+
     def gated_init(self, config_dir):
-        assert release.wait(5.0)
+        # The build cannot finish until the test releases it, AFTER the warm
+        # has returned -- so "the warm returned before its build finished" is
+        # ordering, not the `< 0.2 s` wall ceiling this replaced, which a
+        # loaded runner crosses with the warm still off-thread
+        # (docs/TEST_TIME_ASSERTIONS.md). The 10 s only bounds a mutant that
+        # joins the build: it finishes then, and fails below.
+        release.wait(10.0)
         real_init(self, config_dir)
+        built.set()
 
     monkeypatch.setattr(inbox.SharedProjectRegistry, "__init__", gated_init)
-    t0 = time.monotonic()
-    thread = inbox.warm_shared_project_registry(tmp_path)
-    assert time.monotonic() - t0 < 0.2, "the warm must not wait on the build"
-    assert thread.is_alive() and thread.daemon
-    release.set()
+    try:
+        thread = inbox.warm_shared_project_registry(tmp_path)
+        built_at_return = built.is_set()
+    finally:
+        release.set()
+    assert not built_at_return, "the warm must not wait on the build"
+    assert thread.daemon
     thread.join(5.0)
     assert str(Path(tmp_path)) in inbox._SHARED_REGISTRIES
 
