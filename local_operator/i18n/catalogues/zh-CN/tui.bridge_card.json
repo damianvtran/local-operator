@@ -21,5 +21,5 @@
   "tui.bridge_card.context.dm": "私信",
   "tui.bridge_card.context.channel": "频道",
   "tui.bridge_card.context.group": "群组对话",
-  "tui.bridge_card.context.thread_reply": "话题回复"
+  "tui.bridge_card.context.thread_reply": "讨论串回复"
 }

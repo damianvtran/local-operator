@@ -39,5 +39,5 @@
   "relay.transcript.bridge.offline": "Không thể kết nối Radient — đang thử lại",
   "relay.transcript.bridge.deleted": "Tin nhắn này đã bị xóa",
   "relay.transcript.bridge.more_messages": "{count, plural, other {Còn # tin nhắn khác trong thẻ này}}",
-  "relay.transcript.bridge.thread_reply": "Trả lời trong chuỗi"
+  "relay.transcript.bridge.thread_reply": "Trả lời trong luồng"
 }

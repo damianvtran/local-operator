@@ -20,6 +20,6 @@
   "tui.bridge_card.header.offline": "Radient से संपर्क नहीं हुआ — दोबारा कोशिश के लिए खोलें",
   "tui.bridge_card.context.dm": "सीधा संदेश",
   "tui.bridge_card.context.channel": "चैनल",
-  "tui.bridge_card.context.group": "समूह बातचीत",
+  "tui.bridge_card.context.group": "समूह वार्तालाप",
   "tui.bridge_card.context.thread_reply": "थ्रेड में जवाब"
 }

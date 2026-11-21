@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "relay.transcript",
-  "history_sha256": "a9588e0068a035bfce091ecf67df2d97a8883360310e91a038bd59ad567bfcb4",
+  "history_sha256": "4a876724811890c21981e3da120bb20eda42f8cef43d5792a125983d27171ec6",
   "entries": [
     {
       "locale": "vi",
@@ -93,6 +93,25 @@
         "relay.transcript.bridge.more_messages"
       ],
       "note": "14 new keys relay.transcript.bridge.* (inbound Team Bridge card body states and untrusted frame on the phone web transcript, PR #4278). 13 keys copied verbatim from the audited tui.bridge_card.* translations. Audit round 1 (translation-auditor session 2d94a2642f45) failed zh-CN on F1, rooted in the English offline string (F2: the phone card has no close action), so en relay.transcript.bridge.offline changed to 'reopen the conversation to retry' and that key was retranslated (job 5ebb122944bf). Audit round 2 passed all 7 locales against this en hash, 0 blocker/major. Pre-existing keys unchanged and carry their prior passed audit; this row re-states the namespace against the new en hash."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "fcdce724027f281a7979c6a2229d0c9cd672a76ae200992ccaca807ff3e8fb4e",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "not-performed"
+      },
+      "status": "pending",
+      "note": "Translation-only scoped pass; independent audit required. i18n/receipts/bridge-card-reread-translator-vi-e896d2db9139.json"
     }
   ]
 }
