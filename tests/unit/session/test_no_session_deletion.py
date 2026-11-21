@@ -1780,22 +1780,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "files whose shape+size+age passed",
     ),
     #
-    # Two FILE unlinks, both named by the function that owns the sidecars' paths:
-    # the per-session scan cache and the spool write lock. Neither path can be a
-    # session directory — the first comes from `session_files.ledger.cache_path`
-    # (`<config>/cache/session_files/<id>.json`) and the second from
-    # `spooled.lock_name` (`<config>/wakes/spooled/.<id>.lock`) — and both are
-    # written OUTSIDE the session directory by the modules that own them. The
-    # call runs only after `_bounded_rmtree` has already removed THIS session's
+    # Three FILE unlinks, each named by the module that owns the sidecar's path:
+    # `session_files.ledger.cache_path` names the scan cache at
+    # `<config>/cache/session_files/<id>.json`; `index_prewarm.settled_record_path`
+    # names the settlement record at `<config>/cache/prewarm_settled/<id>.json`;
+    # `spooled.lock_name` names the spool lock at `<config>/wakes/spooled/.<id>.lock`.
+    # All three are OUTSIDE the session directory, and unlink rejects directories.
+    # The call runs only after `_bounded_rmtree` has already removed THIS session's
     # directory, and it is keyed by that session's id: a sidecar whose session
-    # directory still exists is never touched.
+    # directory still exists is never touched. The spool lock is unlinked only
+    # while held; a busy or unopenable lock remains in place.
     (
         "local_operator/session/cleanup.py::_drop_session_sidecars",
         "<path>.unlink",
-        "Unlinks the removed session's own file-scan cache entry and spool lock — "
-        "regular files named by the owning modules' path helpers, never a directory, "
-        "and only for a session whose directory this removal just deleted",
-        2,
+        "Unlinks the removed session's own file-scan cache entry, prewarm settlement "
+        "record and held spool lock — regular files named by the owning modules' path "
+        "helpers, never a directory, and only for a session whose directory this "
+        "removal just deleted",
+        3,
     ),
     # -- transcript compression ----------------------------------------------
     # The compression pass RENAMES nothing and REMOVES nothing but the two files
