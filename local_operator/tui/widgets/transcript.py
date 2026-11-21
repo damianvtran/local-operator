@@ -3685,6 +3685,10 @@ class TeamBridgeBlock(PeerMessageBlock):
         self._body_loader = body_loader
         self._card_body: dict[str, Any] | None = None
         self._body_loading = False
+        # Each disclosure owns its resolver work. Cancellation alone is not an
+        # authority boundary: a loader may finish after swallowing cancellation.
+        self._body_generation = 0
+        self._body_worker: Any = None
         self._body_show_all = False
         #: Row index (within the built content) of the show-more toggle, or -1.
         self._show_more_row = -1
@@ -3737,11 +3741,18 @@ class TeamBridgeBlock(PeerMessageBlock):
             if header:
                 self._snippet = header
         if self._expanded:
+            # A previous disclosure's admission is not current standing. Keep
+            # its collapsed preview, but hide its body until this open resolves.
+            self._body_verified = False
+            if self._body_loader is not None and any(
+                item.get("state") == "admitted"
+                for item in (self._card_body or {}).get("items", [])
+                if isinstance(item, dict)
+            ):
+                self._snippet = _bt(tui_bridge_card.body_loading())
             self._maybe_load_body()
         else:
-            # Closed: nobody is reading, so stop asking. The next open re-asks
-            # from scratch (no answer is trusted past an open) on a fresh
-            # backoff.
+            self._invalidate_body_load()
             self._cancel_reread()
             self._reread_attempt = 0
 
@@ -3749,7 +3760,16 @@ class TeamBridgeBlock(PeerMessageBlock):
         # The timer belongs to this widget; a removed card must not keep a
         # callback (or the resolver) alive. An in-flight worker is cancelled
         # by Textual with the widget.
+        self._invalidate_body_load()
         self._cancel_reread()
+
+    def _invalidate_body_load(self) -> None:
+        self._body_generation += 1
+        worker, self._body_worker = self._body_worker, None
+        self._body_loading = False
+        self._body_verified = False
+        if worker is not None:
+            worker.cancel()
 
     def _cancel_reread(self) -> None:
         timer, self._reread_timer = self._reread_timer, None
@@ -3783,12 +3803,10 @@ class TeamBridgeBlock(PeerMessageBlock):
         self._start_load(local_only=False)
 
     def _needs_body(self) -> bool:
-        """Fetch on open unless every item is already final for this view.
+        """Fetch full standing for every disclosure, then poll nonfinal answers.
 
-        A local-only answer is never final: the first open runs the full
-        resolver once. ``admitted``/``refused`` from a full pass cannot change;
-        anything else (pending, held, offline...) may have moved since the last
-        open, so re-opening re-asks.
+        Final answers stop polling only within the current open generation;
+        collapse invalidates verification even for admitted or refused bodies.
         """
         if self._body_loader is None or self._body_loading:
             return False
@@ -3805,22 +3823,32 @@ class TeamBridgeBlock(PeerMessageBlock):
 
     def _start_load(self, *, local_only: bool) -> None:
         self._body_loading = True
+        generation = self._body_generation
+        load = self._load_body(local_only=local_only, generation=generation)
         try:
-            self.run_worker(
-                self._load_body(local_only=local_only),
+            self._body_worker = self.run_worker(
+                load,
                 exclusive=True,
                 group="bridge-card-body",
             )
         except Exception:  # noqa: BLE001 — unmounted (tests, replay build): no fetch
+            load.close()
             self._body_loading = False
 
-    async def _load_body(self, *, local_only: bool = False) -> None:
+    async def _load_body(
+        self, *, local_only: bool = False, generation: int | None = None
+    ) -> None:
         loader = self._body_loader
         result: dict[str, Any] | None
         try:
             result = await loader(local_only=local_only) if loader is not None else None
         except Exception:  # noqa: BLE001 — an unknown row/route is today's copy
             result = None
+        # A retired worker must neither publish old standing nor clear a newer
+        # disclosure's loading latch, even if the loader ignored cancellation.
+        if generation is not None and generation != self._body_generation:
+            return
+        self._body_worker = None
         self.apply_card_body(result, verified=not local_only)
 
     def apply_card_body(self, result: dict[str, Any] | None, *, verified: bool = True) -> None:
@@ -4011,7 +4039,7 @@ class TeamBridgeBlock(PeerMessageBlock):
         self._source_lines = 0
         if self._body_loader is None:
             return None
-        if self._card_body is None:
+        if self._card_body is None or (self._expanded and not self._body_verified):
             return [Text(_bt(tui_bridge_card.body_loading()), style=dim)]
         items = [item for item in self._card_body.get("items", []) if isinstance(item, dict)]
         if not items:
@@ -4067,7 +4095,7 @@ class TeamBridgeBlock(PeerMessageBlock):
             # thread reply) and the time, so an open card reads as a complete
             # received message without leaving the transcript.
             row.append("\n" + indent, style=dim)
-            row.append(context, style=dim)
+            row.append(context, style=Style(color=theme_mod.semantic_color("muted")))
             self._chrome_rows += 1
         shown = resolved
         total = len(resolved)

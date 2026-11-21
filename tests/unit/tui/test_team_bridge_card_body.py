@@ -581,3 +581,113 @@ def test_card_conversation_reads_only_the_validated_receipt() -> None:
         "label": None,
     }
     assert card_conversation(None) == {"kind": None, "label": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["admitted", "refused"])
+async def test_every_new_open_rechecks_final_standing_without_old_body(state: str) -> None:
+    import asyncio
+
+    release = asyncio.Event()
+    calls: list[bool] = []
+    final = _answer(_item(state, body="previous disclosure secret", source="local"))
+
+    async def loader(*, local_only: bool = False) -> Any:
+        calls.append(local_only)
+        if len(calls) >= 3:
+            await release.wait()
+            return _answer(_item("held", hold={"class": "awaiting_review"}))
+        return final
+
+    block = TeamBridgeBlock("x", {"name": "Ola"}, body_loader=loader)
+    app = await _mounted(block, [])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        block.toggle_expanded()
+        await pilot.pause()
+        assert block._body_verified
+        block.toggle_expanded()
+        block.toggle_expanded()
+        await pilot.pause()
+        assert calls == [True, False, False]
+        assert block._body_loading
+        rows = block._resolved_rows(100)
+        assert rows is not None
+        assert "Loading message" in "".join(row.plain for row in rows)
+        assert "previous disclosure secret" not in "".join(row.plain for row in rows)
+        release.set()
+        await pilot.pause()
+        assert not block._body_loading
+        assert block._card_body == _answer(_item("held", hold={"class": "awaiting_review"}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reopen", [False, True])
+async def test_collapse_retires_even_a_loader_ignoring_cancellation(reopen: bool) -> None:
+    import asyncio
+
+    started, release_old, finished_old, release_new = (asyncio.Event() for _ in range(4))
+    calls: list[bool] = []
+
+    async def loader(*, local_only: bool = False) -> Any:
+        calls.append(local_only)
+        if local_only:
+            return _answer(_item("pending"))
+        if len(calls) == 2:
+            started.set()
+            try:
+                await release_old.wait()
+            except asyncio.CancelledError:
+                await release_old.wait()
+            finished_old.set()
+            return _answer(_item("admitted", body="late retired secret", source="local"))
+        await release_new.wait()
+        return _answer(_item("refused"))
+
+    block = TeamBridgeBlock("x", {"name": "Ola"}, body_loader=loader)
+    timers: list[_FakeTimer] = []
+    app = await _mounted(block, timers)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        block.toggle_expanded()
+        await started.wait()
+        block.toggle_expanded()
+        assert not block._body_loading
+        assert not block._body_verified
+        if reopen:
+            block.toggle_expanded()
+            await pilot.pause()
+            assert calls == [True, False, False]
+        release_old.set()
+        await finished_old.wait()
+        await pilot.pause()
+        assert block._body_loading is reopen, "retired completion changed the disclosure latch"
+        assert not block._body_verified
+        assert "late retired secret" not in str(block._card_body)
+        if reopen:
+            release_new.set()
+            await pilot.pause()
+            assert block._body_verified
+            assert block._card_body == _answer(_item("refused"))
+        assert not timers
+
+
+def test_new_context_uses_readable_semantic_muted_ink() -> None:
+    from local_operator.tui import theme as theme_mod
+
+    block = _open(_answer(_item("admitted", body="received body", source="local")))
+    block._conversation = {"kind": "channel", "name": "release-room"}
+    block._card_facts = {"received_at": "2026-11-20T10:30:00Z", "thread_reply": True}
+    content = block._build_content(100)
+    context = block._context_line()
+    assert context
+    start = content.plain.index(context)
+    colours = {
+        span.style.color.triplet.hex.lower()
+        for span in content.spans
+        if span.start <= start < span.end
+        and isinstance(span.style, Style)
+        and span.style.color is not None
+        and span.style.color.triplet is not None
+    }
+    assert theme_mod.semantic_color("muted").lower() in colours
