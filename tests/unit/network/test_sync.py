@@ -101,6 +101,12 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         json.dumps({"team": "lopdev"}), encoding="utf-8"
     )
     (directory / ORIGIN_NAME).write_text(json.dumps({"origin": "fork"}), encoding="utf-8")
+    # The durable cwd record travels (``sync.COPY_SET_NAMES``) and the round trip
+    # asserts every member arrives, so the fixture holds one.
+    (directory / "cwd.json").write_text(
+        json.dumps({"v": 1, "cwd": "/home/u/proj", "at": 1.0, "source": "birth"}),
+        encoding="utf-8",
+    )
     (directory / TURN_JOURNAL_NAME).write_text(json.dumps({"turn": 2}), encoding="utf-8")
     (directory / STOP_MARKER_NAME).write_text(json.dumps({"rung": "sigterm"}), encoding="utf-8")
     # The runtime's signal receipt travels with the same reasoning as the marker
@@ -309,7 +315,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
     )
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.compression import ARCHIVE_FILENAMES
-    from local_operator.session.creation import CREATED_AT_NAME
+    from local_operator.session.creation import CREATED_AT_NAME, CWD_RECORD_NAME
     from local_operator.session.retention import DESKTOP_MARKER_NAME
     from local_operator.session.runtime.inbox import INBOX_NAME
     from local_operator.session.runtime.journal import EXIT_RECORD_NAME
@@ -357,6 +363,9 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # newly created on the destination (``session_created_at`` falls back to
         # ``st_birthtime``) and the real date is gone with the source (B-M2).
         CREATED_AT_NAME,
+        # The durable cwd record: an idle exec/TUI session's only cwd, so a later move
+        # from the destination still finds its worktree (remapped at the promote).
+        CWD_RECORD_NAME,
         # The judged-goal record (review round 2, MAJOR 1) and a fork's unconsumed
         # opening message: both are a session's own content, and both landed in neither
         # list while this branch was open.

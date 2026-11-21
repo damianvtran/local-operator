@@ -5572,6 +5572,11 @@ async def _prepare(
         Transcript,
         transcript_dir,
         defer_materialise=os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1",
+        # The session's own working directory, recorded at birth as
+        # ``cwd.json`` (``creation.CWD_RECORD_NAME``): the only durable cwd an
+        # idle exec/TUI-created session has once its runtime exits, and what a
+        # move reads to find the worktree it must carry.
+        cwd=effective_cwd,
     )
     # H5d: the bridge runtime must be resolved BEFORE the tool table is built,
     # because `build_bridge_tool` is createIf — it returns None unless

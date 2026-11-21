@@ -313,12 +313,34 @@ class Manifest:
     #: never counted, never a digest input, never probed. Not part of ``empty``: a
     #: session that only read about a repository needs no confirmation.
     mentioned: tuple[str, ...] = ()
+    #: Whether ANY source named the root session's working directory
+    #: (``mobility._session_cwd_at``: wake index, marker, runtime record, ``cwd.json``,
+    #: latest checkpoint). ``False`` means the plan cannot know where the session
+    #: worked, so a ``mentioned`` worktree may be its real work rather than something
+    #: it only read about — see :attr:`cwd_gap`. Not a digest input.
+    cwd_known: bool = True
+    #: Machine reason when ``cwd_known`` is false (``"not_recorded"``), else "".
+    cwd_unknown_reason: str = ""
 
     @property
     def empty(self) -> bool:
         """No worktree at all — the move needs no confirmation and the receipt carries
         no ``working_set`` key (frozen-contract parity for chat-only sessions)."""
         return not self.worktrees
+
+    @property
+    def cwd_gap(self) -> bool:
+        """The session's cwd is unknown AND it mentions worktrees: needs confirmation.
+
+        WHY (coordinator retest on v0.111.4): with no recorded cwd the mention rule
+        (``mention_only``) still lists the worktree unplanned — a mention is never
+        trusted as work, security S5 — but "only mentioned" is no longer a safe
+        reading: it may be exactly where the session committed and edited. So the
+        move asks instead of passing silently, nothing is planned or carried, and
+        the preview says why (``workset_text``). The owner's gate treats this like a
+        non-empty manifest, which is what makes ``--yes`` refuse it (#4380).
+        """
+        return not self.cwd_known and bool(self.mentioned)
 
     @property
     def planned(self) -> tuple[WorktreeFacts, ...]:
@@ -361,6 +383,8 @@ class Manifest:
             "left_behind": [item.to_dict() for item in self.left_behind],
             # Additive and absent when empty (frozen-contract parity).
             **({"mentioned": list(self.mentioned)} if self.mentioned else {}),
+            "cwd_known": self.cwd_known,
+            **({"cwd_unknown_reason": self.cwd_unknown_reason} if not self.cwd_known else {}),
         }
 
 
@@ -649,14 +673,13 @@ def candidate_seeds(
 
     Three sources, in authority order: the recorded cwd (``cwd_hint`` for the root
     session — the owner's ``_source_session_cwd``, which reads the wake index and the
-    runtime record before the marker — else ``carry.resolve_cwd``); file-provenance
+    runtime record before the marker — else :func:`recorded_cwd`, the same resolver,
+    which is also what every subagent child's own cwd comes from); file-provenance
     records (``.file-provenance/*.json`` ``file.path``, PR #4108; metadata only); and
     literal absolute / ``~/`` path mentions in the transcript, which covers sessions
     older than provenance and ``cd``/``git -C`` usage it cannot see. The session
     directory itself is never a seed (it is under the config root, not a worktree).
     """
-    from local_operator.network import carry
-
     home_path = Path(home) if home is not None else Path.home()
     sessions = Path(root) / "sessions"
     seeds: list[Seed] = []
@@ -664,8 +687,11 @@ def candidate_seeds(
     for index, sid in enumerate(session_ids):
         tag = "" if index == 0 else f"subagent:{sid}"
         directory = sessions / sid
+        # ONE RESOLVER FOR THE ROOT AND EVERY CHILD (``recorded_cwd``): a subagent's
+        # own cwd lives in the same places its parent's does, and the bare marker
+        # read it used to get missed an exec/TUI child's ``cwd.json`` entirely.
         cwd = _absolute_seed(
-            cwd_hint if (index == 0 and cwd_hint) else carry.resolve_cwd(directory), home_path
+            cwd_hint if (index == 0 and cwd_hint) else recorded_cwd(root, sid), home_path
         )
         if cwd and os.path.realpath(cwd) != os.path.realpath(directory):
             seeds.append(Seed(cwd, tag or "cwd"))
@@ -695,6 +721,25 @@ def candidate_seeds(
                 if len(mentions_seen) >= _MAX_MENTIONS:
                     break
     return seeds
+
+
+def recorded_cwd(root: Path, session_id: str) -> str:
+    """``session_id``'s recorded working directory, or "" — the move's one resolver.
+
+    Delegates to ``mobility._session_cwd_at`` (wake index → marker → runtime record
+    → ``cwd.json`` → latest checkpoint, each through the S-2 ``usable`` rule) so the
+    manifest, the prepare's ``source_cwd`` and the stale-relay check can never
+    disagree about where a session worked. Imported lazily: mobility imports this
+    module the same way. Never raises — an unreadable record is "unknown", which
+    the manifest reports (``cwd_known``) rather than failing the move.
+    """
+    try:
+        from local_operator.network.mobility import _session_cwd_at
+
+        return _session_cwd_at(Path(root), session_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("workset: could not resolve %s's cwd", session_id, exc_info=True)
+        return ""
 
 
 def _absolute_seed(value: object, home: Path) -> str:
@@ -1539,6 +1584,11 @@ def compute_manifest(
     home_path = Path(home) if home is not None else Path.home()
     tree = session_tree(Path(root), session_id)
     seeds = candidate_seeds(Path(root), tree, cwd_hint=cwd_hint, home=home_path)
+    # Whether the ROOT session's cwd was known: its seed is the only one tagged
+    # plain "cwd" (a child's is ``subagent:<id>``). A cwd that resolved but is not in
+    # a repository is still KNOWN — the session worked there, so its mentions really
+    # are only mentions; only the absence of any record makes them ambiguous.
+    cwd_known = any(seed.source == "cwd" for seed in seeds)
     candidates = discover_worktrees(seeds)
     # Mention-only worktrees are LISTED, never planned (``mention_only``): no facts
     # are read for them (no ``git status`` of a tree the session never ran in, so
@@ -1576,6 +1626,8 @@ def compute_manifest(
         from_device=from_device,
         from_name=from_name,
         mentioned=mentioned,
+        cwd_known=cwd_known,
+        cwd_unknown_reason="" if cwd_known else "not_recorded",
     )
 
 

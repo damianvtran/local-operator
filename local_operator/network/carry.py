@@ -96,7 +96,11 @@ _BACKWARD_CHUNK_BYTES = 1 << 16
 
 
 def _iter_lines_backward(
-    handle: Any, end_of_file: int, *, chunk_bytes: int = _BACKWARD_CHUNK_BYTES
+    handle: Any,
+    end_of_file: int,
+    *,
+    chunk_bytes: int = _BACKWARD_CHUNK_BYTES,
+    max_bytes: int | None = None,
 ):
     """Yield the file's lines NEWEST FIRST, as raw bytes.
 
@@ -108,11 +112,17 @@ def _iter_lines_backward(
     as the reference reader documents.
     """
     position = end_of_file
+    # ``max_bytes`` bounds how far back the walk reads: the rows wholly inside the
+    # newest ``max_bytes`` are yielded, and the walk stops there without yielding the
+    # row it cut through (a torn head would only fail its parse anyway).
+    floor = max(0, end_of_file - max_bytes) if max_bytes is not None else 0
     # Fragments of one row, in READ order (newest first), each contiguous with
     # the next; never joined until the boundary that ends the row arrives.
     carried: list[bytes] = []
     while True:
-        chunk_start = max(0, position - chunk_bytes)
+        if floor and position <= floor:
+            return
+        chunk_start = max(floor, position - chunk_bytes)
         handle.seek(chunk_start)
         chunk = handle.read(position - chunk_start)
         position = chunk_start
@@ -136,7 +146,9 @@ def _iter_lines_backward(
             return
 
 
-def latest_custom_details(session_dir: Path, custom_type: str) -> dict[str, Any] | None:
+def latest_custom_details(
+    session_dir: Path, custom_type: str, *, max_bytes: int | None = None
+) -> dict[str, Any] | None:
     """The newest ``custom_type`` row's ``payload.details``, or ``None``.
 
     Row-for-row compatible with ``session.transcript.read_latest_custom_entry``
@@ -164,7 +176,7 @@ def latest_custom_details(session_dir: Path, custom_type: str) -> dict[str, Any]
         return None
     with handle:
         handle.seek(0, os.SEEK_END)
-        for raw in _iter_lines_backward(handle, handle.tell()):
+        for raw in _iter_lines_backward(handle, handle.tell(), max_bytes=max_bytes):
             if not raw.strip():
                 continue
             try:
@@ -432,6 +444,59 @@ def rewrite_host_cwd(
         mapped,
     )
     return {"from": recorded_value, "to": mapped}
+
+
+def remap_cwd_record(target: Path, session_id: str, *, home: str) -> dict[str, str]:
+    """Map an arrived session's ``cwd.json`` onto THIS host, or blank it.
+
+    ``cwd.json`` (``session.creation.CWD_RECORD_NAME``) travels in the copy set so a
+    later move from here still finds the session's worktree, but the value it carries
+    was written on the SENDER. It is remapped through the same home map the marker's
+    cwd and the monitors use (:func:`translate_host_path`, which keeps a path that
+    exists here, else the same basename or home-relative tail under ``home``).
+
+    NEVER TRUST A SENDER PATH OUTSIDE THIS HOME (security review of the plan, note
+    1): a sender-supplied absolute path that does not resolve under ``home`` after
+    the remap — ``/etc``, ``/tmp/x``, another user's tree that happens to exist here —
+    is never written as this session's cwd. The record is rewritten with ``cwd: ""``
+    (every reader then falls back, the session directory last) and the drop is
+    logged, so the next move's preflight reads "cwd unknown" rather than a path the
+    sender chose. ``home`` is the DESTINATION home the move resolved
+    (``workset_move.home_of``) and is never defaulted; empty means "cannot map", so
+    the record is blanked too. Returns ``{"from", "to"}`` when it rewrote, ``{}``
+    when the file is absent or already fits. Never raises.
+    """
+    from local_operator.session.creation import CWD_RECORD_NAME, write_session_cwd
+
+    path = Path(target) / CWD_RECORD_NAME
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict):
+        document = {}
+    recorded = document.get("cwd")
+    recorded = recorded if isinstance(recorded, str) else ""
+    mapped = translate_host_path(recorded, home=home) if os.path.isabs(recorded) else ""
+    # Resolved on BOTH sides: a symlink under home that points outside it is outside,
+    # and a symlinked home (macOS ``/var`` -> ``/private/var``) is still this home.
+    if mapped and not (home and _under(os.path.realpath(mapped), os.path.realpath(home))):
+        mapped = ""
+    if mapped == recorded:
+        return {}
+    if not mapped:
+        logger.info(
+            "carry: dropped %s's carried cwd record (%r): it does not resolve under this "
+            "device's home %s after the home map, so the session falls back to its directory",
+            session_id,
+            recorded,
+            home,
+        )
+    source = document.get("source")
+    write_session_cwd(
+        Path(target), mapped, source=source if isinstance(source, str) and source else "birth"
+    )
+    return {"from": recorded, "to": mapped}
 
 
 def mark_moved_in(target: Path) -> bool:

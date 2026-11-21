@@ -475,7 +475,9 @@ def _nothing_to_carry_here(root: Path, session_id: str) -> bool:
     except Exception:  # noqa: BLE001 — unknown is not empty (fail closed)
         logger.info("mobility: could not read %s's working set", session_id, exc_info=True)
         return False
-    return bool(manifest.empty)
+    # A cwd gap (unknown cwd, mentioned worktrees) is NOT nothing: those may be the
+    # session's real work, and only the gate's confirmation may let them stay.
+    return bool(manifest.empty) and not manifest.cwd_gap
 
 
 def stale_relay_message(root: Path | str | None = None) -> str:
@@ -1131,10 +1133,13 @@ def _move_refusal(
     return refusal
 
 
-#: ``created_at.json`` is the ONLY entry a bare remnant may hold: it is the birth
-#: sidecar a ``Transcript`` construction publishes, so it is the one file a READER
-#: that never writes leaves behind (see :func:`_bare_remnant`).
-_REMNANT_ALLOWED_NAMES = frozenset({"created_at.json"})
+#: ``created_at.json`` and ``cwd.json`` are the ONLY entries a bare remnant may hold:
+#: they are the birth sidecars a ``Transcript`` construction publishes, so they are
+#: the files a construction that never wrote a row leaves behind (see
+#: :func:`_bare_remnant`). ``cwd.json`` joined it with the durable cwd record: a
+#: transcript built with the creator's cwd and then abandoned is the same corpse,
+#: and must not start blocking the promote it never did.
+_REMNANT_ALLOWED_NAMES = frozenset({"created_at.json", "cwd.json"})
 
 
 def _bare_remnant(directory: Path) -> bool:
@@ -3322,6 +3327,15 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         )
     except Exception:  # noqa: BLE001 — a mapping this could not compute must not fail a promote
         logger.warning("mobility: could not map %s's cwd for this host", target_id, exc_info=True)
+    # THE CARRIED ``cwd.json`` names a path on the SENDER: remap it under THIS device's
+    # home through the same home map, or blank it (``carry.remap_cwd_record``) — a
+    # sender path outside this home is never adopted as this session's cwd.
+    try:
+        from local_operator.network import workset_move as _wm
+
+        carry.remap_cwd_record(target, target_id, home=str(_wm.home_of(server)))
+    except Exception:  # noqa: BLE001 — same rule as the marker: never fail a promote
+        logger.warning("mobility: could not remap %s's cwd record", target_id, exc_info=True)
 
     monitor_cwds: dict[str, int] = {}
     # Before the rebuild, after the cwd rewrite: the session's own monitor load
@@ -4448,7 +4462,13 @@ def _workset_manifest(
             from_device=server.identity.device_id,
             from_name=str(server._own_label()),  # noqa: SLF001
         )
-        return replace(manifest, carries_files=bool(carries))
+        # A CWD GAP WITH NOTHING PLANNED CARRIES NOTHING (``Manifest.cwd_gap``): the
+        # mentioned worktrees are never planned, so the honest plan is "they stay
+        # here" whatever the destination could take. Saying so is also what makes
+        # ``--yes`` refuse it (#4380's ``carry_unavailable``) instead of consenting
+        # to a carrying plan that would send nothing.
+        stays = manifest.empty and manifest.cwd_gap
+        return replace(manifest, carries_files=bool(carries) and not stays)
     except workset.WorksetUnknown:
         logger.warning(
             "mobility: the working-set manifest for %s could not be read",
@@ -4704,7 +4724,12 @@ def _workset_gate_full(
         label = str(unknown["destination"]["name"] or to_device)
         refusal = _workset_refusal(session_id, "working_set_unknown", unknown, to_label=label)
         return refusal, None, None
-    if manifest.empty:
+    # An empty manifest passes ungated, EXCEPT a cwd gap (``Manifest.cwd_gap``): with no
+    # record of where the session worked, its mentioned worktrees may be the work a
+    # move would strand (coordinator retest, v0.111.4), so consent is required even
+    # though nothing is planned. Riding the ordinary refusal is what puts it behind
+    # every existing surface's confirmation, ``--yes``'s #4380 rules included.
+    if manifest.empty and not manifest.cwd_gap:
         return None, None, None
     block = manifest.to_dict()
     label = manifest.to_name or to_device
@@ -5186,6 +5211,9 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
     # ``unknown`` and ``unsupported`` need a decision too: only --without-working-set
     # proceeds past either, so the surface must show them rather than "nothing here".
     required = bool(block.get("worktrees")) or block.get("state") in ("unsupported", "unknown")
+    # Unknown cwd with mentioned worktrees (``Manifest.cwd_gap``): nothing is planned,
+    # but they may be the session's real work, so the user decides (retest, v0.111.4).
+    required = required or bool(block.get("cwd_known") is False and block.get("mentioned"))
     return {
         "ok": True,
         "dry_run": True,
@@ -5269,7 +5297,13 @@ def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     2. ``carry.resolve_cwd`` — the session's own ``desktop.json`` marker, which
        travels in the copy set when it exists;
     3. the live runtime's discovery record (``find_runtime_record``) — the only
-       record of an open session whose marker was never written.
+       record of an open session whose marker was never written;
+    4. ``cwd.json`` (``session.creation.CWD_RECORD_NAME``) — written at birth and on
+       each runtime start, so an IDLE exec/TUI session still answers;
+    5. the latest ``frontend_state_checkpoint_v1`` row's ``state.cwd``, read from a
+       bounded tail (:data:`_CHECKPOINT_TAIL_BYTES`) — sessions older than ``cwd.json``.
+
+    Every step passes the same S-2 ``usable`` rule.
 
     THE SESSION DIRECTORY IS NOT A CWD: ``resolve_cwd`` returns it as its last
     resort, so it is filtered out here rather than sent as a value the destination
@@ -5278,6 +5312,16 @@ def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     ``cwd`` key and the destination invent no marker.
     """
     return _session_cwd_at(Path(server.root), session_id)
+
+
+#: How far back from the transcript's end ``_session_cwd_at`` looks for the latest
+#: ``frontend_state_checkpoint_v1`` row. Measured 2026-11-21 over the 212 transcripts
+#: on the dev host that hold one (of 500 with a plain transcript): distance from EOF to
+#: the start of the latest checkpoint row median 26,992 B, p95 165,368 B, max
+#: 6,954,061 B. 16 MiB clears that max more than twice over while keeping a move's
+#: preflight from reading a 170 MB transcript whole; a session whose last checkpoint
+#: is further back reads as "cwd unknown", which the plan now says honestly.
+_CHECKPOINT_TAIL_BYTES = 16 * 1024 * 1024
 
 
 def _session_cwd_at(root: Path, session_id: str) -> str:
@@ -5331,6 +5375,38 @@ def _session_cwd_at(root: Path, session_id: str) -> str:
             return found
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's runtime record", session_id, exc_info=True)
+    # THE TWO DURABLE FALLBACKS (coordinator retest on v0.111.4): an idle session
+    # created by ``lop exec`` or the TUI has no wake entry, no marker and — its runtime
+    # gone — no runtime record, so every step above answered nothing and its worktree
+    # (unpushed commit, dirty files) was listed only as "mentioned": nothing planned,
+    # no confirmation, and a real move would have left the work behind silently.
+    try:
+        from local_operator.session.creation import read_session_cwd
+
+        # 4. ``cwd.json``, written at birth and on every runtime start/change.
+        found = usable(read_session_cwd(session_dir))
+        if found:
+            return found
+    except Exception:  # noqa: BLE001
+        logger.debug("mobility: could not read %s's cwd record", session_id, exc_info=True)
+    try:
+        from local_operator.network import carry as carry_mod
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        )
+
+        # 5. The latest frontend checkpoint's ``state.cwd`` — the one record a session
+        # older than ``cwd.json`` has. A bounded tail read, never a full scan: see
+        # ``_CHECKPOINT_TAIL_BYTES`` for the measured distribution behind the cap.
+        details = carry_mod.latest_custom_details(
+            session_dir, FRONTEND_CHECKPOINT_CUSTOM_TYPE, max_bytes=_CHECKPOINT_TAIL_BYTES
+        )
+        state = (details or {}).get("state")
+        found = usable(state.get("cwd")) if isinstance(state, Mapping) else ""
+        if found:
+            return found
+    except Exception:  # noqa: BLE001
+        logger.debug("mobility: could not read %s's checkpoint cwd", session_id, exc_info=True)
     return ""
 
 

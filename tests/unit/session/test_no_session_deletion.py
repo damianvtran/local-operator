@@ -3975,6 +3975,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "sessions/); unlink rejects directories",
     ),
     (
+        "local_operator/session/creation.py::write_session_cwd",
+        "os.replace",
+        "Atomic write of the session's own cwd.json record through a sibling "
+        "pid/thread-temp FILE; it never creates, moves or removes a directory",
+    ),
+    (
+        "local_operator/session/creation.py::write_session_cwd",
+        "os.unlink",
+        "Drops only this call's own temp FILE after a failed write; never a journal or directory",
+    ),
+    (
         "local_operator/network/carry.py::_write_marker",
         "os.replace",
         "Atomic write of a session's own desktop.json cwd marker at the promote, "
@@ -5341,6 +5352,7 @@ def test_no_session_directory_removal_outside_cleanup() -> None:
 _NEAR_DISPLACERS: frozenset[str] = frozenset(
     {
         "local_operator/resume.py::write_session_title",  # tmp -> title.json
+        "local_operator/session/creation.py::write_session_cwd",  # tmp -> cwd.json
         "local_operator/resume.py::write_session_attachment",  # tmp -> attachment.json
         "local_operator/resume.py::write_goal_record",  # tmp -> goal.json
         "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json

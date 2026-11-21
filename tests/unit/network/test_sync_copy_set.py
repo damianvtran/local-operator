@@ -74,7 +74,7 @@ def _entry_owners() -> dict[str, str]:
     from local_operator.session.approval_policy import OVERRIDE_FILENAME
     from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
-    from local_operator.session.creation import CREATED_AT_NAME
+    from local_operator.session.creation import CREATED_AT_NAME, CWD_RECORD_NAME
     from local_operator.session.cwd_move import MOVE_MARKER_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
     from local_operator.session.retention import (
@@ -110,6 +110,8 @@ def _entry_owners() -> dict[str, str]:
         ORIGIN_NAME: "resume",
         ORIGIN_CACHE_NAME: "resume",
         CREATED_AT_NAME: "session.creation",
+        # The durable cwd record travels (``sync.COPY_SET_NAMES`` has the argument).
+        CWD_RECORD_NAME: "session.creation",
         # A desktop fork's pending auto-tag intent: per-device tag state that
         # must not travel (see sync.EXCLUDED_ENTRIES). Listed here so the
         # round-trip test builds it and proves it does NOT arrive.

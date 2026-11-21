@@ -135,6 +135,10 @@ ATTACHMENTS_DIRNAME = "attachments"
 #: ``test_sync_copy_set.py`` pins the literal against the module that owns it.
 CREATED_AT_NAME = "created_at.json"
 
+#: The session's durable cwd record (``session/creation.CWD_RECORD_NAME``), spelled here
+#: for the same import-weight reason; ``test_sync_copy_set.py`` pins the literal.
+CWD_RECORD_NAME = "cwd.json"
+
 #: The copy set (§7.2). Spelled here rather than imported from the three modules
 #: that own the names (``resume``, ``retention``, ``session/runtime/inbox``): this
 #: module is imported at relay CONSTRUCTION, and those are session-engine modules.
@@ -225,6 +229,14 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # round 1, B-M2). Copied rather than recomputed: a birth time is not derivable
     # from anything else on the destination.
     CREATED_AT_NAME,
+    # THE SESSION'S WORKING DIRECTORY (``session/creation.CWD_RECORD_NAME``). The only
+    # durable cwd an idle exec/TUI-created session has (no marker, no wake entry, no
+    # live runtime record), so it travels with the session: a later move FROM the
+    # destination must still know which worktree the session works in (coordinator
+    # retest, v0.111.4). It names a path on the SENDER, so the promote remaps it
+    # under this device's home or blanks it (``carry.remap_cwd_record``) before
+    # anything reads it here.
+    CWD_RECORD_NAME,
     # THE JUDGED-GOAL RECORD (``resume.GOAL_SIDECAR_NAME``). ``origin/main`` added
     # it while this branch was open and it landed in NEITHER list, so a session with
     # a judged goal REFUSED to move, ``--keep`` dropped the objective silently and a

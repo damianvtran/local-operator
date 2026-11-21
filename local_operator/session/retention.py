@@ -103,6 +103,10 @@ _SIDECAR_NAMES = frozenset(
         # Birth metadata is bookkeeping, not user content: stamping a legacy
         # conversation must not push it across the cleanup size budget.
         "created_at.json",
+        # The durable cwd record (``creation.CWD_RECORD_NAME``): rewritten when a
+        # runtime STARTS in another folder, which is not the user working here, so it
+        # must move neither the activity clock nor the size budget.
+        "cwd.json",
         # The durable stop marker a killer stages before an irreversible step
         # (``registry.STOP_MARKER_NAME``): ~300 B of evidence ABOUT the run, in
         # every stopped session's directory. It belongs here for the reason

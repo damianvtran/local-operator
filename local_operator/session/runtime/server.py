@@ -3539,6 +3539,8 @@ class RuntimeServer:
         #: here once carried one request's hold onto the next (agent review
         #: round 2, m-a).
         self._cwd_move_watched_request = ""
+        #: The (session id, cwd) pair ``_note_session_cwd`` last recorded durably.
+        self._cwd_noted: tuple[str, str] | None = None
         #: The one watcher task, started on the first ``queue_move`` op.
         self._queued_move_task: asyncio.Task[None] | None = None
         self._thread: threading.Thread | None = None
@@ -4471,6 +4473,9 @@ class RuntimeServer:
                 self._publisher = None
                 publisher.close()
                 raise
+            # The record now names this runtime's cwd; the session's durable copy
+            # follows it (``_note_session_cwd``) so it outlives this process.
+            self._note_session_cwd(self._record.session_id, self._record.cwd)
             # BOTH BOOT REGISTRATIONS ARE PERFORMED ON THE SESSION'S LOOP. The
             # append itself is thread-tolerant, but the body of the same call is
             # not: ``subscribe`` folds the session's history, reconciles the
@@ -4948,6 +4953,9 @@ class RuntimeServer:
                 # TCP disconnect arrives to trigger the ordinary detach path.
                 self._republish_detached()
                 seed = self._handle.session_projection_seed
+                # A cwd move or a /resume into another session changes the seed;
+                # the beat that republishes it also updates the durable record.
+                self._note_session_cwd(seed.session_id, seed.cwd)
                 if self._publisher is not None:
                     self._publisher.heartbeat(
                         session_id=seed.session_id,
@@ -6585,6 +6593,32 @@ class RuntimeServer:
         self._subagents_running = running
         self._subagents_queued = queued
         self._republish()
+
+    def _note_session_cwd(self, session_id: str, cwd: str | None) -> None:
+        """Keep the session's ``cwd.json`` in step with the cwd this runtime publishes.
+
+        WHY HERE: the discovery record is the one place this runtime states the
+        directory it works in, but it is unlinked when the process exits — so an idle
+        session's cwd vanished with its runtime and a later move planned nothing
+        (``creation.CWD_RECORD_NAME`` has the retest that found it). Written at boot
+        and on each heartbeat beside the record, only when the (session, cwd) pair
+        changed: the memo keeps the 15 s beat from re-reading the file, and a write
+        that failed (deferred, not-yet-materialised directory) is retried next beat
+        because the memo is set only on success. Never raises.
+        """
+        try:
+            key = (str(session_id or ""), str(cwd or ""))
+            if not key[0] or not key[1] or getattr(self, "_cwd_noted", None) == key:
+                return
+            root = getattr(self, "_config_root", None) or config_dir()
+            from pathlib import Path
+
+            from local_operator.session.creation import record_session_cwd
+
+            if record_session_cwd(Path(root) / "sessions" / key[0], key[1], source="runtime"):
+                self._cwd_noted = key
+        except Exception:  # noqa: BLE001 — metadata must never cost a boot or a beat
+            logger.debug("session runtime: could not record the session cwd", exc_info=True)
 
     def _republish(self) -> None:
         """Refresh the discovery record with the current live state.

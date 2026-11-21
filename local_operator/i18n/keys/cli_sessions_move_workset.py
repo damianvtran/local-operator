@@ -73,6 +73,14 @@ def changed() -> Msg:
     return Msg("cli.sessions_move_workset.changed", {})
 
 
+def cwd_unknown(*, source: str, paths: str) -> Msg:
+    return Msg("cli.sessions_move_workset.cwd_unknown", {"source": source, "paths": paths})
+
+
+def cwd_unknown_advice(*, source: str, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.cwd_unknown_advice", {"source": source, "device": device})
+
+
 def desktop_refused(*, source: str, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.desktop_refused", {"source": source, "device": device})
 

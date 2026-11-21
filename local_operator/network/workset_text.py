@@ -185,6 +185,15 @@ def summary_lines(
         return [_t(_ws.unsupported(device=who))]
     worktrees = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
     mentioned = [str(p) for p in block.get("mentioned") or [] if isinstance(p, str)]
+    if not worktrees and block.get("cwd_known") is False and mentioned:
+        # THE CWD GAP (``workset.Manifest.cwd_gap``): no record says where this
+        # conversation worked, so "only mentioned" is not a safe reading of these
+        # folders and the move asks. Nothing is planned (the mention rule), so the
+        # sentence says they stay, and why, instead of "No working files".
+        lines = [_t(_ws.cwd_unknown(source=keeper, paths=", ".join(mentioned[:_LIST_LIMIT])))]
+        if advice:
+            lines.append(_t(_ws.cwd_unknown_advice(source=keeper, device=label)))
+        return lines
     if not worktrees:
         lines = [_t(_ws.none())]
         if mentioned:
