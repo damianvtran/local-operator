@@ -189,6 +189,13 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-update-v1",
     "mesh-restart-v1",
     "zlib-records-v1",
+    # THIS BUILD'S LISTENER SIGNS ITS WELCOME AND ITS DIALER REQUIRES THAT PROOF
+    # (``handshake.verify_welcome``, mesh-listener-auth). DIAGNOSTIC ONLY: it never
+    # gates enforcement — the dialer requires the proof whatever the challenge
+    # advertises, so stripping this string downgrades nothing. It lets ``peers``
+    # say which members verify listeners. ``MESH_PROTOCOL_VERSION`` is NOT bumped,
+    # so an old dialer still links to a new listener (the update path).
+    "listener-proof-v1",
     # THE COMPLETE PEER-SOURCE CONTRACT'S STORED-READ HALF. Advertised by every
     # build that can serve typed source purposes (metadata/payload/availability)
     # on the stored-history op, and it is what a viewer's relay checks BEFORE

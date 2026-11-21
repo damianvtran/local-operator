@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "wire.providers.reauth",
+  "history_sha256": "fc7ba23ac7a2958090024d7f4811b84b3946519507405882c80a6568242639bf",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "wire.providers.reauth",
+      "source_sha256": "e65b54faf66049e3f6501e9545d5e97d9cf36954c66bf871aecfafbe34c4ad95",
+      "context_sha256": "ac8ccb7bfc2d8a117d562eab77a90b3c4e9f3883f7d876e3beb655a4dd1c800a",
+      "target_sha256": "465fadfc546f64713eb5ca18a99fbbf8ef4b6f4116e8473c6eae4a842795a40a",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "served model as relayed in the manager's delegation brief (no fallback)"
+      },
+      "status": "passed",
+      "note": "Independent audit (single round) of the new wire.providers.reauth namespace (4 keys) at commit 6e1581210b1c, English source sha256 e65b54faf66049e3f6501e9545d5e97d9cf36954c66bf871aecfafbe34c4ad95. Result passed: one NIT on session_policy, applied as the auditor's exact replacement ('продлить вход' -> 'продлить срок действия входа'). target_sha256 is the committed file after applying the auditor's exact replacements. One independent audit suffices by manager decision: this is a recovery notice and status text, not destructive or safety copy, so no second audit was run. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "rr1"
+    }
+  ]
+}

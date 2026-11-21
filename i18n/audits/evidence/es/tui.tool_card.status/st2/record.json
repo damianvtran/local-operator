@@ -1,0 +1,53 @@
+{
+  "locale": "es",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "83d94835752f1e78126875f2ece3d6c733b0bec6a9f86bfc1f4daf5faca27e61",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Task brief; translator identity not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "fallback": "none",
+    "session": "95be7ec633ed",
+    "result": "clean",
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": {
+    "changed_keys": [
+      "tui.tool_card.status.session_reset"
+    ],
+    "keys_read": 18,
+    "keys_reaudited": 1,
+    "neighbour_keys_read": 17,
+    "retained": "Round-1 audit of unchanged keys retained by task instruction; not a new full-namespace audit."
+  },
+  "findings": [],
+  "checks": {
+    "key_parity": true,
+    "message_arguments": {
+      "source": [],
+      "target": [],
+      "parity": true
+    },
+    "render_message": "sesión: reinicio",
+    "cells": 16,
+    "maxCells": 16,
+    "consumer": "local_operator/tui/widgets/tool_card.py:5957-5970,5997-6012: kernel reset keeps success glyph, amber reason, abbreviates=True; reason uses truncate_cells within remaining cap after glyph and duration. Exactly-at-budget string is safe at a 16-cell reason allocation; narrower slots intentionally ellipsize.",
+    "runtime_source": "/Users/damian/local-operator/.worktrees/i18n-tool-status/local_operator/i18n/runtime.py"
+  },
+  "notes": [
+    "One changed key reviewed for semantics, idiom, register, glossary and composition with 17 status neighbours. sesión: reinicio is an acceptable terse field-style status indicating session reset, not a new session or a failed call.",
+    "No placeholders, ICU plural branches, number/date skeletons, or markup in changed key; Spanish LTR, no direction-sensitive runs. No untranslated English in changed key.",
+    "wake_unconfirmed round-1 accepted width exception retained without reopening; no new rendered UI validation claimed.",
+    "Target catalogue is untracked at worktree HEAD; audited actual on-disk bytes, not committed bytes. HEAD 66c87c0755e264db07ea375c67242cffbe302bc0."
+  ]
+}

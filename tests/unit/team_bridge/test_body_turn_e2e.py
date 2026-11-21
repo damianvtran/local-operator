@@ -1884,3 +1884,100 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
         )
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_body_frame_stays_anchored_for_wire_prefix_stability(tmp_path) -> None:
+    """E2E regression: across a 2-call body turn (tool call -> answer), the
+    ephemeral frame stays anchored at its Call 1 position on BOTH Anthropic and
+    OpenAI-compat wires so the prefix through the frame is byte-identical, AND
+    Call 1's tail cache breakpoint lands on the last persistent message rather
+    than the trailing ephemeral frame."""
+    from local_operator.providers.clients import AnthropicClient, OpenAICompatClient
+
+    def _strip_cache_control(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            if isinstance(obj.get("content"), str):
+                obj = {**obj, "content": [{"type": "text", "text": obj["content"]}]}
+            return {k: _strip_cache_control(v) for k, v in obj.items() if k != "cache_control"}
+        if isinstance(obj, list):
+            return [_strip_cache_control(v) for v in obj]
+        return obj
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    stream = CapturingStream(
+        [
+            _tool_call("call-1", "noop"),
+            [StreamTextDelta(delta="the answer"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="noop", content=[TextContent(text="done")]
+        )
+
+    session = _session(
+        tmp_path,
+        stream,
+        _runtime(config_dir, client),
+        tools=[AgentTool(name="noop", description="a tool", execute=execute)],
+    )
+    try:
+        # Seed a persistent user turn before the body turn so Call 1 has a
+        # persistent message preceding the trailing ephemeral frame.
+        await session._transcript.append_message(Message.user("prior persistent turn"))
+        session._context.messages.append(Message.user("prior persistent turn"))
+        await _serve_body_turn(session)
+    finally:
+        await session.dispose()
+
+    assert len(stream.requests) == 2
+    req1, req2 = stream.requests[0], stream.requests[1]
+    assert [m.model_dump() for m in req2.messages[: len(req1.messages)]] == [
+        m.model_dump() for m in req1.messages
+    ], "Call 2 must keep the exact Call 1 message prefix through the anchored frame"
+
+    # Verify BOTH wire formats keep byte-identical prefixes through Call 1,
+    # place Call 1's tail breakpoint on the persistent message (not the frame),
+    # and never leak ``_ephemeral`` onto the wire.
+    anth_spec = ModelSpec(provider="anthropic", model_id="claude-opus-5", context_window=200_000)
+    oai_spec = ModelSpec(
+        provider="radient",
+        model_id="anthropic/claude-sonnet-5.5",
+        context_window=200_000,
+        supports_prompt_cache=True,
+    )
+    for label, build in (
+        (
+            "anthropic",
+            lambda r: AnthropicClient()._build_body(r.model_copy(update={"model": anth_spec})),
+        ),
+        (
+            "openai_compat",
+            lambda r: OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+                r.model_copy(update={"model": oai_spec})
+            ),
+        ),
+    ):
+        b1 = build(req1)
+        b2 = build(req2)
+        assert "_ephemeral" not in json.dumps(b1)
+        assert "_ephemeral" not in json.dumps(b2)
+        m1, m2 = b1["messages"], b2["messages"]
+        assert _strip_cache_control(m2[: len(m1)]) == _strip_cache_control(
+            m1
+        ), f"{label}: Call 2 wire prefix diverged from Call 1"
+        # Call 1's trailing message is the ephemeral body frame: no marker on it,
+        # and the marker sits on the persistent message right before it.
+        assert BODY in json.dumps(m1[-1])
+        assert "cache_control" not in json.dumps(
+            m1[-1]
+        ), f"{label}: tail breakpoint must skip the trailing ephemeral frame"
+        assert "cache_control" in json.dumps(
+            m1[-2]
+        ), f"{label}: tail breakpoint must land on the last persistent message"

@@ -71,6 +71,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The Bedrock sign-in flow's progress/prompt copy (`providers/bedrock/login.py`,
         # `sso_login.py`) shown by `lop login bedrock`, the TUI and desktop connect.
         "wire.login.bedrock",
+        # A refused-for-good OAuth sign-in (Google Cloud session control): the
+        # failover notice and the `lop login-status` state words. DEFERRED.
+        "wire.providers.reauth",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
         # imaging_unavailable, empty_body), rendered by the desktop and phone

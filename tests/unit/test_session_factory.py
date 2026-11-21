@@ -3279,6 +3279,62 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
 
 
 @pytest.mark.asyncio
+async def test_a_childs_prefix_epoch_survives_its_parents_attach_and_detach(
+    tmp_config_dir: Path,
+) -> None:
+    """PR #4375 review R1-M1, through the real constructors.
+
+    A delegated child (no ``ask``) reads its parent's live probe and re-latches
+    it at every turn boundary. A block-0 line keyed on the ``<interactivity>``
+    body moved block 0 at each flip, and ``_prepare_system_blocks`` persisted a
+    new ``system_prefix`` (a cold cache over tools, system and history): 3
+    epochs over detached -> attached -> detached. Attachment belongs to the
+    tail, which reaches the model as a ``[session-state]`` delta; the prefix
+    stays one epoch.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    state = {"attached": False}
+    parent._goal_state.interactive_probe = lambda: state["attached"]
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-flips",
+        )
+        try:
+            assert not any(tool.name == "ask" for tool in child._context.tools)
+            heads: list[str] = []
+            for attached in (False, True, False):
+                state["attached"] = attached
+                child._goal_state.latch_interactivity()
+                blocks = await child._prepare_system_blocks()
+                heads.append(blocks[0])
+            prefixes = [
+                entry
+                for entry in child._transcript.entries()
+                if str(entry.payload.get("custom_type", "")) == "system_prefix"
+            ]
+            assert len(prefixes) == 1, f"{len(prefixes)} system_prefix epochs persisted"
+            assert len(set(heads)) == 1, "block 0 moved with the parent's attachment"
+            assert "No `ask` tool in this session" in heads[0]
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own(
     tmp_config_dir: Path,
 ) -> None:

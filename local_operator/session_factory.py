@@ -1333,7 +1333,11 @@ def _latest_compaction_id(transcript: Any) -> str | None:
     return None
 
 
-def _env_details(cwd: str | None = None, session_id: str = "") -> str:
+def _env_details(
+    cwd: str | None = None,
+    session_id: str = "",
+    tool_names: Collection[str] | None = None,
+) -> str:
     """Volatile environment facts for the env block (date rides there too,
     added by ``build_system_blocks``). Kept tiny and byte-stable within a
     run: no timestamps, no process ids. ``cwd`` comes from the session's
@@ -1355,17 +1359,27 @@ def _env_details(cwd: str | None = None, session_id: str = "") -> str:
     caller with no transcript directory to name gets. The benchmark harness is
     NOT such a caller: ``scripts/bench_context_budget.py`` hand-builds its own
     env text rather than calling here, which is why the ratchet does not price
-    the extra line."""
+    the extra line.
+
+    ``tool_names`` is the session's tool membership; when given, each line
+    ships only where a held tool can use it (``prompts_api.env_detail_flags``),
+    so an MCP-only run's env block is the date and model alone. ``None`` keeps
+    every line."""
     import platform
 
-    text = (
-        f"Platform: {platform.system()} {platform.release()} ({platform.machine()})\n"
-        f"Python: {platform.python_version()}\n"
-        f"Working directory: {cwd if cwd is not None else os.getcwd()}"
-    )
-    if session_id:
-        text += f"\nSession ID: {session_id}"
-    return text
+    from local_operator.prompts_api import env_detail_flags
+
+    workspace, wants_id = env_detail_flags(tool_names)
+    lines: list[str] = []
+    if workspace:
+        lines += [
+            f"Platform: {platform.system()} {platform.release()} ({platform.machine()})",
+            f"Python: {platform.python_version()}",
+            f"Working directory: {cwd if cwd is not None else os.getcwd()}",
+        ]
+    if session_id and wants_id:
+        lines.append(f"Session ID: {session_id}")
+    return "\n".join(lines)
 
 
 #: The SERVER-OWNED shape of a configuration run: the preamble a run is built
@@ -4226,7 +4240,11 @@ def _make_system_blocks_provider(
     authority — it is in context before the first model call.
     """
 
-    environment = _env_details(cwd, session_id)
+    # The env block's lines follow tool MEMBERSHIP (``_env_details``), so it is
+    # rendered per provider call from ``current_tools`` below, never once here:
+    # the construction list is the pre-narrowing snapshot. ``cwd`` and
+    # ``session_id`` are still captured once, so a stable membership renders
+    # byte-identical text (and the cache key already moves with membership).
     # The HOST capability answer, taken ONCE at construction and passed to every
     # render (see ``prompts_api.host_capability_probes`` for the measured
     # incident). It is read here for the same reason ``user_instructions`` and
@@ -4417,7 +4435,7 @@ def _make_system_blocks_provider(
         cached_blocks = build_system_blocks(
             current_tools,
             knowledge_block,
-            environment,
+            _env_details(cwd, session_id, [tool.name for tool in current_tools]),
             date_str,
             goal=goal,
             goal_status=goal_status,

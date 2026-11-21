@@ -4894,7 +4894,10 @@ async def _construct_child_session(
             # commonest session shape the one that cannot tell itself apart from
             # a peer, and the listing marker would be the only half of the fix it
             # ever saw.
-            _env_details(cwd, transcript.directory.name),
+            # Gated on the child's live membership like the parent's head
+            # (``_env_details``): a child without ``sessions``/``send``/``tags``
+            # has no use for its id, nor one without file/shell tools for cwd.
+            _env_details(cwd, transcript.directory.name, [tool.name for tool in current_tools]),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
             # ...and its LIFECYCLE STATE, so a goal the parent has already

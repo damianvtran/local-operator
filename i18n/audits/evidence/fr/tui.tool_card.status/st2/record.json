@@ -1,0 +1,61 @@
+{
+  "locale": "fr",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "cb7aea0c9e2cad4c064d37848aa5770bf421b0467c329428041cbb64c6142249",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Identity supplied by delegator; not independently inferred from git."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "f9e3a35ab5b5",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "none",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "head": "66c87c0755e264db07ea375c67242cffbe302bc0",
+  "scope": [
+    "tui.tool_card.status.running",
+    "tui.tool_card.status.session_reset"
+  ],
+  "keys_audited": 2,
+  "namespace_keys_read": 18,
+  "neighbour_keys_read": 16,
+  "checks": [
+    {
+      "key": "tui.tool_card.status.running",
+      "source": "running",
+      "target": "tourne",
+      "arguments": [],
+      "rendered": "tourne",
+      "source_cells": 7,
+      "target_cells": 6,
+      "maxCells": 7,
+      "result": "pass"
+    },
+    {
+      "key": "tui.tool_card.status.session_reset",
+      "source": "session reset",
+      "target": "session réinit.",
+      "arguments": [],
+      "rendered": "session réinit.",
+      "source_cells": 13,
+      "target_cells": 15,
+      "maxCells": 16,
+      "result": "pass"
+    }
+  ],
+  "findings": [],
+  "note": "Independent round-2 audit of only running and session_reset plus composition with all 16 unchanged neighbours, read side by side against English and context. Unchanged keys are context only, not newly certified. tourne denotes ongoing execution rather than a completed launch; idiomatic compact computing French. session réinit. is an intelligible abbreviation of session réinitialisée and preserves the fresh-session warning without implying call failure. Both preserve lowercase terse status register, exact argument parity, and absence of plural/markup tokens; neither contains English UI prose. Runtime verification used the primary repo .venv/bin/python with PYTHONPATH pinned to this worktree (module origin confirmed). No scoped key is at or above maxCells. Consumer also inspected: tool_card.py running_label uses settled-spine padding to seven cells; _status_runs sheds whole words below cap; _outcome_runs uses reset fallback as amber reason beside success glyph. Session reset is 15 cells versus English 13, below its 16-cell cap; no extra rendered overflow check indicated by this delta. No repository edits or ledger append performed."
+}

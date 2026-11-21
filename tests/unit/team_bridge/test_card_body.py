@@ -1373,3 +1373,171 @@ async def test_compaction_releases_frozen_excerpt_decisions(tmp_path: Path, monk
     assert kept, "the card must survive in the kept window for this test to mean anything"
     assert session._bridge_excerpt_memo == {}
     assert "delivered by the body turn" in card_text()
+
+
+@pytest.mark.asyncio
+async def test_read_only_prompt_matches_main_turn_bridge_card_prefix_without_mutating_memo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """REGRESSION (cache): ``Session._read_only_prompt`` (aside, clearance,
+    compaction advisor) must apply ``_bridge_history_transform(read_only=True)``
+    so bridge cards render byte-identically to the main turn's frozen prefix
+    without mutating ``_bridge_excerpt_memo``."""
+    from local_operator.harness.render import _default_convert_to_llm
+    from local_operator.harness.types import Message
+    from local_operator.session.session import Session
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+
+    # Card 1: body already present -> main turn freezes it WITH an excerpt.
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "card one frozen excerpt")
+    card1 = _numbered_card(1)
+    # Card 2: body absent on first render -> main turn freezes it ids-only.
+    card2 = _numbered_card(2)
+    # Push card 1 beyond EXCERPT_CARD_WINDOW so its excerpt exists ONLY because
+    # it was frozen in ``_bridge_excerpt_memo``.
+    filler = [_numbered_card(n) for n in range(3, 3 + EXCERPT_CARD_WINDOW)]
+    # Card 99: brand-new card not yet seen by the main turn, with a display row.
+    card_new = _numbered_card(99)
+    _record_turn_body(tmp_path, key, "bcmsg_00000099", "unfrozen brand new body")
+
+    class _ReadOnlyHost:
+        _frozen_system_blocks: list[str] = []
+        _confinement_root: str | None = None
+
+        def __init__(self, history: list[Any]) -> None:
+            self._history = history
+            self._tools: list[Any] = []
+            self.bridge_runtime = SimpleNamespace(config_dir=tmp_path, owner=_owner())
+            self._bridge_excerpt_memo: dict[str, Any] = {}
+
+        def _system_blocks(self) -> list[str]:
+            return ["stable"]
+
+        def _reconcile_tool_inventory(self, blocks: list[str]) -> list[str]:
+            return blocks
+
+        def _wire_legal_snapshot(self) -> list[Any]:
+            return list(self._history)
+
+        def _system_state_delta(self, desired: list[str]) -> tuple[list[str], Any]:
+            return [], None
+
+        def _render_history(self, messages: Any) -> list[Message]:
+            return _default_convert_to_llm(messages)
+
+        def _bridge_history_transform(
+            self, messages: list[Any], *, read_only: bool = False
+        ) -> list[Any]:
+            return Session._bridge_history_transform(
+                self,  # type: ignore[arg-type]
+                messages,
+                read_only=read_only,
+            )
+
+    host = _ReadOnlyHost([card1, card2])
+    # First main turn: card 1 & card 2 are inside EXCERPT_CARD_WINDOW, so card 1
+    # freezes WITH an excerpt and card 2 freezes ids-only.
+    host._bridge_history_transform([card1, card2])
+    # Now push card 1 past EXCERPT_CARD_WINDOW and re-render on the main turn:
+    # card 1 keeps its frozen excerpt only because of ``_bridge_excerpt_memo``.
+    initial_history: list[Any] = [card1, card2, *filler]
+    main_shaped = host._bridge_history_transform(list(initial_history))
+    main_rendered = host._render_history(main_shaped)
+    assert "card one frozen excerpt" in main_rendered[0].text
+    assert "body not retained" in main_rendered[1].text
+
+    # Now card 2's body arrives in the store AFTER it was frozen ids-only, and
+    # a brand-new card_new enters history (not yet memoized by a main turn).
+    _record_turn_body(tmp_path, key, "bcmsg_00000002", "late body must stay frozen empty")
+    host._history = [*initial_history, card_new]
+    memo_before = dict(host._bridge_excerpt_memo)
+
+    _blocks, ro_messages = await Session._read_only_prompt(
+        host,  # type: ignore[arg-type]
+        [Message.user("aside question")],
+    )
+
+    # The entire main-turn prefix (including card 1's frozen excerpt past the
+    # window AND card 2's frozen ids-only decision) is byte-identical.
+    assert [m.model_dump() for m in ro_messages[: len(main_rendered)]] == [
+        m.model_dump() for m in main_rendered
+    ]
+    # And the read-only call NEVER mutated ``_bridge_excerpt_memo``.
+    assert host._bridge_excerpt_memo == memo_before
+    assert card_new.id not in host._bridge_excerpt_memo
+
+
+@pytest.mark.asyncio
+async def test_read_only_prompt_returns_ids_only_without_purging_when_standing_revoked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When standing is revoked, ``_read_only_prompt`` fails closed (ids-only)
+    without clearing ``_bridge_excerpt_memo`` or purging ``DisplayBodyStore``."""
+    from local_operator.harness.render import _default_convert_to_llm
+    from local_operator.harness.types import Message
+    from local_operator.session.session import Session
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "sensitive excerpt body")
+    card1 = _numbered_card(1)
+
+    class _ReadOnlyHost:
+        _frozen_system_blocks: list[str] = []
+        _confinement_root: str | None = None
+
+        def __init__(self, history: list[Any]) -> None:
+            self._history = history
+            self._tools: list[Any] = []
+            self.bridge_runtime = SimpleNamespace(config_dir=tmp_path, owner=_owner())
+            self._bridge_excerpt_memo: dict[str, Any] = {}
+
+        def _system_blocks(self) -> list[str]:
+            return ["stable"]
+
+        def _reconcile_tool_inventory(self, blocks: list[str]) -> list[str]:
+            return blocks
+
+        def _wire_legal_snapshot(self) -> list[Any]:
+            return list(self._history)
+
+        def _system_state_delta(self, desired: list[str]) -> tuple[list[str], Any]:
+            return [], None
+
+        def _render_history(self, messages: Any) -> list[Message]:
+            return _default_convert_to_llm(messages)
+
+        def _bridge_history_transform(
+            self, messages: list[Any], *, read_only: bool = False
+        ) -> list[Any]:
+            return Session._bridge_history_transform(
+                self,  # type: ignore[arg-type]
+                messages,
+                read_only=read_only,
+            )
+
+    host = _ReadOnlyHost([card1])
+    # Populate the memo while standing holds.
+    main_shaped = host._bridge_history_transform([card1])
+    assert "sensitive excerpt body" in host._render_history(main_shaped)[0].text
+    memo_before = dict(host._bridge_excerpt_memo)
+    assert memo_before
+
+    # Revoke standing: read-only helper must fail closed (ids-only) WITHOUT
+    # mutating the memo or purging DisplayBodyStore.
+    for code in ("consent_revoked", "feature_off"):
+        monkeypatch.setattr(authority, "authority_fence", lambda runtime, _c=code: {"code": _c})
+        _blocks, ro_messages = await Session._read_only_prompt(
+            host,  # type: ignore[arg-type]
+            [Message.user("aside question")],
+        )
+        assert "body not retained" in ro_messages[0].text
+        assert "sensitive excerpt body" not in ro_messages[0].text
+        assert host._bridge_excerpt_memo == memo_before
+        assert "bcmsg_00000001" in DisplayBodyStore(tmp_path).bodies(key, ["bcmsg_00000001"])

@@ -144,6 +144,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
+        # A dialled endpoint answered with a POSITIVE wrong listener proof (wrong
+        # device, bad signature, bad MAC) and was removed from the member row it
+        # was dialled from (mesh-listener-auth §6, G4 heal-on-negative-proof).
+        "endpoint_demoted",
         # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME (F4, drill
         # 2026-10-04): not a refusal — nothing decided anything — and the row that
         # answers "the relay saw it" when a join stops before any pairing record
@@ -508,6 +512,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
+    "endpoint_demoted": frozenset({"endpoint", "code"}),
     "handshake_refused": frozenset(
         {
             "cause",
