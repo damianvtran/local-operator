@@ -6,7 +6,7 @@
   "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key}保存",
   "tui.settings_view.pane.agents_empty": "未配置智能体",
   "tui.settings_view.pane.empty_hint": "用{command}列出并附加",
-  "tui.settings_view.pane.more": "{count, plural, other {…… 另有{shown}项}}",
+  "tui.settings_view.pane.more": "{count, plural, other {……另有{shown}项}}",
   "tui.settings_view.pane.providers_empty": "未登录任何提供商 — {command}",
   "tui.settings_view.pane.providers_header": "提供商",
   "tui.settings_view.pane.tab_agents": "智能体",

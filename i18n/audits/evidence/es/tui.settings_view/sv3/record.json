@@ -1,0 +1,294 @@
+{
+  "locale": "es",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "4d4194b53498c615e1698979cec025a77c2c19f9733cf589ca6ae6964a029fd2",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Supplied by delegation; not independently observed."
+  },
+  "auditor": {
+    "agent": "translation-auditor/settings-copy-reaudit-es",
+    "session": "327a274f1088",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "findings": 2,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 2,
+      "nit": 0
+    },
+    "fallback_used": false,
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "round": 2,
+  "head": "464c2500c7ab94c2c2335cfb2c277eb801d7b858",
+  "changed_keys": [
+    "tui.settings_view.editor.contract_unset",
+    "tui.settings_view.scope.new_sessions"
+  ],
+  "keys_read": 21,
+  "keys_reviewed": 10,
+  "note": "Delta audit: 2 changed keys plus 8 compositional neighbours reviewed. All 21 bilingual namespace keys were read, but this is not a fresh full-namespace approval. No changed plural/RTL content; all changed copy is Spanish, key tokens enter/esc intentionally preserved. No native-speaker certification or rendered-frame proof claimed. Source and target both exceed the nominal unset-hint cap; real widget fallback was inspected, not treated as new target-only blocker. Read-only repository; only this scratch receipt written.",
+  "checks": [
+    {
+      "key": "tui.settings_view.editor.contract",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "rendered": {
+        "en": "enter saves · esc cancels",
+        "es": "enter guarda · esc cancela"
+      },
+      "cell_len": {
+        "en": 25,
+        "es": 26
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "rendered": {
+        "en": "enter saves · esc cancels · clear to unset",
+        "es": "enter guarda · esc cancela · vacío quita"
+      },
+      "cell_len": {
+        "en": 42,
+        "es": 40
+      },
+      "maxCells": 23
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "rendered": {
+        "en": "↑↓ suggestions · tab completes · enter saves · esc",
+        "es": "↑↓ sugerencias · tab completa · enter guarda · esc"
+      },
+      "cell_len": {
+        "en": 50,
+        "es": 50
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "rendered": {
+        "en": "↑↓ browse · tab complete · enter saves",
+        "es": "↑↓ navega · tab completa · enter guarda"
+      },
+      "cell_len": {
+        "en": 38,
+        "es": 39
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "rendered": {
+        "en": "↑↓ · tab · enter saves",
+        "es": "↑↓ · tab · enter guarda"
+      },
+      "cell_len": {
+        "en": 22,
+        "es": 23
+      },
+      "maxCells": 23
+    },
+    {
+      "key": "tui.settings_view.scope.live",
+      "arguments": [],
+      "parity": true,
+      "rendered": {
+        "en": "live",
+        "es": "al instante"
+      },
+      "cell_len": {
+        "en": 4,
+        "es": 11
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.scope.never",
+      "arguments": [],
+      "parity": true,
+      "rendered": {
+        "en": "never",
+        "es": "nunca"
+      },
+      "cell_len": {
+        "en": 5,
+        "es": 5
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.scope.new_launch",
+      "arguments": [],
+      "parity": true,
+      "rendered": {
+        "en": "new launch",
+        "es": "al reiniciar"
+      },
+      "cell_len": {
+        "en": 10,
+        "es": 12
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.scope.new_sessions",
+      "arguments": [],
+      "parity": true,
+      "rendered": {
+        "en": "new sessions",
+        "es": "en sesiones nuevas"
+      },
+      "cell_len": {
+        "en": 12,
+        "es": 18
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.section.takes_effect",
+      "arguments": [
+        [
+          "scope",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "rendered": {
+        "en": "takes effect: en sesiones nuevas",
+        "es": "se aplica: en sesiones nuevas"
+      },
+      "cell_len": {
+        "en": 32,
+        "es": 29
+      },
+      "maxCells": null
+    }
+  ],
+  "fallback_checks": {
+    "23": {
+      "text": "  enter guarda · esc cancela",
+      "choice": "contract"
+    },
+    "41": {
+      "text": "  enter guarda · esc cancela",
+      "choice": "contract"
+    },
+    "42": {
+      "text": "  enter guarda · esc cancela · vacío quita",
+      "choice": "unset"
+    },
+    "44": {
+      "text": "  enter guarda · esc cancela · vacío quita",
+      "choice": "unset"
+    }
+  },
+  "header_checks": {
+    "14": "",
+    "17": "",
+    "18": "en sesiones nuevas",
+    "29": "se aplica: en sesiones nuevas"
+  },
+  "consumer": "local_operator/tui/widgets/settings_view.py:4147-4157,4458-4487",
+  "findings": [
+    {
+      "id": "ES-R2-1",
+      "severity": "minor",
+      "key": "tui.settings_view.editor.contract_unset",
+      "current": "{save_key} guarda · {cancel_key} cancela · vacío quita",
+      "proposed": "{save_key} guarda · {cancel_key} cancela · borra para quitar",
+      "reason": "“vacío quita” is understandable only as compressed shorthand; “borra para quitar” directly tells the user to clear the field to unset it, instead of making “vacío” the unexplained subject of “quita”.",
+      "width_note": "Current 40 cells, source 42; existing widest-only hint behavior drops this clause below 42 cells including indent. Proposed wording is clearer but longer; needs rendered fit check, not a mandatory 23-cell squeeze."
+    },
+    {
+      "id": "ES-R2-2",
+      "severity": "minor",
+      "key": "tui.settings_view.scope.new_sessions",
+      "current": "en sesiones nuevas",
+      "proposed": "a nuevas ses.",
+      "reason": "Accurate and idiomatic in full, but 18 cells exceeds maxCells 14; the real header consumer suppresses both full and bare tags at room 14–17, whereas the 12-cell English bare scope survives. Proposed abbreviated phrase is 13 cells and composes as “se aplica: a nuevas ses.”.",
+      "width_note": "Rendered check recommended if keeping full wording; no clipping or English fallback is introduced."
+    }
+  ],
+  "verdict": "clean-with-findings"
+}

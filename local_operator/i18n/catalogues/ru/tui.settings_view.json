@@ -1,6 +1,6 @@
 {
   "tui.settings_view.editor.contract": "{save_key} сохранить · {cancel_key} отмена",
-  "tui.settings_view.editor.contract_unset": "{save_key} сохранить · {cancel_key} отмена · пусто — сброс",
+  "tui.settings_view.editor.contract_unset": "{save_key} сохр. · {cancel_key} отмена · пусто — сброс",
   "tui.settings_view.editor.suggest_long": "{browse_keys} подсказки · {complete_key} дополнить · {save_key} сохранить · {cancel_key}",
   "tui.settings_view.editor.suggest_medium": "{browse_keys} выбор · {complete_key} дополнить · {save_key} сохранить",
   "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key} сохр.",

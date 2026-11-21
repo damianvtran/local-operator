@@ -1,11 +1,11 @@
 {
   "tui.settings_view.editor.contract": "{save_key} enregistrer · {cancel_key} annuler",
-  "tui.settings_view.editor.contract_unset": "{save_key} enregistrer · {cancel_key} annuler · vider = non défini",
+  "tui.settings_view.editor.contract_unset": "{save_key} enreg. · {cancel_key} annuler · vider = aucun",
   "tui.settings_view.editor.suggest_long": "{browse_keys} suggestions · {complete_key} compléter · {save_key} enregistrer · {cancel_key}",
   "tui.settings_view.editor.suggest_medium": "{browse_keys} parcourir · {complete_key} compléter · {save_key} enregistrer",
   "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key} enreg.",
   "tui.settings_view.pane.agents_empty": "aucun agent configuré",
-  "tui.settings_view.pane.empty_hint": "{command} les liste et les attache",
+  "tui.settings_view.pane.empty_hint": "{command} les liste et attache",
   "tui.settings_view.pane.more": "{count, plural, one {… {shown} de plus} many {… {shown} de plus} other {… {shown} de plus}}",
   "tui.settings_view.pane.providers_empty": "aucun connecté — {command}",
   "tui.settings_view.pane.providers_header": "fournisseurs",
