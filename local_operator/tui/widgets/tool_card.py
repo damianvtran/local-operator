@@ -125,7 +125,12 @@ from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
-from local_operator.tui.i18n_status import display_tr, localized_display
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    message_display,
+    strip_display_controls,
+)
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TOOL_NAME_COL_MAX,
@@ -191,9 +196,21 @@ _t_st = display_tr("tui.tool_card.status")
 # (sizes, provider tokens, the backend's English failure cause, identity names)
 # become LTR islands for Urdu; `facts`/`word` are NOT listed because they carry
 # already-projected localized text, which an LTR island would mis-order.
+# `profiles` and `auth_mode` are NOT bare param islands: every locale wraps
+# them in parentheses, and an island must start after whitespace
+# (display.isolated_status_text), so the bare values raised "must include its
+# whole prefix" and crashed the Urdu fetch and search cards. The parenthesised
+# group is one island instead, and `{provider} ({auth_mode})` is ONE island
+# (two neighbouring LTR islands swap order in RTL, the reason `/login
+# {provider}` is whole). Templates whose params a message lacks are skipped and
+# the longest match wins, so the bare `{provider}` row still gets its island.
+# `cause` is not an island either: it is free English prose, measured EMPTY by
+# `_cap_failed_reason` and cut with a non-ASCII `…`, both of which the strict
+# token validator refuses -- in Urdu that was a crash on the failed-send row.
 _t_x = display_tr(
     "tui.tool_card.extra",
-    technical_params=("size", "cause", "provider", "auth_mode", "profiles"),
+    technical_params=("size",),
+    technical_commands=("({profiles})", "{provider} ({auth_mode})", "{provider}"),
 )
 
 
@@ -246,6 +263,21 @@ def _compose_record(compose_bytes: int) -> str:
     if compose_bytes:
         return _t_x(_tx.compose_composed(size=_format_bytes(compose_bytes)))
     return _t_x(_tx.compose_nothing_composed())
+
+
+def _never_sent_text(compose_bytes: int, facts: str) -> str:
+    """``never sent · <facts>``, nesting an already-PAINTED record.
+
+    ``facts`` comes out of :func:`_compose_record` already projected: in Urdu it
+    is wrapped in isolates, and the outer paint refuses control characters, so
+    nesting it raw crashed every Urdu never-sent row. Its isolates are stripped
+    for the nest and the size is re-declared as the outer message's island.
+    """
+    size = _format_bytes(compose_bytes) if compose_bytes else ""
+    return message_display(
+        _tx.compose_never_sent(facts=strip_display_controls(facts)),
+        technical_literals=(size,) if size else (),
+    ).plain
 
 
 _profile_copy = tr_record("tui.profile_actions")
@@ -1148,9 +1180,11 @@ def _failed_reason_text(word: str, cause: str) -> str:
     """``<word>: <cause>`` through the keyed pattern, so a locale owns its joiner.
 
     zh-CN, for one, writes a full-width colon (``：``) with no space; a
-    hard-coded ``": "`` could not carry that.
+    hard-coded ``": "`` could not carry that. ``word`` arrives painted (Urdu
+    isolates included), so its controls are stripped before it nests; the
+    outer paint re-wraps the whole line.
     """
-    return _t_x(_tx.send_failed_reason(word=word, cause=cause))
+    return _t_x(_tx.send_failed_reason(word=strip_display_controls(word), cause=cause))
 
 
 def _cap_failed_reason(word: str, cause: str, room: int) -> str:
@@ -3761,7 +3795,7 @@ class ToolCard(ExpandableActionBlock):
         ``_compose_facts`` keeps feeding the label-shed ladder.
         """
         self._compose_facts = _compose_record(self._compose_bytes)
-        self._summary = _t_x(_tx.compose_never_sent(facts=self._compose_facts))
+        self._summary = _never_sent_text(self._compose_bytes, self._compose_facts)
         self._never_sent_built = self._summary
         self._never_sent_locale = active_locale()
 

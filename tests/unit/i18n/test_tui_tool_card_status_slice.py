@@ -443,6 +443,12 @@ def test_urdu_status_fragments_are_isolated_exactly_once(shipped_locale) -> None
         assert _balanced(row), (name, row)
         for key in _ROW_KEYS_UR[name]:
             # Exactly ONE projection: one RLI ... PDI around the word, never two.
+            # The failed-send word is the exception in SHAPE only: Urdu now owns
+            # its `{word}: {cause}` joiner (tui.tool_card.extra.send.failed_reason),
+            # so the whole reason is one Urdu projection that the word opens.
+            if key == "send.not_delivered":
+                assert row.count(f"\u2067{words[key]}: ") == 1, (name, key, row)
+                continue
             assert row.count(f"\u2067{words[key]}\u2069") == 1, (name, key, row)
             assert f"\u2067\u2067{words[key]}" not in row, (name, row)
         # The LTR technical neighbours stay outside the Urdu island.

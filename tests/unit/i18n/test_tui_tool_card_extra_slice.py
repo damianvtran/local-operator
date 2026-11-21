@@ -278,3 +278,38 @@ def test_translated_fetch_and_search_rows_keep_their_styling(fr_extra) -> None:
     search = _search_card()._build_content(140)
     assert _styles_over(search, "FR Provider: brave (api_key)") == {search_dim}
     assert _styles_over(search, "FR Sources:") == {search_dim}
+
+
+SHIPPED = ("fr", "es", "zh-CN", "ru", "vi", "hi", "ur")
+
+
+@pytest.mark.parametrize("locale", SHIPPED)
+def test_every_shipped_locale_paints_every_surface(locale: str) -> None:
+    """Regression: the REAL Urdu catalogue crashed the fetch and search cards.
+
+    ``profiles``/``auth_mode`` were declared bare technical params, but every
+    locale wraps them in parentheses; Urdu is the one locale that builds LTR islands, and an
+    island must start after whitespace, so painting a 2-attempt fetch raised
+    ``technical status span must include its whole prefix``. The synthetic fr
+    fixture never isolates, so only the shipped catalogues catch it. The same
+    family: a painted fragment nested into an outer pattern (never-sent facts,
+    the failed-send word) and the free-prose cause measured empty or cut with
+    ``…`` also raised under Urdu.
+    """
+    from local_operator.tui.widgets import tool_card
+
+    try:
+        text.set_active_locale(locale)
+        _surfaces()
+        word = tool_card.send_not_delivered_word()
+        for room in (8, 20, 30, 200):
+            tool_card._cap_failed_reason(word, "peer mailbox closed (errno 61)", room)
+        fetch = _fetch_card()._build_content(140).plain
+        search = _search_card()._build_content(140).plain
+    finally:
+        text.set_active_locale("en")
+    if locale == "ur":
+        # The parenthesised identity list is ONE LTR island (LRI ... PDI).
+        assert "\u2066(default, browser-profile)\u2069" in fetch
+        # Provider and auth mode stay one island so RTL cannot swap them.
+        assert "\u2066brave (api_key)\u2069" in search
