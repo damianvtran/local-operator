@@ -796,6 +796,43 @@ re-dated at every serialization) are excluded, which is why the session's
 for any reason (including a field that moves with time) costs only the full
 seed the legacy path always sent; it can never elide a changed frame.
 
+### Steer journal order — `?steer_journal_order=1`
+
+| Capability | Contract |
+|---|---|
+| `capabilities.steer_journal_order = {"available": true}` | delivered phone steers sit at their journal slot on the session stream |
+
+A phone steer is painted on the live projection at SEND time and upgraded in
+place when the drain delivers it at a later tool boundary. The journal — so
+`/history`, a fresh mount and a resume — records it at DELIVERY. Without this
+capability the live frame reads `steer, tool, tool` while every page reads
+`tool, tool, user`: the "messages load out of order" report.
+
+`GET /api/sessions/{id}/events?steer_journal_order=1` declares the fix for that
+connection (only the exact value `1`; the parameter is per stream, like
+`?have=`). On a declaring stream, once a steer is delivered its row moves to
+just after the row it follows in the journal and its `kind` becomes `user` —
+the page's kind, since the journal carries no steer marker. Its `id` does not
+change, so a client keyed by id repaints the row instead of adding one. An
+undelivered steer stays where it was painted (`kind: "steer"`), and a steer
+whose anchor row is outside the capped frame keeps its slot (only the kind
+changes). Several steers drained at one boundary keep their send order.
+
+A stream that does not declare it is byte-identical to a relay without the
+feature: send-time slot, `kind: "steer"`. That is deliberate:
+local-operator-mobile builds before #359 mis-place a held row that moves later,
+and installed phones never update in step with the relay. The ordering hint
+(`steer_journal_order` on the projection, written by the runtime's fold) is
+relay-internal and stripped from every SSE frame. An older relay ignores the
+parameter, so a client feature-detects the capability rather than assuming the
+order.
+
+| Client | Declares | Sees after delivery |
+|---|---|---|
+| Phone app before #359 | no | send-time slot, `steer` (unchanged) |
+| Phone app that declares it | yes | journal slot, `user` — matches `/history` |
+| Relay web SPA | yes | held tab: the row keeps its held slot and repaints (upsert by id); fresh mount: journal order |
+
 ### The transfer verb — a conversation's move (`POST /api/sessions/{id}/transfer`)
 
 The write half, and the relay's half of

@@ -1251,6 +1251,18 @@ class SessionProjection:
     #: stated here. SPARSE: absent means false, which is what an older daemon
     #: and an uncapped projection both mean.
     transcript_head_pinned: bool = False
+    #: WHERE EACH DELIVERED PHONE STEER SITS IN THE JOURNAL: steer row id -> the
+    #: id of the row it follows there. A phone steer is painted at SEND time
+    #: (``ProjectionFold.note_user_message``) and upgraded in place when the
+    #: drain delivers it at a later tool boundary, while the journal — and so
+    #: ``/history`` and every fresh mount — records it at DELIVERY. This map is
+    #: the delivery slot, written by the fold (which lives in the runtime) so
+    #: the relay can reorder per client: only a stream that declared
+    #: ``?steer_journal_order=1`` gets the move (``steer_journal_order_frame``).
+    #: RELAY-INTERNAL: the relay strips it from every SSE frame, so no phone
+    #: ever holds it. SPARSE: an empty map is popped by ``to_json`` so a
+    #: steer-free projection stays byte-identical to the pre-capability wire.
+    steer_journal_order: dict[str, str] = field(default_factory=dict)
     # Optional DISPLAY capability, never inferred from raw entry details. Old
     # owners omit it; only the updated owner source binding sets version 1.
     peer_cycles: int | None = None
@@ -1369,6 +1381,8 @@ class SessionProjection:
             data["transcript"] = [row.to_json() for row in self.transcript]
         if not self.transcript_head_pinned:
             data.pop("transcript_head_pinned", None)
+        if not self.steer_journal_order:
+            data.pop("steer_journal_order", None)
         if self.peer_cycles is None:
             data.pop("peer_cycles", None)
         data["pending"] = self.pending.to_json() if self.pending else None

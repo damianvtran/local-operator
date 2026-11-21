@@ -7413,6 +7413,13 @@ def build_app(daemon: MobileDaemon):
                 # the full seed) — so a client must feature-detect, never probe.
                 "history_after": {"available": True},
                 "seed_digest": {"available": True},
+                # STEER JOURNAL ORDER: ``?steer_journal_order=1`` on a session
+                # events stream moves each delivered phone steer to its journal
+                # slot (as a ``user`` row), so the live frame agrees with
+                # ``/history``. A RELAY capability like ``seed_digest``: an older
+                # relay ignores the parameter and keeps the send-time slot, so a
+                # client must feature-detect rather than assume the order.
+                "steer_journal_order": {"available": True},
                 # Per-device push preferences (Settings → Notifications): the
                 # register body accepts ``preferences`` and the push worker
                 # gates emits on them (``push_devices.PREFERENCE_KEYS``). A
@@ -7654,6 +7661,25 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         session_id = str(request.path_params["session_id"])
+        # STEER JOURNAL ORDER (``capabilities.steer_journal_order``): a client
+        # that declares it gets each delivered phone steer at its journal slot,
+        # so the live frame agrees with ``/history``. Absent, the frame is the
+        # byte-identical legacy one — installed phones from before
+        # local-operator-mobile #359 mis-place a held row that moves, so the
+        # move must never reach a client that did not ask for it. Resolved per
+        # stream because the frame is shared by every subscriber.
+        # Local import, like ``_projection_frame``'s: the fold module is heavy
+        # and the daemon keeps it off its import path.
+        from local_operator.mobile.projection import (
+            STEER_JOURNAL_ORDER_PARAM,
+            steer_journal_order_frame,
+        )
+
+        steer_order = request.query_params.get(STEER_JOURNAL_ORDER_PARAM) == "1"
+
+        def client_frame(frame: dict[str, Any]) -> dict[str, Any]:
+            return steer_journal_order_frame(frame, declared=steer_order)
+
         try:
             owner_row = await remote_row(session_id)
             if owner_row is not None:
@@ -7666,7 +7692,7 @@ def build_app(daemon: MobileDaemon):
                     try:
                         if view.frame is not None:
                             yield _projection_seed_event(
-                                view.frame, request.query_params.get("have")
+                                client_frame(view.frame), request.query_params.get("have")
                             )
                         while True:
                             try:
@@ -7689,7 +7715,7 @@ def build_app(daemon: MobileDaemon):
                                 yield "event: remote_error\ndata: " + json.dumps(frame) + "\n\n"
                             else:
                                 yield _projection_live_event(
-                                    frame, request.query_params.get("have")
+                                    client_frame(frame), request.query_params.get("have")
                                 )
                     finally:
                         release_remote()
@@ -7808,7 +7834,7 @@ def build_app(daemon: MobileDaemon):
                     # stable between repaints; a mark, Keep or activity that
                     # moves it is a real change the phone must receive in full.
                     yield _projection_seed_event(
-                        stamp_temporary(_projection_frame(projection)), have
+                        client_frame(stamp_temporary(_projection_frame(projection))), have
                     )
                     sent_at = loop.time()
                 while True:
@@ -7827,7 +7853,8 @@ def build_app(daemon: MobileDaemon):
                         if wait > 0:
                             await asyncio.sleep(wait)
                     yield _projection_live_event(
-                        stamp_temporary(_latest_projection_frame(queue, frame)), have
+                        client_frame(stamp_temporary(_latest_projection_frame(queue, frame))),
+                        have,
                     )
                     sent_at = loop.time()
             finally:
