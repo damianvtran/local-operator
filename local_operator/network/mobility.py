@@ -2743,24 +2743,25 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
 ARRIVAL_NOTE_MARKER = "move-arrival-note.json"
 
 
-def _pending_setup(server: "RelayServer", session_id: str) -> list[tuple[str, str]]:
-    """``(cwd, run)`` for each dependency recipe this device's setup plan has not run.
+def _dependency_status(server: "RelayServer", session_id: str) -> dict[str, Any] | None:
+    """THIS device's read-only dependency status for the arrival note, or ``None``.
 
-    Read from THIS device's restore record and tree (``workset_setup.plan_setup``),
-    never the peer's block, and computed only: nothing runs here (the arrival note
-    may name the plan, never start it). Any failure is "nothing pending" — the note
-    is advice and the move has already committed.
+    Read from THIS device's restore record and tree (``workset_setup``), never the
+    peer's block, and computed only: nothing runs, links or installs here. ``None``
+    means no working set arrived on this device. A failure is NOT "nothing pending"
+    (review R3 on #4378): it becomes ``{"state": "unknown"}`` so the note keeps its
+    do-not-set-up guard and points at ``--status`` instead of omitting the paragraph.
     """
     try:
         from local_operator.network import workset_move, workset_setup
 
-        plan = workset_setup.plan_setup(Path(server.root), workset_move.home_of(server), session_id)
-    except Exception:  # noqa: BLE001 — advice only
-        logger.debug("mobility: no setup plan for %s", session_id, exc_info=True)
-        return []
-    if plan is None:
-        return []
-    return [(row.cwd, row.run) for row in plan.rows if row.state == "not_run"]
+        status = workset_setup.dependency_status(
+            Path(server.root), workset_move.home_of(server), session_id
+        )
+    except Exception:  # noqa: BLE001 — advice only; the move has already committed
+        logger.debug("mobility: no dependency status for %s", session_id, exc_info=True)
+        return {"state": "unknown", "rows": [], "not_restored": []}
+    return None if status is None else status.to_json()
 
 
 def _arrival_resume_note(
@@ -2811,7 +2812,7 @@ def _arrival_resume_note(
             session_id=session_id,
             source=source,
             destination=str(server._own_label()),  # noqa: SLF001
-            setup_pending=_pending_setup(server, session_id),
+            dependencies=_dependency_status(server, session_id),
         )
         written = append_inbox(
             directory,

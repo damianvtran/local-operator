@@ -120,9 +120,6 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "session.workset.serve",
         "session.workset.restore",
         "session.workset.departed",
-        # The operator at THIS device ran dependency setup over a moved working set
-        # (move-working-set.md §9 phase 2; workset_setup) — install scripts ran here.
-        "session.workset.setup",
         # transport scope (§7.6 of mesh-transport-identity.md)
         "pairing_refused",
         "invite_minted",
@@ -855,9 +852,6 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "session.workset.restore": frozenset({"peer", "state", "worktrees"}),
     "session.workset.departed": frozenset({"peer", "marked"}),
-    # Setup: the run's summary state and, per recipe, its kind, state and exit codes.
-    # No paths and no command output (a log can echo a registry token).
-    "session.workset.setup": frozenset({"state", "rows"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second

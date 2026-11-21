@@ -419,114 +419,104 @@
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "{device} is the destination device name, verbatim. Must not imply the files stayed: they may be on {device}."
   },
-  "cli.sessions_move_workset.help_setup_deps": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_help": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "--to local, --setup-deps-adjacent flag help. Keep '--to local' verbatim. 'lockfile' = pnpm-lock.yaml/uv.lock etc."
+    "note": "Subcommand one-line help in `lop sessions --help`. Must not suggest it installs anything."
   },
-  "cli.sessions_move_workset.setup_cancelled": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_description": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Final summary line after Ctrl-C; {command} a shell command."
+    "note": "Subcommand description in `lop sessions setup-deps --help`. Keep node_modules, .venv and --status verbatim. Must say plainly that it is read-only and never runs a package manager."
   },
-  "cli.sessions_move_workset.setup_complete": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_session_help": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Final summary line."
+    "note": "Help for the positional conversation id argument."
   },
-  "cli.sessions_move_workset.setup_description": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_status_help": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Subcommand description. Keep node_modules and .venv verbatim."
+    "note": "Help for the required --status flag."
   },
-  "cli.sessions_move_workset.setup_help": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_header": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "One-line subcommand help in the `lop sessions` list."
+    "note": "First line of the status report. {session} is a conversation id, verbatim. Must say nothing was run or installed."
   },
-  "cli.sessions_move_workset.setup_hint_log": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_row": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "{log} is a file path."
+    "note": "One row: {state} is one of the deps_state_* labels (already translated), {cwd} a home-relative path, {kind} a package-manager kind token kept verbatim (pnpm, npm, uv, git_lfs...). Keep the ' · ' separator."
   },
-  "cli.sessions_move_workset.setup_hint_manual": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_row_plain": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "For git lfs pull: the program deliberately does not run it."
+    "note": "One row with no kind (the worktree itself was refused or unreadable). {state} is a deps_state_* label, {cwd} a path."
   },
-  "cli.sessions_move_workset.setup_hint_missing": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_state_pending": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "{tool} is an executable name (pnpm, uv...), {run} a command; keep verbatim. The program never installs tools itself."
+    "note": "Row label: the dependency tree does not exist yet (absent or an empty folder). Short label, sentence case."
   },
-  "cli.sessions_move_workset.setup_hint_present": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_state_present_unverified": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "{target} is a path to node_modules or .venv."
+    "note": "Row label: a dependency folder exists but was NOT checked; it may be incomplete. Must not imply it is ready or usable."
   },
-  "cli.sessions_move_workset.setup_hint_refused": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_state_unknown": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "{reason} is a machine reason code kept in English."
+    "note": "Row label: the folder or worktree could not be read (permissions, I/O). Must not imply present or absent."
   },
-  "cli.sessions_move_workset.setup_incomplete": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_state_refused": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Final summary line. 'working set' = the moved worktrees and files; {command} a shell command."
+    "note": "Row label: the worktree's location is outside the restore's placement rules, so it is not described."
   },
-  "cli.sessions_move_workset.setup_none": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_state_manual": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "{session} is a conversation id (hex)."
+    "note": "Row label: a step left to the user by design (e.g. git lfs). Not an error."
   },
-  "cli.sessions_move_workset.setup_not_restored": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_state_not_needed": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "{path} is a worktree path."
+    "note": "Row label: this kind of project has no dependency tree to create."
   },
-  "cli.sessions_move_workset.setup_nothing": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_not_restored": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Shown when the restored worktrees have no lockfile needing a dependency tree."
+    "note": "A worktree of the move that is not restored on this device yet. {path} is a path, verbatim."
   },
-  "cli.sessions_move_workset.setup_prompt": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_missing_tool": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Interactive y/N prompt. Keep '[y/N] ' verbatim including the trailing space: the program accepts only y/yes."
+    "note": "Informational hint under a pending row. {tool} is an executable name, verbatim. Must not tell the reader to install it or run anything."
   },
-  "cli.sessions_move_workset.setup_remote": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_summary_pending": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Refusal. {device} is a device name, {command} a shell command; keep both and '--setup-deps' verbatim."
+    "note": "Final summary when something is not set up. Must not tell the reader (who may be an agent) to run anything; it explains why this command does not."
   },
-  "cli.sessions_move_workset.setup_row": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_summary_unknown": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "One result row. {state} is a machine code (done, present, failed, missing_toolchain...) kept in English; {cwd} a path; {run} a command. Keep the layout."
+    "note": "Final summary when some entry could not be read."
   },
-  "cli.sessions_move_workset.setup_running": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_summary_present_unverified": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Progress line before a command starts; {cwd} a path, {run} a command."
+    "note": "Final summary when every folder exists. Must not claim they are complete or usable."
   },
-  "cli.sessions_move_workset.setup_session_help": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_summary_nothing_needed": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Argument help."
+    "note": "Final summary when no worktree needs a dependency tree."
   },
-  "cli.sessions_move_workset.setup_status_help": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+  "cli.sessions_move_workset.deps_none": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "Flag help for --status."
-  },
-  "cli.sessions_move_workset.setup_warning": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
-    "tone": "plain, factual, calm",
-    "note": "Safety warning shown before the user approves; calm, factual. 'postinstall' is an npm term, keep verbatim."
-  },
-  "cli.sessions_move_workset.setup_yes_help": {
-    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
-    "tone": "plain, factual, calm",
-    "note": "Flag help for --yes."
+    "note": "Error line: no working set of {session} was restored on this device. {session} is a conversation id, verbatim."
   }
 }

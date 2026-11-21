@@ -66,6 +66,86 @@ def changed() -> Msg:
     return Msg("cli.sessions_move_workset.changed", {})
 
 
+def deps_description() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_description", {})
+
+
+def deps_header(*, session: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_header", {"session": session})
+
+
+def deps_help() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_help", {})
+
+
+def deps_missing_tool(*, tool: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_missing_tool", {"tool": tool})
+
+
+def deps_none(*, session: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_none", {"session": session})
+
+
+def deps_not_restored(*, path: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_not_restored", {"path": path})
+
+
+def deps_row(*, state: str, cwd: str, kind: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_row", {"state": state, "cwd": cwd, "kind": kind})
+
+
+def deps_row_plain(*, state: str, cwd: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_row_plain", {"state": state, "cwd": cwd})
+
+
+def deps_session_help() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_session_help", {})
+
+
+def deps_state_manual() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_manual", {})
+
+
+def deps_state_not_needed() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_not_needed", {})
+
+
+def deps_state_pending() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_pending", {})
+
+
+def deps_state_present_unverified() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_present_unverified", {})
+
+
+def deps_state_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_refused", {})
+
+
+def deps_state_unknown() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_unknown", {})
+
+
+def deps_status_help() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_status_help", {})
+
+
+def deps_summary_nothing_needed() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_nothing_needed", {})
+
+
+def deps_summary_pending() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_pending", {})
+
+
+def deps_summary_present_unverified() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_present_unverified", {})
+
+
+def deps_summary_unknown() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_unknown", {})
+
+
 def desktop_refused(*, source: str, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.desktop_refused", {"source": source, "device": device})
 
@@ -84,10 +164,6 @@ def help_dry_run() -> Msg:
 
 def help_no_engage_on_arrival() -> Msg:
     return Msg("cli.sessions_move_workset.help_no_engage_on_arrival", {})
-
-
-def help_setup_deps() -> Msg:
-    return Msg("cli.sessions_move_workset.help_setup_deps", {})
 
 
 def help_without() -> Msg:
@@ -338,90 +414,6 @@ def receipt_transferred(*, source: str, count: int | float) -> Msg:
 
 def receipt_without(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_without", {"device": device})
-
-
-def setup_cancelled(*, command: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_cancelled", {"command": command})
-
-
-def setup_complete() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_complete", {})
-
-
-def setup_description() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_description", {})
-
-
-def setup_help() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_help", {})
-
-
-def setup_hint_log(*, log: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_hint_log", {"log": log})
-
-
-def setup_hint_manual(*, run: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_hint_manual", {"run": run})
-
-
-def setup_hint_missing(*, tool: str, run: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_hint_missing", {"tool": tool, "run": run})
-
-
-def setup_hint_present(*, target: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_hint_present", {"target": target})
-
-
-def setup_hint_refused(*, reason: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_hint_refused", {"reason": reason})
-
-
-def setup_incomplete(*, command: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_incomplete", {"command": command})
-
-
-def setup_none(*, session: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_none", {"session": session})
-
-
-def setup_not_restored(*, path: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_not_restored", {"path": path})
-
-
-def setup_nothing() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_nothing", {})
-
-
-def setup_prompt() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_prompt", {})
-
-
-def setup_remote(*, device: str, command: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_remote", {"device": device, "command": command})
-
-
-def setup_row(*, state: str, cwd: str, run: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_row", {"state": state, "cwd": cwd, "run": run})
-
-
-def setup_running(*, cwd: str, run: str) -> Msg:
-    return Msg("cli.sessions_move_workset.setup_running", {"cwd": cwd, "run": run})
-
-
-def setup_session_help() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_session_help", {})
-
-
-def setup_status_help() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_status_help", {})
-
-
-def setup_warning() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_warning", {})
-
-
-def setup_yes_help() -> Msg:
-    return Msg("cli.sessions_move_workset.setup_yes_help", {})
 
 
 def unknown(*, source: str, repo: str) -> Msg:

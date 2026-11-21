@@ -569,105 +569,138 @@ def test_an_unreadable_working_set_keeps_the_older_relay_refused(
 
 
 # ---------------------------------------------------------------------------
-# Dependency setup (design §9 phase 2): `--setup-deps` and `sessions setup-deps`
+# Dependency STATUS (design §9 phase 2, status-only on #4378): no run mode exists
 # ---------------------------------------------------------------------------
 
 
-def _fake_pnpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A `pnpm` ahead of the host's real one: records its argv/cwd, makes node_modules."""
+def _recording_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`pnpm`/`npm`/`uv`/`yarn` ahead of the host's: any launch leaves a `.launched` file.
+
+    A negative control for "nothing runs": the scripts are real executables on PATH,
+    so ANY code path that started a package manager — whatever argv — would write
+    the marker. Tests assert the marker never appears.
+    """
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
-    script = bindir / "pnpm"
-    script.write_text('#!/bin/sh\necho "pnpm $*|$PWD" >> .calls\nmkdir node_modules\n')
-    script.chmod(0o755)
+    marker = tmp_path / ".launched"
+    for tool in ("pnpm", "npm", "uv", "yarn"):
+        script = bindir / tool
+        script.write_text(
+            f'#!/bin/sh\necho "{tool} $*|$PWD" >> "{marker}"\nmkdir -p node_modules\n'
+        )
+        script.chmod(0o755)
     import os
 
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
-    return bindir
+    return marker
 
 
-def test_setup_deps_toward_a_peer_is_refused_before_anything_moves(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("to", ["laptop", "local"])
+def test_the_former_setup_deps_move_flag_is_rejected_before_anything_moves(
+    to: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """`move --setup-deps` no longer exists: argparse refuses it before the command runs."""
     from local_operator.network import mobility
 
     def never(*_a: Any, **_k: Any) -> dict[str, Any]:
-        raise AssertionError("a --setup-deps move toward a peer must not be issued")
+        raise AssertionError("a move carrying the removed --setup-deps flag was issued")
 
     monkeypatch.setattr(mobility, "request_move", never)
-    args = cli.build_cli_parser().parse_args(
-        ["sessions", "move", SESSION, "--to", "laptop", "--setup-deps", "--yes"]
-    )
 
-    code = cli.sessions_move_command(args)
+    with pytest.raises(SystemExit) as raised:
+        cli.build_cli_parser().parse_args(
+            ["sessions", "move", SESSION, "--to", to, "--setup-deps", "--yes"]
+        )
 
+    assert raised.value.code == 2
+    assert "--setup-deps" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [[], ["--status", "--yes"], ["--status", "-y"]],
+    ids=["no-status", "yes", "y"],
+)
+def test_setup_deps_has_no_run_mode(extra: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    """Without `--status` (or with the removed `--yes`) the verb is a usage error, rc 2."""
+    with pytest.raises(SystemExit) as raised:
+        cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION, *extra])
+
+    assert raised.value.code == 2
     err = capsys.readouterr().err
-    assert code == 2
-    assert "Nothing was moved" in err and f"lop sessions setup-deps {SESSION}" in err
+    assert ("--status" in err) if not extra else ("unrecognized arguments" in err)
 
 
-def test_a_recall_with_setup_deps_recreates_the_tree_on_this_device(
+def test_a_recall_launches_nothing_and_status_reads_the_arrival(
     staged: tuple[Devices, Rig],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The real two-relay recall, then setup over THIS device's own restore record."""
+    """The real two-relay recall with package managers on PATH: zero launches, then
+    `--status` over THIS device's own restore record reports, still launching nothing."""
     (_server_a, server_b, _h, _p), rig = staged
-    _fake_pnpm(tmp_path, monkeypatch)
+    marker = _recording_tools(tmp_path, monkeypatch)
     source_tree = sorted(p.name for p in (rig.feat / "node_modules").iterdir())
 
-    code = _run(["--yes", "--setup-deps"])
+    code = _run(["--yes"])
 
-    out = capsys.readouterr()
-    assert code == 0, out.err
-    assert "install scripts" in out.out  # the warning precedes the move
-    receipt = json.loads(
-        (server_b.root / "network" / "workset-in" / SESSION / "setup.json").read_text()
+    assert code == 0, capsys.readouterr().err
+    capsys.readouterr()
+    monkeypatch.setenv("HOME", str(rig.home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    args = cli.build_cli_parser().parse_args(
+        ["sessions", "setup-deps", SESSION, "--status", "--json"]
     )
-    assert receipt["state"] == "complete", receipt
-    (row,) = receipt["rows"]
-    assert row["kind"] == "pnpm" and row["state"] == "done"
-    dest = rig.home / row["cwd"].removeprefix("~/")
-    assert (dest / "node_modules").is_dir()
-    assert (dest / ".calls").read_text().startswith("pnpm install --frozen-lockfile|")
-    # The source's own tree is never touched by the destination's setup.
+
+    assert cli.sessions_setup_deps_command(args) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["executes"] is False and document["ran"] is False
+    (row,) = document["rows"]
+    assert row["kind"] == "pnpm" and row["state"] in {"pending", "present_unverified"}
+    assert not marker.exists()
+    assert not (server_b.root / "network" / "workset-in" / SESSION / "setup.json").exists()
     assert sorted(p.name for p in (rig.feat / "node_modules").iterdir()) == source_tree
-    assert "Dependency setup is complete." in out.out
 
 
-def test_setup_deps_command_without_yes_off_a_terminal_runs_nothing(
+def test_status_text_says_nothing_ran_and_lists_every_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home, config = tmp_path / "home", tmp_path / "config"
     wt = home / "src" / "app"
     wt.mkdir(parents=True)
     (wt / "package-lock.json").write_text("{}")
+    (wt / "node_modules").mkdir()  # EMPTY: still pending, and never removed
     arrived = config / "network" / "workset-in" / SESSION
     arrived.mkdir(parents=True)
     (arrived / "pending.json").write_text(
         json.dumps(
             {
-                "plans": [{"n": 0, "path": "~/src/app"}],
-                "restored": {"0": {"state": "restored", "dest_path": "~/src/app"}},
+                "plans": [{"n": 0, "path": "~/src/app"}, {"n": 1, "path": "~/src/later"}],
+                "restored": {
+                    "0": {"state": "restored", "dest_path": "~/src/app"},
+                    "1": {"state": "pending_restore", "path": "~/src/later"},
+                },
             }
         )
     )
+    marker = _recording_tools(tmp_path, monkeypatch)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
-    args = cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION])
+    args = cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION, "--status"])
 
     code = cli.sessions_setup_deps_command(args)
 
-    out = capsys.readouterr()
-    assert code == 1
-    assert "not_run · ~/src/app: npm ci" in out.out
-    assert "install scripts" in out.err
-    assert not (arrived / "setup.json").exists() and not (wt / "node_modules").exists()
-    # `--status` before any run (the one command the arrival note names) shows the
-    # pending plan, runs nothing, and does not claim that no working set arrived.
-    status = cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION, "--status"])
-    assert cli.sessions_setup_deps_command(status) == 1
-    shown = capsys.readouterr()
-    assert "not_run · ~/src/app: npm ci" in shown.out and "No working set" not in shown.err
-    assert not (arrived / "setup.json").exists() and not (wt / "node_modules").exists()
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Nothing was run or installed." in out.splitlines()[0]
+    assert "Not set up · ~/src/app (npm)" in out
+    assert "Not restored on this device yet: ~/src/later" in out
+    assert "this command never does that" in out
+    assert "--yes" not in out and "npm ci" not in out
+    assert (wt / "node_modules").is_dir() and not any((wt / "node_modules").iterdir())
+    assert not marker.exists() and not (arrived / "setup.json").exists()
+    # The verb is listed in the `lop sessions` usage synopsis (design D5).
+    with pytest.raises(SystemExit):
+        cli.build_cli_parser().parse_args(["sessions", "--help"])
+    assert "move,setup-deps,sync" in capsys.readouterr().out
