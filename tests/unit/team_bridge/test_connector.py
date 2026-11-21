@@ -646,6 +646,56 @@ def test_spine_delivers_from_screened_bytes_and_releases_claim(tmp_path, monkeyp
     store.claim(owner, "bmsg_1", "sess_x", "tok2", expiry=time.time() + 60)
 
 
+@pytest.mark.parametrize("code", ["sign_in_required", "consent_required", "owner_ineligible"])
+def test_direct_owner_action_hold_notifies_once_and_delivers_nothing(
+    tmp_path, monkeypatch, code
+) -> None:
+    """The DIRECT wake path raises the owner-action notice for an owner-action hold.
+
+    The hold outcome is unchanged (still a hold with the same code, nothing
+    acked or delivered), and a second held message with the same reason adds
+    no second item. A notification store that fails must not change the hold.
+    """
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.team_bridge.screening import ScreenResult
+
+    _store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+
+    async def owner_action(*_a, **_k):
+        return ScreenResult("hold", hold_code=code)
+
+    monkeypatch.setattr(wake_mod, "screen_item", owner_action)
+    for message_id in ("bmsg_1", "bmsg_1"):
+        out = asyncio.run(
+            wake_mod.handle_message_available(
+                owner, message_id, config_dir=tmp_path, auth_store=None, access=_access(owner)
+            )
+        )
+        assert out == {"action": "hold", "message_id": message_id, "code": code}
+    assert record["delivered"] == [] and record["acks"] == []
+    items, _cursor = NotificationStore(tmp_path).list_items(state="all", session_id="sess_cos")
+    assert [item["key"] for item in items] == [
+        f"team-bridge-owner-action:{owner.endpoint_id}:{code}"
+    ]
+    body = items[0]["body_md"]
+    # Contentless: no sender label, org label or message id from the item.
+    for leaked in ("Org Member", "Acme", "bmsg_1"):
+        assert leaked not in body and leaked not in items[0]["title"]
+
+    def boom(*_a, **_k):
+        raise OSError("notification store unavailable")
+
+    monkeypatch.setattr(NotificationStore, "notify", boom)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
+        )
+    )
+    assert out == {"action": "hold", "message_id": "bmsg_1", "code": code}
+    assert record["delivered"] == []
+
+
 def test_spine_off_settings_start_zero_new_traffic(tmp_path, monkeypatch) -> None:
     store, owner = _enroll(tmp_path)
     record, _ = _wire_spine(monkeypatch, tmp_path)

@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.clients._http import (
+    MODEL_LIST_TIMEOUT,
     NO_RESPONSE_BODY,
     APIError,
     redact_secrets,
@@ -200,6 +201,7 @@ def test_list_models_success(
             "X-Title": "Local Operator",
             "HTTP-Referer": "https://local-operator.com",
         },
+        timeout=MODEL_LIST_TIMEOUT,
     )
 
     # Verify the response was parsed correctly

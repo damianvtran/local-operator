@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "audit_id": "mw-secondary-zh-CN",
+  "audit_kind": "second independent safety semantic audit (full namespaces)",
+  "locale": "zh-CN",
+  "namespaces": [
+    "cli.sessions_move_workset",
+    "tui.session_move_workset"
+  ],
+  "audit_date": "2026-11-18",
+  "audited_head": "c5bc5896186cad939fa813d321c525f78ad4e8cf",
+  "key_count": {
+    "cli.sessions_move_workset": 65,
+    "tui.session_move_workset": 11
+  },
+  "auditor": {
+    "agent": "task (lopdev lane move-working-set) / SECOND independent safety i18n-auditor 1946542ef662",
+    "session": "1946542ef662",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "model_independent": false,
+    "independence": "No authorship or remediation of any audited catalogue/context bytes; a different agent/session from every translator (dc12534ff2ca, 8966047148fb, ddcac83c68a5, d84367798211) and from the first auditor 482db48afe47. SAME MODEL (anthropic/claude-opus-5-5) as translators dc12534ff2ca/8966047148fb/ddcac83c68a5 and the first auditor: agent-independent only, NOT model-independent."
+  },
+  "translator": {
+    "agent": "coder",
+    "sessions": [
+      "dc12534ff2ca",
+      "8966047148fb",
+      "ddcac83c68a5",
+      "d84367798211"
+    ],
+    "models": "anthropic/claude-opus-5-5; deepseek/deepseek-flash (round-2 delta, provider fallback)",
+    "source": "lopdev manager brief 2026-11-18 + last audit-history receipt"
+  },
+  "first_auditor": {
+    "session": "482db48afe47",
+    "model": "anthropic/claude-opus-5-5",
+    "evidence": [
+      "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mw1/record.json",
+      "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mw2/record.json"
+    ]
+  },
+  "input_hashes": {
+    "en:cli.sessions_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_move_workset.json",
+      "sha256": "cede2b5900e0a1884b33b2a525a25aac1db76e39962e7b7fe0d8b50a49cac4dd"
+    },
+    "context:cli.sessions_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_move_workset.context.json",
+      "sha256": "3319039021cfb5d67440dee390a42986af6a6f7c8be57d4de6e3d3dc56f21bce"
+    },
+    "target:cli.sessions_move_workset": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.sessions_move_workset.json",
+      "sha256": "092c989ec873efd1f1f4415df4681349aff8a1c017612248a5d528f6489d565d"
+    },
+    "en:tui.session_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move_workset.json",
+      "sha256": "966bc7111580843e30b5f6e845a7bc46f7f7fb6cfc52c51c130b56ea92bc933a"
+    },
+    "context:tui.session_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move_workset.context.json",
+      "sha256": "4110dcee6c6db14e948c2f9e58cd34303263501ae151275ef102939ffb3628ef"
+    },
+    "target:tui.session_move_workset": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.session_move_workset.json",
+      "sha256": "fc1b263a257c0ea5cedb280835eb62d6bfbd00142aa299adab4e7fb389324775"
+    }
+  },
+  "source_sha256_matches_last_receipt": {
+    "cli.sessions_move_workset": true,
+    "tui.session_move_workset": true
+  },
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "findings": [
+      {
+        "id": "S-zh-CN-1",
+        "severity": "minor",
+        "keys": "cli.sessions_move_workset.withheld_secret, withheld_history, reason.history_secret, reason.history_unscannable",
+        "problem": "'secret' is rendered 密钥, which means a (cryptographic/API) key. That is narrower than 'secret' (tokens, passwords, .env values), and differs from the shipped zh corpus, which uses 机密 for secrets ('加密保存的长期机密'). A reader may assume only key files are withheld.",
+        "fix": "疑似机密 for 疑似密钥, 含有机密 for 含有密钥; together with the first audit's 已保留 minor: '未发送（疑似机密）：{path}'"
+      },
+      {
+        "id": "S-zh-CN-2",
+        "severity": "nit",
+        "keys": "cli.sessions_move_workset.unsupported_destination",
+        "problem": "'your answer about the working files' is rendered 你对工作文件的确认 ('your confirmation'). The answer can also be 'move without them'. The refusal and its remedy (update lop on {device}) are unaffected.",
+        "fix": "无法转达你关于工作文件的选择"
+      },
+      {
+        "id": "S-ALL-1",
+        "severity": "nit",
+        "keys": "tui.session_move_workset.checkbox_without",
+        "problem": "en 'I understand ANY working files stay on {source}' is shown when the files could not be listed; the translation says 'the working files stay', presupposing files exist. What the box commits the user to (whatever exists stays on {source}) is intact.",
+        "fix": "我了解所有工作文件（如有）都会留在{source}上"
+      }
+    ]
+  },
+  "not_claimed": [
+    "native-speaker review",
+    "rendered frame / RTL paint proof",
+    "model independence"
+  ]
+}

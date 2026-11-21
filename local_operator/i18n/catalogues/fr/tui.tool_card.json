@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.chip.you": "moi:",
+  "tui.tool_card.fetch.cache": "cache {state}",
+  "tui.tool_card.fetch.fetched": "Récupéré : {url}",
+  "tui.tool_card.fetch.final": "(URL finale : {url})",
+  "tui.tool_card.hint.collapse": "replier",
+  "tui.tool_card.hint.expand": "déplier",
+  "tui.tool_card.hint.interrupt": "{chord} pour interrompre",
+  "tui.tool_card.imagegen.requests_ahead": "{count, plural, one {{shown} requête avant celle-ci} many {{shown} de requêtes avant celle-ci} other {{shown} requêtes avant celle-ci}}",
+  "tui.tool_card.live.earlier_lines": "{count, plural, one {{shown} ligne précédente} many {{shown} de lignes précédentes} other {{shown} lignes précédentes}}",
+  "tui.tool_card.live.earlier_output_hidden": "début de la sortie masqué",
+  "tui.tool_card.live.no_output_yet": "pas encore de sortie",
+  "tui.tool_card.live.running": "en cours",
+  "tui.tool_card.more.diff_lines": "{count, plural, one {{shown} ligne de comparaison de plus} many {{shown} de lignes de comparaison de plus} other {{shown} lignes de comparaison de plus}}",
+  "tui.tool_card.more.lines": "{count, plural, one {{shown} ligne de plus} many {{shown} de lignes de plus} other {{shown} lignes de plus}}",
+  "tui.tool_card.more.search_lines": "{count, plural, one {{shown} ligne de résultat de plus} many {{shown} de lignes de résultat de plus} other {{shown} lignes de résultat de plus}}",
+  "tui.tool_card.status.stop_unconfirmed": "arrêt non confirmé"
+}

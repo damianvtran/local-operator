@@ -65,6 +65,12 @@ def test_shipped_wire_namespaces_exist() -> None:
         # the frame still inherits that one English sentence mid-sentence.
         "wire.errors.hosting",
         "wire.errors.media",
+        # Amazon Bedrock connect/credential refusals (`providers/bedrock/errors.py`),
+        # rendered verbatim by the desktop's provider-connect surface.
+        "wire.errors.bedrock",
+        # The Bedrock sign-in flow's progress/prompt copy (`providers/bedrock/login.py`,
+        # `sso_login.py`) shown by `lop login bedrock`, the TUI and desktop connect.
+        "wire.login.bedrock",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
         # imaging_unavailable, empty_body), rendered by the desktop and phone
@@ -156,6 +162,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # the suspended-grant notice and the refused `approvals auto` receipt.
         # Its own namespace so no audited catalogue's hash moves.
         "wire.bridge_taint",
+        # A chief of staff's community post approval card (RFC v2.4 §5.9,
+        # `community/agent_ops.py`): raised by the runtime, painted on every
+        # surface. Its own namespace so no audited catalogue's hash moves;
+        # English-only (coverage allowance) while the community ships dark.
+        "wire.community",
         # The reply guard's skipped double send (#3377 follow-up, design D1/D2):
         # a dedicated verb and expanded sentence as a CHILD of the bridge rows,
         # so the 85 audited `wire.tool_rows.bridge` bytes and their ledger
@@ -184,6 +195,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; its seven
         # locales ride the same PR with their own ledger rows.
         "wire.github",
+        # Per-session voice mode: its route refusals, spoken phrases and its
+        # settings section. Its own namespace so no audited catalogue's hash
+        # moves; all seven locales carry it, each with its own audit ledger rows.
+        "wire.voice",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

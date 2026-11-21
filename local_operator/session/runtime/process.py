@@ -78,6 +78,7 @@ from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
+    DEFAULT_KEEP_ALIVE_SECONDS,
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_ON_SIGNAL,
@@ -137,7 +138,10 @@ DEFAULT_GRACE_S = 3.0
 #: window of 0 simply leaves the ordinary drain. It declines held engaged
 #: runtimes too, which is the reading of the preference an operator who set it
 #: meant: hold nothing warm.
-DEFAULT_KEEP_ALIVE_SECONDS = 300
+#:
+#: ``DEFAULT_KEEP_ALIVE_SECONDS`` (300) is imported from ``session.runtime.types``
+#: above and re-exported from here unchanged: the mesh relay reads the same window
+#: and may not import this module (it owns sessions).
 
 #: HOW MANY IDLE CLIENTLESS RUNTIMES ONE INSTALL KEEPS WARM
 #: (``runtime.keep_alive_max``).
@@ -4040,7 +4044,11 @@ async def _drain_for(
         # (``_SignalDrainBound``, judged in ``_drain_for_signal``), so all
         # this function may do for it is keep waiting and re-check the idle
         # gate — the failed-update row and the released latch it would
-        # otherwise write must never appear on a signal.
+        # otherwise write must never appear on a signal. The ONE release a
+        # signal drain makes is ``_yield_signal_drain_to_owner``, and it is not
+        # this revocation: it is taken in ``_drain_for_signal``, only for an
+        # unattended wake-sweep stop with an owner prompt waiting, and this
+        # function still commits ``begin_retire`` at the next idle instant.
         if drain.cause == SIGNAL_DRAIN_CAUSE:
             return False
         if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
@@ -4589,7 +4597,13 @@ def _route_signal(
         return
     if state.draining is None:
         state.draining = asyncio.ensure_future(
-            _drain_for_signal(handle, runtime, state.stop, sig_name=sig.name)
+            _drain_for_signal(
+                handle,
+                runtime,
+                state.stop,
+                sig_name=sig.name,
+                yield_to_owner=_signal_yields_to_owner(arrival),
+            )
         )
         return
     logger.info(
@@ -4633,8 +4647,192 @@ def _note_signal_spare(sig_name: str, bound: "_SignalDrainBound", at: float) -> 
     )
 
 
+def _signal_yields_to_owner(arrival: "_Arrival | None") -> bool:
+    """May this signal's drain give way to a prompt the operator sends meanwhile?
+
+    Only for the WAKE SUPERVISOR'S SWEEP: the arrival is paired with a stop
+    marker saying ``deliberate: false`` AND ``mechanism: "wake-sweep"``
+    (``owned_runtimes.SWEEP_MECHANISM``, staged per candidate by
+    ``owned_runtimes._attest_before_signal``). ``control.note_involuntary_stop``
+    has two other writers, and both keep today's refusal on purpose (agent
+    review round 1 on #4355, R3):
+
+    * ``update._attests`` — a generation prune or an in-place install is about
+      to REMOVE OR REPLACE the code tree this process imported from; a fresh
+      turn here would lazily import modules that may no longer exist;
+    * ``reclaim._attest`` (``RECLAIM_MECHANISM``) — the residency sweep chose
+      this runtime to FREE MEMORY; staying resident to serve a prompt defeats
+      the act, and the successor serves it once the memory is back.
+
+    A deliberate stop (``lop stop``, an operator's kill with a marker) keeps
+    today's refusal too: the operator asked for this session to end, and a later
+    prompt is theirs to re-send. An arrival with no marker or no observation also
+    keeps today's behaviour — the yield is an exception to the drain, so it needs
+    positive evidence. The mechanism is matched as a literal (pinned equal to
+    ``SWEEP_MECHANISM`` by a test) so this hot signal path imports nothing.
+    """
+    entry = getattr(arrival, "entry", None)
+    marker = entry.get("stop_marker") if isinstance(entry, dict) else None
+    return (
+        isinstance(marker, dict)
+        and marker.get("deliberate") is False
+        and marker.get("mechanism") == _YIELDING_STOP_MECHANISM
+    )
+
+
+#: ``owned_runtimes.SWEEP_MECHANISM``; see :func:`_signal_yields_to_owner`.
+_YIELDING_STOP_MECHANISM = "wake-sweep"
+
+
+def _owner_waits_on_background_hold(handle: object) -> bool:
+    """An owner prompt is spooled AND only background work holds the drain open.
+
+    "Background only" is :meth:`ServingSessionHandle.is_conversationally_active`
+    answering False: no live turn, no queued prompt, no parked gate — what remains
+    of ``is_busy`` is subagents, background jobs and retained tasks. A handle
+    without that probe (a reduced host, an older double) answers False, so the
+    yield never fires on a guess. The spool read is the same ``peek_inbox`` the
+    successor's boot drain consumes, filtered to ``SOURCE_USER`` rows: a peer's
+    note or a diverted wake is not someone waiting on the composer.
+    """
+    active = getattr(handle, "is_conversationally_active", None)
+    directory_of = getattr(handle, "_session_directory", None)
+    if not callable(active) or not callable(directory_of):
+        return False
+    try:
+        if active():
+            return False
+        directory = directory_of()
+        if not isinstance(directory, Path):
+            return False
+        from local_operator.session.runtime.inbox import (
+            SOURCE_USER,
+            inbox_path,
+            peek_inbox,
+        )
+
+        if not inbox_path(directory).exists():
+            return False
+        return any(line.source == SOURCE_USER for line in peek_inbox(directory))
+    except Exception:  # noqa: BLE001 — an unreadable probe keeps the drain as it was
+        logger.debug("could not read whether an owner prompt is waiting", exc_info=True)
+        return False
+
+
+def _owner_turn_live(handle: object) -> bool:
+    """Is a conversational turn running? A probe that cannot answer says no."""
+    active = getattr(handle, "is_conversationally_active", None)
+    if not callable(active):
+        return False
+    try:
+        return bool(active())
+    except Exception:  # noqa: BLE001 — unknown keeps the bound's own verdict
+        return False
+
+
+def _background_holders(handle: object) -> str:
+    """What the operator was waiting behind, e.g. "1 subagent, 2 background jobs"."""
+    session = getattr(handle, "_session", None)
+    parts: list[str] = []
+    try:
+        subagents = int(session.running_subagents())  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — a count for a log line only
+        subagents = 0
+    try:
+        manager = getattr(session, "jobs", None)
+        jobs = sum(
+            1
+            for job in (manager.list() if manager is not None else [])
+            if getattr(job, "status", None) == "running" and getattr(job, "type", None) != "task"
+        )
+    except Exception:  # noqa: BLE001
+        jobs = 0
+    if subagents:
+        parts.append(f"{subagents} subagent{'s' if subagents != 1 else ''}")
+    if jobs:
+        parts.append(f"{jobs} background job{'s' if jobs != 1 else ''}")
+    return ", ".join(parts) or "background work"
+
+
+async def _yield_signal_drain_to_owner(handle: object, sig_name: str) -> bool:
+    """Let the operator's waiting prompt run HERE instead of behind a subagent.
+
+    THE INCIDENT (2026-11-20, session e6883d17d1a3). An upgrade's supervisor
+    restart swept its runtimes with SIGTERM (fixed at the source in
+    ``wakes/supervisor._stop_is_build_restart``). This runtime was mid-turn, so it
+    drained; the turn ended at 14:31:17, but a subagent kept ``is_busy`` true and
+    kept reporting progress, so ``_SignalDrainBound`` never reaped. The operator's
+    prompt (14:32:51) and "Continue" (14:38:18) were spooled for a successor that
+    could not boot until this process exited (14:39:33) — the app showed only
+    "waiting for the agent" for ~7 minutes, and nothing bounded the wait: a
+    subagent that keeps stepping holds a signal drain for as long as it runs.
+
+    WHY RELEASE THE ADMISSION LATCH, and not the two alternatives:
+
+    * cutting the drain short (``stop.set()``) disposes the subagent mid-flight —
+      in-process work the drain exists to protect — to serve a prompt that could
+      simply run alongside it;
+    * leaving the hold and only publishing a better status still makes the
+      operator wait an unbounded time for a stop nobody asked for.
+
+    So this does what ``_abandon_move`` does for a build handover that cannot reach
+    idle: ``end_drain`` lifts the refusal (and restores wake/job delivery), and
+    ``_drain_inbox_into`` runs the spooled owner prompt on THIS runtime. The
+    DEPARTURE IS NOT REVOKED, which is the property ``_drain_for``'s comment
+    guards ("a silent revocation of a termination signal"): the drain object and
+    the ``leaving`` phrase stay, ``_drain_for`` still commits ``begin_retire`` at
+    the first idle instant, and ``_SignalDrainBound`` still reaps a hold that goes
+    silent once the owner's turn has ended (never mid-turn: see the caller). The
+    gates ``_refuse_gates`` closed are reopened, because the operator is now
+    there to answer them. The signal is honoured late, never ignored.
+
+    ONCE PER DRAIN (the caller's ``yielded``): ``begin_drain`` is not re-taken,
+    for the reason ``_abandon_move`` records — a second retire re-diverts wakes
+    the first one already reserved. Messages that arrive after the release are
+    admitted directly, so the operator's next prompt never spools either.
+
+    Returns whether the latch was released; a handle without ``end_drain`` (a
+    reduced host) keeps today's hold.
+    """
+    end_drain = getattr(handle, "end_drain", None)
+    if not callable(end_drain):
+        return False
+    try:
+        released = bool(end_drain())
+    except Exception:  # noqa: BLE001 — a failed release keeps the hold, never crashes the drain
+        logger.warning("session runtime: could not release the %s drain latch", sig_name)
+        return False
+    if not released:
+        return False
+    # The drain closed every gate when it latched (``_refuse_gates``), so the
+    # operator's turn would otherwise run with each approval silently denied and
+    # each ask answered "escaped" — worse than the wait this removes (agent
+    # review round 1 on #4355, R1). The operator is present now, so a card can be
+    # answered; a parked card reads as a step in flight, which the bound SPAREs.
+    reopen = getattr(handle, "reopen_gates_after_yield", None)
+    if callable(reopen):
+        try:
+            reopen()
+        except Exception:  # noqa: BLE001 — the prompt still runs; its gates just stay refused
+            logger.warning("session runtime: could not reopen gates after the %s yield", sig_name)
+    logger.warning(
+        "session runtime: %s drain was held only by %s while an owner prompt waited; "
+        "running the prompt here and leaving at the first idle instant (unattended "
+        "stop, departure still committed)",
+        sig_name,
+        _background_holders(handle),
+    )
+    await _drain_inbox_into(handle)
+    return True
+
+
 async def _drain_for_signal(
-    handle: object, runtime: object, stop: asyncio.Event, *, sig_name: str
+    handle: object,
+    runtime: object,
+    stop: asyncio.Event,
+    *,
+    sig_name: str,
+    yield_to_owner: bool = False,
 ) -> None:
     """Leave after a termination signal — at the next boundary, or when it goes silent.
 
@@ -4824,13 +5022,31 @@ async def _drain_for_signal(
             _warn_signal_reap(sig_name, bound)
         stop.set()
         return
+    yielded = False
     while True:
         if await _drain_for(drain, handle, runtime, stop):
             return
         if stop.is_set():
             return
+        # See :func:`_yield_signal_drain_to_owner`: once per drain, only for an
+        # unattended sweep, and only while nothing but background work holds it.
+        if yield_to_owner and not yielded and _owner_waits_on_background_hold(handle):
+            yielded = await _yield_signal_drain_to_owner(handle, sig_name)
         at = time.monotonic()
         verdict = bound.sample(handle, at)
+        if verdict == _SignalDrainBound.REAP and yielded and _owner_turn_live(handle):
+            # After the yield, ANY active conversational turn holds off the
+            # silence bound (``_owner_turn_live`` reads
+            # ``is_conversationally_active``, so a wake- or peer-driven turn
+            # counts too, not only the operator's prompt). The case it exists
+            # for is the operator's turn: a long parent-only provider request
+            # moves neither progress signal (the bound's documented blind spot),
+            # and before the yield this prompt would have run uncut on the
+            # successor (agent review round 1 on #4355, R2). The width is
+            # bounded: every turn ends, and ``_drain_for`` still retires at the
+            # first idle instant. Mirrors ``_abandon_move`` keeping serving; the
+            # bound applies again once no turn is active.
+            verdict = _SignalDrainBound.WAIT
         if verdict == _SignalDrainBound.REAP:
             break
         if verdict == _SignalDrainBound.SPARE:
@@ -5070,7 +5286,11 @@ async def _drain_inbox_into_claimed(handle: object, batch, *, live: bool = False
     hold_owner_prompts = False
     for line in lines:
         owner_row = getattr(line, "source", "") == SOURCE_USER
-        if live and owner_row and hold_owner_prompts and getattr(line, "mode", "") != "steer":
+        # Not live-only: a non-live pass on a LISTENING runtime (the signal
+        # yield, an update's drain-back) can now hold a row back too (see the
+        # reservation guard in ``_run_owner_prompt``), and a row behind it must
+        # not overtake it. A boot pass never sets the flag, so it is unchanged.
+        if owner_row and hold_owner_prompts and getattr(line, "mode", "") != "steer":
             continue
         try:
             if getattr(line, "custom_type", "") == "profile_save_result":
@@ -5231,6 +5451,16 @@ def _reserved_by_owner(handle: object, command_id: str) -> bool:
         return True
 
 
+def _spooled_mesh_origin(line: Any) -> dict[str, Any] | None:
+    """A spooled line's mesh origin stamp, only when the line is an OWNER row."""
+    from local_operator.session.runtime.inbox import SOURCE_USER
+
+    raw = getattr(line, "mesh_origin", None)
+    if getattr(line, "source", "") != SOURCE_USER or not isinstance(raw, dict):
+        return None
+    return dict(raw)
+
+
 async def _run_owner_prompt(
     handle: object, line: Any, *, seen: set[str], live: bool = False
 ) -> None:
@@ -5280,7 +5510,7 @@ async def _run_owner_prompt(
     if command_id and callable(admitted) and admitted(command_id):
         logger.info("spooled prompt already in the transcript; not running it twice")
         return
-    if live and _reserved_by_owner(handle, command_id):
+    if _reserved_by_owner(handle, command_id):
         # THE ROW IS INSURANCE, NOT A MESSAGE TO DELIVER (PR #3447 review B1).
         # ``ServingSessionHandle._admit_steer`` spools every accepted steer BEFORE
         # acknowledging it, and that row is the only durable copy until
@@ -5292,6 +5522,21 @@ async def _run_owner_prompt(
         # row is left; whoever makes it durable removes it (``remove_owner_row``),
         # and a successor's boot drain dedupes it by the transcript index if that
         # removal is lost.
+        #
+        # EVERY PASS, NOT ONLY THE LIVE ONE (QA round 2 on #4355, Q3). Three
+        # non-live passes run while the control socket listens: the signal
+        # drain's yield (``_yield_signal_drain_to_owner``) and an update's two
+        # re-admissions. A socket ``prompt`` that is mid-``_spool_for_successor``
+        # has already appended this row but still holds its reservation (it is
+        # released only once the append returns), so ``prompt`` below answered
+        # "already admitted", the row counted as delivered and the commit
+        # deleted it — while the socket prompt went on to tell the operator
+        # "queued for the next runtime". Measured: 1 lost prompt in 13 QA runs.
+        # Left here instead, the live watcher (``_watch_live_inbox``, which
+        # resumes once the drain/update latch is released) runs it on its next
+        # tick, after the spool has released the reservation — exactly once,
+        # because the durable index dedupes any socket copy. A boot pass holds
+        # no reservations (the socket is not listening yet), so it is unchanged.
         raise _LeaveQueued()
     if live and getattr(line, "mode", "") != "steer" and _turn_in_flight(handle):
         # Held back until the turn ends; see :func:`_turn_in_flight`.
@@ -5327,6 +5572,11 @@ async def _run_owner_prompt(
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
     if "owner_typed" in parameters and (getattr(line, "sender", None) or {}).get("remote_origin"):
         fields["owner_typed"] = False
+    # The mesh origin stamp the predecessor minted rides back onto the row, on an
+    # OWNER row only: a peer row's fields are the sender's to choose (M-2).
+    mesh_origin = _spooled_mesh_origin(line)
+    if "mesh_origin" in parameters and mesh_origin is not None:
+        fields["mesh_origin"] = mesh_origin
     if "input_surface" in parameters:
         # ADR 0009: a prompt spooled across a runtime swap keeps the surface it
         # was typed on, so a phone prompt replayed by the successor still routes
@@ -5391,6 +5641,8 @@ async def _run_owner_prompt(
             getattr(line, "sender", None) or {}
         ).get("remote_origin"):
             steer_fields["owner_typed"] = False
+        if "mesh_origin" in inspect.signature(steer).parameters and mesh_origin is not None:
+            steer_fields["mesh_origin"] = mesh_origin
         if "input_surface" in inspect.signature(steer).parameters:
             from local_operator.session.session import spooled_input_surface
 

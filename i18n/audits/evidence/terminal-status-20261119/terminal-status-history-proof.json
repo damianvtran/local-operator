@@ -1,0 +1,44 @@
+[
+  {
+    "locale": "fr",
+    "original_suffix_rows": 2,
+    "appended_rows": 2,
+    "prefix_preserved": true
+  },
+  {
+    "locale": "es",
+    "original_suffix_rows": 1,
+    "appended_rows": 2,
+    "prefix_preserved": true
+  },
+  {
+    "locale": "zh-CN",
+    "original_suffix_rows": 1,
+    "appended_rows": 2,
+    "prefix_preserved": true
+  },
+  {
+    "locale": "ru",
+    "original_suffix_rows": 2,
+    "appended_rows": 2,
+    "prefix_preserved": true
+  },
+  {
+    "locale": "vi",
+    "original_suffix_rows": 1,
+    "appended_rows": 4,
+    "prefix_preserved": true
+  },
+  {
+    "locale": "hi",
+    "original_suffix_rows": 1,
+    "appended_rows": 2,
+    "prefix_preserved": true
+  },
+  {
+    "locale": "ur",
+    "original_suffix_rows": 2,
+    "appended_rows": 2,
+    "prefix_preserved": true
+  }
+]

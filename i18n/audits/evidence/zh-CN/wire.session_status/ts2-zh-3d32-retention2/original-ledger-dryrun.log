@@ -1,0 +1,7 @@
+COMMAND ['/Users/damian/local-operator/.venv/bin/python', 'scripts/i18n/ledger.py', 'append', '--receipt', '/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/receipt.json', '--expected-history-sha', 'ed7881ffef92c784e3dfdb19e7a45c828129d08fd418d2bfb226ac08b617617f', '--dry-run']
+EXPECTED_HISTORY_SHA ed7881ffef92c784e3dfdb19e7a45c828129d08fd418d2bfb226ac08b617617f
+EXIT 0
+STDOUT
+i18n/audit-history/zh-CN/wire.session_status.json
+
+STDERR

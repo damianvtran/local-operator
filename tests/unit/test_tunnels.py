@@ -836,8 +836,9 @@ async def test_console_connect_prepares_relay_and_starts_service_once(
         copy.deepcopy(connection["tunnel"]),
     ]
     monkeypatch.setattr(cli, "RadientTunnels", lambda *args: api)
-    prepare = Mock()
-    installed = Mock()
+    # Both return the install's note (a str, "" when nothing to say).
+    prepare = Mock(return_value="")
+    installed = Mock(return_value="")
     monkeypatch.setattr(cli, "_prepare_mobile", prepare)
     monkeypatch.setattr(cli, "cloudflared_binary", lambda _: "/trusted/cloudflared")
     monkeypatch.setattr(install, "install", installed)
@@ -922,9 +923,9 @@ async def test_a_dead_pinned_login_falls_back_to_the_current_one(
     )
     factory = Mock(return_value=api)
     monkeypatch.setattr(cli, "RadientTunnels", factory)
-    monkeypatch.setattr(cli, "_prepare_mobile", Mock())
+    monkeypatch.setattr(cli, "_prepare_mobile", Mock(return_value=""))
     monkeypatch.setattr(cli, "cloudflared_binary", lambda _: "/trusted/cloudflared")
-    monkeypatch.setattr(install, "install", Mock())
+    monkeypatch.setattr(install, "install", Mock(return_value=""))
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
 

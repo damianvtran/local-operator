@@ -12,7 +12,7 @@ import {
   type StorageLike,
 } from "../node-site-decisions";
 import { CHROME_API_DEADLINE_MS, deadline } from "../settle";
-import { withSessionMutation } from "../state";
+import { forgetAdmittedOrigin, withSessionMutation } from "../state";
 
 /* The managed-policy area, or undefined where Chrome offers none (tests, old
  * builds). Read per call, never cached: setup rewrites the anchor in a running
@@ -136,6 +136,9 @@ export async function listAccess(): Promise<Record<string, unknown>> {
 export async function revokeAccess(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const url = safeHttpUrl(params.url);
   const result = await withSessionMutation(() => revokeSiteDecision(localStorageLike(), url.origin));
+  // After (not inside) the session mutation: the surface store has its own
+  // lane, and a revoke must also end an allow-once admission a live tab holds.
+  await forgetAdmittedOrigin(url.origin);
   return { ...result };
 }
 

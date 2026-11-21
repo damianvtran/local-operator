@@ -57,7 +57,10 @@ function installCommandHost() {
   chrome.tabs.query = async () => [];
   chrome.debugger.sendCommand = async (_target, method) =>
     method === "Accessibility.getFullAXTree" ? { nodes: [] } : {};
-  chrome.scripting.executeScript = async () => [{ result: "page text" }];
+  // `read`'s page function returns the document's own URL with its text, so
+  // the worker can discard a result from a document that left the admitted
+  // origin mid-command (surface-origin.ts); the stub answers in that shape.
+  chrome.scripting.executeScript = async () => [{ result: { href: "https://example.test/page", text: "page text" } }];
   return fixture;
 }
 
@@ -146,6 +149,10 @@ function seed(fixture, { owned = false } = {}) {
     },
   };
   fixture.session.refs = {};
+  // The driven page is an approved site, as on any real driven tab; `read`
+  // re-checks its document's origin against these grants (local storage, so
+  // it does not move the session round-trip counts this file pins).
+  fixture.local.origins = { "https://example.test": "allow" };
   fixture.session.ownerScopes = owned
     ? { [PROOF]: { session: "session:s1", generation: "g1", allocations: { "alloc-1": { tab: TAB, state: "allocated" } } } }
     : {};

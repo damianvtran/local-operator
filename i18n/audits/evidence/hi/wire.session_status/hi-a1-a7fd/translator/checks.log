@@ -1,0 +1,4 @@
+PASS: 17/17 keys and key order; frozen source/context hashes; retired_label unchanged
+PASS: repository ICU parser, argument parity, machine arm names/order, hi one/other, literal token parity
+PASS: 8 opaque command formatter samples; 5 plural formatter samples; 3 negative controls
+NOT PERFORMED: semantic audit, integrated runtime, pseudo, visual, native-client validation, full-corpus validator

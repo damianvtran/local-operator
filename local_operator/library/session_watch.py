@@ -113,6 +113,26 @@ SESSION_MASK: Final = (
 #: path that vanished between ``scandir`` and ``inotify_add_watch``.
 BUDGET_ERRNOS: Final = frozenset({errno.ENOSPC, errno.EMFILE, errno.ENFILE, errno.ENOMEM})
 
+#: Which limit each budget errno means, for the one warning a failed watch
+#: logs. ENOSPC is inotify_add_watch past max_user_watches; EMFILE is
+#: inotify_init1 past max_user_instances (or this process's own open-file
+#: limit, which the same errno reports); ENFILE is the system-wide file table.
+#: Naming both sysctls for every errno sent operators to raise the wrong one.
+_BUDGET_LIMITS: Final = {
+    errno.ENOSPC: "fs.inotify.max_user_watches",
+    errno.EMFILE: "fs.inotify.max_user_instances (or the process's open-file limit)",
+    errno.ENFILE: "fs.file-max",
+}
+
+
+def budget_limit(code: int | None) -> str:
+    """The limit to raise for a ``BUDGET_ERRNOS`` failure (log text, English)."""
+    return _BUDGET_LIMITS.get(
+        code if code is not None else -1,
+        "fs.inotify.max_user_watches / fs.inotify.max_user_instances",
+    )
+
+
 _EVENT: Final = struct.Struct("iIII")
 #: Large enough for a burst of hundreds of events per read; the kernel never
 #: splits one event across reads, so any size >= one max event is correct.
@@ -229,7 +249,11 @@ class SessionDirWatch:
         """Arm every watch and start the reader. Raises ``OSError`` on failure.
 
         On any failure the fd is closed before raising, so the watches already
-        added go back to the user's budget instead of leaking with it.
+        added go back to the user's budget instead of leaking with it. That
+        includes the LATE steps (the wake pipe can hit EMFILE, the thread start
+        can raise RuntimeError under thread exhaustion): the indexer catches
+        whatever ``start`` raises and drops this object, so anything still open
+        here would stay held for the life of the process (review R2-m1).
         """
         fd = self._sys.init()
         self._fd = fd
@@ -239,12 +263,14 @@ class SessionDirWatch:
                 names = sorted(e.name for e in entries if e.is_dir(follow_symlinks=False))
             for name in names:
                 self._add_session(name)
+            self._kill_r, self._kill_w = os.pipe()  # close-on-exec by default (PEP 446)
+            self._thread = threading.Thread(target=self._run, name="library-watch", daemon=True)
+            self._thread.start()
         except BaseException:
+            self._thread = None
             self._close_fd()
+            self._close_pipe()
             raise
-        self._kill_r, self._kill_w = os.pipe()  # close-on-exec by default (PEP 446)
-        self._thread = threading.Thread(target=self._run, name="library-watch", daemon=True)
-        self._thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
@@ -257,6 +283,9 @@ class SessionDirWatch:
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout)
         self._close_fd()
+        self._close_pipe()
+
+    def _close_pipe(self) -> None:
         for name in ("_kill_r", "_kill_w"):
             pipe_fd = getattr(self, name)
             setattr(self, name, None)
@@ -301,24 +330,40 @@ class SessionDirWatch:
             return False
         with self._lock:
             # A rename reuses a wd only after IN_IGNORED, which drops the old
-            # mapping first; overwrite is still the safe order.
+            # mapping first; overwrite is still the safe order. A name already
+            # mapped to a DIFFERENT wd is a stale entry whose removal events an
+            # overflow swallowed (the rescan re-adds it): forget that old wd so
+            # it cannot later be resolved to this name.
+            stale = self._session_wd.get(name)
+            if stale is not None and stale != wd and self._wd_session.get(stale) == name:
+                del self._wd_session[stale]
             self._wd_session[wd] = name
             self._session_wd[name] = wd
         return True
 
     def _rescan_sessions(self) -> list[str]:
-        """Watch every session directory that lacks one. Raises on budget.
+        """Re-arm every session directory's watch. Raises on budget.
 
-        Returns the names newly watched. Only adds: a directory whose removal
-        event was lost leaves a mapping to a wd the kernel no longer fires
-        (and ``_add_session`` overwrites one it reuses), while the reconcile
-        the overflow triggers drops that session's assets.
+        Returns the names newly watched. EVERY listed directory is re-added,
+        not only those missing from the map (review R2-m2): if an overflow
+        swallowed a session's IN_DELETE and IN_IGNORED and the same id was then
+        recreated, the map still holds the dead wd and a missing-only rescan
+        would skip the new directory until the timed reconcile. Re-adding is
+        idempotent — the kernel returns the existing wd for an inode it
+        already watches — so a changed wd is exactly the recreated case. One
+        syscall per session, on an overflow only. Mappings for directories no
+        longer listed are left to the reconcile, which drops their assets.
         """
         with os.scandir(self.root) as entries:
             names = sorted(e.name for e in entries if e.is_dir(follow_symlinks=False))
-        with self._lock:
-            missing = [name for name in names if name not in self._session_wd]
-        added = [name for name in missing if self._add_session(name)]
+        added = []
+        for name in names:
+            with self._lock:
+                before = self._session_wd.get(name)
+            if self._add_session(name):
+                with self._lock:
+                    if self._session_wd.get(name) != before:
+                        added.append(name)
         for name in added:
             # Files may have landed before the watch did, as on IN_CREATE.
             self._on_session(name)

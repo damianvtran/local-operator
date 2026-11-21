@@ -203,6 +203,28 @@
     "tone": "plain",
     "maxCells": 29
   },
+  "wire.settings.providers_bedrock_auth.help": {
+    "role": "settings help text",
+    "tone": "plain, precise",
+    "note": "'ambient' is the literal value to type; keep it verbatim. Must fit about 76 cells."
+  },
+  "wire.settings.providers_bedrock_auth.label": {
+    "role": "text setting label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "How Bedrock authenticates."
+  },
+  "wire.settings.providers_bedrock_region.help": {
+    "role": "settings help text",
+    "tone": "plain, precise",
+    "note": "Keep AWS_REGION verbatim (environment variable). Must fit about 76 cells."
+  },
+  "wire.settings.providers_bedrock_region.label": {
+    "role": "text setting label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "'Region' is an AWS Region (us-east-1)."
+  },
   "wire.settings.remote_compute.description": {
     "role": "settings section description",
     "tone": "plain, honest about preview status",
@@ -382,6 +404,18 @@
     "note": "'Unaddressed' means a message NOT addressed to the user's own agent — chatter in a room, or an agent mentioning it in passing — as opposed to a person writing to it directly. Keep the label short; the help carries the definition. No ICU arguments.",
     "role": "Settings row label",
     "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_hold_release.label": {
+    "maxCells": 29,
+    "role": "Settings row label (boolean toggle)",
+    "tone": "concise, neutral",
+    "note": "Toggle for Team Bridge (product name 'Agent messages') owner release. ON: SOME requests from another member's agent to START or DECIDE new work are HELD for the person to deliver or discard instead of being REJECTED back to the sender. 'Work requests' = those new-work requests only. 'Hold' means kept waiting for a person, never delivered automatically. Do not say 'screen'/'filter'. Keep within 29 cells: the settings label column is 30 cells and a longer label is cut with an ellipsis. No ICU arguments."
+  },
+  "wire.settings.team_bridge_hold_release.help": {
+    "maxCells": 188,
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Claims to preserve, hedged exactly as in English: (1) only SOME requests to start or decide NEW work are held (the code holds only a request whose sole concern is new work, within a per-sender budget, when the screening answer is trusted; anything else is still rejected), so never say 'every request' or 'all'; (2) nothing reaches the user's agent unless the person delivers it, so this is never automatic delivery and never widens who may give the agent instructions; (3) OFF rejects these requests (the earlier behaviour). 'deliver'/'discard' are lowercase verbs describing the person's choice, not button labels; keep this locale's established discard verb distinct from its reject verb. Do not use the word for screening/filtering. WIDTH: the row shows the help in a two-row band 74 cells wide at 80 columns and 94 at 100 columns, wrapping at spaces; English is kept under 140 cells, and a translation must wrap into two rows of 94 cells (at most 188 cells, less once words wrap). Put the 'held for you to deliver or discard' clause first so the 80-column cut keeps it. No ICU arguments, no numbers."
   },
   "wire.settings.update_auto_prune.choice.false.description": {
     "role": "description of the 'off' choice",

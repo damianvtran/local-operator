@@ -865,6 +865,12 @@ def credential_identity(credential: "StoredCredential | Mapping[str, Any]") -> s
         data: Mapping[str, Any] = credential.data
     else:
         data = getattr(credential, "data", credential)
+    # An Amazon Bedrock row names itself by its connection label ("dev ·
+    # us-east-1"), never by its descriptor ``key`` (design §8): the label is
+    # what the operator chose, and the descriptor is storage plumbing.
+    bedrock = data.get("bedrock")
+    if isinstance(bedrock, Mapping) and bedrock.get("label"):
+        return str(bedrock["label"])[:IDENTITY_LIMIT]
     for field in ("email", "account_id", "org_name"):
         value = data.get(field)
         if value:
@@ -1228,6 +1234,17 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     row — otherwise two logins leave two rows and the older one carries a
     dead rotated refresh token that the cascade keeps selecting.
     """
+    if provider == "bedrock":
+        # BEFORE the api-key early return: a Bedrock row is an api_key-typed
+        # CONNECTION (profile + Region, ambient + Region ...), and re-saving
+        # the same connection must replace its row instead of piling up
+        # duplicates that rotation would then walk. Raw API keys still never
+        # dedupe (``identity_key`` returns None for them).
+        from local_operator.providers.bedrock.store import identity_key
+
+        bedrock_identity = identity_key(credential)
+        if bedrock_identity is not None:
+            return bedrock_identity
     if credential.get("type") == "api_key" or credential.get("source") == "login":
         return None
     custody = credential.get(MESH_CUSTODY_IDENTITY_KEY)
@@ -1490,6 +1507,84 @@ def _release_detached_refresh(task: asyncio.Task[dict[str, Any] | None], store: 
     store.close()
 
 
+#: Primary result codes meaning "another connection holds the lock", the only
+#: reservation failures :meth:`AuthStore._update_payload` may treat as a
+#: best-effort skipped write. Compared on the low byte because CPython exposes
+#: EXTENDED codes (``SQLITE_BUSY_SNAPSHOT`` is 517, not 5).
+_LOCK_CONTENTION_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _is_lock_contention(error: sqlite3.Error) -> bool:
+    """Whether ``error`` is verified lock contention, never a read failure.
+
+    ``BEGIN IMMEDIATE`` reads the database header and schema before it takes the
+    reservation, so it can fail with an I/O or corruption error that means the
+    row could not be read. Only contention may be downgraded to "write skipped";
+    everything else must propagate (PR #4269 security review, S2).
+
+    The code is authoritative when present. Without it (an error raised by a
+    wrapper, or an interpreter that does not set ``sqlite_errorcode``) the two
+    messages SQLite itself uses for BUSY and LOCKED are the only remaining
+    signal, and anything else is treated as not contention: misclassifying a
+    read failure as contention is the failure this guard exists to prevent.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        primary = code & 0xFF
+        return isinstance(error, sqlite3.OperationalError) and primary in _LOCK_CONTENTION_CODES
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    text = str(error).lower()
+    # SQLite appends the table name to the LOCKED message ("database table is
+    # locked: auth_credentials"), so that one is a prefix match.
+    return text == "database is locked" or text.startswith("database table is locked")
+
+
+class _FetchedCursor:
+    """A cursor's results, drained while :class:`_SerializedConnection` held its lock.
+
+    Exposes the subset of :class:`sqlite3.Cursor` this store's callers use, so no
+    call site changes, and no caller can step a shared statement unlocked.
+    """
+
+    __slots__ = ("_rows", "_pos", "description", "lastrowid", "rowcount")
+
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        # Read every attribute before the caller's lock is released: `rowcount`
+        # and `lastrowid` are connection-wide in sqlite and a later statement on
+        # another thread would overwrite them.
+        self._rows: list[Any] = cursor.fetchall()
+        self._pos = 0
+        self.description = cursor.description
+        self.lastrowid = cursor.lastrowid
+        self.rowcount = cursor.rowcount
+        cursor.close()
+
+    def fetchone(self) -> Any:
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchall(self) -> list[Any]:
+        rows = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rows
+
+    def fetchmany(self, size: int = 1) -> list[Any]:
+        rows = self._rows[self._pos : self._pos + size]
+        self._pos += len(rows)
+        return rows
+
+    def __iter__(self) -> Iterator[Any]:
+        while (row := self.fetchone()) is not None:
+            yield row
+
+    def close(self) -> None:
+        self._pos = len(self._rows)
+
+
 class _SerializedConnection:
     """A sqlite connection whose statements are serialized by a mutex.
 
@@ -1503,9 +1598,22 @@ class _SerializedConnection:
     Wrapping instead of editing every call site keeps the ~27 existing
     ``self._conn.execute(...)`` uses exactly as they read, and means a
     statement added later is serialized by construction rather than by the
-    author remembering a lock. ``execute`` returns the cursor, so
-    ``.fetchall()``, ``.fetchone()`` and ``.lastrowid`` keep working; the lock
-    covers producing the cursor, which is where the shared state is touched.
+    author remembering a lock. ``execute`` returns a :class:`_FetchedCursor`,
+    so ``.fetchall()``, ``.fetchone()``, iteration, ``.rowcount`` and
+    ``.lastrowid`` keep working.
+
+    THE ROWS ARE FETCHED UNDER THE LOCK. sqlite3 steps a SELECT lazily: the
+    first row is produced by ``execute`` but every later ``fetch*`` steps the
+    same underlying statement machinery the connection shares. Locking only the
+    ``execute`` call (as this class first did) left ``fetchone()`` racing another
+    thread's statement, and a two-thread ``get_credential`` loop on one store
+    measured 10,402 ``None`` rows plus 3,865 TypeError/JSONDecodeError/
+    InterfaceError per 100k reads (zero with one thread). That surfaced as the
+    mesh renewal owner reading a lent login as GONE (``renewal_stale``) or as a
+    ``NoneType`` payload while a background claim read the same row. Draining
+    the cursor before the lock is released costs a list per statement -- every
+    read here is one row or a handful -- and makes a correct read independent
+    of which caller-side ``fetch*`` pattern is used.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -1515,9 +1623,18 @@ class _SerializedConnection:
         # also executes must not deadlock against itself.
         self._lock = threading.RLock()
 
-    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+    @property
+    def lock(self) -> threading.RLock:
+        """The statement mutex, for a caller that must hold it across statements.
+
+        :meth:`AuthStore._update_payload` holds it across its read, mutation and
+        write so another thread's read-modify-write cannot interleave.
+        """
+        return self._lock
+
+    def execute(self, *args: Any, **kwargs: Any) -> _FetchedCursor:
         with self._lock:
-            return self._conn.execute(*args, **kwargs)
+            return _FetchedCursor(self._conn.execute(*args, **kwargs))
 
     def executescript(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
         with self._lock:
@@ -2492,9 +2609,23 @@ class AuthStore:
             eligibility.clear(root)
         except Exception:  # noqa: BLE001 — a logout must not fail over the org hub
             logger.debug("org hub gate clear after logout failed", exc_info=True)
+        # Team Bridge display bodies are third-party text retained for the
+        # account that just left (bridge-body design §2: sign-out deletes
+        # them). Purging HERE, at the one sign-out hook both logout hosts and
+        # the desktop's account removal share, makes it eager rather than "on
+        # the next card view" (review R3 / QA Q1). All rows go: a remaining
+        # Radient login re-earns its own through the hub backfill.
+        try:
+            from local_operator.team_bridge.display_bodies import DisplayBodyStore
+
+            DisplayBodyStore(root).purge()
+        except Exception:  # noqa: BLE001 — a logout must not fail over display retention
+            logger.debug("bridge display purge after logout failed", exc_info=True)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
-        """Seal Muse secrets before metadata serialization; preserve other providers."""
+        """Seal Muse/Bedrock secrets before metadata serialization; preserve other providers."""
+        if self._storage_id(provider) == "bedrock":
+            return self._upsert_bedrock_credential(credential)
         if self._storage_id(provider) != "meta-muse":
             return self._upsert_credential_metadata(provider, credential)
         from local_operator.providers.meta_muse_credentials import (
@@ -2519,6 +2650,48 @@ class AuthStore:
         for old in old_rows:
             if old.id == row.id:
                 delete_key(old.data, self._config_dir or self._db_path.parent)
+        return row
+
+    def _upsert_bedrock_credential(self, credential: dict[str, Any]) -> StoredCredential:
+        """Bedrock seal hook: secret -> encrypted store, descriptor -> auth.db.
+
+        Same order and compensation as the Muse branch above: seal first (a
+        fresh ref per write, so a failed metadata write never clobbers a
+        working connection's secret), write metadata, and on failure delete
+        the new ref unless a committed row already owns it. After success the
+        REPLACED row's old ref (same identity, same row id) is deleted. A row
+        with nothing to seal (profile / ambient / env-bearer descriptors) is
+        written as-is.
+        """
+        from local_operator.providers.bedrock.store import (
+            delete_key,
+            needs_seal,
+            seal_credential,
+        )
+
+        base = self._config_dir or self._db_path.parent
+        if not needs_seal(credential):
+            old_rows = self.list_credentials("bedrock", include_disabled=True)
+            row = self._upsert_credential_metadata("bedrock", credential)
+            for old in old_rows:
+                if old.id == row.id and old.data.get("key") != row.data.get("key"):
+                    delete_key(old.data, base)
+            return row
+        old_rows = self.list_credentials("bedrock", include_disabled=True)
+        sealed = seal_credential(credential, base)
+        try:
+            row = self._upsert_credential_metadata("bedrock", sealed)
+        except BaseException:
+            self._conn.rollback()
+            if not any(
+                existing.data.get("key") == sealed["key"]
+                for existing in self.list_credentials("bedrock", include_disabled=True)
+            ):
+                delete_key(sealed, base)
+            raise
+        for old in old_rows:
+            if old.id == row.id and old.data.get("key") != sealed["key"]:
+                delete_key(old.data, base)
         return row
 
     def _upsert_credential_metadata(
@@ -3038,6 +3211,20 @@ class AuthStore:
     def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
         row = self.get_credential(credential_id)
+        if row is not None and row.provider == "bedrock":
+            # Metadata first, then the sealed secret: a failed delete must
+            # never leave a row pointing at a ref that no longer exists.
+            # (``delete_credentials_for_provider`` loops through here.)
+            from local_operator.providers.bedrock.store import delete_key
+
+            self._conn.execute(
+                "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
+            )
+            self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
+            self._conn.commit()
+            self._publish_account_file()
+            delete_key(row.data, self._config_dir or self._db_path.parent)
+            return
         if row is not None and row.provider == "meta-muse":
             from local_operator.providers.meta_muse_credentials import (
                 reversible_key_deletion,
@@ -3421,6 +3608,7 @@ class AuthStore:
         mutate: Callable[[dict[str, Any]], bool],
         *,
         moves_write_stamp: bool = False,
+        best_effort: bool = True,
     ) -> bool:
         """Read-modify-write one row's payload under ``mutate``.
 
@@ -3452,31 +3640,131 @@ class AuthStore:
 
         Returns whether the write happened. A row that is GONE (a racing logout)
         is ``False`` and never a re-created row: an explicitly removed credential
-        stays removed. Best-effort on a sqlite error, like every other marker
-        write here — losing a marker restores the pre-marker behaviour rather
-        than failing the request that triggered it.
+        stays removed. Best-effort on a sqlite error while WRITING (the UPDATE,
+        the commit), like every other marker write here — losing a marker
+        restores the pre-marker behaviour rather than failing the request that
+        triggered it. Taking the reservation is best-effort ONLY for verified
+        lock contention (``SQLITE_BUSY``/``SQLITE_LOCKED``, see
+        :func:`_is_lock_contention`): ``BEGIN IMMEDIATE`` can itself read the
+        database header and schema, so a disk I/O or corruption error there is a
+        failed READ in disguise and propagates. A sqlite error while READING the
+        row propagates too, as it always did: "could not read" is not "no
+        marker", and a refresh caller that treated it as one would present a
+        token whose send marker it never saw. Every propagated error first rolls
+        back a transaction this call opened, with the rollback's own failure
+        suppressed so the ORIGINAL error is the one the caller sees.
+
+        ``best_effort=False`` is for a write that must NOT be lost quietly: the
+        post-refresh persist in :meth:`_ensure_oauth_fresh`, where the IdP has
+        already consumed the presented refresh token, so a skipped write of a
+        rotation strands the only live token in memory. There, reservation
+        contention and write-phase sqlite errors propagate (after the release)
+        exactly as that path's former bare UPDATE did, and a read-only store
+        raises instead of reporting ``False``. ``False`` then means only what the
+        caller's ``mutate`` decided, or a row that is gone.
+
+        ONE READ-MODIFY-WRITE. The read, ``mutate`` and the write run under the
+        connection's statement lock and, when no transaction is already open, a
+        ``BEGIN IMMEDIATE`` reservation. Without them this was a lost update:
+        the mesh renewal claim (``renewal._record_claim``, thread
+        mesh-control-conn) read the lent row, the owner's ``owner_return``
+        (thread mesh-slow_0) read it and committed an ADOPTION, then the claim
+        committed its stale whole payload over it -- re-opening the
+        ``awaiting_writeback_at`` wait the adoption had just closed, while its
+        epoch guard had checked the stale read, not the row it overwrote. The
+        lock closes that in-process; the reservation closes it against another
+        process sharing the database. ``mutate`` must therefore stay a pure
+        transform of ``data`` (the lock is reentrant, so a store read inside it
+        still works, but a slow callback holds every other statement up).
         """
-        row = self.get_credential(credential_id)
-        if row is None or not isinstance(row.data, dict):
+        if self._read_only:
+            # A metadata-only store has no writable connection to reserve.
+            if not best_effort:
+                raise AuthStoreError("auth store is read-only; the credential cannot be written")
             return False
-        data = dict(row.data)
-        if not mutate(data):
-            return False
-        try:
-            if moves_write_stamp:
-                self._conn.execute(
-                    "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
-                    (json.dumps(data), self._now_ms(), credential_id),
-                )
-            else:
-                self._conn.execute(
-                    "UPDATE auth_credentials SET data = ? WHERE id = ?",
-                    (json.dumps(data), credential_id),
-                )
-            self._conn.commit()
-        except sqlite3.Error:
-            logger.debug("auth payload marker write failed", exc_info=True)
-            return False
+        conn = self._conn
+        with conn.lock:
+            # Transaction state is sampled BEFORE BEGIN, not inferred from BEGIN
+            # having returned: the wrapped `execute` can open the transaction and
+            # still raise afterwards (draining the cursor, reading its
+            # attributes), and a flag set only on return would then skip the
+            # rollback and leave the reservation held on this shared connection.
+            owned = not conn.in_transaction
+
+            def release() -> None:
+                if owned and conn.in_transaction:
+                    conn.rollback()
+
+            def release_before_raise() -> None:
+                # On the way out with an error already in flight, a rollback that
+                # fails too must not replace it: the caller needs the error that
+                # explains the failure, not a secondary one from the cleanup.
+                with suppress(sqlite3.Error):
+                    release()
+
+            try:
+                if owned:
+                    conn.execute("BEGIN IMMEDIATE")
+                # else: a caller's transaction is already open; read and write
+                # inside it and let our commit below land it, exactly as the
+                # pre-reservation code committed within the caller's transaction.
+            except sqlite3.Error as exc:
+                if not best_effort or not _is_lock_contention(exc):
+                    # Not contention: BEGIN IMMEDIATE failed reading the database
+                    # itself (I/O, corruption, misuse). That is "could not read",
+                    # which the READ phase below already refuses to downgrade. Or a
+                    # `best_effort=False` write, whose contention must surface too.
+                    release_before_raise()
+                    raise
+                # Another writer holds the reservation: a write-side failure,
+                # best-effort like the UPDATE below.
+                release()
+                logger.debug("auth payload marker reservation busy", exc_info=True)
+                return False
+            except BaseException:
+                release_before_raise()
+                raise
+            try:
+                # READ phase. A sqlite error here propagates (after cleanup) as it
+                # did before the reservation existed: a caller such as the refresh
+                # path must not proceed as though the marker were absent when the
+                # row simply could not be read.
+                row = self.get_credential(credential_id)
+                if row is None or not isinstance(row.data, dict):
+                    release()
+                    return False
+                data = dict(row.data)
+                if not mutate(data):
+                    release()
+                    return False
+            except BaseException:
+                # A raising read or `mutate` must not leave the reservation held:
+                # the next statement on this shared connection would run inside it.
+                release_before_raise()
+                raise
+            try:
+                # WRITE phase: best-effort on a sqlite error (see docstring).
+                if moves_write_stamp:
+                    conn.execute(
+                        "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(data), self._now_ms(), credential_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE auth_credentials SET data = ? WHERE id = ?",
+                        (json.dumps(data), credential_id),
+                    )
+                conn.commit()
+            except sqlite3.Error:
+                if not best_effort:
+                    release_before_raise()
+                    raise
+                release()
+                logger.debug("auth payload marker write failed", exc_info=True)
+                return False
+            except BaseException:
+                release_before_raise()
+                raise
         return True
 
     def _arm_send_marker(
@@ -4421,6 +4709,13 @@ class AuthStore:
                     # round 1, R4). A fired cap lands in the generic arm below with
                     # the marker left armed, which is right: the request was handed
                     # over, so the outcome is in doubt.
+                    # What the provider was handed, frozen before the call: the
+                    # persist below merges only what the refresh CHANGED relative to
+                    # this, because the providers return `dict(creds)` plus the new
+                    # tokens, so the whole returned dict carries stale copies of every
+                    # other field (claims, markers, delegate records) as they stood
+                    # before the POST.
+                    sent = json.loads(json.dumps(fresh))
                     async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
                         refreshed = await refresh(fresh)
                 except AuthStoreError:
@@ -4535,52 +4830,85 @@ class AuthStore:
                     raise AuthStoreError(
                         f"OAuth refresh failed for '{row.provider}': {detail}"
                     ) from exc
-                merged = dict(fresh)
-                merged.update(refreshed)
-                # Restore identity fields from the stored credential — NEVER
-                # rewritten by refresh, whatever the refresh fn returns.
-                for field in ("org_id", "org_name", "authorized_at"):
-                    if field in fresh:
-                        merged[field] = fresh[field]
-                    else:
-                        merged.pop(field, None)
                 # The response IS the acknowledgement the marker was waiting for:
                 # the exchange ran, so the token it presented is consumed and the
-                # row holds its replacement. Skipped here rather than trusted from
-                # ``fresh``, which was read BEFORE the arm — and this write is not
-                # ownership-gated for the same reason the tombstone's pop is not:
-                # it replaces the very token any marker in this payload was about,
-                # after the guard below has established that token, so what it drops
-                # is dead for every process rather than live for a peer.
-                merged.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
-                # Cross-process guard: the server's job processes each build their
-                # own AuthStore, so the per-process refresh lock does not cover
-                # them. Two processes racing a rotating refresh token both POST
-                # the same token; the IdP rotates and the loser's new token is
-                # dead. If the stored refresh token changed under us (another
-                # process won), skip our write — overwriting would clobber the
-                # winner's live token with our dead one and soft-delete the row.
-                now_row = self.get_credential(row.id)
-                if (
-                    now_row is not None
-                    and self._presented_refresh_token(dict(now_row.data)) != presented
-                ):
+                # row holds its replacement.
+                #
+                # ONE READ-MODIFY-WRITE through `_update_payload`, never a whole
+                # payload built from `fresh`. `fresh` was read before the POST, and
+                # anything another writer committed since -- a renewal
+                # `_record_claim`, a delegate-record or marker change, from this
+                # process or another sharing the database -- was silently written
+                # over by the former `UPDATE ... SET data = <fresh + refreshed>`
+                # whenever the guards below passed (#4269 round 1, deferred). So the
+                # row is re-read INSIDE the reservation, both guards run on THAT
+                # read (no guard->write window left for a peer), and only the
+                # fields the refresh actually changed are laid onto it.
+                #
+                # `best_effort=False`: the IdP has already consumed the presented
+                # token, so a rotation that is not persisted is a live token that
+                # exists only in memory. Contention and write errors raise, as the
+                # bare UPDATE did, rather than returning a token the row lacks.
+                outcome: dict[str, Any] = {}
+
+                def persist(current: dict[str, Any]) -> bool:
+                    # Cross-process guard: the server's job processes each build
+                    # their own AuthStore, so the per-process refresh lock does not
+                    # cover them. Two processes racing a rotating refresh token both
+                    # POST the same token; the IdP rotates and the loser's new token
+                    # is dead. If the stored refresh token changed under us (another
+                    # process won, or the user signed in again), skip our write --
+                    # overwriting would clobber the winner's live token with our
+                    # dead one and soft-delete the row.
+                    if self._presented_refresh_token(current) != presented:
+                        outcome["raced"] = dict(current)
+                        return False
+                    if self._grant_dead_at(current) is not None:
+                        # A sibling tombstoned the grant while our POST was in
+                        # flight, and the IdP then answered US with a rotation. A
+                        # token minted by a refresh belongs to the family the IdP
+                        # revoked, so it must not resurrect the login: the rotation
+                        # is dropped and the tombstone stands. Checked AFTER the
+                        # refresh-race guard because a rotated token is the more
+                        # specific explanation of a moved row.
+                        outcome["dead"] = True
+                        return False
+                    # Identity is fixed at login (PR-12): whatever the refresh fn
+                    # returns, org fields stay as the stored row has them.
+                    identity = {
+                        f: current[f]
+                        for f in ("org_id", "org_name", "authorized_at")
+                        if f in current
+                    }
+                    current.update(
+                        {
+                            key: value
+                            for key, value in refreshed.items()
+                            if key not in sent or sent[key] != value
+                        }
+                    )
+                    for field in ("org_id", "org_name", "authorized_at"):
+                        if field in identity:
+                            current[field] = identity[field]
+                        else:
+                            current.pop(field, None)
+                    # Not ownership-gated, for the same reason the tombstone's pop
+                    # is not: it replaces the very token any marker in this payload
+                    # was about, after the guard above has established that token,
+                    # so what it drops is dead for every process rather than live
+                    # for a peer.
+                    current.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+                    outcome["merged"] = dict(current)
+                    return True
+
+                self._update_payload(row.id, persist, moves_write_stamp=True, best_effort=False)
+                if "raced" in outcome:
                     logger.warning(
                         "refresh race on %s: another process refreshed first; " "keeping its token",
                         row.id,
                     )
-                    return dict(now_row.data)
-                if now_row is not None and self._grant_dead_at(dict(now_row.data)) is not None:
-                    # A sibling tombstoned the grant while our POST was in flight,
-                    # and the IdP then answered US with a rotation. A token minted
-                    # by a refresh belongs to the family the IdP revoked, so it
-                    # must not resurrect the login: the rotation is dropped, the
-                    # tombstone the sibling wrote stands, and the caller is told
-                    # the truth instead of being handed a token out of a dead
-                    # family. Checked AFTER the refresh-race guard because a
-                    # rotated token is the more specific explanation of a moved
-                    # row, and the guard's outcome keeps the peer's payload
-                    # untouched either way.
+                    return outcome["raced"]
+                if outcome.get("dead"):
                     logger.warning(
                         "refresh on %s minted a token after the grant was marked dead; "
                         "the tombstone is kept and the rotation is not persisted",
@@ -4590,11 +4918,19 @@ class AuthStore:
                         f"OAuth grant for '{row.provider}' was refused by the identity "
                         f"provider; run /login {row.provider} to sign in again"
                     )
-                self._conn.execute(
-                    "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
-                    (json.dumps(merged), self._now_ms(), row.id),
-                )
-                self._conn.commit()
+                merged = outcome.get("merged")
+                if merged is None:
+                    # The row is gone (a racing logout): nothing is re-created, and
+                    # the caller still gets the token it paid a POST for, as the
+                    # former UPDATE-of-no-row did.
+                    merged = dict(fresh)
+                    merged.update(refreshed)
+                    for field in ("org_id", "org_name", "authorized_at"):
+                        if field in fresh:
+                            merged[field] = fresh[field]
+                        else:
+                            merged.pop(field, None)
+                    merged.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
                 # The POST is durable: tell the watch so `max_refreshes` counts it
                 # (R1-3). Guarded: a watch fault must never fail a refresh that
                 # already succeeded, and a lost increment only makes the bound
@@ -6584,8 +6920,14 @@ class AuthStore:
         # left usable and only the sticky pointer moves, which is enough to send
         # THIS attempt to a sibling.
         server_side = is_server_side_failure(error)
+        # Same reasoning for a failure the error itself declares row-neutral
+        # (``ProviderError.block_on_rotate=False``: a Bedrock credential chain
+        # that did not resolve, re-read every attempt). Move the sticky pointer
+        # so a sibling serves this attempt, but write no block that would
+        # outlive the user's fix (R3-1 / Q8).
+        row_neutral = server_side or getattr(error, "block_on_rotate", True) is False
         if failing is not None:
-            if server_side:
+            if row_neutral:
                 self.deprioritize_credential(provider, failing.id)
             else:
                 retry_after = retry_after_ms_from_error(error)

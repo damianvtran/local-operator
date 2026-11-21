@@ -25,8 +25,9 @@ the HTTP plane.
 
 from __future__ import annotations
 
+import math
 import re
-from typing import TYPE_CHECKING, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple
 
 from local_operator.clients._http import (
     APIError,
@@ -120,6 +121,7 @@ _PROVIDER_ERROR_ENVELOPE = re.compile(r'\A\s*\{[^}]*?"error"\s*:', re.DOTALL)
 _DIRECT_PROVIDER_LABELS = {
     AudioPath.PROVIDER_STT_ELEVENLABS: "ElevenLabs",
     AudioPath.PROVIDER_STT_OPENAI: "OpenAI",
+    AudioPath.PROVIDER_STT_GROQ: "Groq",
 }
 
 
@@ -311,6 +313,15 @@ def failure_status_and_detail(
             f"account." + _upstream_clause(exc),
         )
 
+    if exc.status_code == 429 and rung == AudioPath.PROVIDER_STT_GROQ:
+        # Groq's free plan answers 429 for both the per-minute and the daily
+        # limit; the caller reads ``retry_after_s`` from the error details to
+        # tell them apart, so the status is kept rather than folded into 502.
+        return (
+            429,
+            f"Transcription is unavailable: {label} rate limit reached." + _upstream_clause(exc),
+        )
+
     if exc.status_code in PROVIDER_REJECTION_STATUSES:
         if label is not None:
             return 502, _direct_rejection_detail(exc, label)
@@ -355,6 +366,41 @@ def classify_upstream_failure(
     return HTTPException(status_code=status_code, detail=detail)
 
 
+def finite_non_negative(value: Any) -> float | None:
+    """``value`` as a float if it is a finite, non-negative number, else ``None``.
+
+    A provider header is hostile input: ``float("nan")`` and ``float("inf")``
+    parse without error, ``int(float("inf"))`` raises ``OverflowError``, and a
+    ``nan`` stored as seconds later crashes ``math.ceil`` and cannot be written
+    as JSON. Seconds and request counts are neither negative nor infinite, so
+    anything else is treated as the header being absent.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _rate_limit_details(response: "HttpxResponse") -> dict[str, Any]:
+    """``retry_after_s`` / ``remaining_requests`` from a refusal's headers.
+
+    :class:`APIError` carries no headers, so the two numbers a caller needs to
+    decide between "wait and retry" and "stop for today" travel in ``details``.
+    Groq documents ``retry-after`` (seconds, set only on a 429) and
+    ``x-ratelimit-remaining-requests`` (the per-day count). A header that is
+    absent or not a number is simply omitted, never guessed.
+    """
+    found: dict[str, Any] = {}
+    retry = finite_non_negative(response.headers.get("retry-after"))
+    remaining = finite_non_negative(response.headers.get("x-ratelimit-remaining-requests"))
+    if retry is not None:
+        found["retry_after_s"] = retry
+    if remaining is not None:
+        found["remaining_requests"] = int(remaining)
+    return found
+
+
 def api_error_from_httpx_response(
     response: "HttpxResponse",
     *,
@@ -375,6 +421,7 @@ def api_error_from_httpx_response(
     """
     raw = response.content.decode(errors="replace")
     message, code, details = error_payload(raw)
+    details = {**details, **_rate_limit_details(response)}
     return APIError(
         scrub_secrets(message or f"{fallback_message} (HTTP {response.status_code})", secrets),
         status_code=response.status_code,
@@ -391,4 +438,5 @@ __all__ = [
     "api_error_from_httpx_response",
     "classify_upstream_failure",
     "failure_status_and_detail",
+    "finite_non_negative",
 ]

@@ -1881,10 +1881,41 @@ def _heavy_job_lines() -> list[str]:
         settings = heavy_lease.configured_settings()
         if not settings.enabled:
             return ["heavy jobs: queue off (bash.heavy_jobs.enabled=false)"]
-        return [heavy_lease.status_line(heavy_lease.lease_dir(), settings.slots)]
+        directory = heavy_lease.lease_dir()
+        return [heavy_lease.status_line(directory, settings.slots), *_heavy_audit_row(directory)]
     except Exception:  # noqa: BLE001 - a status nicety must never fail the report
         logger.debug("heavy-job status unreadable", exc_info=True)
         return []
+
+
+def _heavy_audit_row(directory: Path) -> list[str]:
+    """One line: the heavy-lease audit trail's last event and where the trail is.
+
+    The readiness half of the audit trail (``local_operator/heavy_audit.py``):
+    it tells an operator the trail exists and is being written, and points at
+    the file that proves serialization. One line by contract — the event tail
+    lives in ``lop services heavy status``. No line before the first heavy job
+    ever ran (no file yet): an empty trail is not news on a fresh install.
+    """
+    from local_operator import heavy_audit
+    from local_operator.i18n.keys import cli_services_heavy as copy
+    from local_operator.i18n.text import tr
+
+    entry = heavy_audit.last_event(directory)
+    if entry is None:
+        return []
+    try:
+        age = max(0, int(time.time() - float(entry.get("ts") or 0)))
+    except (TypeError, ValueError):
+        age = 0
+    from local_operator.heavy_cli import _age
+
+    row = copy.audit_row(
+        record=heavy_audit.describe(entry),
+        age=_age(age),
+        path=str(heavy_audit.audit_path(directory)),
+    )
+    return [tr("cli.services_heavy")(row)]
 
 
 def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
@@ -2351,6 +2382,27 @@ def stale_daemon_lines(daemons: Sequence[StaleDaemon] | None = None) -> list[str
         f"STALE daemon: {d.name} (pid {d.pid}) runs {d.generation}, not current — {d.reason}"
         for d in rows
     ]
+
+
+def stale_daemon_status_line(
+    name: str, command: str, *, daemons: Sequence[StaleDaemon] | None = None
+) -> str:
+    """One daemon's "running an older build" status line, or ``""``.
+
+    For ``lop mobile status`` / ``lop tunnel status`` (field finding,
+    2026-11-18: an upgraded machine kept both on the old build and neither
+    status said so). :func:`stale_background_daemons` filtered to ``name`` — one
+    census, so this cannot disagree with ``lop services status`` — and, like it,
+    silent unless the staleness is PROVEN.
+    """
+    rows = stale_background_daemons() if daemons is None else daemons
+    found = next((d for d in rows if d.name == name), None)
+    if found is None:
+        return ""
+    from local_operator.i18n.keys import cli_daemon_build as _k
+    from local_operator.i18n.text import tr
+
+    return tr("cli.daemon_build")(_k.status_stale(generation=found.generation, command=command))
 
 
 # ---------------------------------------------------------------------------

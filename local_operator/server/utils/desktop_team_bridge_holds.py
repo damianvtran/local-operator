@@ -29,6 +29,8 @@ page for sender and body (DESIGN §7.1).
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -68,6 +70,51 @@ class HoldRefused(Exception):
         super().__init__(code)
         self.status = status
         self.code = code
+
+
+#: Domain tag of the discard receipt (:func:`discard_receipt`). Versioned so a
+#: later change to the bound fields can never verify a receipt minted under
+#: the old field list.
+_DISCARD_RECEIPT_DOMAIN = b"lop.team_bridge.hold_discard_receipt.v1\n"
+
+
+def discard_receipt(owner: Any, message_id: str, decision: dict[str, Any]) -> str:
+    """An opaque binding of ONE local hold record, for a Discard with no body on screen.
+
+    WHY IT EXISTS (operator report 2026-11-20, screenshot ``84249637…``). A held
+    message whose Deliver window had passed AND whose body the owner-audit read
+    could no longer serve ("Unknown sender", "could not load") was listed with
+    ``can_discard`` true, so it held the Approvals badge at 1 — but the renderer
+    can only send ``body_sha256`` from a body it has on screen, so neither
+    button was armed and nothing could ever settle it. Measured read-only on the
+    operator's store: ``bcmsg_5ac4…`` (``model_hold``, decided 2026-11-10 09:23,
+    window 168 h, eligible, trusted, no release row).
+
+    WHAT IT BINDS. The live owner key and enrollment generation, the bare
+    message id, the conversation, and the decision row's own body hash,
+    envelope digest, hold code and decision time. A re-screen that rewrites the
+    decision, a re-enrollment, another owner or another message all change it,
+    so a stale or mismatched receipt answers ``snapshot_stale`` and never
+    settles the wrong message. It is NOT a secret and grants nothing on its own:
+    the route still needs the desktop bearer and the captured-owner check, and
+    the release is signed exactly as an ordinary Discard is.
+
+    DISCARD ONLY. Deliver keeps requiring the hash of the body the person saw
+    (S-11): a receipt says which record, never what the person read.
+    """
+
+    fields = [
+        _owner_key(owner),
+        int(owner.enrollment_generation),
+        str(message_id),
+        str(decision.get("conversation_id") or ""),
+        str(decision.get("body_sha256") or ""),
+        str(decision.get("envelope_digest") or ""),
+        str(decision.get("hold_code") or ""),
+        repr(float(decision.get("created_at") or 0.0)),
+    ]
+    payload = json.dumps(fields, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(_DISCARD_RECEIPT_DOMAIN + payload).hexdigest()
 
 
 def _kind(code: str, releasable: bool) -> str:
@@ -132,8 +179,12 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
     work_scope_on = hr.enabled(config_dir)
     decisions = {str(d["message_id"]): d for d in store.work_scope_decisions(owner)}
     items: list[dict[str, Any]] = []
+    # Oldest hold first, the bare id breaking ties: two holds written in the
+    # same instant must not swap places between refreshes (a list that reorders
+    # under the person's pointer reads as rows jumping).
     for bare, row in sorted(
-        _conversation_rows(store, owner).items(), key=lambda kv: kv[1]["created_at"]
+        _conversation_rows(store, owner).items(),
+        key=lambda kv: (kv[1]["created_at"], kv[0]),
     ):
         code = row["hold_code"]
         decision = decisions.get(bare)
@@ -148,21 +199,62 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
         held_at = float(decision["created_at"]) if decision is not None else row["created_at"]
         deliver_until = held_at + hr.DELIVER_WINDOW_S if eligible else None
         release = store.owner_release(owner, bare)
+        can_discard = eligible
+        conversation_id = row["conversation_id"] or (
+            str(decision.get("conversation_id") or "") if decision else ""
+        )
+        can_deliver = bool(
+            eligible
+            and deliver_until is not None
+            and now <= deliver_until
+            and code not in hr.DISCARD_ONLY_HOLD_CODES
+        )
         items.append(
             {
                 "message_id": bare,
-                "conversation_id": row["conversation_id"]
-                or (str(decision.get("conversation_id") or "") if decision else ""),
+                "conversation_id": conversation_id,
                 "seq": row["seq"],
                 "held_at": _iso(held_at),
+                # When the message was FIRST held (the hold row's own time).
+                # ``held_at`` is the decision time — the Deliver window's start —
+                # and a review decision can be written days after the hold
+                # (measured 2026-11-18: 17.9 d vs 8.1 d), so "how long has this
+                # sat here" needs this one. Additive; ``lop team-bridge holds``
+                # reads it for its age column.
+                "first_held_at": _iso(row["created_at"]),
                 "kind": _kind(code, eligible),
                 # Closed codes only (``HOLD_CODES`` or ``unknown_hold``), like the read slice.
                 "hold_code": code if code in HOLD_CODES else "unknown_hold",
                 "releasable": eligible,
-                "can_deliver": bool(
-                    eligible and deliver_until is not None and now <= deliver_until
+                "can_deliver": can_deliver,
+                "can_discard": can_discard,
+                # ONE predicate for "the person owes this an answer", so the
+                # badge, the nav count and the list cannot disagree (the
+                # renderer re-derived it and counted rows it could not act
+                # on). A recorded decision — pending, applied or refused — is
+                # settled from the person's side and never counted again.
+                "actionable": bool(
+                    release is None and conversation_id and (can_deliver or can_discard)
                 ),
-                "can_discard": eligible,
+                # Present only where Discard is open and undecided: lets the
+                # renderer discard a hold whose body can no longer be loaded
+                # (see :func:`discard_receipt`). Never offered for Deliver.
+                "discard_receipt": (
+                    discard_receipt(owner, bare, decision)
+                    if can_discard and release is None and decision is not None
+                    else None
+                ),
+                # PR #4212 S-4: an aged hold that NO model read (provider outage,
+                # hub unavailable) is a Deliver item too, but the owner must be able
+                # to tell it from a screener's "unsure": its decision row names no
+                # screener and no verdict. A closed boolean; the copy is the
+                # renderer's.
+                "unscreened": bool(
+                    decision is not None
+                    and code in hr.REVIEW_HOLD_CODES
+                    and not str(decision.get("screener_model") or "")
+                    and not str(decision.get("screener_verdict") or "")
+                ),
                 "deliver_until": _iso(deliver_until),
                 "decision": _decision_view(release),
             }
@@ -192,10 +284,11 @@ def decide(
     *,
     message_id: str,
     conversation_id: str,
-    body_sha256: str,
+    body_sha256: str | None,
     word: str,
     account_id: str,
     now: float | None = None,
+    hold_receipt: str | None = None,
 ) -> dict[str, Any]:
     """``POST …/holds/{id}/deliver|discard``: sign and write ONE release row.
 
@@ -205,6 +298,12 @@ def decide(
     """
 
     if word not in hr.WORDS:
+        raise HoldRefused(422, "invalid_request")
+    # Exactly one binding. A receipt names a RECORD, not bytes the person read,
+    # so it can never carry a Deliver (S-11); checked before any store read.
+    if (body_sha256 is None) == (hold_receipt is None) or (
+        word == "deliver" and hold_receipt is not None
+    ):
         raise HoldRefused(422, "invalid_request")
     if not hr.any_enabled(config_dir):
         raise HoldRefused(409, "hold_release_off")
@@ -239,11 +338,20 @@ def decide(
         held["conversation_id"] and held["conversation_id"] != conversation_id
     ):
         raise HoldRefused(409, "snapshot_stale")
-    if str(decision["body_sha256"]) != str(body_sha256):
+    if hold_receipt is not None:
+        # Constant-time: the receipt is not a secret, but nothing here should
+        # leak how much of a guessed binding matched.
+        if not hmac.compare_digest(str(hold_receipt), discard_receipt(owner, message_id, decision)):
+            raise HoldRefused(409, "snapshot_stale")
+    elif str(decision["body_sha256"]) != str(body_sha256):
         # The person saw other bytes than the screener did (S-11).
         raise HoldRefused(409, "snapshot_stale")
     if word == "deliver" and now > float(decision["created_at"]) + hr.DELIVER_WINDOW_S:
         raise HoldRefused(409, "deliver_expired")
+    if word == "deliver" and str(decision.get("hold_code") or "") in hr.DISCARD_ONLY_HOLD_CODES:
+        # PR #4212 round 3 (S-13): every screener failed on THIS message while
+        # others screened; nothing read it, so only Discard is offered.
+        raise HoldRefused(409, "hold_not_releasable")
     message = hr.release_payload(
         owner_key=_owner_key(owner),
         generation=int(owner.enrollment_generation),

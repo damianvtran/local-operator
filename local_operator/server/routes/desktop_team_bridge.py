@@ -85,7 +85,6 @@ import io
 import logging
 import re
 import secrets
-import unicodedata
 import urllib.parse
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -109,6 +108,10 @@ from local_operator.server.models.desktop_team_bridge_owner_audit import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.team_bridge.emoji_names import (
+    ACCEPTED_FORMS_HINT,
+    normalize_reaction_emoji,
+)
 from local_operator.team_bridge.types import (
     _CONVERSATION_MESSAGE_ID,
     ATTACHMENT_ID_PATTERN,
@@ -2230,24 +2233,32 @@ _REPLIES_QUERY = frozenset(
 _REACTION_DELETE_QUERY = frozenset({"expected_account_id", "tenant_id"})
 
 
-#: The hub's reaction-key byte bound (agent-server §10.2: NFC, <=128 UTF-8
-#: bytes, one fully-qualified RGI sequence). Only the BOUND is mirrored here,
-#: as a cheap pre-flight: the RGI allowlist is the hub's, and keeping a second
-#: copy in the runtime would be a second opinion that drifts with Unicode.
-_REACTION_EMOJI_MAX_BYTES = 128
-
-
 def _require_reaction_emoji(emoji: str) -> str:
-    """Refuse an empty or over-long reaction key before any upstream I/O.
+    """Canonicalise a reaction key, refusing unusable input before upstream I/O.
 
-    The value is percent-encoded with no safe characters by the client, so it
-    can never reshape the upstream path; this guard only stops obviously
-    non-emoji input (text, pasted paragraphs) from costing a hub round trip.
+    Shares ``normalize_reaction_emoji`` with the agent ``bridge`` tool so a
+    shortcode (``white_check_mark``) from the UI or relay sends the same
+    fully-qualified sequence an agent or picker would, and the reactions stack.
+    The RGI allowlist itself stays the hub's: a non-ASCII literal is only
+    NFC-normalised and FE0F-qualified here. The value is percent-encoded with
+    no safe characters by the client, so it can never reshape the upstream
+    path; this guard stops empty, over-long (agent-server §10.2: <=128 UTF-8
+    bytes) or unknown-shortcode input from costing a hub round trip.
     """
 
-    key = unicodedata.normalize("NFC", emoji)
-    if not key or len(key.encode("utf-8")) > _REACTION_EMOJI_MAX_BYTES:
-        _raise_read("invalid_request")
+    key = normalize_reaction_emoji(emoji)
+    if key is None:
+        # Same ``code`` the renderer already classifies on, but not the generic
+        # read-surface sentence (this is a write): the message names the
+        # accepted forms in the agent tool's exact wording, so a UI or relay
+        # caller that sent a bad shortcode learns what would have worked.
+        raise HTTPException(
+            422,
+            {
+                "code": "invalid_request",
+                "message": f"a reaction must be one emoji: {ACCEPTED_FORMS_HINT}",
+            },
+        )
     return key
 
 
@@ -4585,11 +4596,18 @@ HOLDS_QUERY_PARAMS = frozenset({"expected_account_id"})
 
 
 class TeamBridgeHoldDecision(_Strict):
-    """Deliver/Discard body. ``body_sha256`` is the hash of the body the card showed."""
+    """Deliver/Discard body: exactly one of ``body_sha256`` or ``hold_receipt``.
+
+    ``body_sha256`` is the hash of the body the card showed. ``hold_receipt``
+    is the list's ``discard_receipt`` for a hold whose body can no longer be
+    loaded (expired at the hub, owner-audit unavailable): it binds the local
+    hold record, is accepted by Discard only, and Deliver answers 422 for it.
+    """
 
     expected_account_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
-    body_sha256: str = Field(min_length=64, max_length=64)
+    body_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    hold_receipt: str | None = Field(default=None, min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeHoldDecision":
@@ -4597,8 +4615,11 @@ class TeamBridgeHoldDecision(_Strict):
             raise ValueError("expected_account_id is outside the accepted grammar")
         if not re.fullmatch(CONVERSATION_ID_PATTERN, self.conversation_id):
             raise ValueError("conversation_id is outside the accepted grammar")
-        if not re.fullmatch(r"[0-9a-f]{64}", self.body_sha256):
-            raise ValueError("body_sha256 must be a lowercase sha256 hex")
+        if (self.body_sha256 is None) == (self.hold_receipt is None):
+            raise ValueError("exactly one of body_sha256 or hold_receipt is required")
+        for value in (self.body_sha256, self.hold_receipt):
+            if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("body_sha256 and hold_receipt must be lowercase sha256 hex")
         return self
 
 
@@ -4680,6 +4701,7 @@ async def _decide_hold(
             body_sha256=body.body_sha256,
             word=word,
             account_id=body.expected_account_id,
+            hold_receipt=body.hold_receipt,
         )
     except holds.HoldRefused as refusal:
         _raise_hold(refusal.code)

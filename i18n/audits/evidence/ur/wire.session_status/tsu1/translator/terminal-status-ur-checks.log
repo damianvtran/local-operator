@@ -1,0 +1,38 @@
+{
+  "scope": "scratch catalogue mechanical validation only",
+  "status": "passed",
+  "key_count": 17,
+  "new_keys_translated": 16,
+  "preserved_existing_keys": [
+    "wire.session_status.retired_label"
+  ],
+  "ur_cldr_categories_from_frozen_repo": [
+    "one",
+    "other"
+  ],
+  "checks": [
+    "frozen HEAD/source/context hashes",
+    "JSON duplicate-key detection",
+    "17-key exact parity and source order",
+    "frozen retired_label exact value",
+    "repository ICU syntax and arguments_match",
+    "full recursive select-code/placeholder/hash-token structure equality",
+    "repository _check_plural_categories plus complete one/other arms",
+    "no manual bidi controls",
+    "single logical line",
+    "backtick/printf/URL/bold token equality",
+    "no unchanged English values"
+  ],
+  "problems": [],
+  "not_claimed": [
+    "independent linguistic/safety audit",
+    "integrated runtime",
+    "pseudo-locale",
+    "visual",
+    "native shaping",
+    "render-layer isolation",
+    "full-repository i18n check"
+  ]
+}
+TARGET_SHA256=4bd2a495aa050c93e2f380dd9e2b26dfd0fc0f8177138218f1ed3e528e05050b
+PROVENANCE=/Users/damian/.local-operator/sessions/7b97856c53df/scratchpad/terminal-status-ur-provenance.json

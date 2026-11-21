@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "audit_id": "mw2",
+  "audit_round": 2,
+  "audit_kind": "same-history delta audit",
+  "locale": "fr",
+  "audit_date": "2026-11-18",
+  "audited_head": "56609fdb9dcfd2634c895f46b700883e35326e0b",
+  "previous_head": "ca98f378922f65363815ab2d4c27e93e73b66f1e",
+  "auditor": {
+    "agent": "i18n auditor (lopdev task 482db48afe47)",
+    "session": "482db48afe47",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator": true,
+    "fallback_used": false
+  },
+  "translator": {
+    "agent": "coder",
+    "sessions": [
+      "dc12534ff2ca",
+      "8966047148fb",
+      "ddcac83c68a5",
+      "d84367798211"
+    ],
+    "models": [
+      "anthropic/claude-opus-5-5",
+      "deepseek/deepseek-flash"
+    ],
+    "fallback": "d84367798211 served deepseek/deepseek-flash after a provider fallback",
+    "source": "lopdev manager brief 2026-11-18"
+  },
+  "input_hashes": {
+    "cli.sessions_move_workset": {
+      "en": "cede2b5900e0a1884b33b2a525a25aac1db76e39962e7b7fe0d8b50a49cac4dd",
+      "target": "96ab012b8bb929633b163a8dc896d0d47587c66f1886887ed3345184b61da689"
+    },
+    "tui.session_move_workset": {
+      "en": "966bc7111580843e30b5f6e845a7bc46f7f7fb6cfc52c51c130b56ea92bc933a",
+      "target": "d76a11d8d13468d52d9568f5bf9566881dcf1ae8b03ef7a798ea0d05075eae0e"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "unresolved_blocker_major_count": 0
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "9d3cb7fc69bb4cd6ee864d565f58e1bcaa7f3e79754785285634b6ca3ffaea12"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "9280dfc40718826d9851c1c49fef2b6bf74e7e75743d81ffb0610a94b7d6a26c"
+    }
+  ]
+}

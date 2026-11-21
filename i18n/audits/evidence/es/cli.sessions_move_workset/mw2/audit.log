@@ -1,0 +1,31 @@
+# mechanical checks at HEAD (mech.py)
+rev HEAD
+en cli.sessions_move_workset source sha256 cede2b5900e0a1884b33b2a525a25aac1db76e39962e7b7fe0d8b50a49cac4dd  context 3319039021cfb5d67440dee390a42986af6a6f7c8be57d4de6e3d3dc56f21bce
+en tui.session_move_workset source sha256 966bc7111580843e30b5f6e845a7bc46f7f7fb6cfc52c51c130b56ea92bc933a  context 4110dcee6c6db14e948c2f9e58cd34303263501ae151275ef102939ffb3628ef
+fr cli.sessions_move_workset: keys 65/65 target sha256 96ab012b8bb929633b163a8dc896d0d47587c66f1886887ed3345184b61da689 plural categories ['one', 'other'] mechanical problems 0 typography: plain-space-before-:;?! 0, U+202F 39, ASCII apostrophe 0, U+2019 28
+fr tui.session_move_workset: keys 11/11 target sha256 d76a11d8d13468d52d9568f5bf9566881dcf1ae8b03ef7a798ea0d05075eae0e plural categories [] mechanical problems 0 typography: plain-space-before-:;?! 0, U+202F 2, ASCII apostrophe 0, U+2019 2
+es cli.sessions_move_workset: keys 65/65 target sha256 309f90c2187947105f1c83af7f86c5a1ad841614db804df523df4d150b7d47bd plural categories ['one', 'other'] mechanical problems 0
+es tui.session_move_workset: keys 11/11 target sha256 e0917bd9a8306d2119ecabf3ed8e2a20f44f2a2bcc3ed44a2288557dd0ea4052 plural categories [] mechanical problems 0
+zh-CN cli.sessions_move_workset: keys 65/65 target sha256 092c989ec873efd1f1f4415df4681349aff8a1c017612248a5d528f6489d565d plural categories ['other'] mechanical problems 0 typography: CJK/Latin space junctions 0, single-mark ellipsis 0
+zh-CN tui.session_move_workset: keys 11/11 target sha256 fc1b263a257c0ea5cedb280835eb62d6bfbd00142aa299adab4e7fb389324775 plural categories [] mechanical problems 0 typography: CJK/Latin space junctions 0, single-mark ellipsis 0
+ru cli.sessions_move_workset: keys 65/65 target sha256 eb8b2d137bdb3b102a7cf67c0d2cfb677d72ed2060aa33cb06f83cf46dad924d plural categories ['few', 'many', 'one', 'other'] mechanical problems 0
+ru tui.session_move_workset: keys 11/11 target sha256 f6c93b5aacabf52df2797c6f27a5377bd9d5414d6db9620e10e9dd3815103f02 plural categories [] mechanical problems 0
+vi cli.sessions_move_workset: keys 65/65 target sha256 672580c361c29d38e66d4ba8f3e6cdf09cd950c60d7cfc148f1f4b943e142b3a plural categories ['other'] mechanical problems 0
+vi tui.session_move_workset: keys 11/11 target sha256 98041a796e2e7cd8d62d4d2c7629c99a3e728e9e372eb78771e4f080ab06e41c plural categories [] mechanical problems 0
+ur cli.sessions_move_workset: keys 65/65 target sha256 94dffee72b7946ecf19311680d0ee7cd96dc879e2633098d7cbe8baf3c89bfc7 plural categories ['one', 'other'] mechanical problems 0 typography: Latin/Hindi prose punctuation outside LTR islands 2
+ur tui.session_move_workset: keys 11/11 target sha256 ef94361e2912a8267223656723e79e48d7fd94b0737272735590679f70b6f9f3 plural categories [] mechanical problems 0 typography: Latin/Hindi prose punctuation outside LTR islands 0
+hi cli.sessions_move_workset: keys 65/65 target sha256 2279517b85d27307d2e8efd8c7d42e88fd2734167b588e508b5c6eb811b093c9 plural categories ['one', 'other'] mechanical problems 0
+hi tui.session_move_workset: keys 11/11 target sha256 b3bf08112dabd6bbd429937f26fe1c15eac328a6d7d0674ec9530a440936eb5d plural categories [] mechanical problems 0
+
+# product ICU runtime render (render2.py)
+fr | Raison donnée par git : le dépôt appartient à un autre utilisateur (contrôle safe.directory de git). Pour la voir vous-même, exécutez : git -C ~/src/app status
+es | Motivo de git: el repositorio pertenece a otro usuario (comprobación safe.directory de git). Para verlo tú mismo, ejecuta: git -C ~/src/app status
+zh-CN | git给出的原因：该仓库属于其他用户（git的safe.directory检查）。如需自行查看，请运行：git -C ~/src/app status
+ru | Причина от git: репозиторий принадлежит другому пользователю (проверка safe.directory в git). Чтобы увидеть её самостоятельно, выполните: git -C ~/src/app status
+vi | Lý do từ git: kho thuộc về một người dùng khác (kiểm tra safe.directory của git). Để tự xem, hãy chạy: git -C ~/src/app status
+ur | git کی وجہ: ریپوزیٹری کسی دوسرے صارف کی ہے (git کی safe.directory جانچ)۔ اسے خود دیکھنے کے لیے چلائیں: git -C ~/src/app status
+hi | git का कारण: रिपॉज़िटरी किसी दूसरे यूज़र की है (git की safe.directory जाँच)। इसे खुद देखने के लिए चलाएँ: git -C ~/src/app status
+rendered 651 messages without MessageError
+
+# python scripts/i18n/check.py --audit-base origin/main at HEAD, before receipts
+check.py: ok — 234 file(s) scanned, 2712 literal(s) at or below the baseline, catalogues consistent; 106 advisory finding(s) (report-only until activated)

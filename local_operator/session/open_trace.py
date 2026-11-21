@@ -11,8 +11,8 @@ tracing performs no JSON encoding or file I/O: the writer returns on a
 module-level ``None`` check. Call sites still read span-start clocks, so the
 disabled overhead is small, not literally zero.
 
-ROWS ARE APPEND-ONLY JSONL under a lock: ``at`` (epoch ms), ``stage``, an
-optional ``ms`` span the caller just finished timing, and whatever fields the
+ROWS ARE APPEND-ONLY JSONL under a lock: ``at`` (epoch ms), ``stage``,
+``pid``, an optional ``ms`` span the caller just finished timing, and whatever fields the
 site knows. The writer NEVER raises — a trace that can break the read it
 observes is worse than no trace — and the module is inert when the variable is
 unset.
@@ -50,7 +50,14 @@ def mark(stage: str, ms: float | None = None, **fields: object) -> None:
     """Append one trace row. Never raises, never mutates ``fields``."""
     if _PATH is None:
         return
-    row: dict[str, object] = {"at": time.time() * 1000.0, "stage": stage}
+    # ``pid`` on EVERY row: session runtimes are children of ``lop serve`` and
+    # inherit ``LOP_OPEN_TRACE``, so one file interleaves serve rows with
+    # runtime rows. Without the pid a count such as ``index.refresh_start``
+    # cannot say whether serve or a runtime scanned (the transcript-index ADR
+    # could not settle its 14,483-row count for exactly that reason). Read per
+    # row, not cached at import: a forked child must stamp its own pid. Only
+    # reached when tracing is on, so the disabled path is unchanged.
+    row: dict[str, object] = {"at": time.time() * 1000.0, "stage": stage, "pid": os.getpid()}
     if ms is not None:
         row["ms"] = round(ms, 3)
     row.update(fields)

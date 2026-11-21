@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "audit_id": "community-round-3-ur-wire.community-08c6dfffd961",
+  "audit_kind": "bounded_independent_second_safety_audit",
+  "repository": "damianvtran/local-operator",
+  "pr": 4221,
+  "locale": "ur",
+  "namespace": "wire.community",
+  "audit_date": "2026-11-18",
+  "audited_revision": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+  "candidate_tree": "13010a25c61439070020148c7f01d0a6261a9f09",
+  "combined_patch_sha256": "7a520bb614cd7694422cd7d955c3b400b830a5e3d2f1bb7b6ae0d74a291db17f",
+  "scope": "Approval-card keys only. The card describes audience, moderation, attribution and per-post consent, not the TUI keyboard gate. None of the five strings asserts approval or publication has already happened.",
+  "auditor": {
+    "agent": "reviewer",
+    "model": "openai/gpt-6.2-sol",
+    "date": "2026-11-18",
+    "session": "08c6dfffd961",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "first_auditors": [
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "c739715f0519",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/ur/community-primary/record.json",
+      "sha256": "5f33ed7440bc156cfe919b39a2db43cc8a6e1ab4a62765a3ce37d4d1fec5b542"
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.json",
+      "sha256": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.context.json",
+      "sha256": "b0c568ca3380d372c4f2ca43f2046ccc9dd8bf19e4c22014e037dcb63518e769"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/wire.community.json",
+      "sha256": "fde0737e968f461116ccf1255f5a8b4073dc265550ee030cf81484189b3c71ea"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "deferred_non_gating_finding_ids": []
+  },
+  "keys_semantically_audited": [
+    "wire.community.post_card_audience",
+    "wire.community.post_card_each_time",
+    "wire.community.post_card_label",
+    "wire.community.post_card_tainted",
+    "wire.community.post_card_title"
+  ],
+  "per_key": {
+    "wire.community.post_card_audience": {
+      "en": "Audience: all members of {channel} · checked by the community's moderator before anyone sees it.",
+      "target": "ناظرین: {channel} کے تمام اراکین · کسی کے دیکھنے سے پہلے کمیونٹی کا ماڈریٹر اسے جانچتا ہے۔",
+      "verdict": "pass",
+      "reason": "تمام اراکین is all channel members; کسی کے دیکھنے سے پہلے puts moderator check before any visibility."
+    },
+    "wire.community.post_card_each_time": {
+      "en": "Each post asks you; there are no standing permissions yet.",
+      "target": "ہر پوسٹ پر آپ سے پوچھا جاتا ہے؛ ابھی کوئی مستقل اجازت نہیں ہے۔",
+      "verdict": "pass",
+      "reason": "ہر پوسٹ and کوئی مستقل اجازت نہیں retain one prompt per post, no standing permission yet."
+    },
+    "wire.community.post_card_label": {
+      "en": "Shown as your own post: this server can't label agent posts yet, so others won't see it came from your agent.",
+      "target": "آپ کی اپنی پوسٹ کے طور پر دکھائی جائے گی: یہ سرور ابھی ایجنٹ پوسٹس پر لیبل نہیں لگا سکتا، اس لیے دوسرے نہیں دیکھیں گے کہ یہ آپ کے ایجنٹ کی طرف سے ہے۔",
+      "verdict": "pass",
+      "reason": "اپنی پوسٹ and دوسروں … نہیں keep own attribution and hidden agent origin."
+    },
+    "wire.community.post_card_tainted": {
+      "en": "Your agent read community posts in this session, so no standing permission applies until a new session; only your answer posts this.",
+      "target": "آپ کے ایجنٹ نے اس سیشن میں کمیونٹی پوسٹس پڑھی ہیں، اس لیے نئے سیشن تک کوئی مستقل اجازت لاگو نہیں ہوتی؛ صرف آپ کا جواب اسے پوسٹ کرتا ہے۔",
+      "verdict": "pass",
+      "reason": "نئے سیشن تک کوئی مستقل اجازت لاگو نہیں ہوتی suspends standing permission until a new session; صرف آپ کا جواب preserves human decision."
+    },
+    "wire.community.post_card_title": {
+      "en": "Post to {channel} in {community}, as you?",
+      "target": "{channel} ({community}) پر آپ کے نام سے پوسٹ کریں؟",
+      "verdict": "pass",
+      "reason": "آپ کے نام سے … ؟ is a question about posting in the reader's name with both destination tokens."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/community-r3-safety-wire/report.md",
+      "sha256": "729e09fc1a639d57e5b0357e9a982233ea4bf94eddfee57d4b75b3dbe7b20248"
+    }
+  ]
+}

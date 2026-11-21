@@ -906,14 +906,36 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             # first: launchd can only hold a pid for OUR label, so a leftover
             # foreground daemon on the port cannot fake it.
             reload_needed = True
-            healthy = (
-                current
-                and launchd.job_running(label=label(), path=plist_path(), run=_launchctl)
-                and health(port) is not None
+            pid = (
+                launchd.job_pid(label=label(), path=plist_path(), run=_launchctl)
+                if current
+                else None
             )
+            healthy = current and pid is not None and health(port) is not None
             if healthy:
                 reload_needed = False
-                steps.append("LaunchAgent already current and running; left it loaded")
+                # RUNNING IS NOT "ON THIS BUILD" (field finding, 2026-11-18, on
+                # the mobile and tunnel twins of this branch): the plist names the
+                # stable shim, so it is identical across builds, and an install
+                # used to leave an old-build daemon serving while saying
+                # "already current". A PROVEN stale build is restarted.
+                #
+                # AN UNPROVEN BUILD IS NOT BOUNCED: a bridge restart drops every
+                # attached browser's connection mid-action, so the step names
+                # `lop browser restart` rather than guessing.
+                build = launchd.check_running_build_on_install(
+                    label=label(),
+                    path=plist_path(),
+                    pid=pid,
+                    recovery="lop browser restart",
+                    run=_launchctl,
+                    restart_when_unproven=False,
+                )
+                if build.kind == "failed":
+                    return {"ok": False, "steps": steps, "error": build.step()}
+                steps.append(
+                    build.step() or "LaunchAgent already current and running; left it loaded"
+                )
             elif current and launchd.kickstart(label=label(), path=plist_path(), run=_launchctl):
                 reload_needed = False
                 steps.append("restarted the loaded LaunchAgent (its file was already current)")
@@ -963,6 +985,20 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
                     "error": _translate_systemctl_error(loaded.stderr),
                 }
             steps.append(f"enabled the systemd user service ({systemd_unit()})")
+            from local_operator import update
+
+            # Unproven build → named, not bounced, as on macOS (an attached
+            # browser would lose its connection mid-action).
+            build = update.systemd_install_build_line(
+                name="browser bridge",
+                unit=systemd_unit(),
+                recovery="lop browser restart",
+                restart_when_unproven=False,
+            )
+            if build.kind == "failed":
+                return {"ok": False, "steps": steps, "error": build.step()}
+            if build.step():
+                steps.append(build.step())
     elif supervisor == "schtasks":
         # Task Scheduler cannot redirect a task's stdout, so the log the other
         # two platforms get from launchd/systemd is provided by the task's own

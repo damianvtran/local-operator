@@ -1,0 +1,97 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.tool_card",
+  "date": "2026-11-20",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance_source": "delegation brief; not independently inspected"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "22be0e3560d4",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "files": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.json",
+      "sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.tool_card.json",
+      "sha256": "0bb73fb5ad033156ea7ae6e1987038a101624c90b69c9e3104e988e4aa822dae"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.context.json",
+      "sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087"
+    }
+  },
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "clean",
+  "status": "passed",
+  "keys_read": 16,
+  "validation": {
+    "arguments": "16/16 exact runtime.message_arguments parity",
+    "plural_categories": [
+      "other"
+    ],
+    "plural_messages": 5,
+    "render_count": 80,
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "samples": {
+      "url": "https://example.com",
+      "state": "miss",
+      "chord": "ctrl+c"
+    },
+    "maxCells": {
+      "tui.tool_card.chip.you": {
+        "en": 4,
+        "zh-CN": 4,
+        "maxCells": 4
+      },
+      "tui.tool_card.hint.collapse": {
+        "en": 8,
+        "zh-CN": 4,
+        "maxCells": 10
+      },
+      "tui.tool_card.hint.expand": {
+        "en": 6,
+        "zh-CN": 4,
+        "maxCells": 10
+      },
+      "tui.tool_card.hint.interrupt": {
+        "en": 19,
+        "zh-CN": 12,
+        "maxCells": 24
+      },
+      "tui.tool_card.status.stop_unconfirmed": {
+        "en": 16,
+        "zh-CN": 10,
+        "maxCells": 18
+      }
+    },
+    "manual_bidi_controls": 0
+  },
+  "notes": [
+    "Independent semantic read of all 16 English, target and context entries.",
+    "Shipped consistency: tui.small.copy_picker.more_lines, tui.small.subagent_panel.ctrl_g_expand, tui.small.todo_panel.collapse/expand, tui.small.network_panel.relay_running, wire.tool_rows.bridge.expanded.unconfirmed.",
+    "Style zh-CN lines 8-14: 你 and terse labels; 71-75: 缓存; 85-97: other-only and Latin digits; 110-116: fullwidth punctuation and no added spaces.",
+    "No untranslated English static text. miss, ctrl+c, URL intentionally preserved argument values per context; diff translated as 差异.",
+    "No visual rendered-frame proof claimed; all declared maxCells checked with rich.cells.cell_len."
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "सवाल: {count}",
+  "tui.session_sidebar.footer.hub_note": "लिंक: {count}",
+  "tui.session_sidebar.footer.opening": "खुल रहा है…",
+  "tui.session_sidebar.footer.refresh_failed": "रीफ़्रेश विफल",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, one {+{shown} और पिन किया — स्क्रॉल करें} other {+{shown} और पिन किए — स्क्रॉल करें}}",
+  "tui.session_sidebar.row.untitled": "बिना नाम की बातचीत",
+  "tui.session_sidebar.section.active": "सक्रिय सत्र",
+  "tui.session_sidebar.section.pinned": "पिन किए गए",
+  "tui.session_sidebar.section.previous": "पिछले सत्र",
+  "tui.session_sidebar.section.subagent": "उप-एजेंट रन",
+  "tui.session_sidebar.state.empty": "अभी कोई बातचीत नहीं",
+  "tui.session_sidebar.state.error": "बातचीत लोड नहीं हो सकीं",
+  "tui.session_sidebar.state.loading": "बातचीत लोड हो रही हैं…",
+  "tui.session_sidebar.title": "सत्र",
+  "tui.session_sidebar.tooltip.location": "{device} पर",
+  "tui.session_sidebar.tooltip.location_network": "{device} पर · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "{device} पर · {network} (अंतिम ज्ञात स्थिति)",
+  "tui.session_sidebar.tooltip.location_stale": "{device} पर (अंतिम ज्ञात स्थिति)",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · अगर यह चुप ही रहे, तो {command} चलाएँ",
+  "tui.session_sidebar.tooltip.unnamed_device": "अनाम डिवाइस",
+  "tui.session_sidebar.tooltip.unreachable": "पहुँच से बाहर · {reason}"
+}

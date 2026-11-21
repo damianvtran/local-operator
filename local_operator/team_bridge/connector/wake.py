@@ -469,13 +469,19 @@ async def _screening_cycle(
 
     from local_operator.team_bridge import scheduler as _scheduler
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
-    from local_operator.team_bridge.screening import ScreenResult
     from local_operator.team_bridge.store import StoreRefused
 
-    def _held(code: str) -> Any:
-        if batch:
-            return [ScreenResult("hold", hold_code=code) for _ in items]
-        return ScreenResult("hold", hold_code=code)
+    def _authority_held(cause: str) -> Any:
+        # PR #4212 Q1: an authority refusal is aged BY CAUSE per message — a hub
+        # that says messaging is unavailable ages into the owner's review, an
+        # owner-only fix (sign in, consent, eligibility) into an owner-action
+        # code that never offers Deliver. Below the threshold: ``policy_stale``.
+        from local_operator.team_bridge.screening import aged_authority_hold
+
+        results = [
+            aged_authority_hold(owner, item, config_dir=config_dir, cause=cause) for item in items
+        ]
+        return results if batch else results[0]
 
     try:
         return await _scheduler.run_screening_cycle(
@@ -514,7 +520,9 @@ async def _screening_cycle(
                 else failure.code
             ),
         )
-        return _held("policy_stale")
+        from local_operator.team_bridge.store import AUTHORITY_CAUSE_SIGN_IN
+
+        return _authority_held(AUTHORITY_CAUSE_SIGN_IN)
     except StoreRefused as refusal:
         # The cycle's AUTHORITY refusals (a withdrawn status, an ineligible
         # org, stale consent, a moved owner) are typed ``policy_stale``
@@ -524,8 +532,11 @@ async def _screening_cycle(
         # same refusal visibly; a fresh screen now does too.
         if refusal.code != "policy_stale":
             raise
-        logger.warning("bridge: screening held code=policy_stale cause=authority")
-        return _held("policy_stale")
+        cause = str(getattr(refusal, "cause", "") or "")
+        logger.warning(
+            "bridge: screening held code=policy_stale cause=authority:%s", cause or "other"
+        )
+        return _authority_held(cause)
 
 
 def _owner_wire(owner: Any, config_dir: Path, auth_store: Any) -> Any:
@@ -837,6 +848,10 @@ def _confirmed_screen_result(stored: Mapping[str, Any]) -> Any:
     return ScreenResult(disposition="deliver", receipt=receipt)
 
 
+class RoutedSessionGone(Exception):
+    """``live_only`` delivery found its target no longer live. Nothing was sent."""
+
+
 async def deliver_wake(
     owner: Any,
     payload: str,
@@ -845,8 +860,17 @@ async def deliver_wake(
     config_dir: Path,
     bridge_meta: dict[str, Any] | None = None,
     sender_display: dict[str, Any] | None = None,
+    live_only: bool = False,
 ) -> str:
     """SEAM: hand the wake to the designated CoS session (lazy heavy import).
+
+    ``live_only`` is for a ROUTED target (a session that is not the designated
+    one): it is checked against the registry NOW, not as it was when the
+    decision was made, because this function otherwise passes ``record=None``
+    and a dead session with history would be cold-resumed. Resuming a task
+    session on a stranger's message is exactly what routing must never do, so a
+    target that is no longer live raises :class:`RoutedSessionGone` BEFORE
+    anything is delivered and the caller falls back to the designated session.
 
     Live target: the shipped ``deliver_peer_message`` with ``wake=True``.
     Cold target (no runtime): ``engage_runtime`` with a ``PeerMessageErrand``
@@ -862,6 +886,13 @@ async def deliver_wake(
         session_has_durable_history,
     )
 
+    live_record: Any | None = None
+    if live_only:
+        from .routing import live_capable_record
+
+        live_record = live_capable_record(None, session_id)
+        if live_record is None:
+            raise RoutedSessionGone(session_id)
     sender = {"account_id": owner.account_id, "source": TEAM_BRIDGE_MESSAGE_TYPE}
     if sender_display:
         # D1: the human card must be able to NAME the member. This dict is all
@@ -880,26 +911,36 @@ async def deliver_wake(
         from local_operator.team_bridge.display_receipt import validated_display_receipt
 
         sender.update(validated_display_receipt(sender_display, owner=owner))
-    if session_has_durable_history(session_id):
+    if live_only or session_has_durable_history(session_id):
         # Live, or cold WITH durable history: the primitive owns delivery and
         # answers with the TYPED outcome — no exception-type or message-string
         # inspection (the unengaged distinction is a state, not an error).
-        outcome = await deliver_peer_message_outcome(
-            None,
-            session_id=session_id,
-            text=payload,
-            mode="mailbox",
-            wake=True,
-            sender=sender,
-            # THE PROVENANCE KIND (H4e-render): the receiving session stamps
-            # this on the row, so the card is a bridge message rather than a
-            # generic peer one (§13.4). Re-validated at every hop.
-            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
-            # THE BRIDGE LOCATOR (H5 F3): bounded, closed-key, omitted when
-            # absent — the receiver uses it to find ITS OWN records and never
-            # as clearance (see the receive hook).
-            bridge_meta=bridge_meta,
-        )
+        try:
+            outcome = await deliver_peer_message_outcome(
+                # A routed delivery passes the record it just scanned, so the
+                # primitive can only DIAL that process: with ``None`` it resolves
+                # the id itself and may cold-resume a session that died in the
+                # meantime. A failed dial is a confirmed non-delivery, which is
+                # the designated fallback's cue, not a held card.
+                live_record,
+                session_id=session_id,
+                text=payload,
+                mode="mailbox",
+                wake=True,
+                sender=sender,
+                # THE PROVENANCE KIND (H4e-render): the receiving session stamps
+                # this on the row, so the card is a bridge message rather than a
+                # generic peer one (§13.4). Re-validated at every hop.
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                # THE BRIDGE LOCATOR (H5 F3): bounded, closed-key, omitted when
+                # absent — the receiver uses it to find ITS OWN records and never
+                # as clearance (see the receive hook).
+                bridge_meta=bridge_meta,
+            )
+        except RuntimeError as exc:
+            if live_only:
+                raise RoutedSessionGone(session_id) from exc
+            raise
         # Only a confirmed non-delivery is retryable. Returning its detail as
         # success would let the conversation caller mark its card posted and
         # discard the feed ref, permanently losing the message on replay.
@@ -910,6 +951,8 @@ async def deliver_wake(
         # delivered — the AttributeError lands in the handler's hold arm, so
         # the card stays owed instead of being settled unproven.
         if outcome.state == DELIVERY_FAILED:
+            if live_only:
+                raise RoutedSessionGone(session_id)
             raise DeliveryFailed(outcome.detail)
         return str(outcome.detail)
     # Cold with NO durable history: exactly the designated-CoS engagement
@@ -933,6 +976,14 @@ async def deliver_wake(
     return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
 
 
+#: The owner-action hold codes that raise a contentless owner notice. Literals
+#: rather than an import of ``screening.OWNER_ACTION_HOLD_CODES`` so this
+#: module keeps the screening pipeline off its import path; a unit test pins
+#: them to that mapping's values minus ``screener_required`` (which the
+#: screening-model notice already covers).
+_OWNER_ACTION_NOTICE_CODES = frozenset({"sign_in_required", "consent_required", "owner_ineligible"})
+
+
 async def notify_screening_infra_hold(
     owner: Any, config_dir: Path, session_id: str, hold_code: Any
 ) -> None:
@@ -949,13 +1000,30 @@ async def notify_screening_infra_hold(
     ONCE per receiving endpoint: the item is keyed by endpoint with fixed copy,
     so a repeat is absorbed by the notification store (same key, same content
     hash) instead of adding one item per held message. Contentless like the
-    budget notice: no sender, body or conversation. Any other hold code is a
-    no-op. Best-effort: never turns the hold into a failure.
+    budget notice: no sender, body or conversation. Best-effort: never turns the
+    hold into a failure.
+
+    OWNER-ACTION HOLDS (``sign_in_required``, ``consent_required``,
+    ``owner_ineligible``; ``screening.OWNER_ACTION_HOLD_CODES``) get the same
+    once-per-endpoint treatment, keyed by endpoint AND reason so each distinct
+    fix is announced once and a repeat of the same reason is absorbed. They
+    exist because the hub withdrew the owner's authority for a reason only the
+    owner can fix, so, like an unavailable screener, waiting does not clear
+    them; until this notice they were visible only in ``lop team-bridge holds``.
+    The notice names the ACTION, never a Deliver: these codes are not
+    releasable (``hold_release.RELEASABLE_HOLD_CODES``) and nothing here may
+    make them so. ``screener_required`` is deliberately absent: it is the same
+    condition the ``screening_model_unavailable`` notice already explains.
+    Every other hold code is a no-op.
     """
 
     from local_operator.team_bridge.model_boundary import SCREENING_MODEL_UNAVAILABLE
 
-    if hold_code != SCREENING_MODEL_UNAVAILABLE:
+    if hold_code == SCREENING_MODEL_UNAVAILABLE:
+        key = f"team-bridge-screening-model:{owner.endpoint_id}"
+    elif hold_code in _OWNER_ACTION_NOTICE_CODES:
+        key = f"team-bridge-owner-action:{owner.endpoint_id}:{hold_code}"
+    else:
         return
     from local_operator.i18n.keys import cli_team_bridge as _k
     from local_operator.i18n.text import tr
@@ -963,18 +1031,30 @@ async def notify_screening_infra_hold(
 
     def _notify() -> None:
         t = tr("cli.team_bridge")
+        if hold_code == SCREENING_MODEL_UNAVAILABLE:
+            title = t(_k.notify_screening_model_unavailable_title())
+            body = t(_k.notify_screening_model_unavailable_body())
+        else:
+            # Closed ICU selects over the code itself: the reason is one of
+            # three literals checked above, never sender- or message-derived.
+            # The TITLE selects too (design D1 / QA Q1 on PR #4317): three
+            # owner-action notices can sit side by side in the inbox list, so
+            # each title leads with its own action inside the 40-cell column.
+            reason = str(hold_code)
+            title = t(_k.notify_owner_action_hold_title(reason=reason))
+            body = t(_k.notify_owner_action_hold_body(reason=reason))
         NotificationStore(config_dir).notify(
             session_id,
-            title=t(_k.notify_screening_model_unavailable_title()),
-            body_md=t(_k.notify_screening_model_unavailable_body()),
+            title=title,
+            body_md=body,
             priority="high",
-            key=f"team-bridge-screening-model:{owner.endpoint_id}",
+            key=key,
         )
 
     try:
         await asyncio.to_thread(_notify)
     except Exception:  # noqa: BLE001 — a notification is chrome, the hold stands
-        logger.info("bridge: screening-model notification unrecorded code=notify_failed")
+        logger.info("bridge: hold notification unrecorded code=notify_failed")
 
 
 def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:

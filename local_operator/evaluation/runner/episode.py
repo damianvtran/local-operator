@@ -220,6 +220,25 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # The settle frequency changes the benchmark's action pacing. The
         # companion metadata is derived from this value by the run script.
         "OSWORLD_ACTION_SETTLE_POLICY": "osworld_action_settle_policy",
+        # Directories whose host tools a task evaluator may shell out to.
+        # The worker environment is constructed, never copied
+        # (``supervisor.minimal_environment``), and carries no PATH at all,
+        # so an evaluator sees only the interpreter's default search path:
+        # a tool installed anywhere else either raises or -- where the
+        # evaluator swallows the failure -- silently scores lower. Upstream
+        # harnesses run evaluators under the operator's ordinary environment,
+        # so that is a fidelity gap, and closing it changes what a score
+        # means: a run that sets this is comparable only to runs that
+        # disclose the same directories. Hence a disclosed value rather than
+        # a PATH passthrough. It rides this channel, not the launch
+        # environment, because the worker is launched BEFORE
+        # ``inspect_requirements`` can say whether this adapter build
+        # understands it: the adapter applies it in its own process at
+        # ``prepare``, after the gate, and a build that predates it is
+        # refused instead of sealing a tool path its evaluators never had.
+        # The adapter accepts only absolute, normalised, existing
+        # directories, so the requested string IS the applied list.
+        "EVALUATOR_TOOL_PATH": "evaluator_tool_path",
     }
 )
 _DISCLOSED_INFRA_VALUES = frozenset(DISCLOSED_INFRA_METADATA_KEYS)

@@ -1,0 +1,24 @@
+# Second independent safety audit — vi — cli.sessions_move_workset + tui.session_move_workset
+# auditor session 1946542ef662 (anthropic/claude-opus-5-5); worktree HEAD c5bc5896186cad939fa813d321c525f78ad4e8cf
+
+## HOWTO gates (each run alone)
+# HEAD c5bc5896186cad939fa813d321c525f78ad4e8cf origin/main 9cb0702b1d8d2b1ebe738c00c91946d6b692c2a7 — before second-audit receipts
+$ .venv/bin/python scripts/i18n/generate.py --check
+generate.py --check: 179 artifact(s) byte-identical
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --audit-base origin/main
+check.py: ok — 234 file(s) scanned, 2712 literal(s) at or below the baseline, catalogues consistent; 106 advisory finding(s) (report-only until activated)
+exit=0
+
+## Independent mechanical pass (auditor script; not a semantic proof)
+cli.sessions_move_workset: keys 65/65 same order=True; placeholder-set/flag/NFC/bidi-control mismatches: none
+tui.session_move_workset: keys 11/11 same order=True; placeholder-set/flag/NFC/bidi-control mismatches: none
+render n=0: 0 worktree · 0 commit chưa push · 0 tệp chưa commit · 3.2 MB | Các tệp làm việc chưa được chuyển: 0 worktree vẫn ở trên mbp.
+render n=1: 1 worktree · 1 commit chưa push · 1 tệp chưa commit · 3.2 MB | Các tệp làm việc chưa được chuyển: 1 worktree vẫn ở trên mbp.
+render n=2: 2 worktree · 2 commit chưa push · 2 tệp chưa commit · 3.2 MB | Các tệp làm việc chưa được chuyển: 2 worktree vẫn ở trên mbp.
+render n=5: 5 worktree · 5 commit chưa push · 5 tệp chưa commit · 3.2 MB | Các tệp làm việc chưa được chuyển: 5 worktree vẫn ở trên mbp.
+render n=21: 21 worktree · 21 commit chưa push · 21 tệp chưa commit · 3.2 MB | Các tệp làm việc chưa được chuyển: 21 worktree vẫn ở trên mbp.
+render n=1000000: 1.000.000 worktree · 1.000.000 commit chưa push · 1.000.000 tệp chưa commit · 3.2 MB | Các tệp làm việc chưa được chuyển: 1.000.000 worktree vẫn ở trên mbp.

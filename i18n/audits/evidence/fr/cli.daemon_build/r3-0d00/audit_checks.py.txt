@@ -1,0 +1,40 @@
+"""cli.daemon_build audit checks (i18n-auditor, session 0d00e986c25e, round 3).
+fr/es delta re-audit of FR2-1 / ES2-1: parity, terminology census, typography and attachment probes. Read-only."""
+import glob, hashlib, json, re, subprocess
+from collections import Counter
+C = "local_operator/i18n/catalogues"
+LOCS = ["fr", "es"]
+NS = "cli.daemon_build"
+sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+def load(l):
+    d = {}
+    for f in glob.glob(f"{C}/{l}/*.json"):
+        if not f.endswith(".context.json"):
+            d.update(json.load(open(f)))
+    return d
+E = json.load(open(f"{C}/en/{NS}.json"))
+print("en", sha(f"{C}/en/{NS}.json"), "context", sha(f"{C}/en/{NS}.context.json"), "keys", len(E))
+ph = lambda s: sorted(re.findall(r"\{[^}]*\}", s)); bt = lambda s: sorted(re.findall(r"`[^`]*`", s))
+for l in LOCS:
+    p = f"{C}/{l}/{NS}.json"; d = json.load(open(p))
+    bad = [k for k in E if k not in d or ph(d[k]) != ph(E[k]) or bt(d[k]) != bt(E[k])]
+    print(f"[parity] {l} sha={sha(p)} keys={len(d)} added={sorted(set(d)-set(E))} dropped={sorted(set(E)-set(d))} placeholder/backtick mismatches={bad}")
+diff = subprocess.check_output(["git", "diff", "--name-only", "d40edc68", "HEAD", "--", f"{C}/en/{NS}.json", f"{C}/en/{NS}.context.json"]).decode().split()
+print(f"[source] en/context changed d40edc68..HEAD: {diff}")
+for l in LOCS:
+    old = json.loads(subprocess.check_output(["git", "show", f"d40edc68:{C}/{l}/{NS}.json"]))
+    new = json.load(open(f"{C}/{l}/{NS}.json"))
+    print(f"[delta] {l} changed keys d40edc68..HEAD: {[k for k in new if old.get(k) != new[k]]}")
+for l, pats in [("fr", ["build", "version"]), ("es", ["compilaci", "versi"])]:
+    c = Counter(p for v in json.load(open(f"{C}/{l}/{NS}.json")).values() for p in pats if p in v)
+    print(f"[term] {l} {NS} occurrences={dict(c)}")
+fr = json.load(open(f"{C}/fr/{NS}.json"))
+for k, v in fr.items():
+    for i, ch in enumerate(v):
+        if ch in ";:!?": print(f"[typo] fr {k}: char before '{ch}' = U+{ord(v[i-1]):04X}")
+    print(f"[typo] fr {k}: apostrophes ascii={v.count(chr(39))} U+2019={v.count(chr(0x2019))}")
+for l, pat in [("fr", r"en cours d’exécution sur"), ("es", r"en ejecución con")]:
+    d = json.load(open(f"{C}/{l}/{NS}.json"))
+    print(f"[attach] {l} keys containing '{pat}': {[k for k, v in d.items() if re.search(pat, v)]}")
+print(f"[dup] fr install_restart_failed 'nouveau build' count = {fr['cli.daemon_build.install_restart_failed'].count('nouveau build')}")
+print("[git] head", subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip())

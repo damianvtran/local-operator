@@ -20,7 +20,11 @@ import pytest
 
 from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
-from local_operator.library.store import IndexUnavailable, LibraryStore
+from local_operator.library.store import (
+    STATE_LAST_RECONCILE,
+    IndexUnavailable,
+    LibraryStore,
+)
 from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
@@ -1084,3 +1088,50 @@ def test_a_rescan_that_finds_nothing_new_rewrites_no_catalog_row(tmp_path, monke
     assert LibraryStore(root).revision() > revision
     assert set(before["occurrences"]) < set(after["occurrences"])
     assert names(root) == {f"f{number}.txt" for number in range(6)} | {"new.txt"}
+
+
+@pytest.mark.parametrize("on_worker", [True, False])
+def test_a_stopped_worker_leaves_reconcile_between_sessions(
+    tmp_path, monkeypatch, on_worker: bool
+) -> None:
+    """``stop`` must interrupt a reconcile, but only on the worker it joins.
+
+    WHY: ``stop`` joins the daemon threads for at most 5 s. A backfill over
+    thousands of journals ran longer, so the worker outlived its owner's
+    teardown and kept opening the database under a config dir the owner (a test)
+    then deleted — the directory was recreated and a fresh WAL file opened beside
+    live connections to the old one (SIGBUS in CI). The flag is honoured between
+    sessions on the worker thread. A synchronous caller on its own thread keeps
+    the old contract and runs the whole pass (the ``on_worker=False`` arm).
+    """
+    root = config_root(monkeypatch, tmp_path)
+    for sid in (SESSION, OTHER, SECOND):
+        session(root, sid, [user_row("u1", 1.0, "hello")])
+    index = indexer.LibraryIndexer(root)
+    index.store.ensure_schema()
+    real_signature = indexer.library_index._signature
+    stats: list[Path] = []
+
+    def signature_then_stop(session_dir: Path) -> Any:
+        stats.append(session_dir)
+        # The stop lands mid-reconcile, after the first unit of work.
+        index._stop.set()
+        return real_signature(session_dir)
+
+    monkeypatch.setattr(indexer.library_index, "_signature", signature_then_stop)
+    monkeypatch.setattr(index, "_mark_dirty", lambda _sid: None)
+    worker = threading.Thread(target=index.reconcile, name="library-indexer-under-test")
+    if on_worker:
+        # ``reconcile`` asks whether it runs on THIS indexer's worker.
+        index._thread = worker
+    worker.start()
+    worker.join(10.0)
+    assert not worker.is_alive()
+
+    if on_worker:
+        assert len(stats) == 1, "the worker kept stat'ing journals after stop"
+        assert STATE_LAST_RECONCILE not in index.store.state(), "an interrupted pass wrote state"
+    else:
+        # Distinct dirs: the denominator count (``_scannable``) stats each again.
+        assert len(set(stats)) == 3
+        assert STATE_LAST_RECONCILE in index.store.state()

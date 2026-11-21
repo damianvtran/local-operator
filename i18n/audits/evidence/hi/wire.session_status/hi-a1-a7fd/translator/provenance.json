@@ -1,0 +1,127 @@
+{
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "status": "translated",
+  "created_at": "2026-11-19T21:01:52.057216+00:00",
+  "frozen_head": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "terminal-status-hi",
+    "session": "8c6e64f5562b",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model field",
+    "fallback_used": false
+  },
+  "key_count": 17,
+  "new_keys_translated": 16,
+  "existing_keys_preserved": [
+    "wire.session_status.retired_label"
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "existing_target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/hi/wire.session_status.json",
+      "sha256": "f245dd2ff0a26f46594dc4eec914808664702215279f71964feea4994e8e252d"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/wire.session_status.json",
+      "sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81"
+    }
+  },
+  "artifacts": {
+    "wire.session_status.json": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/wire.session_status.json",
+      "sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81"
+    },
+    "check_translation.py": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/check_translation.py",
+      "sha256": "6bdbada95a64ef5a90da355e7deb706a69ad5801aa8a2a3862836bcdb95d2ec1"
+    },
+    "checks.json": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/checks.json",
+      "sha256": "3e22683e28461f2938f65968e7ba00d711c74829ee4cc0ed08d5aa4838af872f"
+    },
+    "checks.log": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/checks.log",
+      "sha256": "2eba66d12000d5edfc9e28c1da9964761700c11f7514e5800030809793e905e6"
+    }
+  },
+  "independent_audits": {
+    "required": 2,
+    "performed_by_this_session": 0,
+    "status": "pending independent safety audits"
+  },
+  "translation_decisions": [
+    {
+      "topic": "Unseen",
+      "decision": "अपठित denotes unread status, not an additional error cause. The same parenthetical appears across interrupted, complete, and error labels."
+    },
+    {
+      "topic": "Retirement",
+      "decision": "New whole-status text explicitly says the runtime closed for an update; does not attribute it to the operator. Existing retired_label preserved byte-for-byte as required."
+    },
+    {
+      "topic": "Signal vs forced kill",
+      "decision": "सिग्नल से रोका गया contrasts with ज़बरदस्ती बंद किया गया. Attribution surrounds the unchanged command parameter."
+    },
+    {
+      "topic": "Disposed",
+      "decision": "सत्र समाप्त कर दिया गया describes session disposal without claiming transcript/data deletion."
+    },
+    {
+      "topic": "Bounds",
+      "decision": "Stall bound describes the time limit on stopped progress; progress bound describes the allotted progress time. Neither is called an operator stop."
+    }
+  ],
+  "glossary_proposals": [
+    {
+      "en": "unseen (read status)",
+      "hi": "अपठित",
+      "note": "Compact read-state qualifier in terminal labels, not invisible/unnoticed or a cause."
+    },
+    {
+      "en": "interrupted",
+      "hi": "बाधित"
+    },
+    {
+      "en": "dormant (wake)",
+      "hi": "निष्क्रिय",
+      "note": "Consistent with existing hi/wire.sessions.json; not cancelled or scheduled to fire."
+    },
+    {
+      "en": "forced kill",
+      "hi": "ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "en": "turn",
+      "hi": "टर्न",
+      "note": "Living technical loan; no command or identifier translated."
+    }
+  ],
+  "length_notes": "Context specifies one logical line with no fixed cell cap; no truncation or manual line breaks introduced. No visual fit claim.",
+  "unresolved_programme_gap": "Unknown nonempty external diagnostic retains its legacy English path outside this namespace. Not translated here, not an accepted exception, remains unresolved.",
+  "limitations": [
+    "Not audited by translator",
+    "No integrated runtime proof",
+    "No pseudo-localization proof",
+    "No visual/native-client proof",
+    "Full-corpus check.py CLI not run; scoped repository parser and checker helpers run against scratch candidate only",
+    "No repository/generated/history writes, build, install, server, commit or PR"
+  ],
+  "retention": "Scratch contribution awaiting manager retention into canonical tracked evidence; no claim of tracked or merged artifact"
+}

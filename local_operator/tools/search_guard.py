@@ -390,7 +390,7 @@ class _FrameStack(list[str]):
         return frame
 
 
-def lex(command: str) -> Lexed:
+def lex(command: str, *, keep_empty_case_terminators: bool = False) -> Lexed:
     """THE shell-line scanner shared by every bash guard (search, sleep, delete).
 
     One scanner on purpose. The guardrail review found, round after round,
@@ -641,8 +641,11 @@ def lex(command: str) -> Lexed:
             while j < n and command[j] == ch:
                 j += 1
             text = "".join(buf).strip()
-            if text:
-                segments.append((text, piped, command[i:j] if ch != "\n" else "\n"))
+            op = command[i:j] if ch != "\n" else "\n"
+            # A case arm can end after a newline already flushed its body.
+            # Only the case-aware consumer needs that separator on its own.
+            if text or (keep_empty_case_terminators and op == ";;"):
+                segments.append((text, piped, op))
             buf = []
             piped = ch == "|" and (j - i) == 1
             i = j

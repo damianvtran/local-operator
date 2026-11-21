@@ -58,6 +58,7 @@ from typing import Any, Awaitable, Callable, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from local_operator import procstate
+from local_operator.agent_shell import AGENT_SHELL_ENV
 from local_operator.guardrails import spawned as guard_spawned
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
@@ -789,6 +790,13 @@ async def _spawn(
                 # tool's three arms. The worker is per session, so the id is
                 # this kernel's own for its whole life.
                 **session_id_env_injection(session_id),
+                # The bash tool's agent-descent marker, which the worker lacked:
+                # a cell's `subprocess.run(["lop", ...])` is as much an agent's
+                # call as a bash command, so every `in_agent_shell()` consumer
+                # (the exec/interactive refusals, the human-only owner-audit
+                # gate of `lop team-bridge holds`) must see it here too
+                # (#4251 security review S-1).
+                AGENT_SHELL_ENV: "1",
             },
         )
         spawn_options["env"] = env

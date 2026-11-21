@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from local_operator import procstate
 from local_operator.session import transcript_index as ti
 
 #: Bumped whenever the companion's tables/semantics change. An older companion
@@ -60,6 +61,25 @@ _RETAIN_PREVIOUS = 2
 #: Orphan session directories are only reclaimed when nothing in them is newer
 #: than this, so a session's first publication is never swept mid-write.
 _ORPHAN_GRACE_S = 3600.0
+
+#: A writer's temp file: ``<token>.<pid>.tmp`` (the companion build),
+#: ``<token>.naming.<pid>.naming.tmp`` (the sidecar — ``with_suffix`` replaces
+#: only ``.json``), and SQLite's ``-journal`` sibling of either. The pid is the
+#: WRITER's, which is the only identity a leaked temp carries.
+_WRITER_TEMP = re.compile(r"^[^.]+(?:\.naming)?\.(?P<pid>\d+)(?:\.naming)?\.tmp(?:-journal)?$")
+
+#: Other sessions' read-model directories visited per :func:`collect` call. The
+#: start rotates (:data:`_TEMP_SWEEP_CURSOR`), so every directory is reached
+#: within ``ceil(dirs / this)`` publishes while one call stays a few dozen
+#: ``scandir`` entries — the leak this reclaims was ~961 files over the store,
+#: and none of it is urgent enough to put on a publish's critical path at once.
+_TEMP_SWEEP_DIRS = 16
+_TEMP_SWEEP_CURSOR = 0
+
+#: Slack on the pid-reuse comparison: macOS reports a start to the whole second
+#: (``lstart``), so a writer that created its temp in the second it started can
+#: read as "started after the file" by up to that rounding.
+_PID_REUSE_SLACK_S = 2.0
 
 logger = logging.getLogger(__name__)
 # Per-process bounded background work only; no full index retained after completion.
@@ -523,6 +543,11 @@ def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None
         _fsync_directory(path.parent)
     finally:
         temp.unlink(missing_ok=True)
+        # SQLite's rollback journal is a SIBLING (``<temp>-journal``) that the
+        # connection deletes only on a clean commit/close; a build that raised
+        # mid-transaction on some platforms, or whose temp was replaced away,
+        # left it behind with nothing else ever naming it.
+        Path(f"{temp}-journal").unlink(missing_ok=True)
     return token
 
 
@@ -1359,7 +1384,8 @@ def collect(root: str | Path, sid: str, token: str | None) -> None:
     re-reads the head and retries (see :func:`_read`).
 
     Session directories whose canonical index is gone (a deleted session) are
-    swept by :func:`_sweep_orphans` from the same call.
+    swept by :func:`_sweep_orphans` from the same call, and temp files a KILLED
+    writer left behind by :func:`_sweep_dead_writer_temps`.
     """
     directory = _directory(Path(root))
     current = token if isinstance(token, str) else None
@@ -1385,6 +1411,7 @@ def collect(root: str | Path, sid: str, token: str | None) -> None:
         except OSError:
             pass
     _sweep_orphans(root, directory, sid)
+    _sweep_dead_writer_temps(directory, sid)
 
 
 def _sweep_orphans(root: str | Path, directory: Path, sid: str, limit: int = 64) -> None:
@@ -1410,6 +1437,83 @@ def _sweep_orphans(root: str | Path, directory: Path, sid: str, limit: int = 64)
             # a session-deletion surface wherever it appears — an empty directory of
             # a few hundred bytes is not worth an allow-list exception on that
             # guard, and the next publication for that session reuses the path.
+        except OSError:
+            continue
+
+
+def _sweep_dead_writer_temps(directory: Path, sid: str, limit: int = _TEMP_SWEEP_DIRS) -> None:
+    """Unlink temp FILES whose writer is provably gone, bounded per call.
+
+    WHY. :func:`publish` and :func:`write_naming` build into a pid-named temp and
+    remove it in a ``finally`` — which never runs when the process is KILLED
+    (an update restart, a resource guard, SIGKILL). Nothing else ever names those
+    files: :func:`collect` only ranks ``.sqlite``/``.json`` and :func:`_sweep_orphans`
+    only visits deleted sessions, so on the operator's store ~961 of them
+    (~1.46 GiB, many SQLite ``-journal`` siblings) accumulated. They are harness
+    state under the config dir, which the operator's guardrail refuses to let an
+    agent hand-delete, so the runtime must reclaim them itself.
+
+    INVARIANT — a temp is removed only when ALL hold:
+
+    - its name matches :data:`_WRITER_TEMP` (never a ``.sqlite``/``.json``
+      companion or sidecar, never anything else in the directory);
+    - its pid is not THIS process's (our own build may be mid-write);
+    - its mtime is older than :data:`_ORPHAN_GRACE_S` (a slow build by a live
+      peer is still writing it);
+    - the pid is DEAD (:func:`procstate.pid_liveness` is ``False``), or it is held
+      by a process that started after the file was last written — the writer
+      had to start before writing, so that holder is a stranger on a reused pid.
+
+    Any doubt (liveness ``None``, an unreadable start) KEEPS the file: the cost of
+    a wrong keep is disk until the next sweep; the cost of a wrong delete is a
+    live peer's build failing at its ``replace``. FILES ONLY: like
+    :func:`_sweep_orphans` this never removes a directory (see the guard in
+    tests/unit/session/test_no_session_deletion.py).
+    """
+    global _TEMP_SWEEP_CURSOR
+    cutoff = time.time() - _ORPHAN_GRACE_S
+    me = os.getpid()
+    try:
+        others = sorted(
+            entry.name
+            for entry in os.scandir(directory)
+            if entry.name != sid and entry.is_dir(follow_symlinks=False)
+        )
+    except OSError:
+        return
+    picked: list[str] = [sid]
+    if others:
+        start = _TEMP_SWEEP_CURSOR % len(others)
+        picked += (others[start:] + others[:start])[:limit]
+        _TEMP_SWEEP_CURSOR = start + min(limit, len(others))
+    candidates: list[tuple[Path, int, float]] = []
+    for name in picked:
+        try:
+            with os.scandir(directory / name) as entries:
+                for entry in entries:
+                    match = _WRITER_TEMP.match(entry.name)
+                    if match is None or not entry.is_file(follow_symlinks=False):
+                        continue
+                    pid = int(match.group("pid"))
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                    if pid != me and mtime < cutoff:
+                        candidates.append((Path(entry.path), pid, mtime))
+        except OSError:
+            continue
+    if not candidates:
+        return
+    liveness = {pid: procstate.pid_liveness(pid) for pid in {pid for _, pid, _ in candidates}}
+    started = procstate.start_epochs(pid for pid, alive in liveness.items() if alive)
+    for path, pid, mtime in candidates:
+        alive = liveness.get(pid)
+        if alive is None:
+            continue  # unprovable: keep
+        if alive:
+            began = started.get(pid)
+            if began is None or began <= mtime + _PID_REUSE_SLACK_S:
+                continue  # the writer itself (or unknowable): keep
+        try:
+            path.unlink(missing_ok=True)
         except OSError:
             continue
 

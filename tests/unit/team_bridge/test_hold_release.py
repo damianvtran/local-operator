@@ -465,12 +465,15 @@ def test_the_shipped_default_is_on() -> None:
     assert DEFAULT_HOLD_RELEASE is True
     assert TeamBridgeSettings.from_values({}).hold_release is True
     assert TeamBridgeSettings.from_values({"team_bridge": {}}).hold_release is True
-    # Only a real ``false`` is the off switch (same rule as ``review_held``).
-    for garbled in (None, "false", 0, "off"):
+    # The off switch is whatever ``settings_io.strict_bool`` parses as false
+    # (S-1, PR #4317: the ``/settings`` row reads it the same way). Only an
+    # unparseable value falls back to the shipped default, ON.
+    for garbled in (None, "", "maybe", [], {}, 2):
         values = {"team_bridge": {"hold_release": garbled}}
         assert TeamBridgeSettings.from_values(values).hold_release is True, garbled
-    explicit_off = {"team_bridge": {"hold_release": False}}
-    assert TeamBridgeSettings.from_values(explicit_off).hold_release is False
+    for off in (False, "false", "off", "no", "0", 0, " OFF "):
+        values = {"team_bridge": {"hold_release": off}}
+        assert TeamBridgeSettings.from_values(values).hold_release is False, off
 
 
 def test_enabled_reads_on_with_no_key_and_with_no_config_file(tmp_path) -> None:
@@ -499,20 +502,31 @@ def test_enabled_reads_on_when_the_config_is_torn(tmp_path, monkeypatch) -> None
     assert hr.enabled(tmp_path) is True
 
 
-def test_a_non_boolean_value_reads_on_and_is_logged_once(tmp_path, monkeypatch, caplog) -> None:
-    """S-3: a quoted ``"false"`` is not the off switch; the operator is told once."""
+def test_an_unparseable_value_reads_on_and_is_logged_once(tmp_path, monkeypatch, caplog) -> None:
+    """S-3: a value nobody can parse reads ON; the operator is told once.
+
+    A quoted ``"false"`` is NOT in this class since S-1 (PR #4317): it parses
+    as off on both the row and the receiver, so it is neither ON nor logged.
+    """
 
     import logging
 
     monkeypatch.setattr(hr, "_non_boolean_logged", False)
-    values = {"team_bridge": {"enabled": True, "hold_release": "false"}}
+    values = {"team_bridge": {"enabled": True, "hold_release": "maybe"}}
     (tmp_path / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
     with caplog.at_level(logging.INFO, logger=hr.logger.name):
         assert hr.enabled(tmp_path) is True
         assert hr.enabled(tmp_path) is True
     lines = [r.getMessage() for r in caplog.records if "hold_release" in r.getMessage()]
-    assert len(lines) == 1 and "unquoted false" in lines[0]
-    assert '"false"' not in lines[0]  # the value itself is not echoed
+    assert len(lines) == 1 and "write false" in lines[0]
+    assert "maybe" not in lines[0]  # the value itself is not echoed
+    monkeypatch.setattr(hr, "_non_boolean_logged", False)
+    values = {"team_bridge": {"enabled": True, "hold_release": "false"}}
+    (tmp_path / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=hr.logger.name):
+        assert hr.enabled(tmp_path) is False
+    assert not [r for r in caplog.records if "hold_release" in r.getMessage()]
     monkeypatch.setattr(hr, "_non_boolean_logged", False)
     _setting(tmp_path, False)
     caplog.clear()
@@ -1438,3 +1452,145 @@ def test_consumed_owner_release_survives_retry_before_ack_or_reservation(rig, mo
         assert hr.payload_for_row(replayed) == signed_payload
         assert replayed["signature"] == signed["signature"]
         assert hr.verify_row(replayed, hr.anchor_spki(config_dir)[0])
+
+
+# --- an expired hold whose body can no longer be loaded (operator report 2026-11-20) ---
+#
+# The operator's Approvals badge sat at 1 on a held message from 2026-11-10
+# whose Deliver window had passed and whose body the owner-audit read could no
+# longer serve ("Unknown sender", "could not load"): the list said
+# ``can_discard`` but Discard needed the hash of a body that was not on screen,
+# so the row could never settle. These run the real router over the real
+# SQLite store; the expiry is a real ``created_at`` written into that store.
+
+HOLDS = "/v1/desktop/team-bridge/holds"
+EIGHT_DAYS_S = 8 * 24 * 3600.0
+
+
+def _age_decision(config_dir: Path, seconds: float, *, message_id: str = MESSAGE_ID) -> None:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(
+            "UPDATE work_scope_decisions SET created_at = created_at - ? WHERE message_id = ?",
+            (seconds, message_id),
+        )
+
+
+def _listed(call) -> list[dict[str, Any]]:
+    out = call("GET", HOLDS, params={"expected_account_id": "acc_recv"})
+    assert out.status_code == 200
+    return out.json()["result"]["items"]
+
+
+def _receipt_body(receipt: str, **overrides: Any) -> dict[str, Any]:
+    body = {
+        "expected_account_id": "acc_recv",
+        "conversation_id": CONVERSATION_ID,
+        "hold_receipt": receipt,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_an_expired_unloadable_hold_discards_by_receipt_and_settles(api) -> None:
+    config_dir, _store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    # The stuck shape: past the window, Discard-only, counted, and now a receipt.
+    assert item["can_deliver"] is False and item["can_discard"] is True
+    assert item["actionable"] is True
+    receipt = item["discard_receipt"]
+    assert isinstance(receipt, str) and len(receipt) == 64
+    assert "body" not in json.dumps(item).replace("body_sha256", "")
+
+    discard = f"{HOLDS}/{MESSAGE_ID}/discard"
+    deliver = f"{HOLDS}/{MESSAGE_ID}/deliver"
+    # A receipt never carries a Deliver; and the body route still says expired.
+    assert call("POST", deliver, json=_receipt_body(receipt)).status_code == 422
+    expired = call("POST", deliver, json=_body())
+    assert expired.json()["detail"]["code"] == "deliver_expired"
+    # Exactly one binding; unauthenticated and wrong-account calls refused.
+    assert call("POST", discard, json={**_body(), "hold_receipt": receipt}).status_code == 422
+    neither = {"expected_account_id": "acc_recv", "conversation_id": CONVERSATION_ID}
+    assert call("POST", discard, json=neither).status_code == 422
+    assert call("POST", discard, json=_receipt_body(receipt), auth=False).status_code == 401
+    wrong = call("POST", discard, json=_receipt_body(receipt, expected_account_id="acc_other"))
+    assert wrong.json()["detail"]["code"] == "account_mismatch"
+    # A mismatched receipt or conversation never settles anything.
+    bad = call("POST", discard, json=_receipt_body("0" * 64))
+    assert bad.status_code == 409 and bad.json()["detail"]["code"] == "snapshot_stale"
+    other_conv = call("POST", discard, json=_receipt_body(receipt, conversation_id="bcv_zyxwvuts"))
+    assert other_conv.json()["detail"]["code"] == "snapshot_stale"
+    # Another message's path with this receipt: no such hold, nothing written.
+    elsewhere = call("POST", f"{HOLDS}/bcmsg_ffffffff/discard", json=_receipt_body(receipt))
+    assert elsewhere.json()["detail"]["code"] == "hold_not_releasable"
+    assert _count(config_dir, "owner_releases") == 0
+
+    ok = call("POST", discard, json=_receipt_body(receipt))
+    assert ok.status_code == 200, ok.text
+    assert _count(config_dir, "owner_releases") == 1
+    release = Store(config_dir).owner_release(owner, MESSAGE_ID)
+    assert release is not None and release["word"] == "discard"
+    # Signed exactly as a body-bound Discard: the decision's own body hash, and
+    # a signature the connector's verifier accepts.
+    assert release["body_sha256"] == hashlib.sha256(BODY.encode("utf-8")).hexdigest()
+    assert hr.verify_row(release, hr.anchor_spki(config_dir)[0])
+    # Idempotent: the same receipt again answers the same row, writes nothing.
+    assert call("POST", discard, json=_receipt_body(receipt)).json() == ok.json()
+    assert _count(config_dir, "owner_releases") == 1
+    # Already settled: the other word is refused.
+    again = call("POST", deliver, json=_body())
+    assert again.json()["detail"]["code"] == "already_decided"
+    # Settled leaves the actionable set at once, and stays out on a re-read.
+    for _ in range(2):
+        (after,) = _listed(call)
+        assert after["actionable"] is False and after["discard_receipt"] is None
+        assert after["decision"]["word"] == "discard"
+
+
+def test_a_receipt_from_before_a_re_decision_is_stale(api) -> None:
+    config_dir, _store, _owner_, call = api
+    _screen(config_dir, _owner_, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    old = item["discard_receipt"]
+    # The decision row is rewritten (a re-screen): the old receipt names a
+    # record that no longer exists, so it must not settle the new one.
+    _age_decision(config_dir, 60.0)
+    stale = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(old))
+    assert stale.status_code == 409 and stale.json()["detail"]["code"] == "snapshot_stale"
+    assert _count(config_dir, "owner_releases") == 0
+    (fresh,) = _listed(call)
+    assert fresh["discard_receipt"] != old
+
+
+def test_a_receipt_with_no_local_hold_row_is_refused(api) -> None:
+    config_dir, _store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    (item,) = _listed(call)
+    receipt = item["discard_receipt"]
+    # The hold row is gone (the hub hold settled elsewhere); the decision stays.
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("DELETE FROM screening_holds")
+    assert _listed(call) == []
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(receipt))
+    assert out.status_code == 409 and out.json()["detail"]["code"] == "hold_not_releasable"
+    assert _count(config_dir, "owner_releases") == 0
+
+
+def test_a_non_releasable_hold_is_listed_but_never_actionable(api) -> None:
+    config_dir, store, owner, call = api
+    store.persist_hold(owner, MESSAGE_ID, "runner_unavailable")
+    (item,) = _listed(call)
+    assert item["actionable"] is False and item["discard_receipt"] is None
+
+
+def test_holds_written_in_the_same_instant_list_in_a_stable_order(api) -> None:
+    config_dir, store, owner, call = api
+    ids = ["bcmsg_cccccccc", "bcmsg_aaaaaaaa", "bcmsg_bbbbbbbb"]
+    for message_id in ids:
+        store.persist_hold(owner, message_id, "runner_unavailable")
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("UPDATE screening_holds SET created_at = 1795000000.0")
+    for _ in range(3):
+        assert [item["message_id"] for item in _listed(call)] == sorted(ids)

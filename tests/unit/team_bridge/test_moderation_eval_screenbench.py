@@ -938,3 +938,79 @@ def test_committed_results_load_and_name_only_committed_templates() -> None:
         assert trials, path
         assert {t.template_sha256 for t in trials} <= committed, path
         assert sb.summarize(trials)["groups"], path
+
+
+# -- routing for the addressed-aware templates (v5/v6) --------------------------------
+
+
+def test_bench_routing_vocabularies_are_the_screeners() -> None:
+    from local_operator.team_bridge.screening import ADDRESSED_VALUES, RELATION_VALUES
+
+    assert set(sb.ROUTING_ADDRESSED) == set(ADDRESSED_VALUES)
+    assert set(sb.ROUTING_RELATION) == set(RELATION_VALUES)
+
+
+def test_routing_comes_from_the_row_else_the_plan_default(tmp_path: Path) -> None:
+    rows = [
+        {**_row("r1", "legit"), "addressed": "ambient", "relation": "member"},
+        _row("r2", "adv"),
+    ]
+    plan = sb.build_plan(
+        corpus=[_corpus(tmp_path, rows)],
+        templates=["bridge-screen-v6"],
+        models=[ROUTE],
+        repeat=1,
+        split="all",
+        workers=1,
+        max_calls=None,
+        organization="Minerva",
+        addressed="direct",
+    )
+    by_id = {item.id: item for item in plan.items}
+    assert (by_id["r1"].addressed, by_id["r1"].relation) == ("ambient", "member")
+    assert (by_id["r2"].addressed, by_id["r2"].relation) == ("direct", "")
+    assert sb.describe_plan(plan)["addressed_default"] == "direct"
+
+
+def test_an_unknown_routing_value_is_refused_before_any_call(tmp_path: Path) -> None:
+    with pytest.raises(sb.PlanError, match="addressed"):
+        sb.load_corpus(
+            [_corpus(tmp_path, [{**_row("r1", "legit"), "addressed": "everybody"}])],
+            organization="Minerva",
+        )
+    with pytest.raises(sb.PlanError, match="--addressed"):
+        sb.build_plan(
+            corpus=[_corpus(tmp_path, [_row("r2", "legit")], name="d.jsonl")],
+            templates=["bridge-screen-v2"],
+            models=[ROUTE],
+            repeat=1,
+            split="all",
+            workers=1,
+            max_calls=None,
+            organization="Minerva",
+            addressed="nobody",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_v6_trial_renders_the_rows_routing(tmp_path: Path) -> None:
+    rows = [{**_row("r1", "legit"), "addressed": "thread", "relation": "owner"}]
+    plan = sb.build_plan(
+        corpus=[_corpus(tmp_path, rows)],
+        templates=["bridge-screen-v6"],
+        models=[ROUTE],
+        repeat=1,
+        split="all",
+        workers=1,
+        max_calls=None,
+        organization="Minerva",
+    )
+    stream = _stub_stream()
+    trials = await sb.run_plan(
+        plan, out_dir=tmp_path / "out", leg_factory=_factory(stream, tmp_path)
+    )
+    assert [t.status for t in trials] == ["valid"]
+    (request,) = stream.requests
+    prompt = request.messages[0].content[0].text
+    assert "Routing (server facts):\nRelation: owner\nAddressed: thread\n" in prompt
+    assert "Not new work:" in prompt

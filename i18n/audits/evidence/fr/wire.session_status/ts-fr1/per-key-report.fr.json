@@ -1,0 +1,147 @@
+{
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "key_count": 17,
+  "audit_pass": 1,
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-fr-audit / first independent pass",
+    "session": "4730cb4c2fb8",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session system Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "a14cc322d1da",
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "per_key_report": [
+    {
+      "key": "wire.session_status.retired_label",
+      "current_text": "{base} — retiré pour une mise à jour",
+      "status": "passed",
+      "reason": "Legacy value unchanged against frozen repository target. Masculine retiré is retained historical copy, not used by the new formatter; no new mixed-base composition endorsed."
+    },
+    {
+      "key": "wire.session_status.interrupted",
+      "current_text": "Interrompue",
+      "status": "passed",
+      "reason": "Interrompue agrees with the implicit feminine session and is an idiomatic terminal status."
+    },
+    {
+      "key": "wire.session_status.unseen_interruption",
+      "current_text": "Interruption non lue",
+      "status": "passed",
+      "reason": "non lue explicitly marks unread outcome, not invisible or unsuccessful interruption."
+    },
+    {
+      "key": "wire.session_status.retired",
+      "current_text": "Interrompue — retirée pour une mise à jour",
+      "status": "passed",
+      "reason": "Update-related withdrawal explicit; no operator-stop attribution introduced."
+    },
+    {
+      "key": "wire.session_status.unseen_retirement",
+      "current_text": "Interruption non lue — retirée pour une mise à jour",
+      "status": "passed",
+      "reason": "Unread interruption and update-related retirement both preserved; feminine participle refers to implicit session."
+    },
+    {
+      "key": "wire.session_status.signal_stop",
+      "current_text": "Interrompue — arrêtée par un signal{command, select, none {} other { via {command}}}",
+      "status": "passed",
+      "reason": "A signal is named explicitly; none arm omits command attribution; other via connector preserves command bytes."
+    },
+    {
+      "key": "wire.session_status.unseen_signal_stop",
+      "current_text": "Interruption non lue — arrêtée par un signal{command, select, none {} other { via {command}}}",
+      "status": "passed",
+      "reason": "Unread outcome preserved together with signal cause and optional command attribution."
+    },
+    {
+      "key": "wire.session_status.forced_kill",
+      "current_text": "Interrompue — arrêt forcé{command, select, none {} other { via {command}}}",
+      "status": "passed",
+      "reason": "arrêt forcé distinguishes forced termination from the signal-stop wording without an unsafe literal killing metaphor."
+    },
+    {
+      "key": "wire.session_status.unseen_forced_kill",
+      "current_text": "Interruption non lue — arrêt forcé{command, select, none {} other { via {command}}}",
+      "status": "passed",
+      "reason": "Unread status plus forced termination; none/other attribution distinction maintained."
+    },
+    {
+      "key": "wire.session_status.complete",
+      "current_text": "Terminée",
+      "status": "passed",
+      "reason": "Terminée is conventional feminine session status."
+    },
+    {
+      "key": "wire.session_status.unseen_completion",
+      "current_text": "Fin de session non lue",
+      "status": "passed",
+      "reason": "Fin de session non lue names the completion outcome as unread, rather than claiming the session never completed."
+    },
+    {
+      "key": "wire.session_status.recent",
+      "current_text": "Récente",
+      "status": "passed",
+      "reason": "Récente agrees with implicit session; ordinary product register."
+    },
+    {
+      "key": "wire.session_status.dormant",
+      "current_text": "Arrêtée ({count, plural, one {# réveil en sommeil} many {# de réveils en sommeil} other {# réveils en sommeil}})",
+      "status": "passed",
+      "reason": "Arrêtée marks stopped session; réveil en sommeil does not claim cancellation or a wake scheduled to fire. one/many/other present; 0/1 singular and million de form correct."
+    },
+    {
+      "key": "wire.session_status.error",
+      "current_text": "Erreur",
+      "status": "passed",
+      "reason": "Standard terse error status, with no invented cause."
+    },
+    {
+      "key": "wire.session_status.unseen_error",
+      "current_text": "Erreur non lue",
+      "status": "passed",
+      "reason": "Erreur non lue distinguishes unread error outcome from a new kind of failure."
+    },
+    {
+      "key": "wire.session_status.error_cause",
+      "current_text": "{cause, select, user_stop {Erreur — arrêtée par l’utilisateur} runtime_stall_bound {Erreur — le runtime s’est arrêté de lui-même après le délai maximal sans progression} continuation_limit {Erreur — limite de continuation atteinte ; message en attente abandonné} output_limit {Erreur — limite de sortie du modèle atteinte ; impossible de continuer} runtime_retired {Erreur — retirée pour une mise à jour} runtime_shutdown {Erreur — runtime arrêté pendant le tour} runtime_overdue {Erreur — runtime arrêté pour une mise à jour après le délai maximal sans progression} runtime_update_failed {Erreur — mise à jour inachevée ; le runtime a conservé sa version chargée} runtime_killed {Erreur — runtime disparu sans arrêt normal ; aucun arrêt demandé} install_mid_update {Erreur — installation remplacée pendant le tour} owner_lost {Erreur — le runtime ne répondait plus pendant le tour} disposed {Erreur — session fermée pendant le tour} other {Erreur}}",
+      "status": "passed",
+      "reason": "All 13 cause arms examined; see cause_arm_audit. Semantics, negation, update agency and technical identifiers preserved."
+    },
+    {
+      "key": "wire.session_status.unseen_error_cause",
+      "current_text": "{cause, select, user_stop {Erreur non lue — arrêtée par l’utilisateur} runtime_stall_bound {Erreur non lue — le runtime s’est arrêté de lui-même après le délai maximal sans progression} continuation_limit {Erreur non lue — limite de continuation atteinte ; message en attente abandonné} output_limit {Erreur non lue — limite de sortie du modèle atteinte ; impossible de continuer} runtime_retired {Erreur non lue — retirée pour une mise à jour} runtime_shutdown {Erreur non lue — runtime arrêté pendant le tour} runtime_overdue {Erreur non lue — runtime arrêté pour une mise à jour après le délai maximal sans progression} runtime_update_failed {Erreur non lue — mise à jour inachevée ; le runtime a conservé sa version chargée} runtime_killed {Erreur non lue — runtime disparu sans arrêt normal ; aucun arrêt demandé} install_mid_update {Erreur non lue — installation remplacée pendant le tour} owner_lost {Erreur non lue — le runtime ne répondait plus pendant le tour} disposed {Erreur non lue — session fermée pendant le tour} other {Erreur non lue}}",
+      "status": "passed",
+      "reason": "All 13 cause arms examined independently of the prefix; unread qualifier maintained in every branch; see cause_arm_audit."
+    }
+  ],
+  "cause_arm_audit": {
+    "user_stop": "arrêtée par l’utilisateur preserves explicit operator agency; feminine refers to session.",
+    "runtime_stall_bound": "s’est arrêté de lui-même preserves self-termination; délai maximal sans progression verified against incidents.py _stall_bound_cause_sentence, not guessed as general duration.",
+    "continuation_limit": "Limit reached and pending-message abandonment both retained; no successful delivery implied.",
+    "output_limit": "Model-output limit and inability to continue both explicit.",
+    "runtime_retired": "Retirement is for an update; no user attribution.",
+    "runtime_shutdown": "Runtime stopped during the turn; does not claim operator request.",
+    "runtime_overdue": "Update-related runtime departure after no-progress deadline; source _overdue_cause_sentence verifies bound is no movement, not time since last update.",
+    "runtime_update_failed": "Update incomplete; loaded version retained. Clearly distinct from runtime leaving for update.",
+    "runtime_killed": "Unclean disappearance and no requested stop both retained, including negation.",
+    "install_mid_update": "Installation replaced during turn; no unsupported user/deletion attribution.",
+    "owner_lost": "Runtime stopped answering during turn; no invented process death.",
+    "disposed": "session fermée conveys disposed/closed active session, not deletion of history.",
+    "other": "Generic error only, with unread prefix in unseen variant; unknown external nonempty diagnostics remain outside namespace."
+  },
+  "method": "Independent direct French semantic/idiom reading against English and context; no MT service or backtranslation. Actual parser/formatter executed separately in isolated scratch fixture.",
+  "fit": "Source declares one logical line with no fixed cap. Widths logged for simple/status/command/plural cases. Long cause summaries remain layout risk to assess in app; no rendered-layout certification.",
+  "validator_observation": "Repo catalogue validator accepts a missing many arm because it enforces legal categories plus other, not exhaustive CLDR. Observed failed initial expectation is retained; source confirmed in check.py:712-739. Auditor exhaustive-arm negative guard rejects it. Actual target has one/many/other.",
+  "limitations": [
+    "First independent pass only; second safety-copy audit remains required.",
+    "No application lifecycle, browser/TUI visual, release, or runtime localization clearance.",
+    "Unknown nonempty external diagnostic English legacy path is PRESERVED UNRESOLVED programme gap, not an allowed exception.",
+    "Scratch handoff only; manager must retain final evidence under canonical tracked root and append receipt; no repository/history/generated writes performed."
+  ]
+}

@@ -107,6 +107,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "internal executed-receipt verification discriminator, never rendered",
     ),
+    # This local operator-entered audit explanation is persisted with the
+    # notification grant. It is not a peer refusal token or mesh-rendered reason.
+    ("local_operator/cli.py", "sessions_notifications_command", "reason"): (
+        1,
+        "operator-entered local notification-authority audit explanation, not a mesh code",
+    ),
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),
@@ -177,6 +183,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
         1,
         "ask_dismiss closed-set operator token forwarded to the session, never rendered",
+    ),
+    # The same ``ask_dismiss`` token, read once more with the SAME ``str(... or "")``
+    # coercion the ``_dispatch`` arm forwards with, so the app-signature attestation
+    # (``asks.app_attest``) binds exactly what the session will receive. It is a
+    # comparison key for ``AttestTable.consume``, never rendered and never peer prose.
+    ("local_operator/session/runtime/server.py", "_ask_answer_stamp", "reason"): (
+        1,
+        "ask_dismiss closed-set token bound into the app attestation key, never rendered",
     ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
@@ -639,6 +653,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # The reading for reachability rows READS the stage code only to classify it —
     # every sentence it returns is authored in one place — and the one verbatim arm
     # is the no-relay fallback's own prose row.
+    # The ``uplink`` rows (``network.uplink``) carry a detail this device composed
+    # from its own catalogue (``cli.network_uplink``) — localized prose, never a
+    # peer code — so both renderers print it as written.
+    ("local_operator/network/cli.py", "_cmd_doctor", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
+    ("local_operator/network/readiness.py", "uplink_lines", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
     ("local_operator/network/readiness.py", "reachability_reading", "detail"): (
         1,
         "classifier input; the returned sentences are authored here, never echoed",
@@ -668,6 +693,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "classifier input (both dialects' codes, compared against the producers' "
         "constants); the row's sentence is rendered by the glossing renderers",
+    ),
+    # The live-link silence classifier (#4110): the same dialect read as
+    # ``_no_answer_row`` — the probe's own code, compared against relay's
+    # ``DETAIL_NO_ANSWER`` / ``CONNECT_FAILED_PREFIX`` — returning only a bool that
+    # decides whether a live link covers the row. Nothing from it is printed.
+    ("local_operator/network/readiness.py", "_silent_row", "detail"): (
+        1,
+        "classifier input (the probe's own code, compared against the producer's "
+        "constants); returns a bool, never rendered",
     ),
     # The default-model frame (PR #2923): ``model_credential_row`` wraps the verdict
     # chain's OWN sentence for the NOT_SHARED / NO_CREDENTIAL arms in the clause that
@@ -740,7 +774,7 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Frame fields copied into audit records and ``set_trust(reason=…)``: the audit
     # trail is the machine register (`lop network log` prints the record verbatim on
     # purpose, and its ``remedy`` field is the human one).
-    ("local_operator/network/relay.py", "RelayServer._ctl_pair_confirm", "reason"): (
+    ("local_operator/network/relay.py", "RelayServer._pair_confirm_legacy", "reason"): (
         1,
         "an audit-record field",
     ),
@@ -848,6 +882,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the bridge's refusal code, mapped to this project's own refusal copy and "
         "returned as a machine code field, never rendered",
+    ),
+    # The same refusal on a SUBAGENT's site card (PR #4283): ``site_decide`` hands
+    # the card to ``_site_decide_bound`` with its own ``_refuse``, and the bound path
+    # reads the bridge's ``applied: false`` code exactly as above -- ``str()`` keys
+    # ``_site_not_applied_copy`` (one mapping shared with the host's own cards), and
+    # the raw token rides only in the answer's machine ``code`` field.
+    ("local_operator/session/session.py", "Session._site_decide_bound", "reason"): (
+        1,
+        "the bridge's refusal code on a subagent's card, mapped to the same refusal "
+        "copy and returned as a machine code field, never rendered",
     ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same
@@ -968,6 +1012,21 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "the browser host's page-program refusal token, read only to decide "
         "whether to attach the options list; never rendered to a person",
+    ),
+    # The working-set probe (docs/design/move-working-set.md §3.4). ``apply_probe``
+    # reads the DESTINATION's ``detail`` only to test it against ``DETAIL_CODES``:
+    # a code outside that closed set becomes ``"error"`` (security S3), and the kept
+    # code lands in the block's ``clone_detail`` field, which no text surface
+    # renders. ``audit_summary`` reads the answer THIS device's ``run_probe`` just
+    # produced, to COUNT codes for the ``session.workset.probe`` audit row.
+    ("local_operator/network/workset_probe.py", "apply_probe", "detail"): (
+        1,
+        "the destination's detail CODE, allowlisted against DETAIL_CODES and kept as "
+        "a block field; never rendered to a person",
+    ),
+    ("local_operator/network/workset_probe.py", "audit_summary", "detail"): (
+        1,
+        "this device's own probe codes, counted into the probe audit row; not rendered",
     ),
 }
 

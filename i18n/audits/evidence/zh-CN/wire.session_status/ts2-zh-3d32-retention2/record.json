@@ -1,0 +1,134 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-fr-zh-second-audit",
+    "session": "3d32baae3ed6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session Model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "independent_from_translator_session": "e9c45b5505eb",
+    "independent_from_translator": true,
+    "independent_from_first_auditor_session": "ba2da228c32c",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/wire.session_status.zh-CN.json",
+      "sha256": "6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/audit.log",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/audit.log",
+      "sha256": "8d6dd37fae73d4459f335f5462014cc445c33ead65f3447d099468a295cb3674"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/ledger-dryrun.log",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/ledger-dryrun.log",
+      "sha256": "09d7c7ae8fe3e824e3c1b11977c9184900e1ad6d822480ade9fadb4f227288b1"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/original-ledger-dryrun.log",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/original-ledger-dryrun.log",
+      "sha256": "eac0b21340cd3f49f9fd3c5153d5bb49af2b78cab03e80349cc87f8f125d9895"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/original-receipt.json",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/original-receipt.json",
+      "sha256": "d884d44c322eeb2193a42c1ee156ee3429f8ce3a857db825b555b0b5fad71a50"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/original-record.json",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/original-record.json",
+      "sha256": "401ab23e1c55d635720f19fe1beb3a6476e1927d5c2b9491da1bf00322f32cd1"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/probe.py",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/probe.py",
+      "sha256": "469e1a27b3561929ac3d314eaaee0d6e48da557eb8a64d7cc45084c4410f8565"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/receipt.json",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/receipt.json",
+      "sha256": "e0b5fb060e774656713a04839251c224e058815a548a4883bd2affaf5dcb35d9"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/report.json",
+      "scratch_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-zh-CN/report.json",
+      "sha256": "b2388a7f4eb6e07e2d8e2d9ca946bd61b7055520d1c1d19cfa68478924e85628"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "artifact_state": "SCRATCH ONLY; corrected single canonical destination root; no repository retention or ledger apply claimed",
+  "audit_notes_not_execution_log": true,
+  "execution_log_reference": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/audit.log",
+  "execution_log_companions_provenance": "audit.log and probe.py retained byte-for-byte from original completed audit. ledger-dryrun.log is newly executed corrected receipt append dry-run, not a semantic rerun. original-ledger-dryrun.log is immutable prior output. Provenance is auditor session 3d32baae3ed6, actual model openai/gpt-6.1-sol, no fallback.",
+  "metadata_only_retention_correction": {
+    "kind": "metadata-only retention destination correction",
+    "semantic_reaudit": false,
+    "round_reset": false,
+    "original_record_sha256": "401ab23e1c55d635720f19fe1beb3a6476e1927d5c2b9491da1bf00322f32cd1",
+    "original_receipt_sha256": "d884d44c322eeb2193a42c1ee156ee3429f8ce3a857db825b555b0b5fad71a50",
+    "corrected_canonical_root": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2",
+    "unchanged_input_hashes_verified": true,
+    "lineage": [
+      {
+        "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/report.json",
+        "original_sha256": "b2388a7f4eb6e07e2d8e2d9ca946bd61b7055520d1c1d19cfa68478924e85628",
+        "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/report.json",
+        "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+      },
+      {
+        "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/audit.log",
+        "original_sha256": "8d6dd37fae73d4459f335f5462014cc445c33ead65f3447d099468a295cb3674",
+        "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/audit.log",
+        "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+      },
+      {
+        "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/probe.py",
+        "original_sha256": "469e1a27b3561929ac3d314eaaee0d6e48da557eb8a64d7cc45084c4410f8565",
+        "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/probe.py",
+        "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+      },
+      {
+        "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/record.json",
+        "original_sha256": "401ab23e1c55d635720f19fe1beb3a6476e1927d5c2b9491da1bf00322f32cd1",
+        "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/original-record.json",
+        "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+      },
+      {
+        "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/receipt.json",
+        "original_sha256": "d884d44c322eeb2193a42c1ee156ee3429f8ce3a857db825b555b0b5fad71a50",
+        "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/original-receipt.json",
+        "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+      },
+      {
+        "original_source_path": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/second-zh-CN/ledger-dryrun.log",
+        "original_sha256": "eac0b21340cd3f49f9fd3c5153d5bb49af2b78cab03e80349cc87f8f125d9895",
+        "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/ts2-zh-3d32-retention2/original-ledger-dryrun.log",
+        "role": "immutable historical original; embedded original destination references are historical metadata only, not active bundle aliases"
+      }
+    ],
+    "provenance": "Authored by same independent auditor session 3d32baae3ed6, actual model openai/gpt-6.1-sol, no fallback. No linguistic/formatter samples rerun. Source, context and target hashes rechecked unchanged."
+  },
+  "artifact_contract": "All current declared companions reside directly within corrected_canonical_root. Immutable report/original record/receipt/log retain old embedded references solely as historical data; this record directly declares current file destinations and uses no record-path redirect."
+}

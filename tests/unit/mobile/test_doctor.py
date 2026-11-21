@@ -614,7 +614,8 @@ def test_every_english_problem_sentence_names_a_fix_without_jargon():
         "tunnel.not_configured", "tunnel.login_needed", "tunnel.setup_again", "tunnel.offline",
         "tunnel.connecting", "tunnel.turned_off", "tunnel.not_running", "tunnel.duplicates",
         "tunnel.list_unchecked", "tunnel.list_skipped", "login.missing",
-        "watches.near", "watches.at_limit", "watches.unknown",
+        "watches.near", "watches.at_limit", "watches.instances_near",
+        "watches.instances_at_limit", "watches.unknown",
     ]  # fmt: skip
     for key in problems:
         text = catalogue[f"mobile.doctor.{key}"]
@@ -634,7 +635,12 @@ def test_status_says_not_answering_when_a_process_holds_the_port(rig, capsys, mo
 # --- file watches (Linux inotify) ---------------------------------------------------
 
 
-def _fake_proc(root: Path, holders: dict[int, list[int]], limits: tuple[int, int] | None) -> Path:
+def _fake_proc(
+    root: Path,
+    holders: dict[int, list[int]],
+    limits: tuple[int, int] | None,
+    files: dict[int, dict[str, str | bytes]] | None = None,
+) -> Path:
     """A ``/proc`` stand-in: ``holders`` maps pid -> watches per inotify fd.
 
     Each inotify fd is a dangling symlink to ``anon_inode:inotify`` (what
@@ -653,6 +659,15 @@ def _fake_proc(root: Path, holders: dict[int, list[int]], limits: tuple[int, int
                 f"inotify wd:{n} ino:1 sdev:1 mask:2 ignored_mask:0\n" for n in range(watches)
             )
             (proc / str(pid) / "fdinfo" / str(fd)).write_text(f"pos:\t0\nflags:\t02000000\n{lines}")
+    # Per-pid comm/cmdline/cgroup, what the holder's name and restart command
+    # are read from.
+    for pid, entries in (files or {}).items():
+        for entry, content in entries.items():
+            target = proc / str(pid) / entry
+            if isinstance(content, bytes):
+                target.write_bytes(content)
+            else:
+                target.write_text(content)
     (proc / "self").mkdir(exist_ok=True)  # non-numeric entries are skipped
     limits_dir = root / "limits"
     limits_dir.mkdir()
@@ -685,18 +700,45 @@ def test_the_watch_row_sums_this_users_inotify_against_the_limit(
     assert (data["limit"], data["instance_limit"]) == limits
 
 
+_SERVE_ARGV = b"/x/bin/python3\0-P\0-m\0local_operator.cli\0serve\0--port\08977\0"
+_SERVE_FILES: dict[str, str | bytes] = {
+    "comm": "Local Operator\n",
+    "cmdline": _SERVE_ARGV,
+    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+    "local-operator-serve.service\n",
+}
+
+
 def test_at_the_watch_limit_names_the_biggest_holder(tmp_path, monkeypatch):
-    proc = _fake_proc(tmp_path, {3105: [90, 9], 77: [1]}, (100, 128))
+    """node2's shape: ``lop serve`` spent max_user_watches (ENOSPC).
+
+    Design D1/D3: the row names the watch limit only, the program by name, and
+    the exact command that restarts it (the serve daemon reloads in place).
+    """
+    proc = _fake_proc(tmp_path, {3105: [90, 9], 77: [1]}, (100, 128), {3105: _SERVE_FILES})
     monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
     check = doctor.check_watches(proc)
     assert check["status"] == "fail"
-    assert check["data"]["top_pid"] == 3105 and check["data"]["top_watches"] == 99
+    data = check["data"]
+    assert data["top_pid"] == 3105 and data["top_watches"] == 99
+    assert (data["bottleneck"], data["top_name"]) == ("watches", "Local Operator")
+    assert data["restart_command"] == "lop services restart"
     assert check["summary"] == doctor._t(
         doctor._md.watches_at_limit(
-            watches="100", limit="100", instances="3", instance_limit="128", pid="3105"
+            watches="100",
+            limit="100",
+            name="Local Operator",
+            pid="3105",
+            how="command",
+            command="lop services restart",
         )
     )
-    assert "No space left on device" in check["summary"]
+    summary = check["summary"]
+    assert "No space left on device" in summary and "Too many open files" not in summary
+    assert "fs.inotify.max_user_watches" in summary
+    assert "max_user_instances" not in summary
+    assert "Local Operator (process 3105)" in summary
+    assert "restart it with lop services restart" in summary
 
 
 def test_at_the_instance_limit_names_the_biggest_instance_holder(tmp_path, monkeypatch):
@@ -706,18 +748,223 @@ def test_at_the_instance_limit_names_the_biggest_instance_holder(tmp_path, monke
     most inotify fds; restarting 3105 would not free a single instance.
     """
     holders = {3105: [50], 77: [1] * 6, 78: [1]}
-    proc = _fake_proc(tmp_path, holders, (100_000, 8))
+    proc = _fake_proc(tmp_path, holders, (100_000, 8), {77: {"comm": "watchdog\n"}})
     monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
     check = doctor.check_watches(proc)
     assert check["status"] == "fail"
     data = check["data"]
     assert (data["top_pid"], data["top_watches"]) == (3105, 50)
     assert (data["top_instance_pid"], data["top_instances"]) == (77, 6)
+    assert data["bottleneck"] == "instances"
     assert check["summary"] == doctor._t(
-        doctor._md.watches_at_limit(
-            watches="57", limit="100000", instances="8", instance_limit="8", pid="77"
+        doctor._md.watches_instances_at_limit(
+            instances="8", instance_limit="8", name="watchdog", pid="77", how="program", command=""
         )
     )
+
+
+def test_at_the_instance_limit_the_row_says_too_many_open_files(tmp_path, monkeypatch):
+    """Design D1 / review M3: a full max_user_instances is EMFILE.
+
+    inotify_init1 fails with "Too many open files", not "No space left on
+    device", and only fs.inotify.max_user_instances raises it.
+    """
+    cgroup = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/syncthing.service\n"
+    files: dict[int, dict[str, str | bytes]] = {
+        77: {"comm": "syncthing\n", "cmdline": b"/usr/bin/syncthing\0serve\0", "cgroup": cgroup}
+    }
+    proc = _fake_proc(tmp_path, {3105: [50], 77: [1] * 6, 78: [1]}, (100_000, 8), files)
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    monkeypatch.setattr(doctor, "_unit_main_pid", lambda unit, *, user: 77)  # its main process
+    summary = doctor.check_watches(proc)["summary"]
+    assert "Too many open files" in summary and "No space left on device" not in summary
+    assert "fs.inotify.max_user_instances" in summary
+    assert "max_user_watches" not in summary
+    assert "used up its watch handles on this computer (8 of 8)" in summary
+    # Design D2: the sentence opens with words, not a lowercase program name.
+    assert "Most are held by syncthing (process 77): restart it with" in summary
+    assert "restart it with systemctl --user restart syncthing.service" in summary
+
+
+def test_near_the_instance_limit_warns_with_the_instance_wording(tmp_path, monkeypatch):
+    holders = {10: [1, 0]} | {pid: [0] for pid in range(20, 123)}  # 105 of 128 instances
+    proc = _fake_proc(tmp_path, holders, (100_000, 128), {10: {"comm": "code\n"}})
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "warn"
+    assert check["summary"] == doctor._t(
+        doctor._md.watches_instances_near(
+            instances="105", instance_limit="128", name="code", pid="10", how="program", command=""
+        )
+    )
+    assert "fs.inotify.max_user_instances" in check["summary"]
+    assert "Most are held by code (process 10): restart that program" in check["summary"]
+
+
+def test_ok_row_calls_instances_watch_handles_not_watchers(tmp_path, monkeypatch):
+    """Design D5: "file watches" and "watchers" differed by two letters."""
+    proc = _fake_proc(tmp_path, {10: [5]}, (100, 128))
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    summary = doctor.check_watches(proc)["summary"]
+    assert "1 of 128 watch handles" in summary
+    assert "watchers" not in summary
+
+
+_USER_UNIT = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+_WAKES = _USER_UNIT + "local-operator-wakes.service\n"
+_SERVE_UNIT = _USER_UNIT + "local-operator-serve.service\n"
+
+
+@pytest.mark.parametrize(
+    "files,main_pid,command",
+    [
+        (_SERVE_FILES, 42, "lop services restart"),
+        # Review n1: `lop serve` from a terminal keeps the console script's argv.
+        (
+            {
+                "cmdline": b"/home/u/.local/bin/lop\0serve\0--port\08977\0",
+                "cgroup": "0::/x.scope\n",
+            },
+            None,
+            "lop services restart",
+        ),
+        (
+            {"cmdline": b"/x/python3\0-m\0local_operator.mobile.service\0--port\04098\0"},
+            None,
+            "lop mobile restart",
+        ),
+        ({"cgroup": _USER_UNIT + "x.service\n"}, 42, "systemctl --user restart x.service"),
+        (
+            {"cgroup": "0::/system.slice/fluent-bit.service\n"},
+            42,
+            "sudo systemctl restart fluent-bit.service",
+        ),
+        (
+            {"cgroup": "1:name=systemd:/system.slice/old.service\n"},
+            42,
+            "sudo systemctl restart old.service",
+        ),
+        # Review M1: a process in a unit's cgroup that is NOT its MainPID is a
+        # child; restarting the unit would not replace it.
+        ({"cgroup": _USER_UNIT + "x.service\n"}, 7, None),
+        # ... and a tsc --watch from an ssh login on a host without logind, which
+        # stays in sshd.service (KillMode=process would leave it running).
+        (
+            {"cmdline": b"node\0/x/tsc\0--watch\0", "cgroup": "0::/system.slice/sshd.service\n"},
+            1200,
+            None,
+        ),
+        # MainPID unreadable (no systemctl, no user bus, timeout): fail closed.
+        ({"cgroup": "0::/system.slice/fluent-bit.service\n"}, None, None),
+        # A dev server an agent started lives in the wakes unit: restarting it
+        # would end every session. Never systemctl for a lop unit, even if
+        # systemd were to call it the main process.
+        ({"cmdline": b"node\0/x/vite\0", "cgroup": _WAKES}, 42, None),
+        ({"cmdline": b"node\0/x/vite\0", "cgroup": _WAKES}, 3106, None),
+        # A session runtime under the serve unit is not the serve itself.
+        (
+            {
+                "cmdline": b"/x/python3\0-m\0local_operator.session.runtime.process\0",
+                "cgroup": _SERVE_UNIT,
+            },
+            3105,
+            None,
+        ),
+        # The user's own service manager: restarting it ends every user service.
+        ({"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"}, 42, None),
+        ({"cgroup": "0::/user.slice/user-1000.slice/user@1000.service\n"}, 42, None),
+        ({"cgroup": "0::/user.slice/user-1000.slice/session-3.scope\n"}, 42, None),  # a terminal
+        ({}, 42, None),  # exited: nothing readable
+    ],
+)
+def test_the_restart_command_is_named_only_when_it_is_known(
+    tmp_path, monkeypatch, files, main_pid, command
+):
+    """Design D3 / review M1: lop's daemons, and a systemd unit's MAIN process only."""
+    asked: list[tuple[str, bool]] = []
+
+    def main(unit: str, *, user: bool) -> int | None:
+        asked.append((unit, user))
+        return main_pid
+
+    monkeypatch.setattr(doctor, "_unit_main_pid", main)
+    proc = _fake_proc(tmp_path, {42: [1]}, None, {42: files})
+    assert doctor.restart_command(proc, 42) == command
+    if command and command.startswith("systemctl --user"):
+        assert asked == [(command.rsplit(" ", 1)[1], True)]
+    if command and command.startswith("sudo"):
+        assert asked == [(command.rsplit(" ", 1)[1], False)]
+    assert not any(unit.startswith("local-operator-") for unit, _ in asked)
+
+
+class _Ran:
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode, self.stdout = returncode, stdout
+
+
+@pytest.mark.parametrize(
+    "outcome,expected",
+    [
+        (_Ran(0, "4242\n"), 4242),
+        (_Ran(0, "0\n"), None),  # unit not running
+        (_Ran(1, ""), None),  # no such unit / no user bus
+        (_Ran(0, "garbage\n"), None),
+        (FileNotFoundError("systemctl"), None),
+        (doctor.subprocess.TimeoutExpired("systemctl", 2.0), None),
+    ],
+)
+def test_unit_main_pid_fails_closed(monkeypatch, outcome, expected):
+    """Review M1: anything but a clean MainPID answer offers no unit restart."""
+    calls: list[tuple[list[str], float]] = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(doctor.subprocess, "run", run)
+    assert doctor._unit_main_pid("x.service", user=True) == expected
+    assert calls == [
+        (["systemctl", "--user", "show", "-p", "MainPID", "--value", "x.service"], 2.0)
+    ]
+
+
+def test_an_unknown_holder_drops_the_holder_clause(tmp_path, monkeypatch):
+    """Review m1: no "? (process ?)" when the top holder is unknown.
+
+    A zero max_user_instances has no holder at all; a holder that exited
+    before its comm was read has a pid but no name to show.
+    """
+    proc = _fake_proc(tmp_path, {10: []}, (100, 0))  # no inotify fd at all
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "fail"
+    assert check["summary"].endswith(
+        "“Too many open files”. Ask an administrator to raise fs.inotify.max_user_instances."
+    )
+    assert "?" not in check["summary"] and "process" not in check["summary"]
+    assert (check["data"]["top_name"], check["data"]["restart_command"]) == (None, None)
+
+    exited = _fake_proc(tmp_path / "exited", {10: [99]}, (100, 128))  # no comm file
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "exited" / "limits")
+    summary = doctor.check_watches(exited)["summary"]
+    assert summary.endswith("Ask an administrator to raise fs.inotify.max_user_watches.")
+    assert "?" not in summary and "process" not in summary
+
+
+def test_the_pass_row_has_the_problem_rows_json_shape(tmp_path, monkeypatch):
+    """QA Q2: bottleneck/top_name/restart_command are present (null) on pass too."""
+    proc = _fake_proc(tmp_path, {10: [5]}, (100, 128))
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "pass"
+    data = check["data"]
+    assert {k: data[k] for k in ("bottleneck", "top_name", "restart_command")} == {
+        "bottleneck": None,
+        "top_name": None,
+        "restart_command": None,
+    }
 
 
 def test_unreadable_watch_limits_are_unknown_not_a_guess(tmp_path, monkeypatch):

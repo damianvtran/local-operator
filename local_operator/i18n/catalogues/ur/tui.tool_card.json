@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.chip.you": "آپ:",
+  "tui.tool_card.fetch.cache": "کیشے {state}",
+  "tui.tool_card.fetch.fetched": "حاصل کیا: {url}",
+  "tui.tool_card.fetch.final": "(حتمی: {url})",
+  "tui.tool_card.hint.collapse": "سمیٹیں",
+  "tui.tool_card.hint.expand": "پھیلائیں",
+  "tui.tool_card.hint.interrupt": "روکنے کے لیے {chord}",
+  "tui.tool_card.imagegen.requests_ahead": "{count, plural, one {{shown} درخواست آگے ہے} other {{shown} درخواستیں آگے ہیں}}",
+  "tui.tool_card.live.earlier_lines": "{count, plural, one {{shown} پچھلی لائن} other {{shown} پچھلی لائنیں}}",
+  "tui.tool_card.live.earlier_output_hidden": "پچھلا آؤٹ پٹ نہیں دکھایا گیا",
+  "tui.tool_card.live.no_output_yet": "ابھی آؤٹ پٹ نہیں",
+  "tui.tool_card.live.running": "چل رہا ہے",
+  "tui.tool_card.more.diff_lines": "{count, plural, one {فرق کی {shown} مزید لائن} other {فرق کی {shown} مزید لائنیں}}",
+  "tui.tool_card.more.lines": "{count, plural, one {{shown} مزید لائن} other {{shown} مزید لائنیں}}",
+  "tui.tool_card.more.search_lines": "{count, plural, one {{shown} مزید مماثل لائن} other {{shown} مزید مماثل لائنیں}}",
+  "tui.tool_card.status.stop_unconfirmed": "رکنے کی تصدیق نہیں"
+}

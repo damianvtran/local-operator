@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "audit_id": "community-round-3-hi-tui.community-08c6dfffd961",
+  "audit_kind": "bounded_independent_second_safety_audit",
+  "repository": "damianvtran/local-operator",
+  "pr": 4221,
+  "locale": "hi",
+  "namespace": "tui.community",
+  "audit_date": "2026-11-18",
+  "audited_revision": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+  "candidate_tree": "13010a25c61439070020148c7f01d0a6261a9f09",
+  "combined_patch_sha256": "7a520bb614cd7694422cd7d955c3b400b830a5e3d2f1bb7b6ae0d74a291db17f",
+  "scope": "Approval-card keys only. Short cues say read first; the roomy cue and unread viewer explicitly say read the whole post/to the end. The two short cues do not literally say “full” in English or target; they do not suggest the preview counts as read.",
+  "auditor": {
+    "agent": "reviewer",
+    "model": "openai/gpt-6.2-sol",
+    "date": "2026-11-18",
+    "session": "08c6dfffd961",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "first_auditors": [
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "c739715f0519",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/hi/community-primary/record.json",
+      "sha256": "9af981c17128a916b83b8739cc58d79e0fa75a28674d7e88362c99b940c7bcb2"
+    },
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "837443aac8da",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/hi/community-delta-r2-primary/record.json",
+      "sha256": "1390e4c42526f7b7ecd80b7c2adb17c4b5a7b960cda4ea639a4efbeb8abfc585"
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.community.json",
+      "sha256": "67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.community.context.json",
+      "sha256": "d3030886a774ad2ed4cdb2f14e9969e8eb2c3afb2b9cd416c116d20cfa9abd88"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/tui.community.json",
+      "sha256": "377637a1c43a4498b29b904eb752bd76b7e3a1df4051aac588a8b89399921c9e"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "deferred_non_gating_finding_ids": [
+      "R3-M1"
+    ]
+  },
+  "keys_semantically_audited": [
+    "tui.community.post_card_cut",
+    "tui.community.post_allow_unread",
+    "tui.community.post_card_more",
+    "tui.community.post_view_keys",
+    "tui.community.post_view_keys_read"
+  ],
+  "per_key": {
+    "tui.community.post_card_cut": {
+      "en": "… v reads the post",
+      "target": "… v पोस्ट पढ़ें",
+      "verdict": "pass",
+      "reason": "v पोस्ट पढ़ें instructs reading with literal v, not approval."
+    },
+    "tui.community.post_allow_unread": {
+      "en": "Read the post, then allow",
+      "target": "पोस्ट पढ़ें, फिर अनुमति दें",
+      "verdict": "pass",
+      "reason": "पोस्ट पढ़ें, फिर अनुमति दें orders reading before allowing, in polite commands."
+    },
+    "tui.community.post_card_more": {
+      "en": "… {count, plural, one {# more line} other {# more lines}} of the post · v reads it all (Allow needs that first)",
+      "target": "… पोस्ट की {count, plural, one {# और पंक्ति} other {# और पंक्तियाँ}} · v पूरी पढ़ें (“Allow” से पहले यह ज़रूरी है)",
+      "verdict": "pass",
+      "reason": "पूरी पढ़ें and पहले यह ज़रूरी है specify all of the post is required before Allow."
+    },
+    "tui.community.post_view_keys": {
+      "en": "↑↓ pgup pgdn scroll · read to the end, then esc back",
+      "target": "↑↓ pgup pgdn स्क्रॉल · अंत तक पढ़ें, फिर esc वापस",
+      "verdict": "pass",
+      "reason": "अंत तक पढ़ें and फिर esc वापस order reading to the end before returning."
+    },
+    "tui.community.post_view_keys_read": {
+      "en": "✓ Read in full · esc back to Allow or Deny",
+      "target": "✓ पूरी पढ़ ली · esc वापस “Allow” या “Deny” पर",
+      "verdict": "pass",
+      "reason": "पूरी पढ़ ली marks full reading; esc returns to both Allow and Deny, not an automatic approval."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/community-r3-safety-tui/report.md",
+      "sha256": "e5836a189df4ccf33d39f01e06e09005308643c9a72ce213a341bcc46c912288"
+    }
+  ]
+}

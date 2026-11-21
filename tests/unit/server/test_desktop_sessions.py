@@ -575,6 +575,107 @@ async def test_the_read_only_probe_never_clips_the_truncated_path(tmp_path, sigi
 
 
 @pytest.mark.asyncio
+async def test_the_fingerprint_read_creates_nothing_and_names_the_claimed_fingerprint(tmp_path):
+    """The fingerprint lookup is a READ, on the same terms as the probe itself.
+
+    The voice route calls it before every utterance, so a lookup that opened
+    through ``_db`` would mkdir, chmod, adopt WAL and ``CREATE TABLE`` on a path
+    whose docstring promises it creates nothing (review round 2, MINOR 1). Both
+    halves are asserted because the defect answered correctly while writing: only
+    the absent file proves the read.
+    """
+    receipts = DesktopReceipts(tmp_path)
+    assert receipts.recorded_fingerprint("s:id") is None, "an absent store names no fingerprint"
+    assert not receipts.path.exists(), "the lookup created the store it only reads"
+
+    async def op():
+        return {"result": "real receipt"}
+
+    body = {"op": "create"}
+    assert await receipts.run("s:id", body, op) == {"result": "real receipt"}
+    assert receipts.recorded_fingerprint("s:id") == DesktopReceipts.fingerprint(body)
+    assert receipts.recorded_fingerprint("other:id") is None
+
+
+def test_a_store_without_the_receipts_table_answers_none_and_writes_nothing(tmp_path):
+    """A file that opens but carries no schema is still no answer, and no write.
+
+    The store half-created by an older or interrupted process must not be upgraded
+    by a mere lookup either: the bytes and the directory listing are compared,
+    because ``_db``'s WAL adoption and DDL would both show up there.
+    """
+    import sqlite3
+
+    receipts = DesktopReceipts(tmp_path)
+    sqlite3.connect(receipts.path).close()  # a real, empty database file: no schema
+    listing = sorted(entry.name for entry in tmp_path.iterdir())
+    before = receipts.path.read_bytes()
+
+    assert receipts.recorded_fingerprint("s:id") is None
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == listing
+    assert receipts.path.read_bytes() == before, "the lookup wrote to the store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sigil", ["?", "#"])
+async def test_the_fingerprint_lookup_never_clips_the_truncated_path(tmp_path, sigil):
+    """``recorded``'s R11 lesson applies here too: the path is a ``file:`` URI.
+
+    Raw interpolation truncates at the sigil, so the open CREATES a 0-byte file at
+    the truncated path and then answers ``None`` for a key the store does hold.
+    The recorded key is what separates the escaped read from the broken one.
+    """
+    root = tmp_path / f"root{sigil}odd"
+    receipts = DesktopReceipts(root)
+
+    async def op():
+        return {"result": "real receipt"}
+
+    assert receipts.recorded_fingerprint("s:id") is None, "an absent store records nothing"
+    assert not receipts.path.exists(), "the lookup created the store it only reads"
+
+    body = {"op": "create"}
+    await receipts.run("s:id", body, op)
+    assert receipts.recorded_fingerprint("s:id") == DesktopReceipts.fingerprint(body)
+    assert receipts.recorded_fingerprint("other:id") is None
+    assert not (tmp_path / "root").exists(), "the lookup wrote at a truncated path"
+
+
+@pytest.mark.slow
+def test_a_held_write_lock_answers_none_instead_of_raising(tmp_path):
+    """REAL contention, on a store that stayed in rollback mode.
+
+    ``_adopt_wal`` is optional -- a filesystem that cannot host WAL leaves the
+    store in ``delete`` mode, and there another connection's EXCLUSIVE lock blocks
+    readers. Before the lookup shared ``recorded``'s read-only door it raised
+    ``sqlite3.OperationalError`` after the store's own busy window, which the
+    route would have answered as a 500; the contract is "nothing recorded, the
+    caller runs its admissions", which is ``None``.
+
+    ``slow``: the wait is the store's own 10 s busy timeout, not a sleep.
+    """
+    import sqlite3
+
+    receipts = DesktopReceipts(tmp_path)
+    with contextlib.closing(sqlite3.connect(receipts.path)) as seed:
+        seed.execute(
+            "CREATE TABLE receipts (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT)"
+        )
+        seed.execute("INSERT INTO receipts VALUES ('s:id', 'fp', NULL)")
+        seed.commit()
+
+    holder = sqlite3.connect(receipts.path, timeout=5)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        assert receipts.recorded_fingerprint("s:id") is None, "a lock is no answer, never a raise"
+    finally:
+        holder.rollback()
+        holder.close()
+    # The store still reads afterwards, and the lock changed nothing in it.
+    assert receipts.recorded_fingerprint("s:id") == "fp"
+
+
+@pytest.mark.asyncio
 async def test_a_waiting_control_does_not_block_another_sessions_admission(tmp_path):
     receipts = DesktopReceipts(tmp_path)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -9682,6 +9783,103 @@ async def test_a_decline_receipt_never_reports_consent_bearing(answers_api) -> N
     assert remote.calls == [("a-1", None, True, False)]
 
 
+class _StampingAskRemote(_ProvingAskRemote):
+    """A facade whose client returns the runtime's STAMPED surface (PR #4132).
+
+    ``AttachClient.ask_respond``/``ask_revise`` return a ``StampedReceipt``: the
+    sentence plus the label the runtime recorded. ``bearing`` is the cap probe,
+    set to DISAGREE with the stamp in the convergence cells, so a route still
+    reading the probe fails them.
+    """
+
+    def __init__(self, *, surface: str | None, bearing: bool) -> None:
+        super().__init__(bearing=bearing)
+        self.surface = surface
+
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: Any = None,
+        *,
+        decline: bool = False,
+        revise: bool = False,
+        images: Any = None,
+    ) -> str:
+        from local_operator.asks.surfaces import StampedReceipt
+
+        detail = await super().ask_respond(ask_id, answers, decline=decline, revise=revise)
+        return StampedReceipt(detail, self.surface)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "bearing", "expected", "revise"),
+    [
+        # (a) F2: the app-signature attestation stamps ``desktop`` with no cap.
+        ("desktop", False, True, False),
+        ("desktop", False, True, True),
+        # (b) Part C: a cap answer to an INHERITED ask is stamped ``unverified``.
+        ("unverified", True, False, False),
+        ("unverified", True, False, True),
+        # (c) a cap answer to an ask minted here still stamps ``desktop``.
+        ("desktop", True, True, False),
+        # A relayed hop is never consent, whatever the probe says.
+        ("remote", True, False, False),
+    ],
+)
+async def test_consent_bearing_is_the_runtime_stamp_not_the_cap_probe(
+    answers_api, surface: str, bearing: bool, expected: bool, revise: bool
+) -> None:
+    """#4127 convergence: the receipt reports what the runtime RECORDED.
+
+    After F2 the cap probe and the stamp disagree both ways, and the guard reads
+    only the stamp, so a receipt derived from the probe would tell the operator
+    an attested answer cannot authorise a delete (it can) and an inherited-ask
+    cap answer can (it cannot). The probe is not even consulted once a stamp is
+    present.
+    """
+    client, app = answers_api
+    remote = _StampingAskRemote(surface=surface, bearing=bearing)
+    remote.detail = "revised" if revise else "answered"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "revise": revise},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": remote.detail, "consent_bearing": expected}
+    assert remote.probes == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_answer_stamped_desktop_is_still_not_consent_bearing(answers_api) -> None:
+    """Negative control: the peer short-circuit stays ahead of the stamp."""
+    client, app = answers_api
+    remote = _StampingAskRemote(surface="desktop", bearing=True)
+    _install_ask_remote(app, remote, remote_row=SimpleNamespace(device_id="dev-peer"))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["consent_bearing"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_attested_decline_still_reports_no_consent(answers_api) -> None:
+    """PR #4127 QA Q2 survives the convergence: a decline reads null even when
+    the runtime stamped it ``desktop``."""
+    client, app = answers_api
+    remote = _StampingAskRemote(surface="desktop", bearing=True)
+    remote.detail = "declined"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "declined", "consent_bearing": None}
+
+
 @pytest.mark.asyncio
 async def test_the_ask_consent_bearing_feature_is_published_desktop_only(answers_api) -> None:
     from local_operator.server.features import DESKTOP_ONLY_FEATURES
@@ -11189,3 +11387,107 @@ async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
     assert not {"origin", "needs_user"} & set(capture.attention)
     snapshot = module._wire_state_of(capture)["snapshot"]
     assert not {"origin", "needs_user"} & set(snapshot["attention"])
+
+
+# --- team targets whose roster names hub-pulled roles ------------------------
+#
+# Operator report: a new chat on a hub-pulled team showed "This conversation's
+# model was not resolved". ``sessions.preview`` ran ``validate_target``, which
+# raised a bare ``KeyError('iac-engineer')`` because the pulled roster role
+# carried only hub provenance tags. Both halves are pinned here: the member now
+# resolves, and a member that genuinely does not resolve is NAMED in the 404.
+
+
+def _seed_hub_team(root: Path, *, member_tags: list[str]) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamRegistry, parse_members
+    from tests.unit.test_agent_avatar import _edit_fields
+
+    agents = AgentRegistry(root)
+    for name, tags in (("hub-manager", ["role"]), ("iac-engineer", member_tags)):
+        row = agents.create_agent(_edit_fields(name=name, description="d", tags=tags))
+        agents.set_agent_system_prompt(row.id, f"{name} body")
+    TeamRegistry(root).create_team(
+        TeamEditFields(
+            name="pergamondev",
+            description=None,
+            manager="hub-manager",
+            members=parse_members(["iac-engineer"]),
+            instructions=None,
+            project=None,
+        )
+    )
+
+
+HUB_MEMBER_TAGS = ["hub:f5580f4a-0000-4000-8000-000000000001", "hub_sha256:" + "0" * 64]
+
+
+@pytest.mark.asyncio
+async def test_a_team_whose_member_is_a_hub_pulled_role_previews(draft_api) -> None:
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    _seed_hub_team(root, member_tags=HUB_MEMBER_TAGS)
+
+    pane = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "target": {"kind": "team", "name": "pergamondev"},
+        },
+    )
+
+    assert pane.status_code == 200, pane.text
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_team_member_is_named_in_the_404(draft_api) -> None:
+    """Same 404 and sentence as before; the failing team/slot/member ride as data."""
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    # A private chat agent: no role tag, no specialist category, no provenance.
+    _seed_hub_team(root, member_tags=[])
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "cwd": str(root),
+        "target": {"kind": "team", "name": "pergamondev"},
+    }
+
+    pane = await client.post("/v1/desktop/sessions/preview", json=body)
+    created = await client.post("/v1/desktop/sessions", json=body)
+
+    assert pane.status_code == 404, pane.text
+    detail = pane.json()["detail"]
+    assert detail["code"] == "wire.errors.desktop.requested_not_found"
+    assert detail["unresolved"] == {
+        "team": "pergamondev",
+        "slot": "member",
+        "member": "iac-engineer",
+    }
+    assert created.status_code == 404, created.text
+    assert created.json()["detail"] == detail
+
+
+def test_validate_target_names_the_unresolved_member(tmp_path) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.server.utils.desktop_profiles import (
+        UnresolvedTarget,
+        validate_target,
+    )
+    from local_operator.teams import TeamRegistry
+
+    _seed_hub_team(tmp_path, member_tags=[])
+    with pytest.raises(UnresolvedTarget) as raised:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "pergamondev")
+
+    assert isinstance(raised.value, KeyError), "the 404 contract keys on KeyError"
+    assert str(raised.value) == (
+        "team 'pergamondev' member 'iac-engineer' is not an installed role, specialist or team"
+    )
+    with pytest.raises(UnresolvedTarget) as missing:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "nope")
+    assert missing.value.wire_fields()["unresolved"] == {
+        "team": None,
+        "slot": "team",
+        "member": "nope",
+    }
