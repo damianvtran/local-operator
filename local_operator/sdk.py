@@ -92,6 +92,10 @@ from local_operator.session.spec import (
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from contextlib import AbstractAsyncContextManager
 
+    from local_operator.harness.request_admission import (
+        RequestAdmission,
+        RequestAdmissionRefused,
+    )
     from local_operator.harness.types import AgentEvent, EventHandler
     from local_operator.harness.verifier_evidence import (
         VerifierEvidence,
@@ -123,6 +127,8 @@ __all__ = [
     "MarkdownSchema",
     "PeerMessageErrand",
     "PromptErrand",
+    "RequestAdmission",
+    "RequestAdmissionRefused",
     "SessionEventStream",
     "SessionIsolationError",
     "SessionOpenRefused",
@@ -159,6 +165,8 @@ _LAZY_REEXPORTS: dict[str, str] = {
     "Errand": "local_operator.session.runtime.launch",
     "EngageOutcome": "local_operator.session.runtime.launch",
     "AgentEvent": "local_operator.harness.types",
+    "RequestAdmission": "local_operator.harness.request_admission",
+    "RequestAdmissionRefused": "local_operator.harness.request_admission",
     "EventHandler": "local_operator.harness.types",
     "MarkdownSchema": "local_operator.output_contract",
     "decode_output": "local_operator.output_contract",
