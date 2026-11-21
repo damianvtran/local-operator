@@ -28,7 +28,7 @@
   "relay.transcript.bridge.provenance": "外部消息 · 内容不可信",
   "relay.transcript.bridge.loading": "正在加载消息……",
   "relay.transcript.bridge.pending": "等待送达智能体",
-  "relay.transcript.bridge.held": "已被内容审核暂扣",
+  "relay.transcript.bridge.held": "已暂扣，等待审核",
   "relay.transcript.bridge.held_transient": "等待筛查——尚未展示给智能体",
   "relay.transcript.bridge.refused": "已被内容审核拒绝",
   "relay.transcript.bridge.not_admitted": "未送达智能体",
@@ -36,9 +36,10 @@
   "relay.transcript.bridge.signed_out": "登录Radient以查看此消息",
   "relay.transcript.bridge.other_account": "通过另一个Radient账户接收",
   "relay.transcript.bridge.not_member": "你已不在此对话中",
-  "relay.transcript.bridge.offline": "无法连接Radient——重新打开对话以重试",
+  "relay.transcript.bridge.offline": "无法连接Radient——正在重试",
   "relay.transcript.bridge.deleted": "此消息已被删除",
   "relay.transcript.bridge.more_messages": "{count, plural, other {此卡片中还有#条消息}}",
   "relay.transcript.jump.latest": "跳到最新消息",
-  "relay.transcript.jump.latest_short": "最新"
+  "relay.transcript.jump.latest_short": "最新",
+  "relay.transcript.bridge.thread_reply": "话题回复"
 }

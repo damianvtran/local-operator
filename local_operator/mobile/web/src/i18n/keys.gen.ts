@@ -548,6 +548,7 @@ export type MessageParams = {
   "relay.transcript.bridge.provenance": undefined;
   "relay.transcript.bridge.refused": undefined;
   "relay.transcript.bridge.signed_out": undefined;
+  "relay.transcript.bridge.thread_reply": undefined;
   "relay.transcript.bridge.unavailable": undefined;
   "relay.transcript.composer.queued": { "count": number };
   "relay.transcript.fold.failed_label": undefined;

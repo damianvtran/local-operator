@@ -2,7 +2,7 @@
   "tui.bridge_card.frame.untrusted": "外部消息 · 内容不可信",
   "tui.bridge_card.body.loading": "正在加载消息……",
   "tui.bridge_card.body.pending": "等待送达智能体",
-  "tui.bridge_card.body.held": "已被内容审核暂扣",
+  "tui.bridge_card.body.held": "已暂扣，等待审核",
   "tui.bridge_card.body.held_transient": "等待筛查——尚未展示给智能体",
   "tui.bridge_card.body.refused": "已被内容审核拒绝",
   "tui.bridge_card.body.not_admitted": "未送达智能体",
@@ -10,12 +10,16 @@
   "tui.bridge_card.body.signed_out": "登录Radient以查看此消息",
   "tui.bridge_card.body.other_account": "通过另一个Radient账户接收",
   "tui.bridge_card.body.not_member": "你已不在此对话中",
-  "tui.bridge_card.body.offline": "无法连接Radient——收起后重新展开以重试",
+  "tui.bridge_card.body.offline": "无法连接Radient——正在重试",
   "tui.bridge_card.body.deleted": "此消息已被删除",
   "tui.bridge_card.body.show_more": "显示完整消息 · {total, plural, other {共#行}}",
   "tui.bridge_card.body.show_less": "收起",
   "tui.bridge_card.body.more_messages": "{count, plural, other {此卡片中还有#条消息}}",
   "tui.bridge_card.header.held_transient": "等待筛查",
   "tui.bridge_card.header.open_to_load": "展开以加载消息",
-  "tui.bridge_card.header.offline": "无法连接Radient——展开以重试"
+  "tui.bridge_card.header.offline": "无法连接Radient——展开以重试",
+  "tui.bridge_card.context.dm": "私信",
+  "tui.bridge_card.context.channel": "频道",
+  "tui.bridge_card.context.group": "群组对话",
+  "tui.bridge_card.context.thread_reply": "话题回复"
 }

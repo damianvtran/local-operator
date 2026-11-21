@@ -28,7 +28,7 @@
   "relay.transcript.bridge.provenance": "Mensaje externo · contenido no fiable",
   "relay.transcript.bridge.loading": "Cargando el mensaje…",
   "relay.transcript.bridge.pending": "Pendiente de entregar a tu agente",
-  "relay.transcript.bridge.held": "Retenido por la moderación",
+  "relay.transcript.bridge.held": "Retenido para revisión",
   "relay.transcript.bridge.held_transient": "Pendiente de filtrado — aún no se muestra a tu agente",
   "relay.transcript.bridge.refused": "Rechazado por la moderación",
   "relay.transcript.bridge.not_admitted": "No entregado a tu agente",
@@ -36,9 +36,10 @@
   "relay.transcript.bridge.signed_out": "Inicia sesión en Radient para ver este mensaje",
   "relay.transcript.bridge.other_account": "Recibido en otra cuenta de Radient",
   "relay.transcript.bridge.not_member": "Ya no formas parte de esta conversación",
-  "relay.transcript.bridge.offline": "No se pudo conectar con Radient — vuelve a abrir la conversación para reintentar",
+  "relay.transcript.bridge.offline": "No se pudo conectar con Radient — reintentando",
   "relay.transcript.bridge.deleted": "Este mensaje se eliminó",
   "relay.transcript.bridge.more_messages": "{count, plural, one {# mensaje más en esta tarjeta} many {# de mensajes más en esta tarjeta} other {# mensajes más en esta tarjeta}}",
   "relay.transcript.jump.latest": "Ir a lo último",
-  "relay.transcript.jump.latest_short": "Lo último"
+  "relay.transcript.jump.latest_short": "Lo último",
+  "relay.transcript.bridge.thread_reply": "Respuesta en hilo"
 }

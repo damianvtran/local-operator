@@ -604,18 +604,19 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
   "relay.transcript": {
     "en": {
       "relay.transcript.bridge.deleted": "This message was deleted",
-      "relay.transcript.bridge.held": "Held by moderation",
+      "relay.transcript.bridge.held": "Held for review",
       "relay.transcript.bridge.held_transient": "Waiting for screening \u2014 not shown to your agent yet",
       "relay.transcript.bridge.loading": "Loading message\u2026",
       "relay.transcript.bridge.more_messages": "{count, plural, one {# more message in this card} other {# more messages in this card}}",
       "relay.transcript.bridge.not_admitted": "Not delivered to your agent",
       "relay.transcript.bridge.not_member": "You are no longer in this conversation",
-      "relay.transcript.bridge.offline": "Couldn't reach Radient \u2014 reopen the conversation to retry",
+      "relay.transcript.bridge.offline": "Couldn't reach Radient \u2014 retrying",
       "relay.transcript.bridge.other_account": "Received under another Radient account",
       "relay.transcript.bridge.pending": "Waiting to be delivered to your agent",
       "relay.transcript.bridge.provenance": "External message \u00b7 untrusted content",
       "relay.transcript.bridge.refused": "Refused by moderation",
       "relay.transcript.bridge.signed_out": "Sign in to Radient to see this message",
+      "relay.transcript.bridge.thread_reply": "Thread reply",
       "relay.transcript.bridge.unavailable": "Message body unavailable",
       "relay.transcript.composer.queued": "{count, plural, one {# queued} other {# queued}}",
       "relay.transcript.fold.failed_label": "Includes a failed action",
@@ -670,11 +671,4 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
  * rather than mixing two languages under one page tag. */
 export const BUNDLED_CHUNKS: Readonly<Record<string, () => Promise<
  { readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>> = {
-  "es": () => import("./bundled.es.gen"),
-  "fr": () => import("./bundled.fr.gen"),
-  "hi": () => import("./bundled.hi.gen"),
-  "ru": () => import("./bundled.ru.gen"),
-  "ur": () => import("./bundled.ur.gen"),
-  "vi": () => import("./bundled.vi.gen"),
-  "zh-CN": () => import("./bundled.zh-CN.gen"),
 };

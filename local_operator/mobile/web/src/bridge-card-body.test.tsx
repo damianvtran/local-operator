@@ -12,6 +12,7 @@ import * as api from "./api";
 import { Transcript } from "./components/transcript";
 import { MESSAGE_PRESSED_EVENT } from "./lib/message-fold";
 import { CONTENT_RESIZED_EVENT } from "./lib/content-resized";
+import { bridgeAnswerIsFinal, rereadDelay } from "./lib/bridge-card-reread";
 import {
 	BRIDGE_CARD_BODY_COLLAPSE_CHARS,
 	bridgeBodyPreview,
@@ -172,7 +173,7 @@ describe("bridge card on the transcript", () => {
 			more: 0,
 		});
 		const view = draw([card()]);
-		await waitFor(() => expect(view.container.textContent).toContain("Held by moderation"));
+		await waitFor(() => expect(view.container.textContent).toContain("Held for review"));
 		expect(view.container.textContent).toContain("Refused by moderation");
 		expect(view.container.textContent).not.toContain("Message body unavailable");
 	});
@@ -361,5 +362,158 @@ describe("bridge card on the transcript", () => {
 		expect(other.container.querySelector("[data-bridge-card-body]")).toBeNull();
 		expect(mockedBody).toHaveBeenCalledTimes(1);
 		expect(mockedBody.mock.calls[0][1]).toBe("live");
+	});
+});
+
+/* The re-read policy (`lib/bridge-card-reread.ts`): a pending body is handed
+   off minutes to hours after the card appears (measured p50 45 s, p90 21 min,
+   max 8 h), so a mounted card keeps asking until the answer is final. Fake
+   timers drive the backoff; `advance` flushes the read's promise chain too. */
+describe("bridge card re-read while on screen", () => {
+	beforeEach(() => {
+		vi.useFakeTimers({ shouldAdvanceTime: false });
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+	const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+	const flush = () => act(async () => { await vi.advanceTimersByTimeAsync(0); });
+	const pending = { v: 1, items: [item("pending")], more: 0 };
+	const admitted = { v: 1, items: [item("admitted", { body: "the delivered body" })], more: 0 };
+
+	it("classifies final and non-final answers and names the backoff", () => {
+		const of = (raw: unknown) => bridgeCardBodyOf(raw);
+		expect(bridgeAnswerIsFinal(null)).toBe(false);
+		expect(bridgeAnswerIsFinal(of(pending))).toBe(false);
+		expect(bridgeAnswerIsFinal(of({ v: 1, items: [item("held", { hold: { class: "transient" } })], more: 0 }))).toBe(false);
+		expect(bridgeAnswerIsFinal(of({ v: 1, items: [item("held", { hold: { class: "awaiting_review" } })], more: 0 }))).toBe(false);
+		expect(bridgeAnswerIsFinal(of({ v: 1, items: [item("unavailable", { reason: "offline" })], more: 0 }))).toBe(false);
+		expect(bridgeAnswerIsFinal(of(admitted))).toBe(true);
+		expect(bridgeAnswerIsFinal(of({ v: 1, items: [item("refused")], more: 0 }))).toBe(true);
+		expect(bridgeAnswerIsFinal(of({ v: 1, items: [item("unavailable", { reason: "deleted" })], more: 0 }))).toBe(true);
+		expect(bridgeAnswerIsFinal(of({ v: 1, items: [item("mystery_state")], more: 0 }))).toBe(true);
+		expect([0, 1, 2, 3, 4, 50].map(rereadDelay)).toEqual([5_000, 10_000, 20_000, 30_000, 60_000, 60_000]);
+	});
+
+	it("shows the body when a pending card is delivered while it is on screen, without flashing Loading", async () => {
+		mockedBody.mockResolvedValueOnce(pending).mockResolvedValueOnce(pending).mockResolvedValue(admitted);
+		const view = draw([card()]);
+		await flush();
+		expect(view.container.textContent).toContain("Waiting to be delivered to your agent");
+		await advance(5_000);
+		expect(mockedBody).toHaveBeenCalledTimes(2);
+		// The re-read kept the last answer up: never back to Loading.
+		expect(view.container.textContent).not.toContain("Loading message…");
+		expect(view.container.textContent).toContain("Waiting to be delivered to your agent");
+		await advance(10_000);
+		expect(mockedBody).toHaveBeenCalledTimes(3);
+		expect(view.container.textContent).toContain("the delivered body");
+		expect(view.container.textContent).toContain("External message · untrusted content");
+		// Final: no further asks, however long the card stays up.
+		await advance(10 * 60_000);
+		expect(mockedBody).toHaveBeenCalledTimes(3);
+	});
+
+	it("keeps the last answer on screen when a re-read fails, and asks again", async () => {
+		mockedBody.mockResolvedValueOnce(pending).mockRejectedValueOnce(new Error("network")).mockResolvedValue(admitted);
+		const view = draw([card()]);
+		await flush();
+		await advance(5_000);
+		expect(mockedBody).toHaveBeenCalledTimes(2);
+		expect(view.container.textContent).toContain("Waiting to be delivered to your agent");
+		expect(view.container.textContent).not.toContain("Message body unavailable");
+		await advance(10_000);
+		expect(view.container.textContent).toContain("the delivered body");
+	});
+
+	it("never gives up on a long pending card: steady 60 s re-reads past the backoff", async () => {
+		mockedBody.mockResolvedValue(pending);
+		draw([card()]);
+		await flush();
+		await advance(5_000 + 10_000 + 20_000 + 30_000);
+		expect(mockedBody).toHaveBeenCalledTimes(5);
+		await advance(8 * 60 * 60_000);
+		expect(mockedBody).toHaveBeenCalledTimes(5 + 8 * 60);
+	});
+
+	it("says held for review and refused as final copy and stops asking on refused", async () => {
+		mockedBody.mockResolvedValueOnce({ v: 1, items: [item("held", { hold: { class: "awaiting_review", held_for_s: 9 } })], more: 0 })
+			.mockResolvedValue({ v: 1, items: [item("refused")], more: 0 });
+		const view = draw([card()]);
+		await flush();
+		expect(view.container.textContent).toContain("Held for review");
+		expect(view.container.textContent).not.toContain("Waiting to be delivered");
+		await advance(5_000);
+		expect(view.container.textContent).toContain("Refused by moderation");
+		await advance(5 * 60_000);
+		expect(mockedBody).toHaveBeenCalledTimes(2);
+	});
+
+	it("says offline is retrying, and retries", async () => {
+		mockedBody.mockResolvedValueOnce({ v: 1, items: [item("unavailable", { reason: "offline" })], more: 0 }).mockResolvedValue(admitted);
+		const view = draw([card()]);
+		await flush();
+		expect(view.container.textContent).toContain("Couldn't reach Radient — retrying");
+		await advance(5_000);
+		expect(view.container.textContent).toContain("the delivered body");
+	});
+
+	it("stops re-reading on unmount", async () => {
+		mockedBody.mockResolvedValue(pending);
+		const view = draw([card()]);
+		await flush();
+		expect(mockedBody).toHaveBeenCalledTimes(1);
+		view.unmount();
+		await advance(10 * 60_000);
+		expect(mockedBody).toHaveBeenCalledTimes(1);
+	});
+
+	it("asks at once when the app becomes visible again instead of finishing the wait", async () => {
+		mockedBody.mockResolvedValueOnce(pending).mockResolvedValue(admitted);
+		const view = draw([card()]);
+		await flush();
+		expect(mockedBody).toHaveBeenCalledTimes(1);
+		await act(async () => {
+			document.dispatchEvent(new Event("visibilitychange"));
+			await vi.advanceTimersByTimeAsync(0);
+		});
+		expect(mockedBody).toHaveBeenCalledTimes(2);
+		expect(view.container.textContent).toContain("the delivered body");
+	});
+
+	it("shows the card row's thread marker and time beside the body, from the answer's card facts", async () => {
+		vi.useRealTimers();
+		const at = new Date();
+		at.setHours(14, 56, 0, 0);
+		mockedBody.mockResolvedValue({
+			v: 1, items: [item("admitted", { body: "hello" })], more: 0,
+			card: { received_at: at.toISOString(), thread_reply: true },
+		});
+		const view = draw([card()]);
+		await waitFor(() => expect(view.container.textContent).toContain("hello"));
+		const line = view.container.querySelector("[data-bridge-card-context]");
+		const time = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(at);
+		expect(line?.textContent).toBe(`Thread reply · ${time}`);
+		// Under the untrusted frame, above the body.
+		const frame = view.container.querySelector("[data-bridge-card-body]")!;
+		expect(frame.firstElementChild?.textContent).toBe("External message · untrusted content");
+		expect(frame.children[1]).toBe(line);
+	});
+
+	it("draws no context line when the answer carries no card facts (an older core)", async () => {
+		vi.useRealTimers();
+		mockedBody.mockResolvedValue({ v: 1, items: [item("admitted", { body: "hello" })], more: 0 });
+		const view = draw([card()]);
+		await waitFor(() => expect(view.container.textContent).toContain("hello"));
+		expect(view.container.querySelector("[data-bridge-card-context]")).toBeNull();
+	});
+
+	it("parses card facts strictly", () => {
+		expect(bridgeCardBodyOf({ v: 1, items: [], more: 0, card: { received_at: "2026-11-21T14:56:52Z", thread_reply: true } })?.card)
+			.toEqual({ receivedAt: Date.parse("2026-11-21T14:56:52Z"), threadReply: true });
+		expect(bridgeCardBodyOf({ v: 1, items: [], more: 0, card: { received_at: "not a date", thread_reply: "yes" } })?.card)
+			.toEqual({ threadReply: false });
+		expect(bridgeCardBodyOf({ v: 1, items: [], more: 0, card: [] })?.card).toBeUndefined();
+		expect(bridgeCardBodyOf({ v: 1, items: [], more: 0 })?.card).toBeUndefined();
 	});
 });

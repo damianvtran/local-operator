@@ -3620,6 +3620,26 @@ def _markdown_rows(body: str, width: int) -> list[Text]:
     return rows or [Text("")]
 
 
+def _local_time_label(value: object) -> str:
+    """``HH:MM`` local for today, else ``YYYY-MM-DD HH:MM``; "" if unparseable.
+
+    ``value`` is the resolver's ISO-8601 UTC ``card.received_at``.
+    """
+    from datetime import datetime
+
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if moment.tzinfo is None:
+        return ""
+    local = moment.astimezone()
+    same_day = local.date() == datetime.now().astimezone().date()
+    return local.strftime("%H:%M" if same_day else "%Y-%m-%d %H:%M")
+
+
 class TeamBridgeBlock(PeerMessageBlock):
     """A screened TEAM BRIDGE wake from a Radient org member, as its own card.
 
@@ -3655,6 +3675,7 @@ class TeamBridgeBlock(PeerMessageBlock):
         *,
         fold_width: int = 0,
         body_loader: Any = None,
+        conversation: dict[str, Any] | None = None,
     ) -> None:
         # Set BEFORE the base constructor: it builds the first frame, and that
         # build reads these.
@@ -3673,6 +3694,16 @@ class TeamBridgeBlock(PeerMessageBlock):
         self._body_verified = False
         #: Source-line count of the admitted bodies (the show-more label, D4).
         self._source_lines = 0
+        #: The pending re-read of a non-final answer while the card is open,
+        #: and how many have run since the last final answer / open. Policy
+        #: and its measured rationale: ``tui.bridge_card_body`` (re-read).
+        self._reread_timer: Any = None
+        self._reread_attempt = 0
+        #: Where the message was sent (``bridge_card_body.card_conversation``),
+        #: and the row facts the resolver answer carries (``card``: time and
+        #: thread-reply), kept once any answer carried them. Never body text.
+        self._conversation = conversation if isinstance(conversation, dict) else {}
+        self._card_facts: dict[str, Any] = {}
         super().__init__(body, sender, fold_width=fold_width)
         # The peer class is the base's, not ours: a matcher keying on
         # ``peer-message-block`` must not paint an org card, and vice versa.
@@ -3707,6 +3738,49 @@ class TeamBridgeBlock(PeerMessageBlock):
                 self._snippet = header
         if self._expanded:
             self._maybe_load_body()
+        else:
+            # Closed: nobody is reading, so stop asking. The next open re-asks
+            # from scratch (no answer is trusted past an open) on a fresh
+            # backoff.
+            self._cancel_reread()
+            self._reread_attempt = 0
+
+    def on_unmount(self) -> None:
+        # The timer belongs to this widget; a removed card must not keep a
+        # callback (or the resolver) alive. An in-flight worker is cancelled
+        # by Textual with the widget.
+        self._cancel_reread()
+
+    def _cancel_reread(self) -> None:
+        timer, self._reread_timer = self._reread_timer, None
+        if timer is not None:
+            timer.stop()
+
+    def _schedule_reread(self) -> None:
+        """Ask again later while open and not final (``bridge_card_body``)."""
+
+        from local_operator.tui.bridge_card_body import reread_delay
+
+        self._cancel_reread()
+        if not self.is_mounted:
+            # Built for a test or a replay pass with no app: nothing to poll,
+            # and a timer here would never run.
+            return
+        delay = reread_delay(self._reread_attempt)
+        self._reread_attempt += 1
+        try:
+            self._reread_timer = self.set_timer(delay, self._reread)
+        except Exception:  # noqa: BLE001 — unmounted (tests, replay build): nothing to poll
+            self._reread_timer = None
+
+    def _reread(self) -> None:
+        self._reread_timer = None
+        if not self._expanded or self._body_loader is None or self._body_loading:
+            return
+        # The last answer stays on screen while this runs: ``_card_body`` is
+        # only replaced when the new answer lands, so nothing flashes back to
+        # "Loading message…".
+        self._start_load(local_only=False)
 
     def _needs_body(self) -> bool:
         """Fetch on open unless every item is already final for this view.
@@ -3755,7 +3829,11 @@ class TeamBridgeBlock(PeerMessageBlock):
         ``verified`` is False for the local-only mount pass, which keeps the
         first open's full resolve due.
         """
+        from local_operator.tui.bridge_card_body import answer_is_final
+
         self._body_loading = False
+        if isinstance(result, dict) and isinstance(result.get("card"), dict):
+            self._card_facts = result["card"]
         if isinstance(result, dict) and isinstance(result.get("items"), list):
             self._card_body = result
             self._body_verified = self._body_verified or verified
@@ -3776,6 +3854,15 @@ class TeamBridgeBlock(PeerMessageBlock):
             # Only an OPEN card goes on to the hub; a closed one keeps the
             # mount pass local-only (D1).
             self._maybe_load_body()
+        elif self._expanded and verified:
+            # A full answer for an open card: keep asking until it is final.
+            # A failed read (``result`` None) is not final either — the last
+            # good answer stays painted and the next re-read tries again.
+            if answer_is_final(result):
+                self._cancel_reread()
+                self._reread_attempt = 0
+            else:
+                self._schedule_reread()
 
     def _header_text(self, result: dict[str, Any]) -> str:
         """The collapsed header's text for a resolver answer, or "" to keep it.
@@ -3973,6 +4060,15 @@ class TeamBridgeBlock(PeerMessageBlock):
         row.append("\n" + indent, style=warn)
         row.append(_bt(tui_bridge_card.frame_untrusted()), style=warn)
         self._chrome_rows += 2
+        context = self._context_line()
+        if context:
+            # Where and when, right under the caution and above the words: the
+            # identity header names WHO, this names the conversation (and a
+            # thread reply) and the time, so an open card reads as a complete
+            # received message without leaving the transcript.
+            row.append("\n" + indent, style=dim)
+            row.append(context, style=dim)
+            self._chrome_rows += 1
         shown = resolved
         total = len(resolved)
         clamped = total > self.BODY_CLAMP_ROWS
@@ -4004,6 +4100,36 @@ class TeamBridgeBlock(PeerMessageBlock):
             row.append(label, style=Style(color=theme_mod.semantic_color("accent")))
             self._show_more_row = len(row.plain.splitlines()) - 1
         return row
+
+    def _context_line(self) -> str:
+        """``<conversation>[ · thread reply][ · time]`` for an open card, or "".
+
+        The conversation comes from the row's validated display receipt; the
+        thread marker and time from the resolver answer's ``card`` object
+        (``received_at`` ISO-8601 UTC). A channel reads ``#name`` like the
+        receipt line elsewhere; the time is local clock time, with the ISO date
+        in front when the message is not from today. Numerals and ISO dates are
+        not copy, so only the words are catalogue keys.
+        """
+        parts: list[str] = []
+        kind = self._conversation.get("kind")
+        label = _sanitize_sender_field(self._conversation.get("label"))
+        if kind == "channel" and label:
+            parts.append(label if label.startswith("#") else f"#{label}")
+        elif label:
+            parts.append(label)
+        elif kind == "dm":
+            parts.append(_bt(tui_bridge_card.context_dm()))
+        elif kind == "channel":
+            parts.append(_bt(tui_bridge_card.context_channel()))
+        elif kind == "group":
+            parts.append(_bt(tui_bridge_card.context_group()))
+        if self._card_facts.get("thread_reply") is True:
+            parts.append(_bt(tui_bridge_card.context_thread_reply()))
+        stamp = _local_time_label(self._card_facts.get("received_at"))
+        if stamp:
+            parts.append(stamp)
+        return " · ".join(parts)
 
     def _sender_name(self) -> tuple[str, bool]:
         """The MEMBER the receiver validated, then their organization (§2).

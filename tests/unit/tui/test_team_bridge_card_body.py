@@ -84,7 +84,7 @@ def test_a_short_body_claims_no_show_more_and_m_stays_with_the_composer() -> Non
 @pytest.mark.parametrize(
     ("item", "copy"),
     [
-        (_item("held", hold={"class": "awaiting_review", "held_for_s": 5}), "Held by moderation"),
+        (_item("held", hold={"class": "awaiting_review", "held_for_s": 5}), "Held for review"),
         (_item("refused"), "Refused by moderation"),
         (_item("pending"), "Waiting to be delivered to your agent"),
         (_item("not_admitted"), "Not delivered to your agent"),
@@ -93,7 +93,7 @@ def test_a_short_body_claims_no_show_more_and_m_stays_with_the_composer() -> Non
         (_item("unavailable", reason="not_member"), "You are no longer in this conversation"),
         (
             _item("unavailable", reason="offline"),
-            "Couldn't reach Radient — close and reopen to retry",
+            "Couldn't reach Radient — retrying",
         ),
         (_item("unavailable", reason="deleted"), "This message was deleted"),
         (
@@ -173,7 +173,7 @@ def _collapsed(answer: dict[str, Any], sender: dict[str, Any] | None = None) -> 
     ("item", "header"),
     [
         (_item("admitted", body="**Hello** from Ola", source="local"), "Hello from Ola"),
-        (_item("held", hold={"class": "awaiting_review"}), "Held by moderation"),
+        (_item("held", hold={"class": "awaiting_review"}), "Held for review"),
         (_item("held", hold={"class": "transient"}), "Waiting for screening"),
         (_item("refused"), "Refused by moderation"),
         (_item("pending"), "Waiting to be delivered to your agent"),
@@ -303,9 +303,9 @@ def test_the_closed_offline_header_says_open_not_close_and_reopen() -> None:
     row = _collapsed(_answer(_item("unavailable", reason="offline")))
     assert "Couldn't reach Radient — open to retry" in row
     assert "close and reopen" not in row
-    # The open card keeps the body line: there the retry IS close and reopen.
+    # The open card keeps the body line: an open card retries by itself.
     body = _open(_answer(_item("unavailable", reason="offline")))._build_content(110).plain
-    assert "Couldn't reach Radient — close and reopen to retry" in body
+    assert "Couldn't reach Radient — retrying" in body
 
 
 def test_an_open_offline_card_header_does_not_contradict_its_body() -> None:
@@ -321,7 +321,7 @@ def test_an_open_offline_card_header_does_not_contradict_its_body() -> None:
     assert "open to retry" in block._build_content(110).plain.splitlines()[0]
     block.toggle_expanded()
     header = block._build_content(110).plain.splitlines()[0]
-    assert "Couldn't reach Radient — close and reopen to retry" in header
+    assert "Couldn't reach Radient — retrying" in header
     assert "— open to retry" not in header
     block.toggle_expanded()
     closed = block._build_content(110).plain.splitlines()[0]
@@ -329,3 +329,255 @@ def test_an_open_offline_card_header_does_not_contradict_its_body() -> None:
     # Opened before the answer lands: the header is built open from the start.
     opened = _open(offline)
     assert "— open to retry" not in opened._build_content(110).plain.splitlines()[0]
+
+
+# -- re-read while open (bridge card never showing a delivered body) ----------
+#
+# The reported bug: a card opened while its message was ``pending`` kept
+# "Waiting to be delivered" until it was closed and reopened, though the body
+# was handed off minutes later (measured p50 45 s, p90 21 min, max 8 h). These
+# mount the card in a real Textual app and replace ``set_timer`` with a
+# recording fake, so the backoff is asserted exactly and fired by hand.
+
+from local_operator.tui.bridge_card_body import (  # noqa: E402
+    REREAD_BACKOFF_S,
+    REREAD_STEADY_S,
+    answer_is_final,
+    card_conversation,
+    reread_delay,
+)
+
+
+class _FakeTimer:
+    def __init__(self, delay: float, callback: Any) -> None:
+        self.delay = delay
+        self.callback = callback
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def _scripted_loader(answers: list[Any], calls: list[bool]) -> Any:
+    async def load(*, local_only: bool = False) -> Any:
+        calls.append(local_only)
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    return load
+
+
+async def _mounted(block: TeamBridgeBlock, timers: list[_FakeTimer]) -> Any:
+    from textual.app import App
+
+    def fake_set_timer(delay: float, callback: Any, **_kw: Any) -> _FakeTimer:
+        timer = _FakeTimer(delay, callback)
+        timers.append(timer)
+        return timer
+
+    block.set_timer = fake_set_timer  # type: ignore[method-assign]
+
+    class _Host(App[None]):
+        def compose(self):  # type: ignore[no-untyped-def]
+            yield block
+
+    return _Host()
+
+
+def _fire(timers: list[_FakeTimer]) -> None:
+    live = [timer for timer in timers if not timer.stopped]
+    assert live, "no re-read scheduled"
+    live[-1].stopped = True
+    live[-1].callback()
+
+
+def test_the_policy_classifies_final_answers_and_names_the_backoff() -> None:
+    assert answer_is_final(None) is False
+    assert answer_is_final({"v": 1}) is False
+    assert answer_is_final(_answer(_item("pending"))) is False
+    assert answer_is_final(_answer(_item("held", hold={"class": "transient"}))) is False
+    assert answer_is_final(_answer(_item("held", hold={"class": "awaiting_review"}))) is False
+    assert answer_is_final(_answer(_item("unavailable", reason="offline"))) is False
+    assert answer_is_final(_answer(_item("unavailable", reason="not_loaded"))) is False
+    assert answer_is_final(_answer(_item("admitted", body="x"))) is True
+    assert answer_is_final(_answer(_item("refused"))) is True
+    assert answer_is_final(_answer(_item("unavailable", reason="deleted"))) is True
+    assert answer_is_final(_answer(_item("from_the_future"))) is True
+    assert answer_is_final(_answer()) is True
+    assert REREAD_BACKOFF_S == (5.0, 10.0, 20.0, 30.0)
+    assert [reread_delay(n) for n in (0, 1, 2, 3, 4, 500)] == [5, 10, 20, 30, 60, 60]
+    assert REREAD_STEADY_S == 60.0
+
+
+@pytest.mark.asyncio
+async def test_an_open_pending_card_shows_the_body_once_delivered_without_reopening() -> None:
+    calls: list[bool] = []
+    admitted = _answer(_item("admitted", body="the delivered body", source="local"))
+    loader = _scripted_loader(
+        [_answer(_item("pending")), _answer(_item("pending")), _answer(_item("pending")), admitted],
+        calls,
+    )
+    block = TeamBridgeBlock("(no preview available)", {"name": "Ola"}, body_loader=loader)
+    timers: list[_FakeTimer] = []
+    app = await _mounted(block, timers)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert calls == [True]  # the local-only mount pass
+        block.toggle_expanded()
+        await pilot.pause()
+        assert calls == [True, False]
+        assert "Waiting to be delivered to your agent" in block._build_content(110).plain
+        assert [t.delay for t in timers] == [5.0]
+        _fire(timers)
+        # While the re-read runs, the last answer stays: never back to Loading.
+        assert block._body_loading is True
+        assert "Loading message…" not in block._build_content(110).plain
+        await pilot.pause()
+        assert [t.delay for t in timers] == [5.0, 10.0]
+        _fire(timers)
+        await pilot.pause()
+        body = block._build_content(110).plain
+        assert "the delivered body" in body
+        assert "External message · untrusted content" in body
+        assert "Waiting to be delivered" not in body
+        # Final: nothing further is scheduled.
+        assert [t.delay for t in timers] == [5.0, 10.0]
+        assert all(t.stopped for t in timers)
+
+
+@pytest.mark.asyncio
+async def test_collapsing_or_unmounting_stops_the_re_read() -> None:
+    calls: list[bool] = []
+    loader = _scripted_loader([_answer(_item("pending"))], calls)
+    block = TeamBridgeBlock("x", {"name": "Ola"}, body_loader=loader)
+    timers: list[_FakeTimer] = []
+    app = await _mounted(block, timers)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        block.toggle_expanded()
+        await pilot.pause()
+        assert len(timers) == 1 and not timers[0].stopped
+        block.toggle_expanded()  # collapse
+        assert timers[0].stopped
+        # Reopening starts a fresh backoff from the first step.
+        block.toggle_expanded()
+        await pilot.pause()
+        assert timers[-1].delay == 5.0 and not timers[-1].stopped
+        await block.remove()
+        await pilot.pause()
+        assert timers[-1].stopped
+        asked = len(calls)
+        # A timer that fired late on a removed/collapsed card asks nothing.
+        block._expanded = False
+        block._reread()
+        assert len(calls) == asked
+
+
+@pytest.mark.asyncio
+async def test_a_failed_re_read_keeps_the_last_answer_and_asks_again() -> None:
+    calls: list[bool] = []
+    loader = _scripted_loader(
+        [
+            _answer(_item("pending")),
+            _answer(_item("pending")),
+            RuntimeError("io"),
+            _answer(_item("refused")),
+        ],
+        calls,
+    )
+    block = TeamBridgeBlock("x", {"name": "Ola"}, body_loader=loader)
+    timers: list[_FakeTimer] = []
+    app = await _mounted(block, timers)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        block.toggle_expanded()
+        await pilot.pause()
+        _fire(timers)
+        await pilot.pause()
+        assert "Waiting to be delivered to your agent" in block._build_content(110).plain
+        assert [t.delay for t in timers] == [5.0, 10.0]
+        _fire(timers)
+        await pilot.pause()
+        assert "Refused by moderation" in block._build_content(110).plain
+        assert len(timers) == 2
+
+
+def test_held_for_review_and_refused_are_final_copy_not_still_delivering() -> None:
+    held = (
+        _open(_answer(_item("held", hold={"class": "awaiting_review"})))._build_content(110).plain
+    )
+    assert "Held for review" in held and "Waiting to be delivered" not in held
+    refused = _open(_answer(_item("refused")))._build_content(110).plain
+    assert "Refused by moderation" in refused and "Waiting to be delivered" not in refused
+
+
+def _open_in(conversation: dict[str, Any], answer: dict[str, Any]) -> TeamBridgeBlock:
+    block = TeamBridgeBlock(
+        "(no preview available)", {"name": "Ola"}, body_loader=_no_load, conversation=conversation
+    )
+    block._expanded = True
+    block.apply_card_body(answer)
+    return block
+
+
+def test_an_open_card_shows_conversation_thread_and_time_with_the_body() -> None:
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    block = _open_in(
+        {"kind": "channel", "label": "general"},
+        {
+            **_answer(_item("admitted", body="hello there")),
+            "card": {"received_at": now.isoformat().replace("+00:00", "Z"), "thread_reply": True},
+        },
+    )
+    lines = block._build_content(110).plain.splitlines()
+    frame = next(
+        i for i, line in enumerate(lines) if "External message · untrusted content" in line
+    )
+    expected = f"#general · Thread reply · {now.astimezone().strftime('%H:%M')}"
+    assert lines[frame + 1].strip() == expected
+    assert "hello there" in "\n".join(lines[frame + 2 :])
+    # The row facts survive a later answer that lacks them (an older core).
+    block.apply_card_body(_answer(_item("admitted", body="hello there")), verified=False)
+    assert expected in block._build_content(110).plain
+    epoch = datetime.fromtimestamp(0, UTC).astimezone().strftime("%Y-%m-%d %H:%M")
+    dm = _open_in(
+        {"kind": "dm"},
+        {
+            **_answer(_item("pending")),
+            "card": {"received_at": "1970-01-01T00:00:00Z", "thread_reply": False},
+        },
+    )
+    assert f"Direct message · {epoch}" in dm._build_content(110).plain
+    # Nothing known: no context line at all, not an empty dim row.
+    plain = _open(_answer(_item("pending")))._build_content(110).plain.splitlines()
+    frame = next(i for i, line in enumerate(plain) if "untrusted content" in line)
+    assert "Waiting to be delivered" in plain[frame + 1]
+
+
+def test_card_conversation_reads_only_the_validated_receipt() -> None:
+    details = {
+        "body": "untrusted wire text naming #elsewhere",
+        "bridge_receipt": {
+            "v": 1,
+            "sender": {"name": "Ada"},
+            "conversation": {"kind": "channel", "label": "general"},
+        },
+        "bridge_receipt_source": {
+            "account_id": "a",
+            "tenant_id": "t",
+            "endpoint_id": "e",
+            "conversation_id": "bcv_1",
+            "message_ids": ["bcmsg_1"],
+            "conversation_seq": 3,
+        },
+    }
+    assert card_conversation(details) == {"kind": "channel", "label": "general"}
+    assert card_conversation({"bridge_receipt": {"conversation": {"kind": "dm"}}}) == {
+        "kind": None,
+        "label": None,
+    }
+    assert card_conversation(None) == {"kind": None, "label": None}
