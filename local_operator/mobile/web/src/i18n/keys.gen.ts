@@ -1182,6 +1182,11 @@ export type MessageParams = {
   "wire.phone_access.away_after.label": undefined;
   "wire.phone_access.description": undefined;
   "wire.phone_access.title": undefined;
+  "wire.providers.connect.key_invalid_characters": undefined;
+  "wire.providers.connect.key_rejected": { "label": string };
+  "wire.providers.connect.key_unreachable": { "label": string };
+  "wire.providers.connect.key_unverified": { "label": string; "status": string };
+  "wire.providers.connect.suggested_automatic": undefined;
   "wire.providers.reauth.session_policy": { "label": string; "provider": string };
   "wire.providers.reauth.sign_in_expired": { "label": string; "provider": string };
   "wire.providers.reauth.status_session_policy": undefined;
