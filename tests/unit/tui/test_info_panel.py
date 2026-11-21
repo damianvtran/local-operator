@@ -343,6 +343,59 @@ def test_an_available_update_renders_the_remedy_whole() -> None:
     assert "v0.52.0" in narrow
 
 
+@pytest.mark.parametrize("locale", ["en", "fr", "zh-CN", "ur"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_update_status_copy_follows_live_locale_and_cell_width(locale: str, compact: bool) -> None:
+    """Exercise the actual behind-install row, including a live language move.
+
+    Fit is measured before bidi projection: CJK cells are not code points, and
+    cropping a projected Urdu isolate would leave the terminal direction open.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.i18n.keys import tui_welcome
+    from local_operator.i18n.text import active_locale, set_active_locale, tr_record
+    from local_operator.tui.i18n_status import localized_display
+    from local_operator.tui.widgets.info_panel import _Body, _install_section, semantic_style
+    from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
+
+    version = "0.52.0"
+    snapshot = _snapshot(install=InstallInfo(version="0.51.6", latest_known=version, behind=True))
+    original = active_locale()
+    resolve = tr_record("tui.welcome")
+    prefix = f"  {NOTICE_GLYPHS['warning']} "
+    try:
+        # Reuse the snapshot and module across locale changes, rather than
+        # constructing an isolated translator that cannot expose stale copy.
+        for language in ("en", locale, "en"):
+            set_active_locale(language)
+            assert active_locale() == language
+            full = resolve(tui_welcome.status_update(version=version))
+            short = resolve(tui_welcome.status_update_short(version=version))
+            width = cell_len(prefix + full.text) - (1 if compact else 0)
+            expected = short if compact else full
+            assert cell_len(prefix + short.text) <= width
+            body = _Body(width)
+            _install_section(body, snapshot, False)
+            row = next(line for line in body.lines if line.plain.startswith(prefix))
+            painted = localized_display(
+                expected.text,
+                source_locale=expected.source_locale,
+                technical_literals=(version, "/update"),
+            ).plain
+            assert row.plain == prefix + painted, (language, compact, width)
+            assert any(
+                span.start == 0
+                and span.end == len(row.plain)
+                and span.style == semantic_style("warning")
+                for span in row.spans
+            )
+            assert version in row.plain
+            assert ("/update" in row.plain) is (not compact)
+    finally:
+        set_active_locale(original)
+
+
 # -- the subagent tree --------------------------------------------------------
 
 

@@ -43,7 +43,8 @@ from textual.widgets import Static
 # a locale can carry them; `_t` is bound BELOW the whole import block so no
 # later import reads as not-at-top (E402, the earlier slice's CI failure).
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import tr
+from local_operator.i18n.keys import tui_welcome
+from local_operator.i18n.text import tr, tr_record
 from local_operator.info.collect import LiveState
 from local_operator.info.model import (
     UNKNOWN,
@@ -67,6 +68,7 @@ from local_operator.session.runtime.types import (
     update_phase,
     update_short,
 )
+from local_operator.tui.i18n_status import localized_display
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
     section_header,
@@ -83,6 +85,7 @@ from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 from local_operator.tui.widgets.welcome import _fit_tail, _shorten_home
 
 _t = tr("tui.small")
+_update_record = tr_record("tui.welcome")
 
 #: The copy chord. Deliberately the SAME constant the aside already binds rather
 #: than a second ``"ctrl+r"`` literal: "copy this surface out" should be one
@@ -531,13 +534,24 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
     install = snapshot.install
     body.kv("Version", install.version or "unavailable", notes=_latest_notes(install))
     if install.behind and install.latest_known:
-        # Composed like ``welcome.py``'s update row so the two cannot diverge,
-        # and the ``— /update`` remedy is dropped WHOLE when it does not fit:
-        # ``/upd…`` is an instruction nobody can follow.
-        remedy = f"{NOTICE_GLYPHS['warning']} latest is v{install.latest_known} — /update"
-        short = f"{NOTICE_GLYPHS['warning']} v{install.latest_known} available"
+        # Reuse the welcome row's audited copy: "latest is v…" conveys the
+        # same available-update fact as the former compact "v… available".
+        # Select by terminal cells BEFORE projection so CJK width and Urdu
+        # isolates cannot crop the /update remedy or leave direction open.
+        # Translated prose is projected with its actual source; the version
+        # and command remain technical LTR tokens, with the glyph outside.
+        prefix = f"  {NOTICE_GLYPHS['warning']} "
+        record = _update_record(tui_welcome.status_update(version=install.latest_known))
+        if cell_len(prefix + record.text) > body.width:
+            record = _update_record(tui_welcome.status_update_short(version=install.latest_known))
+        painted = localized_display(
+            record.text,
+            source_locale=record.source_locale,
+            technical_literals=(install.latest_known, "/update"),
+        )
         row = Text()
-        row.append("  " + (remedy if len(remedy) + 2 <= body.width else short))
+        row.append(prefix)
+        row.append_text(painted)
         row.stylize(semantic_style("warning"))
         row.truncate(body.width, overflow="crop")
         body.lines.append(row)
