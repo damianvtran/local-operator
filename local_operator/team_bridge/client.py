@@ -1541,6 +1541,18 @@ def attachments_capability(payload: Any) -> dict[str, Any] | None:
     return out
 
 
+def _path_id(value: str) -> str:
+    """One opaque id as ONE path segment.
+
+    The responder routes take ids that originate in hub feed rows and a local
+    policy file; percent-encoding with no safe characters means neither can ever
+    contribute a ``/``, ``?`` or ``..`` to the upstream path (same rule as the
+    reaction emoji segment).
+    """
+
+    return urllib.parse.quote(str(value), safe="")
+
+
 def _envelope_result(response: httpx.Response) -> dict[str, Any]:
     """The ``result`` object from the house ``{msg, result}`` envelope.
 
@@ -2541,6 +2553,10 @@ class TeamBridgeClient:
                 # decides whether the request is resent without the block.
                 _observation.note_hub_refused(self.base_url)
             raise _refusal(response)
+        if empty_result and response.status_code == 204:
+            # The responder Stop and claim release answer 204 with no body (agent-server
+            # #451); opt-in only, so every other route keeps refusing an empty 2xx.
+            return {}
         if empty_result:
             # Cancellation acknowledges a CAS with {msg} and no result. Opt in
             # only for that wire contract; malformed read replies still fail.
@@ -6003,6 +6019,141 @@ class TeamBridgeClient:
             params=fields or None,
             access=access,
             expected_account_id=expected_account_id,
+        )
+
+    # -- alert responders and the claim lease (Team Integrations RFC §7.3, §9.3) --
+    #
+    # agent-server #451 (PR 2c). Registered on the hub ONLY while
+    # ``TEAM_INTEGRATIONS_ENABLED`` is on: a dark hub answers an uncoded 404 for
+    # every path here, which ``_refusal`` reads as ``bridge_error`` and the
+    # responder runtime treats as "stand down" (fail closed, zero tokens).
+    #
+    # Every rule is the hub's (owner device, consent hash, active membership,
+    # autonomy kill switch read uncached on claim AND heartbeat); these methods
+    # carry bytes and nothing else, so ``team_bridge.responders.lease`` is the one
+    # place that interprets the coded refusals (``already_claimed``,
+    # ``lease_fenced``, ``autonomy_disabled``, ``responder_not_enabled``,
+    # ``alert_resolved``). Every route runs as the runtime's own pinned identity —
+    # never a desktop-captured one — because a responder acts as the owner's AGENT
+    # endpoint, which the hub verifies belongs to the calling account.
+
+    async def responder_consent(self) -> dict[str, Any]:
+        """The served ``responder_consent_v1`` text: ``{version, text, sha256}``."""
+
+        return await self._send("GET", "/integrations/responder-consent")
+
+    async def responder_publish(
+        self,
+        conversation_id: str,
+        endpoint_id: str,
+        *,
+        tenant_id: str,
+        enabled: bool,
+        autonomy_tier: str,
+        consent_version: str,
+        consent_sha256: str,
+        policy_sha256: str,
+        paused_until: str | None = None,
+    ) -> dict[str, Any]:
+        """PUT the non-sensitive projection of one channel's local responder policy.
+
+        The hub never sees the policy itself (repos, credentials, budgets stay on
+        this device, RFC §7.1) — only the enable bit, the tier, the pause, the
+        consent the owner accepted (by hash) and the policy's own hash.
+        """
+
+        body: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "responder_enabled": bool(enabled),
+            "autonomy_tier": autonomy_tier,
+            "consent_version": consent_version,
+            "consent_sha256": consent_sha256,
+            "policy_sha256": policy_sha256,
+        }
+        if paused_until:
+            body["paused_until"] = paused_until
+        return await self._send(
+            "PUT",
+            f"/messaging/conversations/{_path_id(conversation_id)}"
+            f"/responders/{_path_id(endpoint_id)}",
+            body=body,
+        )
+
+    async def responder_stop(
+        self, conversation_id: str, endpoint_id: str, *, tenant_id: str
+    ) -> None:
+        """DELETE the responder registration ("Stop"); the hub answers 204."""
+
+        await self._send(
+            "DELETE",
+            f"/messaging/conversations/{_path_id(conversation_id)}"
+            f"/responders/{_path_id(endpoint_id)}",
+            body={"tenant_id": tenant_id},
+            empty_result=True,
+        )
+
+    async def alert_claim(
+        self, conversation_id: str, root_message_id: str, *, tenant_id: str, actor_endpoint_id: str
+    ) -> dict[str, Any]:
+        """Claim an alert root as the agent endpoint: 201 + ``lease_epoch``, or a coded 409/403."""
+
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{_path_id(conversation_id)}"
+            f"/messages/{_path_id(root_message_id)}/claim",
+            body={"tenant_id": tenant_id, "actor_endpoint_id": actor_endpoint_id},
+        )
+
+    async def alert_claim_heartbeat(
+        self,
+        conversation_id: str,
+        root_message_id: str,
+        *,
+        tenant_id: str,
+        actor_endpoint_id: str,
+        lease_epoch: int,
+        status_line: str | None = None,
+        waiting_approval_for: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Renew the lease AT ``lease_epoch`` (409 ``lease_fenced`` on any mismatch)."""
+
+        body: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "actor_endpoint_id": actor_endpoint_id,
+            "lease_epoch": int(lease_epoch),
+        }
+        if status_line is not None:
+            body["status_line"] = status_line
+        if waiting_approval_for is not None:
+            body["waiting_approval_for"] = dict(waiting_approval_for)
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{_path_id(conversation_id)}"
+            f"/messages/{_path_id(root_message_id)}/claim/heartbeat",
+            body=body,
+        )
+
+    async def alert_claim_release(
+        self,
+        conversation_id: str,
+        root_message_id: str,
+        *,
+        tenant_id: str,
+        actor_endpoint_id: str,
+        lease_epoch: int,
+    ) -> None:
+        """Release the claim AT ``lease_epoch``. Never refused by a kill switch (hub rule)."""
+
+        await self._send(
+            "DELETE",
+            f"/messaging/conversations/{_path_id(conversation_id)}"
+            f"/messages/{_path_id(root_message_id)}/claim",
+            body={
+                "tenant_id": tenant_id,
+                "actor_endpoint_id": actor_endpoint_id,
+                "lease_epoch": int(lease_epoch),
+            },
+            empty_result=True,
         )
 
     # -- typing indicators (agent-server §18; lop design §5) -------------------

@@ -73,6 +73,9 @@ FORCED_REMOVAL_REASON = (
 )
 # Spelled here rather than imported: ``provenance`` imports this module.
 _LEDGER_DIRNAME = "guardrails"
+#: ``team_bridge.responders.policy.policy_path`` relative to a state root. Spelled
+#: here rather than imported so the guard's import graph stays free of team_bridge.
+_RESPONDER_POLICY_PARTS = ("team_bridge", "responders.yaml")
 _LEDGER_FILENAME = "created.sqlite"
 
 
@@ -381,6 +384,12 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
     for state in prot.state_roots:
         if _under(path, os.path.join(state, _LEDGER_DIRNAME)):
             return "the guardrail's own records"
+        if _in_policy_region(path, state):
+            # Team Integrations RFC §7.1 (S-34/S-40): the owner's alert-responder policy
+            # is the ONLY thing that authorizes work from an inbound alert, so the agent
+            # it authorizes must never be able to write, move or delete it — by the file
+            # tools or by bash. Evidence class = CRITICAL for every op, no ask can lift it.
+            return RESPONDER_POLICY_REASON
         sessions = os.path.join(state, _SESSIONS_DIRNAME)
         if not _under(path, sessions) or path == sessions:
             continue
@@ -724,6 +733,158 @@ def _in_own_pad(path: str, prot: _Protected) -> bool:
     return any(_under_evidence(path, pad) for pad in prot.own_scratchpad)
 
 
+#: The reason every route onto the responder policy carries. A module constant
+#: so ``classify_targets`` can rank even an UNKNOWN program handed the policy
+#: (``python3 -c "open(P, 'w')"``) CRITICAL, where other evidence is only HIGH.
+RESPONDER_POLICY_REASON = "the owner's alert responder policy"
+
+
+def _in_policy_region(path: str, state: str) -> bool:
+    """Is ``path`` the responder policy, something under that name, or its
+    ``team_bridge`` directory itself?
+
+    Why the directory too (PR #4383 review M1/S-1): the loader reads
+    ``<state>/team_bridge/responders.yaml`` by name, so whoever can replace,
+    link, move or extract INTO the directory chooses the policy — ``ln -s
+    ~/forged team_bridge``, ``mv ~/forged team_bridge``, ``cp -R x/.
+    team_bridge/``, ``tar -C``/``unzip -d``/``git -C`` all name only the
+    directory. Only the directory ITSELF is fenced, not everything under it:
+    ``team_bridge/`` also holds the connector's locks and caches, which an
+    agent may legitimately repair (those stay at their ordinary HIGH).
+    Case-folded on a case-insensitive volume so ``RESPONDERS.yaml`` spelled
+    before the file exists still lands on it; ``..`` is already normalised
+    away by every caller (``_norm``/``realpath``).
+    """
+    directory = os.path.join(state, _RESPONDER_POLICY_PARTS[0])
+    policy = os.path.join(directory, _RESPONDER_POLICY_PARTS[1])
+    candidates = [(path, directory, policy)]
+    if _case_insensitive(state):
+        candidates.append((path.casefold(), directory.casefold(), policy.casefold()))
+    return any(p == d or _under(p, pol) for p, d, pol in candidates)
+
+
+def _policy_by_pattern(pattern: str, state: str) -> bool:
+    """Could glob ``pattern`` name the policy or its directory (component-wise,
+    so ``*`` never crosses ``/``)? Fails closed on case like the paths do."""
+    directory = os.path.join(state, _RESPONDER_POLICY_PARTS[0])
+    policy = os.path.join(directory, _RESPONDER_POLICY_PARTS[1])
+    fold = _case_insensitive(state)
+    pat = [c for c in (pattern.casefold() if fold else pattern).split("/") if c]
+    for root in (directory, policy):
+        parts = [c for c in (root.casefold() if fold else root).split("/") if c]
+        if len(pat) == len(parts) and all(
+            fnmatch.fnmatchcase(r, q) for r, q in zip(parts, pat, strict=True)
+        ):
+            return True
+    return False
+
+
+def _policy_reason(target: Target, prot: _Protected) -> str | None:
+    """The responder-policy fence for one resolved word, on every spelling:
+    lexical, realpath (a link already pointing there) and the kernel's landing
+    for a ``..`` word, plus any glob that could match it."""
+    spellings: set[str] = set()
+    for word in (target.path, target.raw_path):
+        if not word:
+            continue
+        spellings.add(_norm(word))
+        try:
+            spellings.add(os.path.realpath(word))
+        except OSError:
+            pass
+    if target.raw_path:
+        kernel = kernel_path(target.raw_path)
+        if kernel:
+            spellings.add(kernel)
+    for state in prot.state_roots:
+        if any(_in_policy_region(s, state) for s in spellings):
+            return RESPONDER_POLICY_REASON
+        if target.pattern is not None and _policy_by_pattern(_norm(target.pattern), state):
+            return RESPONDER_POLICY_REASON
+    return None
+
+
+#: The reason a bulk copy into a state root carries (``_bulk_reason``).
+BULK_INTO_STATE_REASON = (
+    "a bulk copy, sync, extract or checkout into the Local Operator state directory "
+    "(it can land the owner's alert responder policy or the guardrail's records)"
+)
+
+#: The reason a bulk write with an UNKNOWABLE landing into an ancestor of a state
+#: root carries (``_bulk_reason``, review S-16): HIGH, so the judge weighs it
+#: against the operator's typed request instead of refusing it outright.
+BULK_INTO_ANCESTOR_REASON = (
+    "extracts or copies an unknown set of files into a directory that contains the "
+    "Local Operator state directory (it could land the owner's alert responder policy "
+    "or the guardrail's records)"
+)
+
+
+def _bulk_reason(target: Target, prot: _Protected) -> tuple[str, Risk] | None:
+    """Does a tree-landing write (``Target.bulk``) reach into a state root?
+
+    WHY (PR #4383 security round 2, S-12). ``rsync -a ~/forged/ ~/.local-operator/``,
+    ``ditto``, ``cp -R x/``, ``cp --parents``, ``tar -x``/``unzip`` or a ``git
+    checkout`` there each plant ``team_bridge/responders.yaml`` (or the
+    ``guardrails/`` ledger) while naming only the state root, which is not itself
+    evidence, so they all ranked LOW. An agent has no routine reason to bulk-write
+    into the state root, so:
+
+    * destination == a state root → CRITICAL, whatever lands;
+    * destination == an ANCESTOR of a state root (``~``, ``/``) whose KNOWN
+      landing names the next component toward the state root (``rsync -a
+      ~/x/.local-operator ~``) → CRITICAL;
+    * destination == an ancestor whose landing is UNKNOWABLE (an archive
+      extract, a contents copy ``cp -R x/ ~``, a checkout, a pull, a stash pop)
+      → HIGH with :data:`BULK_INTO_ANCESTOR_REASON` (review S-16). A session's
+      cwd is home by default, so ``tar -xzf ~/Downloads/x.tgz`` or a dotfiles
+      ``git --work-tree=$HOME pull`` is routine; CRITICAL there was refused with
+      no lever but the global override. HIGH lets the judge read the operator's
+      typed request ("extract this into my home" passes, an injected one does
+      not). The residual — a judge-approved plant — is closed structurally by
+      GATE R3-HASH (``team_bridge.responders.runner``), not by this rank;
+    * a known landing that does not name that component (``cp -R ~/proj ~/``)
+      stays as it was.
+
+    Every spelling ``_policy_reason`` judges (lexical, realpath, the kernel's
+    ``..`` landing) is judged here too, case-folded on a case-insensitive volume.
+    """
+    if not target.bulk:
+        return None
+    unknown: tuple[str, Risk] | None = None
+    spellings: set[str] = set()
+    for word in (target.path, target.raw_path):
+        if not word:
+            continue
+        spellings.add(_norm(word))
+        try:
+            spellings.add(os.path.realpath(word))
+        except OSError:
+            pass
+    if target.raw_path and (kernel := kernel_path(target.raw_path)):
+        spellings.add(kernel)
+    for state in prot.state_roots:
+        fold = _case_insensitive(state)
+        root = state.casefold() if fold else state
+        names = None
+        if target.bulk_names is not None:
+            names = {n.casefold() if fold else n for n in target.bulk_names}
+        for spelling in spellings:
+            dest = (spelling.casefold() if fold else spelling).rstrip("/") or "/"
+            if dest == root:
+                return BULK_INTO_STATE_REASON, Risk.CRITICAL
+            if _under(root, dest):
+                step = os.path.relpath(root, dest).split(os.sep, 1)[0]
+                if names is None:
+                    unknown = (BULK_INTO_ANCESTOR_REASON, Risk.HIGH)
+                elif step in names:
+                    return BULK_INTO_STATE_REASON, Risk.CRITICAL
+    # A CRITICAL spelling (another state root, or a realpath landing on one)
+    # outranks an unknown-landing HIGH, so the HIGH is returned only after
+    # every spelling of every root has been judged.
+    return unknown
+
+
 def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
     """Does ``target`` land in the guard's evidence?
 
@@ -743,6 +904,9 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
     path = target.path
     if path is None:
         return None
+    policy = _policy_reason(target, prot)
+    if policy is not None:
+        return policy
     lexical = {path, target.pattern or path}
     # Cheap prefilter: realpath/F_GETPATH only for words that could be there.
     # The raw (un-normalised) word's realpath resolves ``..`` physically, the
@@ -2565,6 +2729,14 @@ def classify_targets(
         )
         pad_hits: set[str | None] = set()
         for t in writes:
+            bulk = _bulk_reason(t, prot)
+            if bulk is not None:
+                evidence_hits.append(RankedTarget(t, bulk[1], bulk[0]))
+                continue
+            if t.op == "bulk":
+                # A git work tree recorded only for the rule above: the rest of
+                # its ranking is the backstop's ordinary cwd touch.
+                continue
             reason = _touch_reason(t, prot, globstar=globstar)
             if reason == OTHER_SCRATCHPAD:
                 # Not evidence, but another session's files: every write there
@@ -2589,6 +2761,14 @@ def classify_targets(
             if reason is None:
                 continue
             shown = f"{reason}, handed to {t.program or 'a program'}"
+            if reason == RESPONDER_POLICY_REASON:
+                # An unknown program (an interpreter's ``-c``/``-e``) handed the
+                # policy or its directory may write it, and nothing here can
+                # tell; the policy authorizes the agent asking, so no judge or
+                # ask may lift it (review M1/S-1). Reads go through ``cat`` or
+                # the read tool, which stay LOW.
+                evidence_hits.append(RankedTarget(t, Risk.CRITICAL, shown))
+                continue
             if reason == OTHER_SCRATCHPAD:
                 tree = _tree_read(
                     t,
