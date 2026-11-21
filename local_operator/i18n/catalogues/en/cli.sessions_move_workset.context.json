@@ -418,5 +418,115 @@
     "role": "CLI receipt line on the SOURCE when the destination's answer about the working files never arrived",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "{device} is the destination device name, verbatim. Must not imply the files stayed: they may be on {device}."
+  },
+  "cli.sessions_move_workset.help_setup_deps": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "--to local, --setup-deps-adjacent flag help. Keep '--to local' verbatim. 'lockfile' = pnpm-lock.yaml/uv.lock etc."
+  },
+  "cli.sessions_move_workset.setup_cancelled": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Final summary line after Ctrl-C; {command} a shell command."
+  },
+  "cli.sessions_move_workset.setup_complete": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Final summary line."
+  },
+  "cli.sessions_move_workset.setup_description": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Subcommand description. Keep node_modules and .venv verbatim."
+  },
+  "cli.sessions_move_workset.setup_help": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "One-line subcommand help in the `lop sessions` list."
+  },
+  "cli.sessions_move_workset.setup_hint_log": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "{log} is a file path."
+  },
+  "cli.sessions_move_workset.setup_hint_manual": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "For git lfs pull: the program deliberately does not run it."
+  },
+  "cli.sessions_move_workset.setup_hint_missing": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "{tool} is an executable name (pnpm, uv...), {run} a command; keep verbatim. The program never installs tools itself."
+  },
+  "cli.sessions_move_workset.setup_hint_present": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "{target} is a path to node_modules or .venv."
+  },
+  "cli.sessions_move_workset.setup_hint_refused": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "{reason} is a machine reason code kept in English."
+  },
+  "cli.sessions_move_workset.setup_incomplete": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Final summary line. 'working set' = the moved worktrees and files; {command} a shell command."
+  },
+  "cli.sessions_move_workset.setup_none": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "{session} is a conversation id (hex)."
+  },
+  "cli.sessions_move_workset.setup_not_restored": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "{path} is a worktree path."
+  },
+  "cli.sessions_move_workset.setup_nothing": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Shown when the restored worktrees have no lockfile needing a dependency tree."
+  },
+  "cli.sessions_move_workset.setup_prompt": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Interactive y/N prompt. Keep '[y/N] ' verbatim including the trailing space: the program accepts only y/yes."
+  },
+  "cli.sessions_move_workset.setup_remote": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Refusal. {device} is a device name, {command} a shell command; keep both and '--setup-deps' verbatim."
+  },
+  "cli.sessions_move_workset.setup_row": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "One result row. {state} is a machine code (done, present, failed, missing_toolchain...) kept in English; {cwd} a path; {run} a command. Keep the layout."
+  },
+  "cli.sessions_move_workset.setup_running": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Progress line before a command starts; {cwd} a path, {run} a command."
+  },
+  "cli.sessions_move_workset.setup_session_help": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Argument help."
+  },
+  "cli.sessions_move_workset.setup_status_help": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Flag help for --status."
+  },
+  "cli.sessions_move_workset.setup_warning": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Safety warning shown before the user approves; calm, factual. 'postinstall' is an npm term, keep verbatim."
+  },
+  "cli.sessions_move_workset.setup_yes_help": {
+    "role": "CLI line of `lop sessions setup-deps` / `lop sessions move --setup-deps` (recreating node_modules/.venv after a session's worktrees were moved to this device).",
+    "tone": "plain, factual, calm",
+    "note": "Flag help for --yes."
   }
 }

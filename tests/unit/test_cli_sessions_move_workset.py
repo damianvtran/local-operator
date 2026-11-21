@@ -566,3 +566,103 @@ def test_an_unreadable_working_set_keeps_the_older_relay_refused(
 
     assert refused["code"] == "relay_restart_required", refused
     assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Dependency setup (design §9 phase 2): `--setup-deps` and `sessions setup-deps`
+# ---------------------------------------------------------------------------
+
+
+def _fake_pnpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A `pnpm` ahead of the host's real one: records its argv/cwd, makes node_modules."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    script = bindir / "pnpm"
+    script.write_text('#!/bin/sh\necho "pnpm $*|$PWD" >> .calls\nmkdir node_modules\n')
+    script.chmod(0o755)
+    import os
+
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return bindir
+
+
+def test_setup_deps_toward_a_peer_is_refused_before_anything_moves(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.network import mobility
+
+    def never(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise AssertionError("a --setup-deps move toward a peer must not be issued")
+
+    monkeypatch.setattr(mobility, "request_move", never)
+    args = cli.build_cli_parser().parse_args(
+        ["sessions", "move", SESSION, "--to", "laptop", "--setup-deps", "--yes"]
+    )
+
+    code = cli.sessions_move_command(args)
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "Nothing was moved" in err and f"lop sessions setup-deps {SESSION}" in err
+
+
+def test_a_recall_with_setup_deps_recreates_the_tree_on_this_device(
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The real two-relay recall, then setup over THIS device's own restore record."""
+    (_server_a, server_b, _h, _p), rig = staged
+    _fake_pnpm(tmp_path, monkeypatch)
+    source_tree = sorted(p.name for p in (rig.feat / "node_modules").iterdir())
+
+    code = _run(["--yes", "--setup-deps"])
+
+    out = capsys.readouterr()
+    assert code == 0, out.err
+    assert "install scripts" in out.out  # the warning precedes the move
+    receipt = json.loads(
+        (server_b.root / "network" / "workset-in" / SESSION / "setup.json").read_text()
+    )
+    assert receipt["state"] == "complete", receipt
+    (row,) = receipt["rows"]
+    assert row["kind"] == "pnpm" and row["state"] == "done"
+    dest = rig.home / row["cwd"].removeprefix("~/")
+    assert (dest / "node_modules").is_dir()
+    assert (dest / ".calls").read_text().startswith("pnpm install --frozen-lockfile|")
+    # The source's own tree is never touched by the destination's setup.
+    assert sorted(p.name for p in (rig.feat / "node_modules").iterdir()) == source_tree
+    assert "Dependency setup is complete." in out.out
+
+
+def test_setup_deps_command_without_yes_off_a_terminal_runs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home, config = tmp_path / "home", tmp_path / "config"
+    wt = home / "src" / "app"
+    wt.mkdir(parents=True)
+    (wt / "package-lock.json").write_text("{}")
+    arrived = config / "network" / "workset-in" / SESSION
+    arrived.mkdir(parents=True)
+    (arrived / "pending.json").write_text(
+        json.dumps(
+            {
+                "plans": [{"n": 0, "path": "~/src/app"}],
+                "restored": {"0": {"state": "restored", "dest_path": "~/src/app"}},
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    args = cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION])
+
+    code = cli.sessions_setup_deps_command(args)
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "not_run · ~/src/app: npm ci" in out.out
+    assert "install scripts" in out.err
+    assert not (arrived / "setup.json").exists() and not (wt / "node_modules").exists()
+    status = cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION, "--status"])
+    assert cli.sessions_setup_deps_command(status) == 1  # no receipt yet

@@ -682,6 +682,18 @@ Detected per restored worktree by lockfile; PR B puts them in `recipes` (not run
 Phase 2: `--setup-deps` runs the listed recipe on the destination after restore
 (package lifecycle scripts execute, which is why it is opt-in, not default).
 
+Phase 2 as built (`network/workset_setup.py`): `lop sessions setup-deps <id>` on the
+destination, and `lop sessions move <id> --to local --setup-deps` (a recall, where this
+device is the destination). `--to <peer> --setup-deps` is refused before anything moves
+and names the destination-side command: no peer can make this device run install
+scripts. Recipes are re-derived from the restored tree, mapped to a fixed argv (no
+shell; the commons row is a `symlink` into an absent/empty path, never `rm -rf`), run
+in a cwd re-checked against `mesh.move.working_set_roots`, one bounded process group
+per step (the `mobile/install.py` package-step limits), with `VIRTUAL_ENV`/
+`UV_PROJECT_ENVIRONMENT` stripped. An existing `node_modules`/`.venv` is `present` and
+untouched; a missing tool is reported with its recipe, never installed. The receipt is
+`network/workset-in/<sid>/setup.json` (`--status`), audited as `session.workset.setup`.
+
 ## 10. Recall (`--to local`)
 
 Symmetric by construction: the remote device is the owner, computes the manifest

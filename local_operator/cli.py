@@ -1999,7 +1999,46 @@ def build_cli_parser() -> LocalizedArgumentParser:
         action="store_true",
         help=_wsh.help_yes().envelope(locale=help_locale)["text"],
     )
+    # DEPENDENCY SETUP (design move-working-set.md §9, phase 2). A move never carries
+    # node_modules/.venv; this opt-in recreates them from each restored worktree's
+    # lockfile. Accepted only with `--to local`, where THIS device is the one the
+    # files land on and the person typing it is the one whose shell runs the
+    # package manager's install scripts. `--to <peer>` refuses it before anything
+    # moves (no remote execution) and names `lop sessions setup-deps` to run there.
     move_parser.add_argument(
+        "--setup-deps",
+        action="store_true",
+        help=_wsh.help_setup_deps().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
+
+    # `lop sessions setup-deps <id>`: the destination-local half of §9 phase 2, for a
+    # working set that arrived here by ANY move (a peer's `--to <this device>`
+    # included). Its own verb rather than a mesh request: setup runs install scripts
+    # in this device's home, so it is only ever started by the operator sitting here.
+    setup_parser = sessions_subparsers.add_parser(
+        "setup-deps",
+        help=_wsh.setup_help().envelope(locale=help_locale)["text"],
+        description=_wsh.setup_description().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    setup_parser.add_argument(
+        "session", help=_wsh.setup_session_help().envelope(locale=help_locale)["text"]
+    )
+    setup_parser.add_argument(
+        "--status",
+        action="store_true",
+        help=_wsh.setup_status_help().envelope(locale=help_locale)["text"],
+    )
+    setup_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help=_wsh.setup_yes_help().envelope(locale=help_locale)["text"],
+    )
+    setup_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
     )
 
@@ -7890,6 +7929,23 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         return 2
     wait_s = mobility.MOVE_MAX_WAIT_S if int(args.wait) < 0 else float(args.wait)
     as_json = bool(getattr(args, "json", False))
+    setup_deps = bool(getattr(args, "setup_deps", False))
+    if setup_deps and to != "local":
+        # NO REMOTE EXECUTION (design §9 phase 2): the destination's operator has
+        # granted file import at most, never "run install scripts for me". Refused
+        # BEFORE the move so the user cannot believe it ran; the remedy is the verb
+        # the person at that device runs.
+        print(
+            render_resolved(
+                _wsh.setup_remote(
+                    device=to, command=f"lop sessions setup-deps {shlex.quote(session_id)}"
+                )
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    if setup_deps and not bool(getattr(args, "dry_run", False)) and not as_json:
+        print(render_resolved(_wsh.setup_warning()))
     if bool(getattr(args, "dry_run", False)):
         return _sessions_move_dry_run(session_id, to=to, as_json=as_json)
 
@@ -7984,6 +8040,10 @@ def sessions_move_command(args: argparse.Namespace) -> int:
                 print(render_resolved(_wsh.aborted()), file=sys.stderr)
                 return 1
     if as_json:
+        if result.get("ok") and setup_deps:
+            # The flag is the script's explicit opt-in; the receipt rides the move's
+            # document under ``setup`` (``None`` when no working set arrived here).
+            result = {**result, "setup": _setup_deps_receipt(session_id)}
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
         return 0 if result.get("ok") else 1
     workset_lines = _sessions_move_workset_words(
@@ -8012,10 +8072,166 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     if result.get("ok"):
         for line in lines:
             print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        if setup_deps:
+            # The move itself succeeded; setup is a separate, reported outcome. Its
+            # failure never undoes the move or touches the restored files, so the
+            # exit status stays the MOVE's and the setup lines say what is left.
+            _sessions_setup_deps_run(session_id, as_json=False, assume_yes=True, warned=True)
         return 0
     for line in lines:
         print(line, file=sys.stderr)
     return 1
+
+
+def sessions_setup_deps_command(args: argparse.Namespace) -> int:
+    """``lop sessions setup-deps <id>``: recreate a moved working set's dependency trees.
+
+    Runs on THIS device only, over the worktrees THIS device restored for ``<id>``
+    (``network/workset_setup.py`` carries the security model). ``--status`` reads
+    the last receipt and runs nothing. Without ``--yes`` an interactive terminal is
+    asked once after the plan and the install-script warning; a non-interactive
+    caller without ``--yes`` gets the plan and exit 1, never a silent install.
+    Exit 0 when every row is done/present/skipped, else 1.
+    """
+
+    from local_operator.network import workset_setup
+
+    session_id = str(args.session)
+    if bool(getattr(args, "status", False)):
+        receipt = workset_setup.read_receipt(Path(config_dir()), session_id)
+        if receipt is None:
+            print(render_resolved(_wsh.setup_none(session=session_id)), file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(workset_setup.receipt_json(receipt))
+        else:
+            _print_setup_rows(receipt.get("rows") or [], receipt.get("not_restored") or [])
+            _print_setup_summary(str(receipt.get("state") or ""), session_id)
+        return 0 if receipt.get("state") == "complete" else 1
+    return _sessions_setup_deps_run(
+        session_id,
+        as_json=bool(getattr(args, "json", False)),
+        assume_yes=bool(getattr(args, "yes", False)),
+    )
+
+
+def _setup_deps_receipt(session_id: str) -> dict[str, Any] | None:
+    """Run setup without prompting (the caller holds the opt-in) and audit it."""
+    from local_operator.network import workset_setup
+
+    config, home = Path(config_dir()), Path.home()
+    plan = workset_setup.plan_setup(config, home, session_id)
+    if plan is None:
+        return None
+    receipt = workset_setup.run_setup(config, home, plan)
+    workset_setup.audit(config, session_id, receipt)
+    return receipt
+
+
+def _sessions_setup_deps_run(
+    session_id: str, *, as_json: bool, assume_yes: bool, warned: bool = False
+) -> int:
+    import json as _json
+
+    from local_operator.network import workset_setup
+
+    config = Path(config_dir())
+    home = Path.home()
+    plan = workset_setup.plan_setup(config, home, session_id)
+    if plan is None:
+        print(render_resolved(_wsh.setup_none(session=session_id)), file=sys.stderr)
+        return 1
+    runnable = [r for r in plan.rows if r.state == "not_run"]
+    interactive = not as_json and sys.stdin.isatty() and sys.stdout.isatty()
+    if runnable and not as_json and not warned:
+        # The warning HEADS the plan ("each package manager below"): `--yes` skips
+        # the question, never the warning; a move printed it before it moved. Off a
+        # terminal without `--yes` it goes to stderr with the refusal.
+        print(
+            render_resolved(_wsh.setup_warning()),
+            file=sys.stdout if (assume_yes or interactive) else sys.stderr,
+        )
+    if not as_json:
+        _print_setup_rows([vars(r) for r in plan.rows], plan.not_restored)
+    if not runnable:
+        if as_json:
+            print(_json.dumps(workset_setup.plan_json(plan), indent=2, sort_keys=True))
+        elif not plan.rows:
+            print(render_resolved(_wsh.setup_nothing()))
+        ok = all(r.state in workset_setup.OK_STATES for r in plan.rows) and not plan.not_restored
+        return 0 if ok else 1
+    if not assume_yes:
+        if not interactive:
+            # A script must say --yes: install scripts never run on an implicit yes.
+            if as_json:
+                print(_json.dumps(workset_setup.plan_json(plan), indent=2, sort_keys=True))
+                print(render_resolved(_wsh.setup_warning()), file=sys.stderr)
+            return 1
+        try:
+            answer = input(render_resolved(_wsh.setup_prompt()))
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            _print_setup_summary("cancelled", session_id)
+            return 1
+
+    def progress(row: Any) -> None:
+        if not as_json:
+            _print_setup_rows([vars(row)], [])
+
+    def starting(row: Any) -> None:
+        if not as_json:
+            print(render_resolved(_wsh.setup_running(cwd=row.cwd, run=row.run)), flush=True)
+
+    receipt = workset_setup.run_setup(config, home, plan, progress=progress, starting=starting)
+    workset_setup.audit(config, session_id, receipt)
+    if as_json:
+        print(workset_setup.receipt_json(receipt))
+    else:
+        _print_setup_summary(str(receipt.get("state") or ""), session_id)
+    return 0 if receipt.get("state") == "complete" else 1
+
+
+def _print_setup_rows(rows: Any, not_restored: Any) -> None:
+    """One keyed line per setup row, plus the hint that row's state needs."""
+    for row in rows:
+        print(
+            render_resolved(
+                _wsh.setup_row(
+                    state=str(row.get("state") or ""),
+                    cwd=str(row.get("cwd") or ""),
+                    run=str(row.get("run") or ""),
+                )
+            )
+        )
+        state = str(row.get("state") or "")
+        if state == "missing_toolchain":
+            hint = _wsh.setup_hint_missing(
+                tool=str(row.get("missing") or ""), run=str(row.get("run") or "")
+            )
+        elif state == "present":
+            hint = _wsh.setup_hint_present(target=str(row.get("target") or row.get("cwd") or ""))
+        elif state in ("failed", "timeout", "cancelled") and row.get("log"):
+            hint = _wsh.setup_hint_log(log=str(row.get("log")))
+        elif state == "refused":
+            hint = _wsh.setup_hint_refused(reason=str(row.get("reason") or ""))
+        elif state == "manual":
+            hint = _wsh.setup_hint_manual(run=str(row.get("run") or ""))
+        else:
+            continue
+        print("  " + render_resolved(hint))  # i18n: ignore indentation around a keyed line
+    for path in not_restored:
+        print(render_resolved(_wsh.setup_not_restored(path=str(path))))
+
+
+def _print_setup_summary(state: str, session_id: str) -> None:
+    command = f"lop sessions setup-deps {shlex.quote(session_id)}"
+    if state == "complete":
+        print(render_resolved(_wsh.setup_complete()))
+    elif state == "cancelled":
+        print(render_resolved(_wsh.setup_cancelled(command=command)), file=sys.stderr)
+    else:
+        print(render_resolved(_wsh.setup_incomplete(command=command)), file=sys.stderr)
 
 
 def _sessions_move_dry_run(session_id: str, *, to: str, as_json: bool) -> int:
@@ -8366,6 +8582,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "sync":
         return sessions_sync_command(args)
+
+    if getattr(args, "sessions_command", None) == "setup-deps":
+        return sessions_setup_deps_command(args)
 
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer

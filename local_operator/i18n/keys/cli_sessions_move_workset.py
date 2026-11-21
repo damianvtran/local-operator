@@ -86,6 +86,10 @@ def help_no_engage_on_arrival() -> Msg:
     return Msg("cli.sessions_move_workset.help_no_engage_on_arrival", {})
 
 
+def help_setup_deps() -> Msg:
+    return Msg("cli.sessions_move_workset.help_setup_deps", {})
+
+
 def help_without() -> Msg:
     return Msg("cli.sessions_move_workset.help_without", {})
 
@@ -334,6 +338,90 @@ def receipt_transferred(*, source: str, count: int | float) -> Msg:
 
 def receipt_without(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_without", {"device": device})
+
+
+def setup_cancelled(*, command: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_cancelled", {"command": command})
+
+
+def setup_complete() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_complete", {})
+
+
+def setup_description() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_description", {})
+
+
+def setup_help() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_help", {})
+
+
+def setup_hint_log(*, log: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_hint_log", {"log": log})
+
+
+def setup_hint_manual(*, run: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_hint_manual", {"run": run})
+
+
+def setup_hint_missing(*, tool: str, run: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_hint_missing", {"tool": tool, "run": run})
+
+
+def setup_hint_present(*, target: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_hint_present", {"target": target})
+
+
+def setup_hint_refused(*, reason: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_hint_refused", {"reason": reason})
+
+
+def setup_incomplete(*, command: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_incomplete", {"command": command})
+
+
+def setup_none(*, session: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_none", {"session": session})
+
+
+def setup_not_restored(*, path: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_not_restored", {"path": path})
+
+
+def setup_nothing() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_nothing", {})
+
+
+def setup_prompt() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_prompt", {})
+
+
+def setup_remote(*, device: str, command: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_remote", {"device": device, "command": command})
+
+
+def setup_row(*, state: str, cwd: str, run: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_row", {"state": state, "cwd": cwd, "run": run})
+
+
+def setup_running(*, cwd: str, run: str) -> Msg:
+    return Msg("cli.sessions_move_workset.setup_running", {"cwd": cwd, "run": run})
+
+
+def setup_session_help() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_session_help", {})
+
+
+def setup_status_help() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_status_help", {})
+
+
+def setup_warning() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_warning", {})
+
+
+def setup_yes_help() -> Msg:
+    return Msg("cli.sessions_move_workset.setup_yes_help", {})
 
 
 def unknown(*, source: str, repo: str) -> Msg:
