@@ -280,11 +280,21 @@ class EffortSupport:
 _ANTHROPIC_FULL = EffortSupport(("low", "medium", "high", "xhigh", "max"), default="high")
 _ANTHROPIC_NO_XHIGH = EffortSupport(("low", "medium", "high", "max"), default="high")
 _ANTHROPIC_BASE = EffortSupport(("low", "medium", "high"), default="high")
-# Opus 5.5 is the one Anthropic model whose documented default is NOT `high`:
-# "The API defaults to `high` (`medium` on Claude Opus 5.5)" (effort doc, read
-# 2026-09-24). The seed is sent as `output_config.effort`, so seeding `high`
-# here would silently run every turn one rung above the model's own default.
-_ANTHROPIC_OPUS_5_5 = EffortSupport(("low", "medium", "high", "xhigh", "max"), default="medium")
+# Opus 5.5 and Haiku 5.5 are the Anthropic models whose documented default is
+# NOT `high`: "Claude Opus 5.5 and Claude Haiku 5.5 default to medium ...
+# Setting `effort` to the model's default (`"medium"` on Claude Opus 5.5 and
+# Claude Haiku 5.5, `"high"` on other models) produces exactly the same
+# behavior as omitting the `effort` parameter entirely" (effort doc, Opus read
+# 2026-09-24, Haiku 2026-11-21; both "support all five effort levels"). The seed
+# is SENT as `output_config.effort`, so seeding `high` here runs every turn one
+# rung above the model's own default. Haiku 5.5 did exactly that until
+# 2026-11-21 by falling through to the 5+ arm: on Bedrock research tasks (n=8,
+# lop v0.110.0) `high` cost 1.78x Claude Code where `medium` cost 1.19x, with
+# accuracy indistinguishable (list-task F1 0.906 high vs 0.861 medium vs CC
+# 0.891, p>0.5, no wrong values) -- the cost of a level nobody chose.
+_ANTHROPIC_MEDIUM_DEFAULT = EffortSupport(
+    ("low", "medium", "high", "xhigh", "max"), default="medium"
+)
 
 # OpenAI. The GPT-5 and GPT-6 ladders are not interchangeable: choosing the
 # cheapest rung for a naming errand sent `none` to GPT-6 and got HTTP 400,
@@ -365,10 +375,11 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # `output_config: {"effort": "high"}` on every request. Three digits is
     # generous for a generation number and cannot swallow a date.
     (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
-    # Ahead of the 5+ arm, which would otherwise claim it with `high`. `(?!\d)`
-    # stops `5-55` and deliberately lets a punctuated suffix through
+    # Ahead of the 5+ arm, which would otherwise claim them with `high`. Exact
+    # tiers, not a 5.5 widening: Sonnet 5.5 documents `high`. `(?!\d)` stops
+    # `5-55` and deliberately lets a punctuated suffix through
     # (`claude-opus-5-5-1`, a dated snapshot): same generation, same default.
-    (re.compile(r"claude-opus-5[.-]5(?!\d)"), _ANTHROPIC_OPUS_5_5),
+    (re.compile(r"claude-(?:opus|haiku)-5[.-]5(?!\d)"), _ANTHROPIC_MEDIUM_DEFAULT),
     (re.compile(r"claude-[a-z]+-(?:[5-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"gpt-5(?!\d)"), _OPENAI_GPT5),
     (re.compile(r"gpt-(?:[6-9]|\d{2,})"), _OPENAI_GPT6),
