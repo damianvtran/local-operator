@@ -14008,6 +14008,27 @@ class Session:
             return None
         return self._enqueue_ask
 
+    def _integration_consent_seam(self) -> Any | None:
+        """The Team Integrations consent seam, or ``None`` where no person can grant.
+
+        Bound per turn beside the ask doors and ``None`` under the same queue
+        condition, plus for a delegated child: a child never files a consent
+        card on its parent's screen for work the person watching never asked
+        about (the ``_authorize_hub_pull`` rule), and a channel post that
+        reached a child must never reach an integration admin operation (RFC
+        §8.1, S-83). ``answered_ids`` is read LIVE, because the set is filled as
+        answer rows arrive during the run and reset when the next run starts.
+        """
+        if self._parent_session_id or self.ask_queue() is None:
+            return None
+        from local_operator.team_bridge.integration_consent import IntegrationConsent
+
+        return IntegrationConsent(
+            self.ask_queue,
+            lambda: set(self._run_answered_ask_ids),
+            session_id=str(self.session_id or ""),
+        )
+
     def _ask_withdraw_callable(self) -> Callable[..., Any] | None:
         """The tool's withdraw door, or ``None`` on the BLOCKING arm (design §12).
 
@@ -25273,6 +25294,9 @@ class Session:
             begin_site_request=(
                 self.begin_site_request if self._site_card_enqueue_callable() is not None else None
             ),
+            # Team Integrations: only a person's answer on a host-filed card
+            # can publish an app or mint a credential (RFC §8.2).
+            integration_consent=self._integration_consent_seam(),
             # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
             # same two conditions as the two doors above, so its presence IS
             # "this ask would queue" — which is exactly the population the

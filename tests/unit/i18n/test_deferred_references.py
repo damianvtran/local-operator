@@ -184,6 +184,40 @@ def test_sdk_spec_refusals_render_without_the_eager_bundle() -> None:
     assert sdk.SessionSpecError is SessionSpecError
 
 
+def test_team_integration_consent_renders_without_the_eager_bundle() -> None:
+    """Consent cards carry finished strings, not deferred keys a client needs.
+
+    Keep the safety-critical approve/cancel labels in the same locale as the
+    question after deferral, without changing the audited catalogue bytes.
+    """
+    from local_operator.i18n import text
+    from local_operator.team_bridge.integrations import AskCopy, ask_question
+
+    namespace = "wire.team_integrations"
+    assert namespace in catalogues.DEFERRED_NAMESPACES
+    for locale in ("en", "hi"):
+        bundle = catalogues.wire_bundle(locale)
+        assert namespace not in bundle["namespaces"]
+        assert namespace in {entry["namespace"] for entry in bundle["deferred"]}
+        messages = catalogues.load_catalogue(locale, namespace)
+        text.set_active_locale(locale)
+        try:
+            question, affirm, decline = ask_question(
+                AskCopy(op="mint_token", app_name="Review app", org_name="Review org")
+            )
+        finally:
+            text.set_active_locale("en")
+        assert question["question"].startswith(
+            messages[f"{namespace}.ask.mint_token.question"]
+            .replace("{app_name}", "Review app")
+            .replace("{org_name}", "Review org")
+        )
+        assert affirm == messages[f"{namespace}.option.approve"]
+        assert decline == messages[f"{namespace}.option.cancel"]
+        assert [option["label"] for option in question["options"]] == [decline, affirm]
+        assert namespace not in json.dumps(question)
+
+
 def test_the_census_catches_one_added_reference(
     i18n_deferred_watch: ModuleType, tmp_path: Path
 ) -> None:
