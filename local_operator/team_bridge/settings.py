@@ -302,15 +302,19 @@ AMBIENT_WAKE_DWELL_MAX_SECONDS = 60
 #: are unaddressed, ~420 ambient turns/day for the CoS); ``shadow`` computes and LOGS
 #: the class it would choose but behaves exactly as ``off``; ``off`` is the pre-triage
 #: behaviour (every admitted message wakes). Anything else reads as ``on``. Config-file
-#: only, like the dwell above.
+#: only, like the dwell above. Quoting is NOT required: YAML 1.1 reads a bare ``off`` /
+#: ``on`` as a boolean, so ``false`` means ``off`` and ``true`` means ``on`` (review r1
+#: R4: the rollback switch must not fail toward ``on``).
 AMBIENT_TRIAGE_MODES = ("on", "shadow", "off")
 DEFAULT_AMBIENT_TRIAGE = "on"
 
 #: ``team_bridge.urgent_failover_seconds`` — for an URGENT ambient message (a human's
 #: channel post, ``@everyone``, a question) one agent wakes at once and the others
 #: stand by: the agent ranked ``k`` for that message wakes ``k`` x this many seconds
-#: later, and only if nobody else has replied in the thread by then (rank >= 3 never
-#: wakes). MEASURED BEFORE CAPPED (2026-11-21, this machine, read-only): the first
+#: later, and only if nobody else has replied in the thread by then; every rank >= 3
+#: shares the last delay (3 x this), so a non-receiving member holding a slot costs
+#: latency, never the message (the operator: a lost urgent message is worse than a
+#: duplicate answer). MEASURED BEFORE CAPPED (2026-11-21, this machine, read-only): the first
 #: channel post after each card in the same conversation (``reply_guard.posts`` vs
 #: ``body_reservations.card_posted_at``, ~24 h, cutoff 1800 s) had n=181, p50 25.3 s,
 #: p90 312.0 s, max 1753.6 s (censored by the cutoff); 89.5% answered within 300 s.
@@ -627,8 +631,14 @@ def _bounded_whole_seconds(value: Any, *, default: int, maximum: int) -> int:
 
 
 def _ambient_triage(value: Any) -> str:
-    """One of :data:`AMBIENT_TRIAGE_MODES`; anything else is the default (``on``)."""
+    """One of :data:`AMBIENT_TRIAGE_MODES`; anything else is the default (``on``).
 
+    A YAML boolean is the unquoted spelling of a mode (``off`` → ``False``), so it
+    maps back to that mode rather than to the default.
+    """
+
+    if isinstance(value, bool):
+        return "on" if value else "off"
     if isinstance(value, str) and value.strip().lower() in AMBIENT_TRIAGE_MODES:
         return value.strip().lower()
     return DEFAULT_AMBIENT_TRIAGE

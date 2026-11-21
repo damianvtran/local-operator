@@ -466,13 +466,16 @@ def _group_key(
 ) -> GroupKey:
     # session_id last: ``flush_due`` reads ``key[2]`` as the conversation id.
     # A staggered standby keys apart from the thread's ordinary group (a suffix
-    # no thread id can carry) so it keeps its own due time and rate memory.
+    # no thread id can carry) so it keeps its own due time and rate memory — and
+    # PER MESSAGE (review r1 m2): ``due`` is set only when a group is created, so
+    # a second urgent message in the same thread with another slot would inherit
+    # the first one's due time and be checked early (a duplicate) or late.
     thread = metadata.thread_root_id or ""
     return (
         str(config_dir),
         str(getattr(owner, "endpoint_id", "") or ""),
         metadata.conversation_id,
-        f"{thread}\x1fstaggered" if staggered else thread,
+        f"{thread}\x1fstaggered\x1f{metadata.message_id}" if staggered else thread,
         session_id,
     )
 

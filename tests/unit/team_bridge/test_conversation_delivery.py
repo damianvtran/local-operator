@@ -2692,8 +2692,10 @@ def test_a_passive_thread_reply_is_admitted_but_wakes_nobody(
         assert handled[0]["detail"] == conversation_mod.CARD_PASSIVE
         # Nothing was buffered for a later flush either: no wake can leak out late.
         assert not out.get("coalesced_wakes")
-        # The card obligation is settled, so a replayed delivery never wakes later.
-        assert rows[0]["card_posted_at"] is not None
+        # The card obligation is settled, so a replayed delivery never wakes later:
+        # the row is ``deferred`` (reads settled) and, since no card went out, carries
+        # no card mark (ambient-dwell review r1 n1/m1).
+        assert (rows[0]["state"], rows[0]["card_posted_at"]) == ("deferred", None)
 
         replay = _run(b, config_dir)
         assert transcripts["sess_b"] == []
@@ -2796,8 +2798,10 @@ def test_a_held_passive_reply_settles_on_the_retry_pass(
     # The retry outcome carries no hand-off ``detail``; the transcript is the wake.
     assert len(transcripts["sess_b"]) == (1 if wakes else 0)
     if not wakes:
-        # Settled like the live path, so a later replay of the ref is a duplicate.
-        assert _reservation_rows(config_dir)[0]["card_posted_at"] is not None
+        # Settled like the live path, so a later replay of the ref is a duplicate:
+        # ``deferred`` with no card mark (ambient-dwell review r1 n1/m1).
+        row = _reservation_rows(config_dir)[0]
+        assert (row["state"], row["card_posted_at"]) == ("deferred", None)
 
 
 def test_a_mention_is_never_passive(tmp_path, monkeypatch) -> None:

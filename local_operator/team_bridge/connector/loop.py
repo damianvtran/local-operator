@@ -1054,7 +1054,13 @@ def _staggered_promoter(auth_store: Any, access: Any) -> Any:
     async def promote(group_owner: Any, metadata: Any, *, config_dir: Path) -> bool:
         from . import conversation as _conversation
 
-        client = await _conversation._wire_for(group_owner, config_dir, auth_store)
+        try:
+            client = await _conversation._wire_for(group_owner, config_dir, auth_store)
+        except Exception:  # noqa: BLE001 — closed code, never content
+            # No wire = no hub read, NOT no wake (review r1 m1): the check falls
+            # back to the free local record, and an unconfirmed answer promotes.
+            logger.warning("bridge: staggered wake check unwired code=wire_unavailable")
+            client = None
         return await _conversation.promote_staggered(
             group_owner, metadata, config_dir=config_dir, client=client, access=access
         )

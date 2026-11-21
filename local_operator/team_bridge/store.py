@@ -4715,6 +4715,13 @@ class Store:
         the card owed (re-posted once on the replay — at-least-once, never a
         loss). Conditional on the column still being unset, so a replay never
         moves the original time. Live-owner fenced.
+
+        NEVER on a ``deferred`` row (review r1 m1/n1): no card went out for it, and
+        its card status already reads settled without the mark. Marking it used
+        to break the urgent failover — a replay of a parked standby set the column
+        and :meth:`promote_staggered_reservation` (which requires it unset) then
+        refused, so the standby never woke — and it made ``card_posted_at`` claim a
+        card the failover measurement would count.
         """
 
         with self._connect() as conn:
@@ -4724,7 +4731,8 @@ class Store:
             self._ensure_card_posted_column(conn)
             updated = conn.execute(
                 "UPDATE body_reservations SET card_posted_at = ? WHERE owner_key = ? "
-                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL",
+                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL "
+                "AND state != 'deferred'",
                 (float(now), _owner_key(owner), conversation_id, message_id),
             )
             return bool(updated.rowcount)

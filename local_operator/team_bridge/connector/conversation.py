@@ -9,8 +9,12 @@ agent member whose endpoint consent allows it. That row carries refs only:
    and a closed sender kind, never names or bodies. Display names come only
    from the endpoint-authorized body response and are rendered after matching
    screening/hash/admission. Older servers omit them: render IDs and unknown
-   provenance, never consult a person-gated view. Cards include tenant and
-   conversation locators so the agent can read without guessing a channel.
+   provenance, never consult a person-gated view for names. Cards include tenant
+   and conversation locators so the agent can read without guessing a channel.
+   The ONE sanctioned conversation-view read is channel-wake triage's ROSTER
+   (``_agent_roster``): member ids, kinds, states and visible notify levels, never
+   names or bodies, only for an URGENT message under ``ambient_triage`` ``on``
+   (never ``off``/``shadow``), cached per conversation, failures negative-cached.
 2. **Screen, then admit.** Before any wake, the body is fetched through the
    endpoint-addressed classification endpoint, hashed against the server's
    binding hash, and run through the SAME H3 screening pipeline the pair lane
@@ -76,7 +80,7 @@ from ..client import (
     screening_template_v4_usable,
 )
 from ..hold_release import REVIEW_HOLD_CODES, WORK_SCOPE_HOLD
-from ..types import ConversationFeedRef
+from ..types import ConversationFeedRef, sender_class
 from .batch_screen import (
     allocation_for,
     came_from_void_batch,
@@ -917,22 +921,76 @@ class WakeDecision:
 
 #: Pre-triage behaviour: every admitted message wakes on the coalescer's rate.
 WAKE_AS_BEFORE = WakeDecision("triage_off")
-#: How many agents an urgent message can wake: slot 0 now, slots 1..2 as failover.
+#: Failover slots with their OWN delay: slot 0 wakes now, slot ``k`` after ``k`` x
+#: ``urgent_failover_seconds``. Every rank at or past this shares the LAST delay
+#: (``URGENT_MAX_SLOTS`` x failover) instead of never waking (review r1 R3): the
+#: roster is only an approximation of who received the message (another account's
+#: notify level and endpoint state are not readable), so a wrong roster may cost
+#: latency, never the message. Operator: losing an urgent message is worse than a
+#: duplicate answer.
 URGENT_MAX_SLOTS = 3
-#: Conversation rosters are re-read at most this often per conversation: a member
-#: joining mid-window only shifts which standby wakes, never whether slot 0 does.
+#: Conversation rosters are re-read at most this often per conversation. A cached
+#: roster that does NOT list this agent is re-read at once (it joined since), and a
+#: departed member still cached only delays a standby (see ``URGENT_MAX_SLOTS``).
 ROSTER_TTL_S = 600.0
-_ROSTERS: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+#: A FAILED roster read is remembered this long (review r1 Q4): a 403 or an outage
+#: would otherwise cost one failing GET per urgent message. Unreadable = slot 0.
+ROSTER_FAILURE_TTL_S = 60.0
+
+
+@dataclass(frozen=True)
+class _RosterMember:
+    """One active agent member as the conversation view shows it (no content).
+
+    ``notify`` is readable only on the caller's OWN account's rows (agent-server
+    ``BridgeConversationParticipantView``); ``""`` = not visible, which the hub
+    resolves to ``all`` for an agent. ``joined_seq`` 0 = not stated.
+    """
+
+    endpoint_id: str
+    account_id: str
+    notify: str = ""
+    joined_seq: int = 0
+
+
+_ROSTERS: dict[tuple[str, str], tuple[float, tuple[_RosterMember, ...] | None]] = {}
+_ROSTER_CAP = 512
+#: A message sender as the hub's message views can name it: ``(account_id, sender
+#: class)``. NOT the account alone (review r1 R2): agent-server gives every agent its
+#: OWNER's account id, so a human and their agent share an account and only the kind
+#: tells them apart. Views carry no sender endpoint, so two agents of one owner still
+#: look alike; that case fails OPEN (a possible duplicate answer, never a lost wake).
+SenderKey = tuple[str, str]
 #: Per-thread reply record the connector sees for free (every admitted message in its
 #: channels, passive ones included): ``(endpoint, conversation, root) -> [(seq,
-#: sender account)]``. The first, zero-cost half of the failover's "already answered"
-#: check; bounded per thread and in keys.
-_THREAD_SEEN: dict[tuple[str, str, str], list[tuple[int, str]]] = {}
+#: sender)]``. The first, zero-cost half of the failover's "already answered" check;
+#: bounded per thread and in keys.
+_THREAD_SEEN: dict[tuple[str, str, str], list[tuple[int, SenderKey]]] = {}
 _THREAD_SEEN_CAP = 2048
 _THREAD_SEEN_PER_KEY = 64
 #: The original sender of each buffered staggered message (the answered check must
-#: ignore that sender's own follow-ups). Popped at the check.
-_STAGGER_SENDER: dict[tuple[str, str], str] = {}
+#: ignore that sender's own follow-ups). Popped at the check; bounded (review r1 m4)
+#: because a standby that never reaches its check (a stop, a replay that is never
+#: flushed) would otherwise leave its entry forever. Insertion-ordered, so the
+#: oldest goes first; a lost entry only makes the check count the sender's own
+#: follow-up as an answer, never wake a second agent.
+_STAGGER_SENDER: dict[tuple[str, str], SenderKey] = {}
+_STAGGER_SENDER_CAP = 1024
+
+
+def _sender_key(
+    ref: ConversationFeedRef, metadata: ConversationCardMetadata, account: str
+) -> SenderKey:
+    """The sender's ``(account, class)``, falling back to the FEED's kind.
+
+    ``_card_metadata`` turns an absent body ``sender_kind`` into ``"unknown"``, so a
+    plain ``metadata.sender_kind or ref.sender_kind`` never reached the hub-stated
+    feed kind (review r1 Q2). ``app`` (an integration post) and ``unknown`` stay as
+    they are: neither is an agent, so neither is ambient chatter.
+    """
+
+    kind = metadata.sender_kind if metadata.sender_kind not in (None, "", "unknown") else None
+    return (account, kind or ref.sender_kind or "unknown")
 
 
 def classify_wake(
@@ -944,89 +1002,189 @@ def classify_wake(
 ) -> WakeDecision:
     """The deterministic triage table: first match wins. Pure, no I/O.
 
-    1. DM, mention, ``addressed=direct``, routed, sender is the owner → wake now.
-    2. hub-marked passive → deferred (``passive``).
+    1. hub-marked passive (outside a DM) → deferred (``passive``). FIRST, in every
+       mode (review r1 R1): the hand-off never posts a card for it, so any other
+       class would leave a ``pending`` row a later turn drains in full.
+    2. DM, a PERSONAL mention, ``addressed=direct``, routed, sender is the owner, or
+       a body read that names no conversation kind from a hub that sent no
+       ``addressed`` either (an older hub: fail open, review r1 Q2) → wake now.
     3. a reply in a thread this agent follows → wake after the dwell window.
-    4. ``addressed=everyone``, a HUMAN's ambient post, or an ambient post whose
-       screened body asks a question ("?") → urgent: one agent now, the rest
-       stagger (``rule='urgent'``; the slot is resolved by :func:`decide_wake`).
-    5. any other ambient post → deferred (``ambient``).
+    4. urgent: a channel-wide mention (``@channel``/``@here``/``@everyone``),
+       ``addressed=everyone``, a sender that is NOT an agent (a human, an app /
+       integration alert, an unknown kind), or a post whose screened body asks a
+       question ("?") → one agent now, the rest stagger (``rule='urgent'``; the
+       slot is resolved by :func:`decide_wake`).
+    5. any other ambient agent post → deferred (``ambient``).
+
+    A channel-wide mention also sets the hub's ``mention`` bit (agent-server
+    ``mention := channelWide || mentioned[endpoint]``); what tells it apart is
+    ``addressed``: a personal mention is always ``direct`` there, while ``@channel``
+    reads ``everyone`` (or ``thread`` for a follower). Operator (2026-11-21): "if
+    something seems urgent it should be responded to immediately but not by all
+    agents" — so ``@channel`` takes the one-agent urgent path, a personal @mention
+    still wakes its agent at once.
 
     ``body_text`` is the already-screened body still in the caller's memory; it
     is only searched for ``?`` and never stored.
     """
 
+    if ref.passive and metadata.conversation_kind != "dm":
+        return WakeDecision("passive", wake_class="passive")
+    channel_wide = ref.mention and ref.addressed in ("everyone", "thread")
     if (
         metadata.conversation_kind == "dm"
-        or ref.mention
+        or (metadata.conversation_kind is None and ref.addressed is None)
+        or (ref.mention and not channel_wide)
         or ref.addressed == "direct"
         or metadata.routed
         or ref.sender_relation == "owner"
     ):
         return WakeDecision("direct", dwell_s=0.0)
-    if ref.passive:
-        return WakeDecision("passive", wake_class="passive")
     if metadata.thread_follower is True or ref.addressed == "thread":
         return WakeDecision("thread_follower", dwell_s=float(dwell_s))
     if (
-        ref.addressed == "everyone"
-        or (metadata.sender_kind or ref.sender_kind) == "human"
+        channel_wide
+        or ref.addressed == "everyone"
+        or _sender_key(ref, metadata, "")[1] != "agent"
         or (body_text is not None and "?" in body_text)
     ):
         return WakeDecision("urgent", dwell_s=0.0)
     return WakeDecision("ambient", wake_class="ambient")
 
 
-def urgent_slot(message_id: str, own_account_id: str, agent_account_ids: Any) -> int:
+def urgent_slot(
+    message_id: str,
+    own_endpoint_id: str,
+    agent_endpoint_ids: Any,
+    maybe_sender: Any = (),
+) -> int:
     """This agent's failover rank for one urgent message (0 = wakes now).
 
-    Rank by ``sha256(message_id:account_id)`` over the conversation's active agent
-    members other than the sender: every connector computes the SAME order without
-    talking to the others, and a fresh order per message spreads first-responder
-    duty evenly across agents. Own account missing from the roster → slot 0 (the
-    pre-triage behaviour: never lose the wake on a stale roster).
+    Rank by ``sha256(message_id:endpoint_id)`` over the conversation's agent members
+    that received it: every connector computes the SAME order without talking to
+    the others, and a fresh order per message spreads first-responder duty evenly.
+    ENDPOINT, never account (review r1 R2): the hub gives every agent its owner's
+    account id, so ranking by account put all of one owner's agents in one slot.
+    Own endpoint missing from the roster → slot 0 (the pre-triage behaviour: never
+    lose the wake on a stale or ambiguous roster).
+
+    ``maybe_sender``: endpoints that may be the (agent) sender, which never receives
+    its own message, so must not hold slot 0 alone. Views name only the sender's
+    ACCOUNT, and one owner's agents share it. One suspect other than this agent →
+    it IS the sender: drop it. Several (a single-owner team, the common case) → the
+    sender is exactly one of them, so a suspect ranked above this agent may be the
+    sender: count one fewer ahead. Then the first non-sender in the order always
+    reads slot 0 (at worst two agents wake now — a duplicate, never a delay or a
+    loss), and the rest keep their stagger.
     """
 
-    def rank(account: str) -> str:
-        return hashlib.sha256(f"{message_id}:{account}".encode()).hexdigest()
+    def rank(endpoint: str) -> str:
+        return hashlib.sha256(f"{message_id}:{endpoint}".encode()).hexdigest()
 
-    ordered = sorted(set(agent_account_ids) | {own_account_id}, key=rank)
-    if own_account_id not in set(agent_account_ids):
+    members = set(agent_endpoint_ids)
+    if not own_endpoint_id or own_endpoint_id not in members:
         return 0
-    return ordered.index(own_account_id)
+    suspects = (set(maybe_sender) & members) - {own_endpoint_id}
+    if len(suspects) == 1:
+        members -= suspects
+        suspects = set()
+    order = sorted(members, key=rank)
+    position = order.index(own_endpoint_id)
+    return position - (1 if suspects.intersection(order[:position]) else 0)
 
 
 async def _agent_roster(
-    client: Any, owner: Any, conversation_id: str, access: Any, *, now: float
-) -> tuple[str, ...] | None:
-    """Active AGENT member account ids of a conversation (cached), or ``None``."""
+    client: Any,
+    owner: Any,
+    conversation_id: str,
+    access: Any,
+    *,
+    now: float,
+    refresh: bool = False,
+) -> tuple[_RosterMember, ...] | None:
+    """Active AGENT members of a conversation (cached), or ``None`` if unreadable.
+
+    The ONE person-gated read the connector makes, and only for an urgent message
+    under triage ``on``: the agent-server conversation view, which an agent
+    member's own access may read. Members without an endpoint id (an older hub)
+    are skipped, so every connector there finds itself off-roster → slot 0 → the
+    pre-triage wake.
+    """
 
     key = (str(getattr(owner, "endpoint_id", "") or ""), conversation_id)
     cached = _ROSTERS.get(key)
-    if cached is not None and now - cached[0] < ROSTER_TTL_S:
-        return cached[1]
+    if cached is not None and not refresh:
+        ttl = ROSTER_TTL_S if cached[1] is not None else ROSTER_FAILURE_TTL_S
+        if now - cached[0] < ttl:
+            return cached[1]
+    roster: tuple[_RosterMember, ...] | None
     try:
         view = await client.conversation(conversation_id, tenant_id=owner.tenant_id, access=access)
     except Exception:  # noqa: BLE001 — unreadable roster = slot 0, never a lost wake
-        return None
+        view = None
     members = view.get("members") if isinstance(view, Mapping) else None
     if not isinstance(members, list):
-        return None
-    roster = tuple(
-        str(m.get("account_id") or "")
-        for m in members
-        if isinstance(m, Mapping)
-        and m.get("kind") == "agent"
-        and m.get("state", "active") == "active"
-        and m.get("account_id")
-    )
-    if len(_ROSTERS) > 512:
+        roster = None
+    else:
+        roster = tuple(
+            _RosterMember(
+                endpoint_id=str(m.get("endpoint_id") or ""),
+                account_id=str(m.get("account_id") or ""),
+                notify=str(m.get("notify") or ""),
+                joined_seq=(
+                    m["joined_seq"]
+                    if isinstance(m.get("joined_seq"), int)
+                    and not isinstance(m["joined_seq"], bool)
+                    else 0
+                ),
+            )
+            for m in members
+            if isinstance(m, Mapping)
+            and m.get("kind") == "agent"
+            and m.get("state", "active") == "active"
+            and m.get("endpoint_id")
+        )
+    if len(_ROSTERS) > _ROSTER_CAP:
         _ROSTERS.clear()
     _ROSTERS[key] = (now, roster)
     return roster
 
 
-def _note_thread_activity(owner: Any, ref: ConversationFeedRef, sender_account_id: str) -> None:
+def _receiving_endpoints(
+    roster: tuple[_RosterMember, ...],
+    ref: ConversationFeedRef,
+    sender: SenderKey,
+) -> tuple[list[str], list[str]]:
+    """The roster members that actually RECEIVED this message, and sender suspects.
+
+    Mirrors agent-server ``BridgeConversationFeedRecipients`` where the view lets
+    it (review r1 R3): ``mute`` never receives; ``mention`` receives only a
+    mention (an urgent message with the mention bit is a channel-wide one); a
+    member that joined after this seq cannot see it; departed / invited members
+    were already dropped by state. Another account's notify is not readable and
+    an endpoint's enabled state is not shown, so those members stay in: a
+    non-receiver holding a slot only delays the standbys behind it (rank >=
+    :data:`URGENT_MAX_SLOTS` still fails over).
+
+    Suspects: when an AGENT sent it, the agents of the sender's account (see
+    :func:`urgent_slot`); a human or app sender is never an agent member.
+    """
+
+    seq = int(ref.conversation_seq)
+    out: list[str] = []
+    suspects: list[str] = []
+    for member in roster:
+        if member.notify == "mute" or (member.notify == "mention" and not ref.mention):
+            continue
+        if member.joined_seq and member.joined_seq > seq:
+            continue
+        out.append(member.endpoint_id)
+        if sender[1] == "agent" and sender[0] and member.account_id == sender[0]:
+            suspects.append(member.endpoint_id)
+    return out, suspects
+
+
+def _note_thread_activity(owner: Any, ref: ConversationFeedRef, sender: SenderKey) -> None:
     """Record ``(seq, sender)`` under the thread this message belongs to."""
 
     root = ref.thread_root_id or ref.message_id
@@ -1034,8 +1192,16 @@ def _note_thread_activity(owner: Any, ref: ConversationFeedRef, sender_account_i
     if key not in _THREAD_SEEN and len(_THREAD_SEEN) >= _THREAD_SEEN_CAP:
         _THREAD_SEEN.clear()
     seen = _THREAD_SEEN.setdefault(key, [])
-    seen.append((int(ref.conversation_seq), sender_account_id))
+    seen.append((int(ref.conversation_seq), sender))
     del seen[:-_THREAD_SEEN_PER_KEY]
+
+
+def _remember_stagger_sender(conversation_id: str, message_id: str, sender: SenderKey) -> None:
+    key = (conversation_id, message_id)
+    _STAGGER_SENDER.pop(key, None)
+    while len(_STAGGER_SENDER) >= _STAGGER_SENDER_CAP:
+        _STAGGER_SENDER.pop(next(iter(_STAGGER_SENDER)))
+    _STAGGER_SENDER[key] = sender
 
 
 def _triage_settings(config_dir: Path) -> Any:
@@ -1071,41 +1237,51 @@ async def decide_wake(
     :func:`_hand_off_card`; a replay never re-decides (the row's state stands).
     Reads ``team_bridge.ambient_triage``: ``off`` is the pre-triage behaviour and
     ``shadow`` logs the class it would have chosen but behaves as ``off``. The
-    hub's passive bit defers the row in EVERY mode — that is a fix (a passive row
-    left ``pending`` was later drained as a full turn), not a triage choice.
+    hub's passive bit defers the row in EVERY mode and BEFORE any other rule —
+    that is a fix (a passive row left ``pending`` was later drained as a full
+    turn, and the hand-off never posts its card), not a triage choice.
     """
 
     moment = time.time() if now is None else now
-    _note_thread_activity(owner, ref, sender_account_id)
+    sender = _sender_key(ref, metadata, sender_account_id)
+    _note_thread_activity(owner, ref, sender)
     settings = _triage_settings(config_dir)
-    passive = ref.passive and metadata.conversation_kind != "dm"
+    if ref.passive and metadata.conversation_kind != "dm":
+        logger.info("bridge: wake triage rule=passive")
+        return WakeDecision("passive", wake_class="passive")
     if settings.ambient_triage == "off":
-        return WakeDecision("passive", wake_class="passive") if passive else WAKE_AS_BEFORE
+        return WAKE_AS_BEFORE
     decision = classify_wake(
         ref, metadata, body_text=body_text, dwell_s=settings.ambient_wake_dwell_seconds
     )
     if settings.ambient_triage == "shadow":
         logger.info("bridge: wake triage shadow rule=%s", decision.rule)
-        return WakeDecision("passive", wake_class="passive") if passive else WAKE_AS_BEFORE
+        return WAKE_AS_BEFORE
     if decision.rule != "urgent":
         logger.info("bridge: wake triage rule=%s", decision.rule)
         return decision
+    own = str(getattr(owner, "endpoint_id", "") or "")
     roster = await _agent_roster(client, owner, ref.conversation_id, access, now=moment)
+    if roster is not None and own not in {m.endpoint_id for m in roster}:
+        # A cached roster that does not list this agent predates its joining:
+        # read once more before falling back to slot 0.
+        roster = await _agent_roster(
+            client, owner, ref.conversation_id, access, now=moment, refresh=True
+        )
     if roster is None:
         slot = 0
     else:
-        others = [a for a in roster if a != sender_account_id]
-        slot = urgent_slot(ref.message_id, str(getattr(owner, "account_id", "") or ""), others)
+        receiving, suspects = _receiving_endpoints(roster, ref, sender)
+        slot = urgent_slot(ref.message_id, own, receiving, suspects)
     logger.info("bridge: wake triage rule=urgent slot=%d", min(slot, URGENT_MAX_SLOTS))
     if slot == 0:
         return decision
-    if slot >= URGENT_MAX_SLOTS:
-        return WakeDecision("urgent_standby", wake_class="ambient")
-    _STAGGER_SENDER[(ref.conversation_id, ref.message_id)] = sender_account_id
+    _remember_stagger_sender(ref.conversation_id, ref.message_id, sender)
     return WakeDecision(
         "urgent_failover",
         wake_class="staggered",
-        stagger_delay_s=float(slot * settings.urgent_failover_seconds),
+        dwell_s=0.0,
+        stagger_delay_s=float(min(slot, URGENT_MAX_SLOTS) * settings.urgent_failover_seconds),
     )
 
 
@@ -1119,18 +1295,21 @@ async def promote_staggered(
 ) -> bool:
     """The failover check at a standby's flush: wake only if nobody answered.
 
-    Answered = a message in the urgent message's thread, after its seq, from
-    someone other than its sender. First the free local record of what this
-    connector admitted; else ONE ``conversation_replies`` read. A read that fails
-    counts as unanswered: a possibly-duplicate answer beats a lost urgent wake
-    (the same trade ``coalesce._still_owed`` makes). Unanswered → CAS the row
-    ``deferred`` → ``pending`` so the flush posts its card; True when promoted.
+    Answered = a message in the urgent message's thread, after its seq, from a
+    sender other than the original one, compared as ``(account, class)`` (see
+    :data:`SenderKey`): a human's own agent answering them counts. First the
+    free local record of what this connector admitted; else ONE
+    ``conversation_replies`` read (``client=None``: the local record only). A read
+    that fails counts as unanswered: a possibly-duplicate answer beats a lost
+    urgent wake (the same trade ``coalesce._still_owed`` makes). Unanswered → CAS
+    the row ``deferred`` → ``pending`` so the flush posts its card; True when
+    promoted.
     """
 
     from local_operator.team_bridge.store import Store
 
     root = metadata.thread_root_id or metadata.message_id
-    sender = _STAGGER_SENDER.pop((metadata.conversation_id, metadata.message_id), "")
+    sender = _STAGGER_SENDER.pop((metadata.conversation_id, metadata.message_id), ("", ""))
     seq = int(metadata.conversation_seq)
     key = (str(getattr(owner, "endpoint_id", "") or ""), metadata.conversation_id, root)
     answered = any(s > seq and who != sender for s, who in _THREAD_SEEN.get(key, ()))
@@ -1147,9 +1326,7 @@ async def promote_staggered(
             )
             replies = page.get("replies") if isinstance(page, Mapping) else None
             answered = any(
-                isinstance(row, Mapping)
-                and isinstance(row.get("sender"), Mapping)
-                and str(row["sender"].get("account_id") or "") not in ("", sender)
+                (who := _reply_sender(row)) is not None and who != sender
                 for row in (replies if isinstance(replies, list) else ())
             )
         except Exception:  # noqa: BLE001 — closed code; unanswered by default
@@ -1163,6 +1340,16 @@ async def promote_staggered(
         message_id=metadata.message_id,
         now=time.time(),
     )
+
+
+def _reply_sender(row: Any) -> SenderKey | None:
+    """A reply row's ``(account, class)``; ``None`` when it names no account."""
+
+    sender = row.get("sender") if isinstance(row, Mapping) else None
+    if not isinstance(sender, Mapping) or not sender.get("account_id"):
+        return None
+    kind = str(sender.get("kind") or "")
+    return (str(sender["account_id"]), sender_class(kind) if kind else "unknown")
 
 
 def _record_body_reservation(
@@ -1354,9 +1541,9 @@ async def _hand_off_card(
         # off used to leave a ``pending`` row the session's follow-up re-arm served.
         return CARD_PASSIVE
     if wake is not None and wake.wake_class in ("passive", "ambient"):
-        # TRIAGE DEFERRED IT (``classify_wake`` rules 2/5, or an urgent standby
-        # ranked past the last failover slot): the row is ``deferred``, readable in
-        # channel history, and wakes nobody. Same exits as the passive branch.
+        # TRIAGE DEFERRED IT (``classify_wake`` rules 1/5): the row is
+        # ``deferred``, readable in channel history, and wakes nobody. Same exits
+        # as the passive branch.
         return CARD_NO_WAKE
 
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
