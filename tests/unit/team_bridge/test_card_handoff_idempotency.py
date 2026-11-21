@@ -755,3 +755,31 @@ def test_cold_target_without_history_is_unchanged_at_least_once(tmp_path, monkey
     _handle(owner, config_dir, server)
     _handle(owner, config_dir, server)
     assert len(errands) == 2 and all(not e.command_id for e in errands)
+
+
+def test_a_rebuilt_card_takes_its_routing_from_the_live_metadata():
+    """Merge of #4258: routing is the CURRENT delivery decision, not presentation.
+
+    The caller re-reads the stored route on every replay and passes the matching
+    session, so a record minted for a routed card that was since handed back to
+    the designated session must rebuild as an ordinary card (and vice versa). The
+    record never stores the routing fields, which also keeps session ids out of it.
+    """
+
+    from dataclasses import replace
+
+    routed = replace(
+        _metadata("bcmsg_abcdef0f", 1),
+        routed=True,
+        routed_ask_ref="bcmsg_ask00001",
+        routed_via_thread=True,
+        route_candidates=(("sess_other", 3, None),),
+    )
+    record = conversation._card_record(routed)
+    for name in ("routed", "routed_ask_ref", "routed_via_thread", "route_candidates"):
+        assert name not in record
+    plain = _metadata("bcmsg_abcdef0f", 1)
+    rebuilt = conversation._card_from_record(record, plain, ["bcmsg_abcdef0f"])
+    assert (rebuilt.routed, rebuilt.routed_ask_ref, rebuilt.route_candidates) == (False, None, ())
+    again = conversation._card_from_record(record, routed, ["bcmsg_abcdef0f"])
+    assert again == routed

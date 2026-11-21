@@ -21,7 +21,7 @@ from local_operator.team_bridge.connector import coalesce as coalesce_mod
 from local_operator.team_bridge.connector import conversation as conversation_mod
 from local_operator.team_bridge.connector import loop as loop_mod
 from local_operator.team_bridge.connector import routing
-from local_operator.team_bridge.connector.wake import RoutedSessionGone
+from local_operator.team_bridge.connector.wake import CARD_HANDOFF, RoutedSessionGone
 from tests.unit.team_bridge import test_conversation_delivery as rig
 from tests.unit.team_bridge.test_conversation_delivery import (
     CONVERSATION_ID,
@@ -114,7 +114,18 @@ def _setup(
         sender_display: Any = None,
         live_only: bool = False,
     ) -> str:
-        calls.append({"session": session_id, "live_only": live_only, "payload": payload})
+        # The persisted card hand-off id (PR #4348) the card would carry on the
+        # wire, read from the same context variable the real ``deliver_wake``
+        # reads: None means no id was bound for this wake.
+        handoff = CARD_HANDOFF.get()
+        calls.append(
+            {
+                "session": session_id,
+                "live_only": live_only,
+                "payload": payload,
+                "handoff": handoff.message_id if handoff is not None else None,
+            }
+        )
         if live_only and session_id in gone:
             raise RoutedSessionGone(session_id)
         transcripts.setdefault(session_id, []).append({"payload": payload})
@@ -253,6 +264,49 @@ def test_the_pair_lane_never_meets_the_router() -> None:
         assert name not in pair_lane, name
     # And the conversation lane is the ONLY caller of the planner.
     assert "plan_route" in inspect.getsource(conversation_mod.handle_conversation_available)
+
+
+def test_a_routed_card_binds_its_hand_off_id_against_the_designation(
+    tmp_path, monkeypatch
+) -> None:
+    """Merge of #4258 into PR #4348: a routed row keeps ``designated_session``.
+
+    The bind fences rows against the designation; passing the routed TARGET
+    would mismatch the row and hold the card forever (``card_binding_mismatch``).
+    """
+
+    owner, config_dir, store, calls = _setup(tmp_path, monkeypatch)
+    _asked(config_dir, ASKER, ago_s=95, owner=owner, message_id="bcmsg_ask00001")
+
+    out = _run(owner, config_dir)
+
+    assert [item["action"] for item in out["handled"]] == ["delivered"]
+    assert [c["session"] for c in calls] == [ASKER]
+    row = _reservation(store, owner)
+    assert row["routed_session"] == ASKER
+    assert row["designated_session"] == DESIGNATED
+    assert calls[0]["handoff"] is not None
+    assert calls[0]["handoff"] == row["card_handoff_id"]
+
+
+def test_the_designated_fallback_reuses_the_routed_attempts_hand_off_id(
+    tmp_path, monkeypatch
+) -> None:
+    """The routed attempt delivered nothing, so the fallback is the SAME card.
+
+    It must carry the id bound before the routed attempt (not a fresh one, not
+    none), so a replay after a lost posted marker is deduplicated by the
+    designated session's receiver.
+    """
+
+    owner, config_dir, store, calls = _setup(tmp_path, monkeypatch, gone=frozenset({ASKER}))
+    _asked(config_dir, ASKER, ago_s=40, owner=owner, message_id="bcmsg_ask00001")
+
+    _run(owner, config_dir)
+
+    assert [c["session"] for c in calls] == [ASKER, DESIGNATED]
+    bound = _reservation(store, owner)["card_handoff_id"]
+    assert bound and calls[0]["handoff"] == calls[1]["handoff"] == bound
 
 
 def test_a_target_that_vanished_before_the_wake_falls_back_to_the_designated_session(
