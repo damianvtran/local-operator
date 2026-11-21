@@ -31,10 +31,11 @@ from local_operator.secrets import broker as broker_module
 from local_operator.secrets import client
 from local_operator.secrets.broker import BrokerError, SecretBroker
 from local_operator.secrets.errors import BrokerUnavailable
-from local_operator.secrets.keys import key_path, write_private_file
+from local_operator.secrets.keys import key_path, registration_ticket, write_private_file
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
+    encode_bytes,
     recv_frame,
     send_frame,
     socket_path,
@@ -111,6 +112,86 @@ def session(broker: SecretBroker, config_root: Path):
         stop.set()
         channel.close()
         thread.join(timeout=2)
+
+
+def test_registration_reply_precedes_concurrent_notification(
+    broker: SecretBroker, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publishing a session must not let a notice become its registration reply.
+
+    Pause registration at its audit, after publication but before its reply.
+    A synthetic notifier then either writes its frame (the old ordering) or
+    waits behind registration's write lock. Events select that interleaving,
+    rather than relying on a scheduler race or a tighter production timeout.
+    """
+    attempted = threading.Event()
+    notice_written = threading.Event()
+    notified: list[bool] = []
+    workers: list[threading.Thread] = []
+    real_audit = broker._audit
+    real_send = broker_module.send_frame
+
+    def observed_send(connection: socket.socket, frame: dict) -> None:
+        real_send(connection, frame)
+        if frame.get("event") == "retrieved":
+            notice_written.set()
+
+    def paused_audit(identity, operation: str, outcome: str) -> None:
+        real_audit(identity, operation, outcome)
+        if operation != "register" or outcome != "allow":
+            return
+        with broker._lock:
+            registered = broker._sessions[identity.pid]
+        registration_holds_writer = registered.write_lock.locked()
+
+        def notify() -> None:
+            attempted.set()
+            notified.append(
+                broker._notify_session(
+                    registered, name="SYNTHETIC_NOTICE", value=b"synthetic-notice-canary"
+                )
+            )
+
+        worker = threading.Thread(target=notify, daemon=True)
+        workers.append(worker)
+        worker.start()
+        assert attempted.wait(5), "the synthetic notifier did not start"
+        if not registration_holds_writer:
+            assert notice_written.wait(5), "an unblocked notifier did not write its frame"
+
+    monkeypatch.setattr(broker_module, "send_frame", observed_send)
+    monkeypatch.setattr(broker, "_audit", paused_audit)
+    channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    channel.settimeout(5)
+    try:
+        channel.connect(str(socket_path(config_root)))
+        send_frame(
+            channel,
+            {
+                "version": PROTOCOL_VERSION,
+                "op": "register",
+                "ticket": encode_bytes(registration_ticket(config_root)),
+                "session_id": "synthetic-registration-order",
+            },
+        )
+        first = recv_frame(channel)
+        assert first is not None and first.get("ok") is True, (
+            "registration's first frame must be OK, not a concurrent notification; "
+            f"got frame kind {first.get('event') if first else None!r}"
+        )
+        assert first["registered"] == os.getpid()
+        assert first["pid"] == os.getpid()
+        assert client.read_notification(channel) == (
+            "SYNTHETIC_NOTICE",
+            b"synthetic-notice-canary",
+        )
+        client.acknowledge(channel)
+    finally:
+        channel.close()
+        for worker in workers:
+            worker.join(timeout=5)
+            assert not worker.is_alive(), "the synthetic notifier did not finish"
+    assert notified == [True], "the ordered notification still requires a real ACK"
 
 
 def _retrieve_script(config_root: Path) -> str:
