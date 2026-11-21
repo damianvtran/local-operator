@@ -24,6 +24,7 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -910,7 +911,7 @@ def test_a_no_roll_outage_outside_a_session_still_falls_back(
 # controls below. Every case goes through the PUBLIC entry with a store tripwire.
 
 
-def _deny(*_args: object, **_kwargs: object) -> dict:
+def _deny(*_args: object, **_kwargs: object) -> dict[str, Any]:
     raise client.BrokerDenied("no lop session is registered with the broker")
 
 
@@ -970,7 +971,7 @@ def test_a_roll_first_seen_inside_retrieval_then_a_denial_never_decrypts_locally
     monkeypatch.setattr(client, "ROLL_WAIT_S", 0.4)
     attempts: list[int] = []
 
-    def roll_then_deny(*_args: object, **_kwargs: object) -> dict:
+    def roll_then_deny(*_args: object, **_kwargs: object) -> dict[str, Any]:
         attempts.append(1)
         if len(attempts) == 1:
             _write_sentinel(rolling_path(config_root), 1)
@@ -1064,7 +1065,7 @@ def test_an_observed_roll_keeps_its_remaining_wait_and_then_serves(
 
     deadlines: list[float | None] = []
 
-    def deny_then_serve(op: str, base=None, deadline=None, **_kwargs) -> dict:
+    def deny_then_serve(op: str, base=None, deadline=None, **_kwargs) -> dict[str, Any]:
         deadlines.append(deadline)
         if len(deadlines) == 1:
             _deny()

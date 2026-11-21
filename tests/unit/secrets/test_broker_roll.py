@@ -32,11 +32,13 @@ import textwrap
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import local_operator
 from local_operator.secrets import client
+from local_operator.secrets.audit import AuditEntry
 from local_operator.secrets import session as session_module
 from local_operator.secrets.broker import SecretBroker
 from local_operator.secrets.crypto import generate_master_key
@@ -143,7 +145,7 @@ def _start_old_broker(config_root: Path, reaper: Reaper) -> int:
     raise AssertionError("the old broker never came up")
 
 
-def _status(config_root: Path) -> dict:
+def _status(config_root: Path) -> dict[str, Any]:
     return client.broker_status(config_root) or {}
 
 
@@ -201,7 +203,7 @@ def _finish(child: subprocess.Popen[str]) -> tuple[str, float]:
     return out + err, elapsed
 
 
-def _roll_rows(key: bytes, config_root: Path) -> list:
+def _roll_rows(key: bytes, config_root: Path) -> list[AuditEntry]:
     return [e for e in SecretStore(key, base=config_root).audit_entries() if e.event == "roll"]
 
 
@@ -414,6 +416,7 @@ def test_readiness_mismatch_aborts_and_leaves_the_old_broker(
     assert _status(config_root).get("pid") == old_pid, "the old broker did not survive"
     assert not successor_socket_path(config_root).exists()
     assert not rolling_path(config_root).exists()
+    assert result.new_pid is not None, "the roll never spawned a successor"
     assert process_info(result.new_pid) is None, "the failed successor was left running"
     rows = _roll_rows(keyfile_store, config_root)
     assert len(rows) == 1 and rows[0].outcome.startswith("fail:"), rows
@@ -435,6 +438,7 @@ def test_a_successor_that_never_answers_is_reaped(
     result = roll_broker(config_root, force=True, spawn=spawn, ready_timeout=1.0)
     assert result.status == "failed" and result.code == "readiness", result
     assert _status(config_root).get("pid") == old_pid
+    assert result.new_pid is not None, "the roll never spawned a successor"
     assert process_info(result.new_pid) is None
 
 
@@ -502,6 +506,7 @@ def test_tier_rule(config_root: Path, reaper: Reaper) -> None:
     assert _status(config_root).get("locked") is False
     unlocked = roll_broker(config_root, force=True, spawn=no_spawn)
     assert unlocked.status == "deferred" and unlocked.code == "passphrase", unlocked
+    assert result.new_pid is not None, "the locked roll reported no successor pid"
     _stop_pid(result.new_pid)
 
     # A planted master.key beside a hardened store: the VALIDATING predicate
@@ -721,7 +726,7 @@ def test_the_client_waits_out_a_roll_instead_of_falling_back(
     from local_operator.secrets import access
     from local_operator.secrets.roll import _write_sentinel
 
-    def deny(*_args: object, **_kwargs: object) -> dict:
+    def deny(*_args: object, **_kwargs: object) -> dict[str, Any]:
         raise client.BrokerDenied("no registered session ancestor")
 
     monkeypatch.setattr(client, "request", deny)
@@ -1127,7 +1132,7 @@ def test_a_different_pid_at_the_canonical_socket_aborts_the_switch(
     real_request = client.request
 
     def before_switch() -> None:
-        def lying(operation: str, base: Path | None = None, **fields: object) -> dict:
+        def lying(operation: str, base: Path | None = None, **fields: object) -> dict[str, Any]:
             reply = real_request(operation, base, **fields)  # type: ignore[arg-type]
             if operation == "status" and fields.get("connection") is None:
                 reply = {**reply, "pid": 1}
@@ -1232,14 +1237,17 @@ def test_an_exited_session_does_not_abort_the_switch() -> None:
     gone.wait()
     me = process_info(os.getpid())
     assert me is not None
-    old = {
+    # dict[str, object]: dict is invariant, so the literal must carry the
+    # parameter's declared type rather than its inferred nested shape.
+    old: dict[str, object] = {
         "session_lineage": [
             {"pid": gone.pid, "start_time": 1.0, "caps": ["reroll"]},
             {"pid": me.pid, "start_time": me.start_time, "caps": ["reroll"]},
         ]
     }
-    assert _unknown_to_successor(old, {"session_lineage": [], "expected_lineage": []}) == [me.pid]
-    held = {"expected_lineage": [{"pid": me.pid, "start_time": me.start_time}]}
+    none_held: dict[str, object] = {"session_lineage": [], "expected_lineage": []}
+    assert _unknown_to_successor(old, none_held) == [me.pid]
+    held: dict[str, object] = {"expected_lineage": [{"pid": me.pid, "start_time": me.start_time}]}
     assert _unknown_to_successor(old, held) == []
 
 
