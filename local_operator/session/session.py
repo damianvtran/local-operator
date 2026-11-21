@@ -7825,6 +7825,14 @@ class Session:
         # compaction-advisor calls. Run it read-only so a racing helper never
         # mutates ``_bridge_excerpt_memo`` or runs side-effecting store purges;
         # guard both attributes so minimal stub sessions remain compatible.
+        # KNOWN TRADE-OFF (PR #4370): a Team Bridge body turn anchors its
+        # ephemeral body frame right after the wake card (PendingTurn
+        # ._insert_index), and this read-only prompt deliberately never carries
+        # that frame (it holds no admission). So during a body turn an aside or
+        # clearance matches the main prefix only up to the wake card and
+        # re-writes the turn's tool steps, where it used to match through
+        # tool_result N-1. Accepted for the per-step frame re-write the anchor
+        # saves; watch clearance cache_read on body turns after deploy.
         combined: list[AgentMessage] = [*history, *turns]
         if getattr(self, "bridge_runtime", None) is not None and hasattr(
             self, "_bridge_history_transform"

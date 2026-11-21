@@ -86,6 +86,10 @@ _LEASE_FLOOR_SECONDS = 8 * 60 * 60.0
 #: any legitimate run and short enough that a dead claim resurfaces.
 _LEASE_CAP_SECONDS = 24 * 60 * 60.0
 
+#: Anchor recorded when Call 1's history was empty: the frame leads the list.
+#: A sentinel rather than ``None`` because ``None`` means "no Call 1 yet".
+_ANCHOR_AT_START = object()
+
 
 @dataclass(frozen=True)
 class FetchedBody:
@@ -145,11 +149,16 @@ class PendingTurn:
         self._drifted = False
         self._drift_reason = "admission_drift"
         self._injected: InjectedBody | None = None
-        #: Position in ``messages`` where Call 1 placed the ephemeral frame.
-        #: Re-using this index on Call 2+ keeps the pre-turn + frame prefix
-        #: byte-identical across mid-turn tool steps instead of teleporting
-        #: the frame to ``messages[-1]`` and busting the provider prompt cache.
-        self._anchor_index: int | None = None
+        #: The message Call 1 placed the ephemeral frame right after (``None``
+        #: until Call 1; :data:`_ANCHOR_AT_START` when Call 1's history was
+        #: empty). Call 2+ re-inserts after the SAME message so the pre-turn +
+        #: frame prefix stays byte-identical across mid-turn tool steps.
+        #: WHY a message and not a list index: mid-turn compaction replaces
+        #: the whole list (``[summary, *preserved, *kept]``), so a saved index
+        #: points into unrelated history and can split a tool_use from its
+        #: tool_result -- a 400 on both wires for the rest of the turn.
+        self._anchor_after: Any = None
+        self._anchor_after_id: str | None = None
         self._presentation_ref: Any = None
         #: Held only so a COMPLETED settlement can hand the verified bytes to
         #: the display store; cleared with the claim either way.
@@ -309,13 +318,16 @@ class PendingTurn:
         same object that holds the lease the injection depends on. Returning the
         input list unchanged is the ordinary-request answer, not an error.
 
-        ANCHOR INVARIANT: the insertion index is pinned on the first admitted
-        call of this turn (``len(messages)``, right after pre-turn history /
-        wake card) and reused on subsequent tool-step calls of the same turn
-        (clamped to ``len(messages)`` if history shrinks, e.g. mid-turn
-        compaction). That keeps the wire prefix through the frame byte-identical
-        across Call 1 -> Call 2+ so mid-turn tool calls hit the prompt cache
-        while preserving every admission, lease and non-persistence invariant.
+        ANCHOR INVARIANT: the first admitted call of this turn appends the
+        frame and records the message it follows (the wake card / end of
+        pre-turn history). Later tool-step calls insert the frame right after
+        that same message, which keeps the wire prefix through the frame
+        byte-identical across Call 1 -> Call 2+ so mid-turn tool calls hit the
+        prompt cache. See :meth:`_insert_index` for when that is not safe and
+        the frame goes last instead (the pre-anchor behaviour).
+
+        Asides and clearances never carry the frame; the cache trade-off that
+        implies is recorded at ``Session._read_only_prompt``.
         """
 
         text = self.for_call()
@@ -324,9 +336,7 @@ class PendingTurn:
         from .card_projection import mark_admitted_frame
         from .request_body import CustomFrameInjection
 
-        if self._anchor_index is None:
-            self._anchor_index = len(messages)
-        insert_idx = min(self._anchor_index, len(messages))
+        insert_idx = self._insert_index(messages)
         shaped = CustomFrameInjection.insert(
             messages, text, message_id=self._frame_message_id(), index=insert_idx
         )
@@ -338,6 +348,47 @@ class PendingTurn:
         # journal cards never borrow its admission by repeating the same ids;
         # they remain content-free markers even in this very request.
         return shaped
+
+    def _insert_index(self, messages: list[Any]) -> int:
+        """Where this call's frame goes: after the Call 1 predecessor, or last.
+
+        The anchor is matched by object identity first (the harness loop
+        passes the same message objects from step to step), then by the
+        message's own ``id`` in case a caller re-validated or copied them.
+        Inserting there is refused -- and the frame appended instead -- when
+        the predecessor is gone (compaction summarised it away), when it is an
+        assistant message carrying tool calls, or when the message after it is
+        a tool result: in all three the frame would sit between a tool_use and
+        its tool_result, which neither Anthropic nor OpenAI-compat accepts.
+        Appending forfeits the cache saving for that call, never validity.
+        """
+
+        if self._anchor_after is None:
+            # Call 1: the frame goes last; remember what it follows.
+            if messages:
+                self._anchor_after = messages[-1]
+                self._anchor_after_id = getattr(messages[-1], "id", None) or None
+            else:
+                self._anchor_after = _ANCHOR_AT_START
+            return len(messages)
+        if self._anchor_after is _ANCHOR_AT_START:
+            pos = 0
+        else:
+            pos = -1
+            # Scan from the end: the anchor sits before this turn's steps.
+            for i in range(len(messages) - 1, -1, -1):
+                candidate = messages[i]
+                if candidate is self._anchor_after or (
+                    self._anchor_after_id is not None
+                    and getattr(candidate, "id", None) == self._anchor_after_id
+                ):
+                    pos = i + 1
+                    break
+            if pos < 0 or getattr(messages[pos - 1], "tool_calls", None):
+                return len(messages)
+        if pos < len(messages) and getattr(messages[pos], "role", None) == "tool":
+            return len(messages)
+        return pos
 
     def _card_admission_intact(self) -> bool:
         """Reused ephemeral copies cannot outlive their exact admission lease."""

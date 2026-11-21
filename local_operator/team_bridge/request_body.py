@@ -256,10 +256,16 @@ class CustomFrameInjection:
 
         WHY insert-at-index rather than always append: a multi-step turn makes
         several provider calls (tool use -> tool result -> follow-up). Always
-        appending to ``messages[-1]`` teleports up to 16 KiB of body text past
-        every assistant/tool message emitted mid-turn, busting the provider's
-        prefix cache on every tool step. Anchoring at the Call 1 index keeps
-        the prefix byte-identical through the frame for the entire turn while
+        appending moves up to 16 KiB of body text past every assistant/tool
+        message emitted mid-turn, so each step's prefix diverges at the frame.
+        On Anthropic that re-writes the frame plus the new step every step
+        (the prior tool_result breakpoint still reads the rest), and a full
+        rewrite only in image-bearing sessions, where the settled breakpoint
+        displaced that one. OpenAI-compat paid more: tool results are role
+        ``tool`` there, so its previous-user breakpoint was the wake card and
+        every step re-wrote the turn's tool steps so far. Anchoring the frame after
+        the same message every call (``PendingTurn._insert_index``) keeps the
+        prefix byte-identical through the frame for the entire turn while
         leaving ``messages`` unmutated and never persisting the frame.
         """
         from local_operator.harness.types import CustomMessage
@@ -385,14 +391,14 @@ def inject_into_context(
 
     from local_operator.harness.types import CustomMessage
 
-    frame = CustomMessage(
-        custom_type=custom_type,
-        attribution="user",
-        details=body_details(injected),
-        id=message_id,
-    )
-    frame._ephemeral = True
-    return list(messages) + [frame]
+    return list(messages) + [
+        CustomMessage(
+            custom_type=custom_type,
+            attribution="user",
+            details=body_details(injected),
+            id=message_id,
+        )
+    ]
 
 
 def admission_digest(owner_key: str, policy_digest: str, body_sha256: str, receipt_id: str) -> str:
