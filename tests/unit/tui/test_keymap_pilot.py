@@ -448,7 +448,7 @@ async def test_the_recording_sentence_is_never_painted_faint(width: int) -> None
     from rich.color import Color as RichColor
 
     from local_operator.tui import theme as theme_mod
-    from local_operator.tui.widgets.settings_view import _RECORDING_HOTKEY_DETAIL
+    from local_operator.tui.widgets.settings_view import _recording_hotkey_detail
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(width, 30)) as pilot:
@@ -462,7 +462,7 @@ async def test_the_recording_sentence_is_never_painted_faint(width: int) -> None
         plain = view._detail_text.plain
         # SENTENCE FIRST on a desktop row, and never clipped: the whole string
         # is 60 cells, so even the narrow band holds it.
-        assert plain.startswith(_RECORDING_HOTKEY_DETAIL), plain
+        assert plain.startswith(_recording_hotkey_detail()), plain
 
         faint = RichColor.parse(str(theme_mod.semantic_color("faint")))
         muted = RichColor.parse(str(theme_mod.semantic_color("muted")))
@@ -470,7 +470,7 @@ async def test_the_recording_sentence_is_never_painted_faint(width: int) -> None
         assert getattr(sentence.style, "color", None) == muted, view._detail_text.spans
         # No span OVERLAPPING the sentence may carry `faint`: the sentence is
         # spans[0] today, and this still holds if a later change splits it.
-        sentence_end = len(_RECORDING_HOTKEY_DETAIL)
+        sentence_end = len(_recording_hotkey_detail())
         for span in view._detail_text.spans:
             if span.start >= sentence_end or span.end <= 0:
                 continue
