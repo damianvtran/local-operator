@@ -620,7 +620,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 157, schema 2,270 -> 2,259 chars) so this doc's growth is paid for on the
     # always-loaded arm, which is why ``bench_context_budget.py`` was re-measured
     # to a PASS at 97,038 chars / 34,906 billed (29 headroom) rather than raised.
-    "generate_image": 984,
+    "generate_image": 985,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.
