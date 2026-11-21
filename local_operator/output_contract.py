@@ -439,16 +439,27 @@ class OutputContract:
         A type schema is announced as its GENERATED JSON Schema: the model is
         shown the same shape a raw mapping would give it, in the vocabulary
         ``json.dumps`` can carry.
+
+        COMPACT separators, deliberately: this block rides every request of the
+        session (it joins the system prefix), and ``indent=2`` whitespace was
+        roughly half the schema's characters for a model that reads minified
+        JSON exactly as well. Key order is unchanged (no ``sort_keys``) so the
+        caller's property order — often meaningful to the model — survives.
         """
         if self._type_adapter is not None:
             return "- It must validate against this schema (JSON Schema): " + json.dumps(
-                self._type_adapter.json_schema(), indent=2
+                self._type_adapter.json_schema(), separators=_COMPACT_JSON
             )
         if self._json_validator is not None:
             return "- It must validate against this schema (JSON Schema): " + json.dumps(
-                _plain(self.schema), indent=2
+                _plain(self.schema), separators=_COMPACT_JSON
             )
         return ""
+
+
+#: ``json.dumps`` separators for the schema announcement (see
+#: ``OutputContract._schema_announcement``): no padding after ``,``/``:``.
+_COMPACT_JSON = (",", ":")
 
 
 def decode_output(text: str, format: str) -> Any:

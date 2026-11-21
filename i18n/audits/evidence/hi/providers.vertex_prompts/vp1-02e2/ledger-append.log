@@ -1,0 +1,10 @@
+Execution companion; provenance: i18n/audits/evidence/hi/providers.vertex_prompts/vp1-02e2/record.json
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace providers.vertex_prompts
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/hi/providers.vertex_prompts/vp1-02e2/receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run
+i18n/audit-history/hi/providers.vertex_prompts.json
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/hi/providers.vertex_prompts/vp1-02e2/receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --apply
+i18n/audit-history/hi/providers.vertex_prompts.json
+exit=0

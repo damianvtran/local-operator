@@ -11,6 +11,9 @@ changes a registry string without regenerating the catalogue. New registry
 slots extend that snapshot from the reviewed English catalogue: the heavy-job
 section and switch add eight slots (including the shared on/off labels), with
 no change to the existing extraction-time strings or translated copy.
+The ``team_bridge.hold_release`` row (PR #4317) adds two slots the same way,
+copied from the en catalogue whose bytes carry that PR's passed copy-audit
+receipts (round ``pr4317-copy-r2``, ``keys_audited`` = exactly these two).
 
 The second test pins the resolution PATH: the registry's strings must come
 through the `wire.settings` catalogue (not from leftovers), and an unknown

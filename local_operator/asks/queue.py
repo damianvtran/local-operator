@@ -137,6 +137,26 @@ def _lapsed_visible_ms(config_dir: Path) -> int:
     return lapsed_visible_ms(config_dir)
 
 
+def _answer_by(surface: str, mesh_origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The ``by`` of an answered/revised event: the surface, plus the mesh origin.
+
+    ``mesh_origin`` is the receiving runtime's stamp (``network/origin.py``) and is
+    ABSENT, never null, when there is none — so every local or legacy row stays
+    byte-identical and a reader that never heard of it never sees the key.
+
+    Built ON ``by_record`` (F2), never beside it: the surface and any app-signature
+    ``proof`` are exactly what ``by_record`` records, and the stamp is only added
+    after. The stamp is the RECEIVING runtime's own connection fact, so it is not
+    part of the content the desktop app signs (``asks/app_attest``) — an attested
+    answer is always a local one, and a stamped answer is always a relayed one,
+    which ``stamp_answer_surface`` never lets an attestation vouch for.
+    """
+    by: dict[str, Any] = dict(by_record(surface))
+    if isinstance(mesh_origin, Mapping):
+        by["mesh_origin"] = dict(mesh_origin)
+    return by
+
+
 class AskQueue:
     """The session's queued asks: enqueue, answer, withdraw, fold, deliver."""
 
@@ -200,6 +220,10 @@ class AskQueue:
         #: ask, fail-closed, because the guard reads consent per ask, not per
         #: question. Kept beside ``_drafts`` and dropped with it everywhere.
         self._draft_surfaces: dict[str, dict[str, str]] = {}
+        #: The per-cell mesh origin stamps of the same legacy draft, kept and
+        #: dropped beside ``_draft_surfaces`` for the same reason (mesh-origin-
+        #: stamp §2 rule 4): one unstamped cell must not ride a verified one.
+        self._draft_origins: dict[str, dict[str, dict[str, Any] | None]] = {}
 
     # -- paths -------------------------------------------------------------
 
@@ -966,6 +990,7 @@ class AskQueue:
         by: str = "unknown",
         tool_call_id: str = "",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append ``answered`` for the whole ask, atomically, and reconcile.
 
@@ -1054,7 +1079,7 @@ class AskQueue:
             "kind": store.EVENT_ANSWERED,
             "ask_id": ask_id,
             "at": now,
-            "by": by_record(by),
+            "by": _answer_by(by, mesh_origin),
             "answers": cleaned,
         }
         if refs:
@@ -1081,6 +1106,7 @@ class AskQueue:
         by: str = "unknown",
         tool_call_id: str = "",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """SUPERSEDE a recorded answer while it is still UNDELIVERED (design §10).
 
@@ -1155,7 +1181,7 @@ class AskQueue:
             "kind": store.EVENT_REVISED,
             "ask_id": ask_id,
             "at": now,
-            "by": by_record(by),
+            "by": _answer_by(by, mesh_origin),
             "answers": cleaned,
             # The ``at`` of the write this supersedes: the newest revision's when
             # one exists, else the first answer's. Naming it keeps the log a chain
@@ -1429,6 +1455,7 @@ class AskQueue:
         values: Sequence[str],
         *,
         by: str = "unknown",
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """LEGACY INCREMENTAL ANSWER: one question of an ask, settled later.
 
@@ -1472,6 +1499,12 @@ class AskQueue:
             }
         draft[key] = [str(item) for item in (values or ())]
         self._draft_surfaces.setdefault(ask_id, {})[key] = str(by)
+        # Per cell, like the surface: the settled answer's mesh origin is the
+        # first cell's, verified only if EVERY cell came from that same verified
+        # device (the store's revision rule, applied to the legacy draft).
+        self._draft_origins.setdefault(ask_id, {})[key] = (
+            dict(mesh_origin) if mesh_origin is not None else None
+        )
         waiting = [qid for qid in ids if qid not in draft]
         if waiting:
             # Publish the partial so the mirrored card advances to the next
@@ -1480,13 +1513,19 @@ class AskQueue:
             return {"ok": True, "settled": False, "waiting": waiting}
         cells_by = self._draft_surfaces.get(ask_id, {})
         settle_by = weakest_surface(*(cells_by.get(qid, UNVERIFIED) for qid in ids))
-        outcome = self.respond(ask_id, draft, by=settle_by)
+        from local_operator.network.origin import fold_answer_origin
+
+        origins = self._draft_origins.pop(ask_id, {})
+        cell_origins = [origins.get(qid) for qid in ids]
+        settle_origin = fold_answer_origin(cell_origins[0], cell_origins[1:]) if ids else None
+        outcome = self.respond(ask_id, draft, by=settle_by, mesh_origin=settle_origin)
         if not outcome.get("ok"):
             # A refusal at settle time (a lost race against another surface)
             # discards the draft with it: keeping it would let the next tap
             # settle an ask the log has already closed.
             self._drafts.pop(ask_id, None)
             self._draft_surfaces.pop(ask_id, None)
+            self._draft_origins.pop(ask_id, None)
             return outcome
         return {"ok": True, "settled": True, "waiting": []}
 
@@ -1823,6 +1862,7 @@ class AskQueue:
         # under it, and keeping it would advance a card for a closed ask.
         self._drafts.pop(str(ask_id), None)
         self._draft_surfaces.pop(str(ask_id), None)
+        self._draft_origins.pop(str(ask_id), None)
         self._refresh()
         self._kick()
 
@@ -1842,6 +1882,7 @@ class AskQueue:
             if record.get("status") != store.STATUS_OPEN:
                 self._drafts.pop(str(record.get("ask_id")), None)
                 self._draft_surfaces.pop(str(record.get("ask_id")), None)
+                self._draft_origins.pop(str(record.get("ask_id")), None)
 
     def _kick(self) -> None:
         """Ask the session to reconcile soon. Best-effort, no loop required.

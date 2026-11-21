@@ -518,6 +518,21 @@ async def test_the_lock_is_held_when_the_awaiter_is_cancelled(
         assert await _until(_free) is True, "the exchange never released the lock"
 
 
+# QUARANTINED, not fixed: `elapsed < 0.5` is a wall-clock bound on the whole
+# connect (discovery, lock acquire, a loop-scheduled 0.1s timeout), so a loaded
+# shard crosses it while the exchange's 0.6s POST is still in flight. Remove
+# once the derived assertion lands.
+@pytest.mark.skip(
+    reason=(
+        "QUARANTINED 2026-11-19 flaky-sweep ledger lopdev-E01: `AssertionError: the awaiter "
+        "waited for the exchange instead of returning at its budget` (`assert "
+        "0.7059773220000807 < 0.5`, #4240 gate job 135372519605, test (3.13, 4)); owner: "
+        "lopdev E01; real fix: the `elapsed` bound is wall-clock over the whole connect, so a "
+        "loaded shard crosses it without the behaviour regressing — assert the discriminating "
+        "state (exchange still pending, lock still held) or bound the wait in loop time; remove "
+        "once that derived assertion lands"
+    )
+)
 @pytest.mark.asyncio
 async def test_the_lock_is_held_when_the_awaiter_overruns_its_budget(
     monkeypatch: pytest.MonkeyPatch,

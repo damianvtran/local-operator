@@ -1,0 +1,115 @@
+{
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+  "context_sha256": "4f9cf2dabc89f7e711c3cf2d74b2a6e75c274954152daa14a1dad31ac9cf12f2",
+  "target_sha256": "9d39802f777c145ee4577601dbfb6b8151e3bcf91c4cbaa0d28ff6b5e982aea3",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/fr/wire.session_status.json",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Delegation brief; not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor (dur-audit-fr)",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "3af0528b6788",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "fallback_used": false,
+    "independent_from_translator": true
+  },
+  "findings_by_severity": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "clean",
+  "status": "passed",
+  "scope": {
+    "keys_read": 5,
+    "new_keys": 4,
+    "existing_integration_keys": 1,
+    "unchanged_entries_verified": 31,
+    "comparison_keys_read": 9
+  },
+  "evidence": [
+    {
+      "case": "0s",
+      "duration": "0 s",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 0 s)",
+      "fr_cells": 3,
+      "en_cells": 2
+    },
+    {
+      "case": "42s",
+      "duration": "42 s",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 42 s)",
+      "fr_cells": 4,
+      "en_cells": 3
+    },
+    {
+      "case": "1m",
+      "duration": "1 min",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 1 min)",
+      "fr_cells": 5,
+      "en_cells": 2
+    },
+    {
+      "case": "4m",
+      "duration": "4 min",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 4 min)",
+      "fr_cells": 5,
+      "en_cells": 2
+    },
+    {
+      "case": "1h 0m",
+      "duration": "1 h 0 min",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 1 h 0 min)",
+      "fr_cells": 9,
+      "en_cells": 5
+    },
+    {
+      "case": "3h 12m",
+      "duration": "3 h 12 min",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 3 h 12 min)",
+      "fr_cells": 10,
+      "en_cells": 6
+    },
+    {
+      "case": "21h 0m",
+      "duration": "21 h 0 min",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 21 h 0 min)",
+      "fr_cells": 10,
+      "en_cells": 6
+    },
+    {
+      "case": "1d 1h",
+      "duration": "1 j 1 h",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 1 j 1 h)",
+      "fr_cells": 7,
+      "en_cells": 5
+    },
+    {
+      "case": "2d 4h",
+      "duration": "2 j 4 h",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 2 j 4 h)",
+      "fr_cells": 7,
+      "en_cells": 5
+    },
+    {
+      "case": "1000d 0h",
+      "duration": "1000 j 0 h",
+      "heartbeat": "Ne répond pas · processus actif (dernier signal de vie il y a 1000 j 0 h)",
+      "fr_cells": 10,
+      "en_cells": 8
+    }
+  ],
+  "note": "Independent delta linguistic audit: four new duration keys plus wedged_heartbeat; not a full re-audit of 31 existing entries. Arguments match English, days remains simple. French CLDR one/many/other: no plural branches needed for invariant unit symbols. French s/min/h/j match shipped relay.asks.duration.* and relay.shell.usage.countdown_*; Latin glyphs are conventional French symbols, not English leakage. Durations 3–10 cells, +1–4 vs English; no fixed sidecar cap. No rendered UI screenshot or native-speaker certification claimed. Unchanged existing bytes verified by reverse insertion reconstruction and git diff."
+}

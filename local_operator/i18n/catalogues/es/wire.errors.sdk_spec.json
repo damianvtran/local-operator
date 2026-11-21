@@ -7,6 +7,7 @@
   "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' abre un visor para spec.resume; no conecta equipos, perfiles, herramientas, nombres, objetivos ni políticas de aprobación: eso corresponde al propietario. Define solo resume en esta especificación (o usa mode=''own''). Campos no admitidos: {fields}.",
   "wire.errors.sdk_spec.attach_output_unsupported": "no se puede definir la aplicación forzosa del formato de salida en una sesión conectada; lo decide el runtime propietario",
   "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' necesita spec.resume: un visor se conecta a un id",
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": "mcp_ready_timeout_s: timeout_s debe ser un número finito >= 0",
   "wire.errors.sdk_spec.mode_invalid": "mode debe ser ''own'' o ''attach'', no {mode}",
   "wire.errors.sdk_spec.output_format_invalid": "output_format debe ser uno de {formats}",
   "wire.errors.sdk_spec.output_retries_range": "output_retries debe estar entre 0 y 5",

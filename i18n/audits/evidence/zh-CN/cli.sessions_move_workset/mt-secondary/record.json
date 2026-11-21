@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "audit_id": "mt-secondary-zh-CN",
+  "audit_kind": "second independent safety semantic audit (PR #4245 delta keys)",
+  "locale": "zh-CN",
+  "audit_date": "2026-11-18",
+  "audited_head": "4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10",
+  "delta_base": "696a18338",
+  "keys_audited": {
+    "cli.sessions_move_workset": [
+      "cli.sessions_move_workset.receipt_transferred",
+      "cli.sessions_move_workset.receipt_restored_row",
+      "cli.sessions_move_workset.receipt_pending",
+      "cli.sessions_move_workset.receipt_left_row",
+      "cli.sessions_move_workset.receipt_recipe",
+      "cli.sessions_move_workset.receipt_rewrite",
+      "cli.sessions_move_workset.reason.primary_absent",
+      "cli.sessions_move_workset.reason.restore_failed",
+      "cli.sessions_move_workset.reason.snapshot_failed",
+      "cli.sessions_move_workset.reason.restore_path_refused",
+      "cli.sessions_move_workset.reason.url_refused",
+      "cli.sessions_move_workset.reason.destination_declined",
+      "cli.sessions_move_workset.receipt_branch_moved",
+      "cli.sessions_move_workset.import_not_granted",
+      "cli.sessions_move_workset.reason.import_not_granted",
+      "cli.sessions_move_workset.reason.too_many_worktrees",
+      "cli.sessions_move_workset.reason.clone_parent_refused",
+      "cli.sessions_move_workset.reason.kept_as_confirmed",
+      "cli.sessions_move_workset.probe_refused_by_policy",
+      "cli.sessions_move_workset.receipt_sent",
+      "cli.sessions_move_workset.receipt_sent_row",
+      "cli.sessions_move_workset.receipt_sent_unknown"
+    ],
+    "wire.settings": [
+      "wire.settings.mesh_moves.title",
+      "wire.settings.mesh_moves.description",
+      "wire.settings.mesh_move_working_set_max_bytes.label",
+      "wire.settings.mesh_move_working_set_max_bytes.help",
+      "wire.settings.mesh_move_working_set_roots.label",
+      "wire.settings.mesh_move_working_set_roots.help"
+    ]
+  },
+  "auditor": {
+    "agent": "task (lopdev) / SECOND independent safety i18n-auditor 1946542ef662",
+    "session": "1946542ef662",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "model_independent": false
+  },
+  "translator": {
+    "agent": "coder",
+    "jobs": [
+      "1768f308a175",
+      "04a689e5090b",
+      "b57675c8318a",
+      "b7523be856f2",
+      "b404dd5868ee",
+      "19556dc3b91a (mechanical fixes, a69e0e74b)"
+    ],
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "first_auditor": {
+    "session": "482db48afe47",
+    "evidence": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/"
+  },
+  "input_hashes": {
+    "en:cli.sessions_move_workset": "6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050",
+    "target:cli.sessions_move_workset": "6f2c1a4af67273dd3d1efd2bd967f4a6017a8b44e1e283a9bdc211d65da01bc1",
+    "en:wire.settings": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+    "target:wire.settings": "77cb65f4075ae063a6ec88991a7f1d4b5fba428911bfa1093022273f6c9b4087"
+  },
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "findings": [
+      {
+        "id": "T-ALL-1",
+        "severity": "minor",
+        "keys": "cli.sessions_move_workset.receipt_pending",
+        "problem": "'relay' is kept in Latin script. The glossary row 'relay' says translate (relais · relé · 中继 · ретранслятор · chuyển tiếp · ریلے · रिले), and fr follows it.",
+        "fix": "use the glossary term for this locale"
+      },
+      {
+        "id": "T-ALL-2",
+        "severity": "minor",
+        "keys": "cli.sessions_move_workset.reason.too_many_worktrees",
+        "problem": "'worktrees' is translated as a calque (arbres de travail / árboles de trabajo / 工作树 / рабочих деревьев / cây làm việc / ورک ٹری / वर्कट्री), but every other key in this namespace keeps Latin 'worktree'. Glossary consistency.",
+        "fix": "use worktree(s) as in brings_summary and receipt_*"
+      },
+      {
+        "id": "T-zh-CN-1",
+        "severity": "minor",
+        "keys": "cli.sessions_move_workset.import_not_granted, reason.too_many_worktrees, reason.kept_as_confirmed, wire.settings.mesh_* (4)",
+        "problem": "'move' is rendered 迁移 in the new keys, but 移动 in the 76 existing keys and on the Move button the user presses.",
+        "fix": "移动"
+      }
+    ]
+  },
+  "not_claimed": [
+    "native-speaker review",
+    "rendered frame / RTL paint",
+    "model independence"
+  ]
+}

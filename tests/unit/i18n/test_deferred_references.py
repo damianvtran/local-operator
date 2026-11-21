@@ -92,6 +92,98 @@ def test_no_deferred_namespace_gained_a_reference(
     )
 
 
+def test_bedrock_deferred_copy_remains_resolvable_without_the_eager_bundle(monkeypatch) -> None:
+    """Login callbacks and refusal envelopes must not need a client catalogue."""
+    import inspect
+
+    from local_operator.i18n import resolve
+    from local_operator.i18n.keys import wire_login_bedrock
+    from local_operator.i18n.messages import render_resolved
+    from local_operator.providers.bedrock.login import _t
+    from local_operator.server.routes.auth import _bedrock_keys, _bedrock_refusal
+
+    for locale in ("en", "hi"):
+        monkeypatch.setattr(resolve, "resolve_language", lambda: locale)
+        bundle = catalogues.wire_bundle(locale)
+        # Both namespaces stay fetchable on demand, but no eager client copy
+        # is needed to render their text at the process boundary.
+        for namespace in ("wire.login.bedrock", "wire.errors.bedrock"):
+            assert namespace in catalogues.DEFERRED_NAMESPACES
+            assert namespace not in bundle["namespaces"]
+        for name, key in inspect.getmembers(wire_login_bedrock, inspect.isfunction):
+            if name.startswith("_"):
+                continue
+            message = key(
+                **{
+                    arg: "1" if arg == "count" else "fixture"
+                    for arg in inspect.signature(key).parameters
+                }
+            )
+            text = _t(message)
+            assert text == render_resolved(message)
+            assert text and not text.startswith("wire.login.bedrock.")
+        response = _bedrock_refusal(
+            422, "bedrock_input_invalid", _bedrock_keys().input_invalid(field="region")
+        )
+        # The desktop contract keys on a MAPPING envelope (``code``/``text``).
+        # Starlette annotates ``HTTPException.detail`` as ``str | None`` while
+        # this refusal carries a dict, so the payload is observed across that
+        # boundary and then asserted to be the mapping the contract names.
+        payload: object = getattr(response, "detail")
+        assert isinstance(payload, dict), "the refusal envelope is a mapping"
+        assert payload["code"] == "bedrock_input_invalid"
+        assert payload["text"]
+        assert "wire.errors.bedrock" not in str(payload)
+
+
+def test_sdk_spec_refusals_render_without_the_eager_bundle() -> None:
+    """Deferring ``wire.errors.sdk_spec`` (PR #4349) must not cost a translation.
+
+    WHY. The namespace left the eager bundle so hi's eager total fits
+    ``EAGER_TOTAL_MAX_BYTES`` again. That is safe only while the refusal is a
+    FINISHED sentence rendered in the embedding process: both render points
+    (``session/spec.py`` and ``sdk.py``) are driven here in a non-English locale,
+    and the raised text must be the locale's catalogue sentence with no catalogue
+    key or code attribute left for a client to resolve.
+    """
+    from local_operator import sdk
+    from local_operator.i18n import text
+    from local_operator.session.spec import SessionSpec, SessionSpecError
+
+    namespace = "wire.errors.sdk_spec"
+    assert namespace in catalogues.DEFERRED_NAMESPACES
+    for locale in ("en", "hi"):
+        bundle = catalogues.wire_bundle(locale)
+        assert namespace not in bundle["namespaces"]
+        assert namespace in {entry["namespace"] for entry in bundle["deferred"]}
+
+    hi = catalogues.load_catalogue("hi", namespace)
+    guards = {
+        # session/spec.py: SessionSpec.__post_init__
+        "mcp_ready_timeout_invalid": lambda: SessionSpec(mcp_ready_timeout_s=-1.0),
+        # sdk.py: the attach guard, the other recorded render point (no params,
+        # so the raised sentence is the catalogue value verbatim)
+        "attach_output_unsupported": lambda: sdk._refuse_attach_extras(
+            SessionSpec(output_format="json")
+        ),
+    }
+    text.set_active_locale("hi")
+    try:
+        for key, guard in guards.items():
+            try:
+                guard()
+            except SessionSpecError as error:
+                raised = error
+            else:  # pragma: no cover - the guard is the subject under test
+                raise AssertionError(f"{key} did not refuse")
+            assert raised.args == (hi[f"{namespace}.{key}"],)
+            assert namespace not in str(raised)
+            assert not hasattr(raised, "code")
+    finally:
+        text.set_active_locale("en")
+    assert sdk.SessionSpecError is SessionSpecError
+
+
 def test_the_census_catches_one_added_reference(
     i18n_deferred_watch: ModuleType, tmp_path: Path
 ) -> None:

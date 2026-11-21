@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "cli.failures",
-  "history_sha256": "7a9bb00c92d6becb6901e81e7d6908a0a26a01d3976504888ab6811ec7bf8517",
+  "history_sha256": "1ce72bab4e5cff7b45d78d9637616c07351b2608f882c82a75c99ceb6f025bad",
   "entries": [
     {
       "locale": "hi",
@@ -38,6 +38,62 @@
         {
           "path": "i18n/audits/evidence/hi/cli.failures/gbt2/audit.log",
           "sha256": "dc0df2f1efbbc17caa20b068b79e66d0dbf261094fe93d7a103813ddf4e88c01"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.failures",
+      "source_sha256": "10452313f2d9c33a17496fabefb90870ef27631c1ac446972d7457b8000ce54c",
+      "translator": {
+        "agent": "coder (PR #4364 implementer)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "f3778867a369",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "hi cli.failures goo1: independent audit of new key github_owner_offline (PR #4364); PASS; prior 5 keys byte-identical to base. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/hi/cli.failures/goo1/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/cli.failures/goo1/report.md",
+          "sha256": "45438b4a4f6874454f79113f7d220159db89bb1a8ecf416962a9e85fb142a7f4"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.failures",
+      "source_sha256": "da8725bbc324ad5124716489a31616dc4e7d999ae1ae07f9060d206f0137bc95",
+      "translator": {
+        "agent": "manager (lopdev lane 79, PR #4364 commit 6d1afe8c3)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "683ecf30b5dc",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "hi cli.failures goo2: independent re-audit of github_owner_offline after en reworded to \"isn't answering right now\" (PR #4364, 6d1afe8c3); PASS; round-1 corrections persist; other 5 keys byte-identical. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/hi/cli.failures/goo2/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/cli.failures/goo2/report.md",
+          "sha256": "4a7f5990580579c9ad7598b0f74b57ba35a899faba386bf7f4a8711f69ef4b86"
         }
       ]
     }

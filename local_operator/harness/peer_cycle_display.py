@@ -8,6 +8,7 @@ and model messages are never copied or enriched. No Python/stdout text is parsed
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -42,6 +43,9 @@ from local_operator.harness.types import (
 )
 
 CUSTOM_TYPE = "frontend_peer_cycle_display_v1"
+#: Envelope ``status`` when no current transcript index is in memory yet: the
+#: records are not refused, just not provable until the armed refresh lands.
+BUILDING = "building"
 MAX_RECORD_BYTES = 64 * 1024
 MAX_SOURCE_IDS = 4096
 HOT_RECORDS = 16
@@ -448,8 +452,51 @@ class DisplayCycleAccumulator:
         return record
 
 
+def _index_or_arm(directory: Path) -> Any:
+    """The current transcript index for ``directory``, never built ON A LOOP.
+
+    WHY NOT ``refresh_index``. These readers run SYNCHRONOUSLY, and several on
+    an event loop: the TUI's render path (``tui/app.py``
+    ``_peer_display_records_for``, called from async ``_prepare_sidebar_session``
+    and from ``_project_settled_rows``), and
+    the session runtime's ``history_page`` (async in ``serving.py``, calling the
+    sync ``display_window`` -> :func:`attach_page_records`). ``refresh_index``
+    is a whole-journal scan on a cold or moved cache — seconds on the
+    anchor-sized conversations — and it ran outside the ``start_refresh``
+    single-flight, so a page read could both stall its loop and duplicate a
+    scan another open already had in flight (transcript-index ADR caller map).
+
+    The answer is the same split the desktop's open frame uses: serve what is
+    already in memory (:func:`transcript_index.current_without_build`), else
+    arm the shared single-flight refresh without waiting and answer "not
+    ready"; the caller's next read finds the index resident.
+
+    A caller with NO running loop (a ``to_thread`` worker) builds directly with
+    ``refresh_index`` (review round 1, M1). It is already off every loop, so
+    the stall this function exists to avoid cannot happen there, and it has no
+    loop to own a background task. Answering "not ready" instead would be
+    permanent for some of them: ``mobile/durable.py``'s ``_fold`` runs in such a
+    worker and caches its rows until the journal changes, so an idle
+    conversation would never get its peer-cycle grouping back. The per-session
+    build lock in ``refresh_index`` still dedups this build against a
+    concurrent ``start_refresh`` of the same journal.
+    """
+    from local_operator.session import transcript_index
+
+    root, session_id = directory.parent.parent, directory.name
+    index = transcript_index.current_without_build(root, session_id)
+    if index is not None:
+        return index
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return transcript_index.refresh_index(root, session_id)
+    transcript_index.arm_refresh(root, session_id)
+    return None
+
+
 def indexed_records(
-    transcript: Any, ids: list[str], *, max_bytes: int = 512 * 1024
+    transcript: Any, ids: list[str], *, max_bytes: int = 512 * 1024, index: Any = None
 ) -> dict[str, Any] | None:
     """Read selected archive IDs using the existing all-row index, never a scan.
 
@@ -457,10 +504,9 @@ def indexed_records(
     by a page consumer instead of pretending a capped proof never existed.
     """
     from local_operator.session.transcript import read_indexed_raw_rows
-    from local_operator.session.transcript_index import refresh_index
 
     directory = transcript.directory
-    index = refresh_index(directory.parent.parent, directory.name)
+    index = index or _index_or_arm(directory)
     if index is None:
         return None
     return read_indexed_raw_rows(directory, index, ids, max_bytes=max_bytes)
@@ -721,12 +767,11 @@ def validate_indexed_record(
         _entry_to_message,
         read_indexed_raw_rows,
     )
-    from local_operator.session.transcript_index import refresh_index
 
     if not isinstance(record, dict) or not 0 < max_bytes <= 512 * 1024:
         return None, 0
     directory = _directory_of(transcript)
-    index = index or refresh_index(directory.parent.parent, directory.name)
+    index = index or _index_or_arm(directory)
     if index is None or not index.source_views.origins_complete:
         return None, 0
     try:
@@ -807,20 +852,31 @@ def discover_records(
 
     ``transcript`` is a ``Transcript`` OR the journal directory itself (see
     ``_directory_of``). ``index`` lets a caller that already holds a CURRENT
-    resident index pass it in; when omitted this function keeps its original
-    ``refresh_index`` contract (build/load the cache), which the interactive
-    display paths still rely on.
+    resident index pass it in; when omitted only an index already in memory is
+    used (see :func:`_index_or_arm`) and a missing one answers the documented
+    not-ready shape — every candidate ``unavailable`` — while the shared
+    refresh is armed. It never builds.
     """
     from local_operator.session.transcript import read_indexed_raw_rows
-    from local_operator.session.transcript_index import refresh_index
 
     candidates = candidate_record_ids(session_id, messages)
     if not candidates:
         return None
     directory = _directory_of(transcript)
-    index = index or refresh_index(directory.parent.parent, directory.name)
+    index = index or _index_or_arm(directory)
     if index is None:
-        return {"records": [], "remaining": [], "unavailable": candidates, "bytes": 0}
+        # ``status: building`` is the NOT-READY marker: the same explicit empty
+        # partition as before, plus a word saying the cause is a cold index and
+        # not the source itself. ``display_window`` reads it to keep this page
+        # out of its cache, so the next read at the same cut can carry the
+        # records the armed refresh is about to make available.
+        return {
+            "records": [],
+            "remaining": [],
+            "unavailable": candidates,
+            "bytes": 0,
+            "status": BUILDING,
+        }
     cut_rows = [index.journal_rows.get(message.id) for message in messages]
     if not cut_rows or any(row is None for row in cut_rows):
         return {"records": [], "remaining": [], "unavailable": candidates, "bytes": 0}
@@ -986,7 +1042,23 @@ async def persist_record(transcript: Any, record: dict[str, Any]) -> bool:
     """Idempotent archive append; a collision cannot overwrite another record."""
     key = record["id"]
     if transcript.has_entry(key):
-        existing = indexed_records(transcript, [key], max_bytes=MAX_RECORD_BYTES + 1024)
+        # THIS caller is async and its answer is a write decision, so unlike the
+        # page readers it may not answer "not ready": ``False`` here reads as a
+        # collision and the record is never re-published. It awaits the SHARED
+        # single-flight refresh instead of scanning on the loop.
+        from local_operator.session import transcript_index
+
+        directory = transcript.directory
+        root, session_id = directory.parent.parent, directory.name
+        index = transcript_index.current_without_build(root, session_id)
+        if index is None:
+            task, _started = transcript_index.start_refresh(root, session_id)
+            index = await asyncio.shield(task)
+        if index is None:
+            return False
+        existing = indexed_records(
+            transcript, [key], max_bytes=MAX_RECORD_BYTES + 1024, index=index
+        )
         if (
             existing is None
             or existing["remaining"]

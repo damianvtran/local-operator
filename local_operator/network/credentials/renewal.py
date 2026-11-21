@@ -340,6 +340,10 @@ def owner_take(broker: Any, link: Any, key: str, by: str) -> dict[str, Any] | No
         )
     now_ms = int(time.time() * 1000)
     outcome: dict[str, Any] = {}
+    # Resolved before the write: `write` runs under the store's statement lock
+    # and write reservation, so the network member file read stays out of it
+    # (`AuthStore._update_payload` wants `mutate` a pure transform).
+    device_name = _member_name(broker, by)
 
     def write(payload: dict[str, Any]) -> bool:
         current = payload.get(REFRESH_DELEGATE_KEY)
@@ -376,7 +380,7 @@ def owner_take(broker: Any, link: Any, key: str, by: str) -> dict[str, Any] | No
             record["salt"], store._presented_refresh_token(payload)
         )  # noqa: SLF001
         record["last_contact_ms"] = now_ms
-        record["device_name"] = _member_name(broker, by)
+        record["device_name"] = device_name
         payload[REFRESH_DELEGATE_KEY] = record
         outcome["record"] = dict(record)
         return True

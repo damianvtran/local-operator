@@ -459,6 +459,10 @@
   "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label": "Caché de 1 h de Anthropic a partir de (tokens)",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": "Tamaño de contexto (tokens) a partir del cual las peticiones de subagentes usan el TTL de 1 hora de la caché de prompts. 0 no añade ninguna regla por tamaño: en las mediciones, usar 1 hora solo por tamaño resultó más caro para los subagentes con cualquier tamaño. Aparte, con una suscripción de Claude un subagente pasa a 1 hora tras una llamada que dure 4 minutos o más; un 0 en el ajuste principal de 1 hora lo desactiva.",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": "TTL 1 h subagentes Anthropic",
+  "wire.settings.providers_bedrock_auth.help": "ambient: credenciales de AWS de esta máquina (rol de IAM) para Bedrock.",
+  "wire.settings.providers_bedrock_auth.label": "Autenticación de Bedrock",
+  "wire.settings.providers_bedrock_region.help": "Región de AWS para Bedrock si la conexión no fija una. Vacío: AWS_REGION.",
+  "wire.settings.providers_bedrock_region.label": "Región de Amazon Bedrock",
   "wire.settings.providers_openai_api.choice.chat_completions.description": "renuncia explícita por compatibilidad",
   "wire.settings.providers_openai_api.choice.chat_completions.label": "chat_completions",
   "wire.settings.providers_openai_api.choice.responses.description": "la API Responses pública (predeterminado)",
@@ -762,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Tope de no dirigidos / hora",
   "wire.settings.team_bridge_session.help": "Sesión que puede despertarse al recibir mensajes nuevos; vacío = solo un indicador.",
   "wire.settings.team_bridge_session.label": "Sesión de CoS",
+  "wire.settings.team_bridge_hold_release.label": "Retener pedidos de trabajo",
+  "wire.settings.team_bridge_hold_release.help": "Algunas solicitudes de trabajo nuevo se retienen para que las entregues o descartes. Nada llega a tu agente si no lo entregas. Desactivado, se rechazan.",
   "wire.settings.tool_approval_mode.choice.ask.description": "preguntar antes de las herramientas de escritura/ejecución",
   "wire.settings.tool_approval_mode.choice.ask.label": "preguntar",
   "wire.settings.tool_approval_mode.choice.auto.description": "ejecutarlas sin preguntar",
@@ -881,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 horas",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 horas",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "Eliminar los chats temporales tras",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Cuánto tiempo puede estar inactivo un chat temporal antes de eliminarse. El tiempo en pantalla, una tarea en curso o una pregunta abierta no cuentan como inactividad."
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Cuánto tiempo puede estar inactivo un chat temporal antes de eliminarse. El tiempo en pantalla, una tarea en curso o una pregunta abierta no cuentan como inactividad.",
+  "wire.settings.mesh_moves.title": "Movimientos de sesión",
+  "wire.settings.mesh_moves.description": "Lo que una conversación movida a otro dispositivo lleva consigo. Se lee en cada movimiento, así que un cambio se aplica al siguiente.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Límite de archivos de trabajo por movimiento (bytes)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "La cantidad máxima de datos de archivos de trabajo (commits empaquetados más archivos preparados, sin preparar y sin seguimiento) que un movimiento envía a otro dispositivo o acepta de él. Si se supera, el movimiento se rechaza y nada cambia. Valor predeterminado: 256 MiB.",
+  "wire.settings.mesh_move_working_set_roots.label": "Carpetas que pueden recibir repositorios movidos",
+  "wire.settings.mesh_move_working_set_roots.help": "Dónde, en este dispositivo, un movimiento de sesión puede crear o restaurar un repositorio: carpetas dentro de tu carpeta personal, escritas con ~ y separadas por comas (por ejemplo ~/code, ~/work). Nunca se usan carpetas ocultas, del sistema, de comandos (en el PATH) ni node_modules. Sin configurar: un repositorio se restaura donde ya está, y uno que falta solo se clona en una carpeta que ya contiene tus repositorios; configúralo para permitir otras carpetas."
 }

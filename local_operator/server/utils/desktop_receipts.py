@@ -155,6 +155,62 @@ class DesktopReceipts:
                 db.execute("INSERT INTO receipts VALUES (?, ?, NULL)", (key, fingerprint))
         return None
 
+    @staticmethod
+    def fingerprint(body: dict[str, Any]) -> str:
+        """The digest ``run`` compares a same-key retry's body by."""
+        return hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _read(self, sql: str, parameters: tuple[Any, ...]) -> tuple[Any, ...] | None:
+        """Run one read against the store, without creating it or claiming anything.
+
+        BOTH READS GO THROUGH THIS, and ``_db`` is not one of them: ``_db`` mkdirs,
+        chmods, adopts WAL and ``CREATE TABLE``s, so a lookup that opened through
+        it would write on a path whose callers promise it creates nothing (review
+        round 2, MINOR 1).
+
+        It opens the store READ-ONLY on purpose. An absent store, a store with no
+        receipts table yet, and a store whose write lock another connection holds
+        all record nothing, and none of them is a refusal: ``OperationalError``
+        answers ``None`` so the caller runs its admissions and ``run`` owns the
+        claim, including its conflict semantics.
+
+        The path reaches SQLite as a proper ``file:`` URI rather than interpolated
+        raw, because a config root is arbitrary user data and two of its legal
+        characters are URI delimiters. Interpolated raw, a root containing ``?`` or
+        ``#`` truncates the filename there and takes ``?mode=ro`` with it, so the
+        open lands on the truncated path — CREATING a 0-byte file there, on the
+        very path whose docstring promises a read writes nothing — and then
+        answers ``None`` for a key the store does hold (review round 3, R11).
+        ``Path.as_uri`` percent-encodes, so those characters survive as data.
+        """
+        if not self.path.exists():
+            return None
+        try:
+            # The connect is INSIDE the try because a read-only open of a file
+            # that vanished since the check above raises at connect, not at the
+            # first statement.
+            with closing(
+                sqlite3.connect(self.path.absolute().as_uri() + "?mode=ro", uri=True, timeout=10)
+            ) as db:
+                return db.execute(sql, parameters).fetchone()
+        except sqlite3.OperationalError:
+            return None
+
+    def recorded_fingerprint(self, key: str) -> str | None:
+        """The fingerprint ``key`` was claimed with, or ``None``; a read, never a claim.
+
+        For a caller that chooses part of the body itself (the voice route picks
+        ``mode``), so it can rebuild the SAME body for a retry instead of the one
+        the current state would pick. It goes through :meth:`_read`, so the
+        database file is not created by asking and a store that cannot be read
+        (no table, a held lock) answers ``None`` rather than raising into the
+        request.
+        """
+        row = self._read("SELECT fingerprint FROM receipts WHERE id = ?", (key,))
+        return None if row is None else str(row[0])
+
     def recorded(self, key: str) -> bool:
         """Has ``key`` already been claimed, WITHOUT claiming it or writing.
 
@@ -177,35 +233,11 @@ class DesktopReceipts:
         success into a failure for the client the at-most-once contract exists for
         (review round 2, R7).
 
-        It opens the store READ-ONLY on purpose: ``_db`` creates the file and
-        chmods it, and a probe that runs before a refusal must write nothing. An
-        absent store, and a store with no receipts table yet, both record nothing.
-
-        The path reaches SQLite as a proper ``file:`` URI rather than interpolated
-        raw, because a config root is arbitrary user data and two of its legal
-        characters are URI delimiters. Interpolated raw, a root containing ``?`` or
-        ``#`` truncates the filename there and takes ``?mode=ro`` with it, so the
-        open lands on the truncated path — CREATING a 0-byte file there, on the
-        very path whose docstring promises a probe writes nothing — and then
-        answers ``False`` for a key the store does hold (review round 3, R11).
-        ``Path.as_uri`` percent-encodes, so those characters survive as data.
+        It reads through :meth:`_read`, so an absent store, a store with no receipts
+        table yet, and a write lock held elsewhere all answer "nothing recorded" —
+        and a write before a refusal is exactly what must not happen.
         """
-        if not self.path.exists():
-            return False
-        try:
-            # The connect is INSIDE the try because a read-only open of a file
-            # that vanished since the check above raises at connect, not at the
-            # first statement.
-            with closing(
-                sqlite3.connect(self.path.absolute().as_uri() + "?mode=ro", uri=True, timeout=10)
-            ) as db:
-                row = db.execute("SELECT 1 FROM receipts WHERE id = ?", (key,)).fetchone()
-        except sqlite3.OperationalError:
-            # No table yet, or a write lock held elsewhere: "nothing recorded"
-            # is the safe answer — the caller then runs the admissions and
-            # ``run`` owns the claim, including its conflict semantics.
-            return False
-        return row is not None
+        return self._read("SELECT 1 FROM receipts WHERE id = ?", (key,)) is not None
 
     def _release(self, key: str) -> None:
         """Delete an UNFINISHED claim on ``key``, so the same id may run again.
@@ -273,9 +305,7 @@ class DesktopReceipts:
         fingerprint check, so a same-id retry still coalesces and a different
         body still raises :class:`ReceiptConflict`.
         """
-        fingerprint = hashlib.sha256(
-            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        fingerprint = self.fingerprint(body)
         # Coalesce retries of THIS request, not unrelated sessions: a runtime
         # compaction can wait on a provider, and must not block another session's
         # prompt admission. Cross-process races still use the SQLite transaction.

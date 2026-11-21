@@ -1,0 +1,87 @@
+{
+  "tui.tool_card.chip.you": {
+    "maxCells": 4,
+    "note": "Lead chip on a tool row the USER ran themselves with `! <command>` (not the agent), e.g. 'you: git status'. The code appends one space after it. It sits inside the row's summary budget and is dropped whole when the row is too narrow, so keep it at most ~4 cells.",
+    "role": "attribution chip",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.fetch.cache": {
+    "note": "Fragment of the web-fetch card's 'Fetched:' row metadata, joined with other fragments by '  ·  ' (e.g. '200  ·  text/html  ·  cache miss'). {state} is the cache outcome as a literal machine token (miss, hit, revalidated…) — keep it verbatim. Lower-case.",
+    "role": "metadata fragment",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.fetch.fetched": {
+    "note": "First row of an expanded web-fetch card. {url} is the requested URL, inserted verbatim. Cropped at the card's line width.",
+    "role": "detail row label",
+    "tone": "plain"
+  },
+  "tui.tool_card.fetch.final": {
+    "note": "Appended (after two spaces) to the 'Fetched:' row only when the fetch was redirected; {url} is the final URL after redirects, inserted verbatim. Keep the parentheses.",
+    "role": "detail row suffix",
+    "tone": "plain"
+  },
+  "tui.tool_card.hint.collapse": {
+    "maxCells": 10,
+    "note": "Click/Enter affordance trailing an open tool row; a press collapses the card. The code wraps it in ⟨ ⟩ brackets. Pairs with 'expand' in the same slot, so keep the two similar in length (English 8 cells).",
+    "role": "affordance",
+    "tone": "plain, terse, imperative"
+  },
+  "tui.tool_card.hint.expand": {
+    "maxCells": 10,
+    "note": "Click/Enter affordance trailing a closed tool row (and repeated after a '… N more diff lines' marker); a press opens the card's detail. The code wraps it in ⟨ ⟩ brackets. English 6 cells; it is shed whole when the row is too narrow, so keep it short.",
+    "role": "affordance",
+    "tone": "plain, terse, imperative"
+  },
+  "tui.tool_card.hint.interrupt": {
+    "maxCells": 24,
+    "note": "Trailing hint on a running image-generation row telling the user which key stops it. {chord} is the literal key chord 'ctrl+c' — keep it verbatim, never translate. The code wraps the whole hint in ⟨ ⟩ brackets. Dropped whole at narrow widths.",
+    "role": "affordance",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.imagegen.requests_ahead": {
+    "note": "Live image-generation card line: how many provider requests are queued AHEAD of this one (not our queue position). {count} is the number for plural selection; {shown} is the same number pre-formatted as raw digits — insert {shown}, do not localise digits.",
+    "role": "status line",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.live.earlier_lines": {
+    "note": "Above a running tool's live output tail: this many earlier output lines were dropped from view. {count} is the number for plural selection; {shown} is the same number pre-formatted as raw digits — insert {shown}, do not localise digits. The code paints a leading '… ' (ellipsis + space) before this text; do not add one.",
+    "role": "elision marker",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.live.earlier_output_hidden": {
+    "note": "Above a running tool's live output tail when an unknown amount of earlier output was dropped from view. The code paints a leading '… ' (ellipsis + space) before this text; do not add one.",
+    "role": "elision marker",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.live.no_output_yet": {
+    "note": "Appended to the live header ('⋯ running · 4s · no output yet') while nothing has streamed to the card yet. Means 'not yet — keep waiting', distinct from a finished call's 'no output'. Lower-case clause.",
+    "role": "status clause",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.live.running": {
+    "note": "Heading of an expanded running tool card's live block; the code paints a leading '⋯ ' glyph and may append ' · <elapsed>' and the 'no output yet' clause. Lower-case single word in English.",
+    "role": "status header",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.more.diff_lines": {
+    "note": "Below an edit card's diff preview: this many diff lines are hidden; an '⟨expand⟩' affordance may follow on the same row. {count} is the number for plural selection; {shown} is the same number pre-formatted as raw digits — insert {shown}, do not localise digits. The code paints a leading '… ' (ellipsis + space) before this text; do not add one.",
+    "role": "elision marker",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.more.lines": {
+    "note": "Below a truncated tool card body (arguments, output, captured text): this many lines are hidden. {count} is the number for plural selection; {shown} is the same number pre-formatted as raw digits — insert {shown}, do not localise digits. The code paints a leading '… ' (ellipsis + space) before this text; do not add one.",
+    "role": "elision marker",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.more.search_lines": {
+    "note": "Below a search tool card's captured matches: this many matching lines are hidden. {count} is the number for plural selection; {shown} is the same number pre-formatted as raw digits — insert {shown}, do not localise digits. The code paints a leading '… ' (ellipsis + space) before this text; do not add one.",
+    "role": "elision marker",
+    "tone": "plain, terse"
+  },
+  "tui.tool_card.status.stop_unconfirmed": {
+    "maxCells": 18,
+    "note": "Status column word on a `sessions stop` tool row when the stop was requested but not yet confirmed (amber attention state, not success). Names WHAT is unconfirmed — the stop — so it is not confused with a delivery or wake. The column abbreviates it at narrow widths; keep it short.",
+    "role": "status word",
+    "tone": "plain, terse"
+  }
+}

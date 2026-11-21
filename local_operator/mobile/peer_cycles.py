@@ -18,6 +18,15 @@ from local_operator.harness.peer_cycles import PeerCycleReplay
 from local_operator.mobile.types import TranscriptEntry
 
 
+class _NoChanges:
+    """An update carrying no frontend-state change: re-apply the current context."""
+
+    changes: dict[str, Any] = {}
+
+
+_NO_CHANGES = _NoChanges()
+
+
 def bind_owner_peer_cycles(
     fold: Any, session: Any, notify: Callable[[], None], loop: Any
 ) -> Callable[[], None]:
@@ -63,6 +72,51 @@ def bind_owner_peer_cycles(
             return
         if fold.projection.version != before:
             notify()
+        _retry_when_index_lands()
+
+    def _retry_when_index_lands() -> None:
+        # The indexed validator never builds on this loop (see
+        # ``peer_cycle_display._index_or_arm``): with no current index it
+        # answers "not provable yet" and arms the shared refresh. A late
+        # publication lands right after a journal append, i.e. exactly when the
+        # resident index is stale, so without this re-ask the phone would not
+        # group the cycle until some unrelated update arrived. ONE retry per
+        # in-flight refresh, on its completion: no polling, no second scan.
+        #
+        # The lookup sees a refresh owned by ANOTHER loop too (review round 1,
+        # m1): it reaches this loop only as the proxy ``start_refresh`` hands a
+        # joiner, which ``in_flight_refresh`` now finds. A lookup, not
+        # ``arm_refresh``: arming here would start a refresh on every update of
+        # a session with nothing waiting on the index.
+        from local_operator.session import transcript_index
+
+        directory = getattr(session.transcript, "directory", None)
+        if directory is None or context.get("retry_armed"):
+            return
+        pending = transcript_index.in_flight_refresh(directory.parent.parent, directory.name)
+        if pending is None:
+            return
+        context["retry_armed"] = True
+
+        def retry(settled: Any) -> None:
+            context["retry_armed"] = False
+            if closed:
+                return
+            # Re-ask only when the refresh produced an index. A failed,
+            # cancelled or journal-less refresh would make the re-ask arm the
+            # same refresh again, an unbounded retry loop with nothing to show.
+            if settled.cancelled() or settled.exception() is not None:
+                return
+            if settled.result() is None:
+                return
+            # The fold's join memo cannot see the index becoming current, so
+            # the same inputs would otherwise be skipped as already joined.
+            invalidate = getattr(fold, "invalidate_peer_cycles", None)
+            if invalidate is not None:
+                invalidate()
+            apply(_NO_CHANGES)
+
+        pending.add_done_callback(retry)
 
     def enqueue(update: Any) -> None:
         if not closed and not loop.is_closed():
@@ -81,6 +135,7 @@ def bind_owner_peer_cycles(
     fold.set_peer_cycle_source(
         context["records"], transcript=session.transcript, owner_epoch=context["epoch"]
     )
+    _retry_when_index_lands()
 
     def unsubscribe() -> None:
         nonlocal closed

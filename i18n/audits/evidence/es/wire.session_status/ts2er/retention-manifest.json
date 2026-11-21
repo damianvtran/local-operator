@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original paths/provenance/verdicts remain unchanged. Integration-only retention mapping, not an audit. No eligibility or history promotion in Phase A.",
+  "locale": "es",
+  "namespace": "wire.session_status",
+  "round": "second_audits",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128",
+  "original_receipt": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/receipt.json",
+  "original_receipt_sha256": "b0e463cecb2fe52efaa68d9fcd4ae627e7bcd82b1211b61a0c831974db0fbe44",
+  "original_record": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/record.json",
+  "original_record_sha256": "29b1984e1a3ffe34fa3c763dafbcb1f0ab042736b2e4c370b0211be784d24baf",
+  "original_status": "passed",
+  "translator": {
+    "agent": "i18n-translator (terminal-status-es)",
+    "session": "b39246e0d986",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state Model field",
+    "fallback": "No fallback reported in this session",
+    "date": "2026-11-19"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "191daf68e868",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session runtime Model header",
+    "fallback": "none observed",
+    "independent_from_translator_session": "b39246e0d986",
+    "independent_from_first_auditor_session": "f9eeb42530ec",
+    "result": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "date": "2026-11-19"
+  },
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/record.json",
+      "sha256": "29b1984e1a3ffe34fa3c763dafbcb1f0ab042736b2e4c370b0211be784d24baf"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/receipt.json",
+      "sha256": "b0e463cecb2fe52efaa68d9fcd4ae627e7bcd82b1211b61a0c831974db0fbe44"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/validate.py.txt",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/validate.py.txt",
+      "sha256": "7b49d175520fadca91ed67f4feea092d7647b1841dffa2730e17f2d70a592c92"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/report.md",
+      "sha256": "6bbc02817c0e820972cf9d1cfc6d8373e85e5088074130471d01dc84661f3644"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/independent-pre-receipt-review.json",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/independent-pre-receipt-review.json",
+      "sha256": "4f5dec431b0acc142926f712fe1c907e15baa3af9976ab55e0f6d59666c11514"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/receipt-dryrun.log",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/receipt-dryrun.log",
+      "sha256": "9609ea957f90164e4d00656fb74b5fcbf39353c7fb059d673d097d26498b1a00"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/mechanical.json",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/mechanical.json",
+      "sha256": "dd18d96240ffebc9a61eac5815c30a6bb469b8a73a61636e3cde2b4abd03829a"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/audit.log",
+      "sha256": "d1e93bf81fd5473602a37596dfc4158acd19a8fa0bdab8282ae5827d85d1970f"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.session_status/ts2er/SHA256SUMS.json",
+      "original_path": "/Users/damian/.local-operator/sessions/191daf68e868/scratchpad/terminal-status-second/es/SHA256SUMS.json",
+      "sha256": "17b9f83629797e4ffef87e50a70e6debf9112d2b366df598611f129de410948c"
+    }
+  ]
+}

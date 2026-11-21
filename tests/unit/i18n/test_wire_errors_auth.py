@@ -23,11 +23,11 @@ PATH = "local_operator/server/routes/auth.py"
 OPAQUE = "synthetic ' {tail} العربية 日本語"
 
 
-def constructors():
+def constructors(source: str | None = None):
     return sorted(
         (
             node
-            for node in ast.walk(ast.parse((ROOT / PATH).read_text()))
+            for node in ast.walk(ast.parse((ROOT / PATH).read_text() if source is None else source))
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "HTTPException"
@@ -36,11 +36,106 @@ def constructors():
     )
 
 
+# These are additions after the frozen extraction, not extra legacy sentences.
+# Enumerate their owners and exact constructor inventory: filtering by namespace
+# alone would silently hide a new, uncatalogued constructor in an old route.
+BEDROCK_CONSTRUCTORS = {"_bedrock_refusal": 1, "bedrock_sso_login": 1}
+
+
+def legacy_constructors(source: str | None = None):
+    source = (ROOT / PATH).read_text() if source is None else source
+    tree = ast.parse(source)
+    excluded = set()
+    for owner, expected in BEDROCK_CONSTRUCTORS.items():
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == owner
+        ]
+        assert len(functions) == 1
+        calls = constructors(ast.unparse(functions[0]))
+        assert len(calls) == expected, owner
+        excluded.update(
+            node.lineno
+            for node in ast.walk(functions[0])
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "HTTPException"
+        )
+    return [call for call in constructors(source) if call.lineno not in excluded]
+
+
+def test_legacy_census_does_not_hide_new_constructors():
+    source = (ROOT / PATH).read_text()
+    assert len(legacy_constructors(source)) == 14
+    assert (
+        len(
+            legacy_constructors(
+                source + "\nraise HTTPException(422, w.input_invalid().envelope())\n"
+            )
+        )
+        == 15
+    )
+    with pytest.raises(AssertionError, match="_bedrock_refusal"):
+        legacy_constructors(
+            source.replace(
+                "return HTTPException(status, message.envelope(code=code))",
+                "HTTPException(422, message.envelope(code=code))\n"
+                "    return HTTPException(status, message.envelope(code=code))",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "status,code,message",
+    [
+        (422, "bedrock_input_invalid", "input_invalid"),
+        (500, "bedrock_context_failed", "context_failed"),
+    ],
+)
+def test_bedrock_helper_envelopes_are_accounted_separately(status, code, message):
+    from local_operator.i18n.keys import wire_errors_bedrock as keys
+
+    sentence = (
+        keys.input_invalid(field="region")
+        if message == "input_invalid"
+        else keys.context_failed(detail=OPAQUE)
+    )
+    refusal = auth._bedrock_refusal(status, code, sentence)
+    assert refusal.status_code == status
+    assert refusal.detail == sentence.envelope(code=code)
+    invalid = auth._invalid_input(SimpleNamespace(code="bedrock_input_invalid", field="region"))
+    assert invalid.status_code == 422
+    assert invalid.detail == keys.input_invalid(field="region").envelope(
+        code="bedrock_input_invalid"
+    )
+
+
+def test_bedrock_sso_service_refusal_is_not_a_legacy_constructor():
+    tree = ast.parse((ROOT / PATH).read_text())
+    route = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "bedrock_sso_login"
+    )
+    (call,) = constructors(ast.unparse(route))
+    assert isinstance(call.args[0], ast.Constant) and call.args[0].value == 503
+    payload = eval(
+        compile(ast.Expression(call.args[1]), "<bedrock-sso-refusal>", "eval"),
+        {**vars(auth), "error": ValueError(OPAQUE)},
+    )
+    assert payload == {
+        "code": "wire.errors.auth.auth_refusal",
+        "params": {"error": OPAQUE},
+        "text": OPAQUE,
+    }
+
+
 def test_full_sentence_status_and_params_match_base():
     golden = json.loads(
         (Path(__file__).parent / "fixtures/wire_errors_auth_en_golden.json").read_text()
     )
-    calls = constructors()
+    calls = legacy_constructors()
     assert len(calls) == 14
     samples = []
     for call in calls:

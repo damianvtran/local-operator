@@ -2461,6 +2461,17 @@ class ProjectionFold:
         self._peer_records, self._peer_transcript = records, transcript
         self._join_peer_cycles()
 
+    def invalidate_peer_cycles(self) -> None:
+        """Forget the join memo so the next join re-validates the same inputs.
+
+        The memo keys on the records, rows and transcript generation; it cannot
+        see the transcript INDEX becoming current, which is what turns a
+        not-yet-provable record into a provable one (the validator never builds
+        an index on this loop). ``bind_owner_peer_cycles`` calls this when the
+        armed refresh lands.
+        """
+        self._peer_join_key = None
+
     def _join_peer_cycles(self) -> None:
         from local_operator.mobile.peer_cycles import project_peer_cycles
 

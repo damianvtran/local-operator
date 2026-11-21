@@ -517,10 +517,16 @@ def display_window(
     # response must own those children even on a cold or non-admitted request.
     # Copy only the selected page, never the whole canonical history.
     page = page.model_copy(deep=True)
-    from local_operator.harness.peer_cycle_display import attach_page_records
+    from local_operator.harness.peer_cycle_display import BUILDING, attach_page_records
 
     page = attach_page_records(page, transcript, max_wire_bytes=max_wire_bytes)
-    if page.status != "reset":
+    # A page whose peer-cycle proof is still ``building`` (no current index
+    # was in memory; the refresh is armed, not awaited) is served but NOT
+    # cached: the cache key is the cut, which the refresh does not move, so a
+    # cached copy would pin "not ready" for every later read of this cut.
+    proof = page.peer_cycle_display_records
+    building = isinstance(proof, dict) and proof.get("status") == BUILDING
+    if page.status != "reset" and not building:
         cache.put(key, page)
     return page
 

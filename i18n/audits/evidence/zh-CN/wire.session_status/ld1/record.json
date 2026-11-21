@@ -1,0 +1,58 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+  "translator": {
+    "agent": "translator (as named in delegation; not independently verified)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "72eb476d84d2",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "72eb476d84d2",
+  "files": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/zh-CN/wire.session_status.json",
+      "sha256": "8901d2990ab022f0bf3cbf6338f4c716acfe2734a56b76db266254cf3a6c6214"
+    }
+  },
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [
+      {
+        "id": "ZH-DUR-1",
+        "severity": "minor",
+        "keys": [
+          "wire.session_status.duration_minutes",
+          "wire.session_status.duration_hours_minutes",
+          "wire.session_status.duration_days_hours"
+        ],
+        "current_text": {
+          "duration_minutes": "{count, number}分钟",
+          "duration_hours_minutes": "{hours, number}小时{minutes, number}分",
+          "duration_days_hours": "{days}天{hours, number}小时"
+        },
+        "proposed_text": "Retain the idiomatic, existing-unit-consistent text; verify fit in a rendered sidebar/picker before claiming visual fit. No wording substitution requested.",
+        "reason": "Measured terminal-cell width expands 1m from 2 to 5 cells, 1h 0m from 5 to 8 cells, and 1d 1h from 5 to 8 cells; the sidecar has no fixed cell cap, so this is a rendered-fit follow-up, not a demonstrated overflow defect."
+      }
+    ],
+    "nit": []
+  },
+  "verdict": "clean-with-findings",
+  "status": "passed",
+  "note": "Scope: four new duration keys plus wedged_heartbeat composition. Read all 35 keys side-by-side; 31 existing entries preserved bytewise except required final-member comma. Runtime argument parity and all ten requested duration+heartbeat pairs passed. Chinese CLDR other only; none of the scoped keys has a plural construct, so plural branches/# are not applicable. days remains simple string and 1000 stays ungrouped. Units match relay.shell.usage.countdown_days/hours/minutes and relay.asks.duration.minutes/hours/days; asks uses spaces pre-existing but this status follows no-space Chinese style. No Latin unit letters. One nonblocking rendered-fit follow-up; no rendered UI proof claimed. Translator identity/model supplied by delegator, date unknown; independent auditor actual model recorded."
+}

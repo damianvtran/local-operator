@@ -1,0 +1,1409 @@
+{
+  "locale": "es",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_file": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "target_file": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/es/wire.session_status.json",
+  "target_sha256": "de08e8b447356705e112a12b67c39b8814fe69d1e6b98d407f33338d0e9bf485",
+  "context_file": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by delegating manager; not independently observed."
+  },
+  "auditor": {
+    "agent": "translation-auditor (live-status-audit-es)",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "320153d86770",
+    "session": "320153d86770",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "actual_model_source": "developer session-state Model field",
+    "fallback": "none observed"
+  },
+  "result": "clean-with-findings",
+  "status": "passed",
+  "findings_count": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "ES-1",
+      "severity": "minor",
+      "key_id": "wire.session_status.waiting",
+      "affected_key_ids": [
+        "wire.session_status.waiting",
+        "wire.session_status.waiting_subagents",
+        "wire.session_status.delegating_jobs",
+        "wire.session_status.delegating_running",
+        "wire.session_status.delegating_queued"
+      ],
+      "current_text": "many {# de trabajos}; many {# de subagentes en curso}; many {# de subagentes en cola}",
+      "problem": "The many branches append de to a fully numeric cardinal. This is not the noun construction un millón de trabajos; the runtime emits 1.000.000 de trabajos. The inherited Spanish style-guide example itself recommends this form, so this is a shared wording issue rather than translator inconsistency.",
+      "evidence": {
+        "actual_outputs": [
+          "Esperando 1.000.000 de trabajos",
+          "Esperando 1.000.000 de trabajos · 1.000.000 de subagentes en curso",
+          "1.000.000 de trabajos en curso",
+          "1.000.000 de subagentes en curso",
+          "1.000.000 de subagentes en cola"
+        ],
+        "source": "Rendered here using local_operator.i18n.runtime.render_message; i18n/style-guides/es.md lines 98-102; RAE distinguishes the noun millón, which takes de, from written numeric cardinals.",
+        "reference": "https://www.rae.es/ortograf%C3%ADa/uso-combinado-de-cifras-y-palabras"
+      },
+      "suggested_wording": "Keep many arms but remove de: many {# trabajos}, many {# trabajos en curso}, many {# subagentes en curso}, many {# subagentes en cola}. Do not replace the CLDR many category or alter #."
+    }
+  ],
+  "keys_read": 31,
+  "new_keys_read": 14,
+  "preexisting_keys_read": 17,
+  "head": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+  "checks": {
+    "preexisting_17_value_bytes": "unchanged; individual raw JSON string bytes compared with git show HEAD, not only parsed equality; git diff reviewed",
+    "key_parity": "31/31",
+    "argument_name_and_kind_parity": "31/31 exact runtime.message_arguments tuple equality",
+    "plural_categories": [
+      "many",
+      "one",
+      "other"
+    ],
+    "plural_branch_integrity": "Every plural has exactly many, one, other; no =N category stand-ins; counts preserved. plural_categories is defined in format.py and used through runtime.fmt.",
+    "exec_and_joiner": "exec preserved literally; every source middle-dot joiner count preserved",
+    "agreement": "Abierta and Lista agree with sesión; trabajos/subagentes masculine plurals; en curso/en cola invariant; no T/V inconsistency",
+    "glossary_citations": [
+      "job -> trabajo: i18n/style-guides/es.md; tui.status.jobs",
+      "subagent -> subagente: i18n/glossary.md; cli.sessions_help.cleanup_delegated_max_age_hours",
+      "queued -> en cola: relay.session.model.queued; cli.sessions_help.move_cancel_queued",
+      "headless -> sin interfaz: wire.login.bedrock.no_tty",
+      "en curso: cli.permissions.setup.done; cli.sessions_help.reclaim_description"
+    ],
+    "overflow_notes": [
+      "No fixed cell cap per context sidecar. Length measurements are runtime string lengths, not rendered-layout proof.",
+      "approval_needed 15 -> 20 characters; answer_needed 13 -> 19; working 7 -> 10; attached 4 -> 7; exec_headless 23 -> 32; delegating_jobs at count=1 13 -> 18. Flag these for integrator rendered narrow-sidebar/mobile validation; do not arbitrarily shorten accurate copy to fake a fit.",
+      "Possible shorter accurate exec_headless phrasing: Activa sin interfaz (exec), with feminine session agreement. No proven clipping or user-interface overflow finding."
+    ],
+    "ui_evidence": "No browser or native rendered-frame validation performed; source+runtime translation audit only.",
+    "rtl": "not applicable: es is LTR",
+    "render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000000
+    ],
+    "renders": [
+      {
+        "key_id": "wire.session_status.retired_label",
+        "count": 0,
+        "params": {
+          "base": "Interrumpida"
+        },
+        "output": "Interrumpida — retirada por una actualización"
+      },
+      {
+        "key_id": "wire.session_status.retired_label",
+        "count": 1,
+        "params": {
+          "base": "Interrumpida"
+        },
+        "output": "Interrumpida — retirada por una actualización"
+      },
+      {
+        "key_id": "wire.session_status.retired_label",
+        "count": 2,
+        "params": {
+          "base": "Interrumpida"
+        },
+        "output": "Interrumpida — retirada por una actualización"
+      },
+      {
+        "key_id": "wire.session_status.retired_label",
+        "count": 5,
+        "params": {
+          "base": "Interrumpida"
+        },
+        "output": "Interrumpida — retirada por una actualización"
+      },
+      {
+        "key_id": "wire.session_status.retired_label",
+        "count": 21,
+        "params": {
+          "base": "Interrumpida"
+        },
+        "output": "Interrumpida — retirada por una actualización"
+      },
+      {
+        "key_id": "wire.session_status.retired_label",
+        "count": 1000000,
+        "params": {
+          "base": "Interrumpida"
+        },
+        "output": "Interrumpida — retirada por una actualización"
+      },
+      {
+        "key_id": "wire.session_status.interrupted",
+        "count": 0,
+        "params": {},
+        "output": "Interrumpida"
+      },
+      {
+        "key_id": "wire.session_status.interrupted",
+        "count": 1,
+        "params": {},
+        "output": "Interrumpida"
+      },
+      {
+        "key_id": "wire.session_status.interrupted",
+        "count": 2,
+        "params": {},
+        "output": "Interrumpida"
+      },
+      {
+        "key_id": "wire.session_status.interrupted",
+        "count": 5,
+        "params": {},
+        "output": "Interrumpida"
+      },
+      {
+        "key_id": "wire.session_status.interrupted",
+        "count": 21,
+        "params": {},
+        "output": "Interrumpida"
+      },
+      {
+        "key_id": "wire.session_status.interrupted",
+        "count": 1000000,
+        "params": {},
+        "output": "Interrumpida"
+      },
+      {
+        "key_id": "wire.session_status.unseen_interruption",
+        "count": 0,
+        "params": {},
+        "output": "Interrupción sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_interruption",
+        "count": 1,
+        "params": {},
+        "output": "Interrupción sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_interruption",
+        "count": 2,
+        "params": {},
+        "output": "Interrupción sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_interruption",
+        "count": 5,
+        "params": {},
+        "output": "Interrupción sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_interruption",
+        "count": 21,
+        "params": {},
+        "output": "Interrupción sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_interruption",
+        "count": 1000000,
+        "params": {},
+        "output": "Interrupción sin leer"
+      },
+      {
+        "key_id": "wire.session_status.retired",
+        "count": 0,
+        "params": {},
+        "output": "Interrumpida — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.retired",
+        "count": 1,
+        "params": {},
+        "output": "Interrumpida — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.retired",
+        "count": 2,
+        "params": {},
+        "output": "Interrumpida — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.retired",
+        "count": 5,
+        "params": {},
+        "output": "Interrumpida — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.retired",
+        "count": 21,
+        "params": {},
+        "output": "Interrumpida — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.retired",
+        "count": 1000000,
+        "params": {},
+        "output": "Interrumpida — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.unseen_retirement",
+        "count": 0,
+        "params": {},
+        "output": "Interrupción sin leer — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.unseen_retirement",
+        "count": 1,
+        "params": {},
+        "output": "Interrupción sin leer — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.unseen_retirement",
+        "count": 2,
+        "params": {},
+        "output": "Interrupción sin leer — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.unseen_retirement",
+        "count": 5,
+        "params": {},
+        "output": "Interrupción sin leer — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.unseen_retirement",
+        "count": 21,
+        "params": {},
+        "output": "Interrupción sin leer — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.unseen_retirement",
+        "count": 1000000,
+        "params": {},
+        "output": "Interrupción sin leer — retirada para actualizar"
+      },
+      {
+        "key_id": "wire.session_status.signal_stop",
+        "count": 0,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.signal_stop",
+        "count": 1,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.signal_stop",
+        "count": 2,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.signal_stop",
+        "count": 5,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.signal_stop",
+        "count": 21,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.signal_stop",
+        "count": 1000000,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.unseen_signal_stop",
+        "count": 0,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.unseen_signal_stop",
+        "count": 1,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.unseen_signal_stop",
+        "count": 2,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.unseen_signal_stop",
+        "count": 5,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.unseen_signal_stop",
+        "count": 21,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.unseen_signal_stop",
+        "count": 1000000,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — detenida con una señal"
+      },
+      {
+        "key_id": "wire.session_status.forced_kill",
+        "count": 0,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.forced_kill",
+        "count": 1,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.forced_kill",
+        "count": 2,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.forced_kill",
+        "count": 5,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.forced_kill",
+        "count": 21,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.forced_kill",
+        "count": 1000000,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrumpida — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.unseen_forced_kill",
+        "count": 0,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.unseen_forced_kill",
+        "count": 1,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.unseen_forced_kill",
+        "count": 2,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.unseen_forced_kill",
+        "count": 5,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.unseen_forced_kill",
+        "count": 21,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.unseen_forced_kill",
+        "count": 1000000,
+        "params": {
+          "command": "none"
+        },
+        "output": "Interrupción sin leer — finalizada por la fuerza"
+      },
+      {
+        "key_id": "wire.session_status.complete",
+        "count": 0,
+        "params": {},
+        "output": "Completada"
+      },
+      {
+        "key_id": "wire.session_status.complete",
+        "count": 1,
+        "params": {},
+        "output": "Completada"
+      },
+      {
+        "key_id": "wire.session_status.complete",
+        "count": 2,
+        "params": {},
+        "output": "Completada"
+      },
+      {
+        "key_id": "wire.session_status.complete",
+        "count": 5,
+        "params": {},
+        "output": "Completada"
+      },
+      {
+        "key_id": "wire.session_status.complete",
+        "count": 21,
+        "params": {},
+        "output": "Completada"
+      },
+      {
+        "key_id": "wire.session_status.complete",
+        "count": 1000000,
+        "params": {},
+        "output": "Completada"
+      },
+      {
+        "key_id": "wire.session_status.unseen_completion",
+        "count": 0,
+        "params": {},
+        "output": "Finalización sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_completion",
+        "count": 1,
+        "params": {},
+        "output": "Finalización sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_completion",
+        "count": 2,
+        "params": {},
+        "output": "Finalización sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_completion",
+        "count": 5,
+        "params": {},
+        "output": "Finalización sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_completion",
+        "count": 21,
+        "params": {},
+        "output": "Finalización sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_completion",
+        "count": 1000000,
+        "params": {},
+        "output": "Finalización sin leer"
+      },
+      {
+        "key_id": "wire.session_status.recent",
+        "count": 0,
+        "params": {},
+        "output": "Reciente"
+      },
+      {
+        "key_id": "wire.session_status.recent",
+        "count": 1,
+        "params": {},
+        "output": "Reciente"
+      },
+      {
+        "key_id": "wire.session_status.recent",
+        "count": 2,
+        "params": {},
+        "output": "Reciente"
+      },
+      {
+        "key_id": "wire.session_status.recent",
+        "count": 5,
+        "params": {},
+        "output": "Reciente"
+      },
+      {
+        "key_id": "wire.session_status.recent",
+        "count": 21,
+        "params": {},
+        "output": "Reciente"
+      },
+      {
+        "key_id": "wire.session_status.recent",
+        "count": 1000000,
+        "params": {},
+        "output": "Reciente"
+      },
+      {
+        "key_id": "wire.session_status.dormant",
+        "count": 0,
+        "params": {
+          "count": 0
+        },
+        "output": "Detenida (0 despertares inactivos)"
+      },
+      {
+        "key_id": "wire.session_status.dormant",
+        "count": 1,
+        "params": {
+          "count": 1
+        },
+        "output": "Detenida (1 despertar inactivo)"
+      },
+      {
+        "key_id": "wire.session_status.dormant",
+        "count": 2,
+        "params": {
+          "count": 2
+        },
+        "output": "Detenida (2 despertares inactivos)"
+      },
+      {
+        "key_id": "wire.session_status.dormant",
+        "count": 5,
+        "params": {
+          "count": 5
+        },
+        "output": "Detenida (5 despertares inactivos)"
+      },
+      {
+        "key_id": "wire.session_status.dormant",
+        "count": 21,
+        "params": {
+          "count": 21
+        },
+        "output": "Detenida (21 despertares inactivos)"
+      },
+      {
+        "key_id": "wire.session_status.dormant",
+        "count": 1000000,
+        "params": {
+          "count": 1000000
+        },
+        "output": "Detenida (1.000.000 de despertares inactivos)"
+      },
+      {
+        "key_id": "wire.session_status.error",
+        "count": 0,
+        "params": {},
+        "output": "Error"
+      },
+      {
+        "key_id": "wire.session_status.error",
+        "count": 1,
+        "params": {},
+        "output": "Error"
+      },
+      {
+        "key_id": "wire.session_status.error",
+        "count": 2,
+        "params": {},
+        "output": "Error"
+      },
+      {
+        "key_id": "wire.session_status.error",
+        "count": 5,
+        "params": {},
+        "output": "Error"
+      },
+      {
+        "key_id": "wire.session_status.error",
+        "count": 21,
+        "params": {},
+        "output": "Error"
+      },
+      {
+        "key_id": "wire.session_status.error",
+        "count": 1000000,
+        "params": {},
+        "output": "Error"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error",
+        "count": 0,
+        "params": {},
+        "output": "Error sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error",
+        "count": 1,
+        "params": {},
+        "output": "Error sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error",
+        "count": 2,
+        "params": {},
+        "output": "Error sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error",
+        "count": 5,
+        "params": {},
+        "output": "Error sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error",
+        "count": 21,
+        "params": {},
+        "output": "Error sin leer"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error",
+        "count": 1000000,
+        "params": {},
+        "output": "Error sin leer"
+      },
+      {
+        "key_id": "wire.session_status.error_cause",
+        "count": 0,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.error_cause",
+        "count": 1,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.error_cause",
+        "count": 2,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.error_cause",
+        "count": 5,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.error_cause",
+        "count": 21,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.error_cause",
+        "count": 1000000,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error_cause",
+        "count": 0,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error sin leer — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error_cause",
+        "count": 1,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error sin leer — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error_cause",
+        "count": 2,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error sin leer — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error_cause",
+        "count": 5,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error sin leer — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error_cause",
+        "count": 21,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error sin leer — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.unseen_error_cause",
+        "count": 1000000,
+        "params": {
+          "cause": "user_stop"
+        },
+        "output": "Error sin leer — detenida por el usuario"
+      },
+      {
+        "key_id": "wire.session_status.approval_needed",
+        "count": 0,
+        "params": {},
+        "output": "Aprobación pendiente"
+      },
+      {
+        "key_id": "wire.session_status.approval_needed",
+        "count": 1,
+        "params": {},
+        "output": "Aprobación pendiente"
+      },
+      {
+        "key_id": "wire.session_status.approval_needed",
+        "count": 2,
+        "params": {},
+        "output": "Aprobación pendiente"
+      },
+      {
+        "key_id": "wire.session_status.approval_needed",
+        "count": 5,
+        "params": {},
+        "output": "Aprobación pendiente"
+      },
+      {
+        "key_id": "wire.session_status.approval_needed",
+        "count": 21,
+        "params": {},
+        "output": "Aprobación pendiente"
+      },
+      {
+        "key_id": "wire.session_status.approval_needed",
+        "count": 1000000,
+        "params": {},
+        "output": "Aprobación pendiente"
+      },
+      {
+        "key_id": "wire.session_status.answer_needed",
+        "count": 0,
+        "params": {},
+        "output": "Respuesta pendiente"
+      },
+      {
+        "key_id": "wire.session_status.answer_needed",
+        "count": 1,
+        "params": {},
+        "output": "Respuesta pendiente"
+      },
+      {
+        "key_id": "wire.session_status.answer_needed",
+        "count": 2,
+        "params": {},
+        "output": "Respuesta pendiente"
+      },
+      {
+        "key_id": "wire.session_status.answer_needed",
+        "count": 5,
+        "params": {},
+        "output": "Respuesta pendiente"
+      },
+      {
+        "key_id": "wire.session_status.answer_needed",
+        "count": 21,
+        "params": {},
+        "output": "Respuesta pendiente"
+      },
+      {
+        "key_id": "wire.session_status.answer_needed",
+        "count": 1000000,
+        "params": {},
+        "output": "Respuesta pendiente"
+      },
+      {
+        "key_id": "wire.session_status.wedged",
+        "count": 0,
+        "params": {},
+        "output": "No responde · proceso activo"
+      },
+      {
+        "key_id": "wire.session_status.wedged",
+        "count": 1,
+        "params": {},
+        "output": "No responde · proceso activo"
+      },
+      {
+        "key_id": "wire.session_status.wedged",
+        "count": 2,
+        "params": {},
+        "output": "No responde · proceso activo"
+      },
+      {
+        "key_id": "wire.session_status.wedged",
+        "count": 5,
+        "params": {},
+        "output": "No responde · proceso activo"
+      },
+      {
+        "key_id": "wire.session_status.wedged",
+        "count": 21,
+        "params": {},
+        "output": "No responde · proceso activo"
+      },
+      {
+        "key_id": "wire.session_status.wedged",
+        "count": 1000000,
+        "params": {},
+        "output": "No responde · proceso activo"
+      },
+      {
+        "key_id": "wire.session_status.wedged_heartbeat",
+        "count": 0,
+        "params": {
+          "duration": "4m"
+        },
+        "output": "No responde · proceso activo (último latido hace 4m)"
+      },
+      {
+        "key_id": "wire.session_status.wedged_heartbeat",
+        "count": 1,
+        "params": {
+          "duration": "4m"
+        },
+        "output": "No responde · proceso activo (último latido hace 4m)"
+      },
+      {
+        "key_id": "wire.session_status.wedged_heartbeat",
+        "count": 2,
+        "params": {
+          "duration": "4m"
+        },
+        "output": "No responde · proceso activo (último latido hace 4m)"
+      },
+      {
+        "key_id": "wire.session_status.wedged_heartbeat",
+        "count": 5,
+        "params": {
+          "duration": "4m"
+        },
+        "output": "No responde · proceso activo (último latido hace 4m)"
+      },
+      {
+        "key_id": "wire.session_status.wedged_heartbeat",
+        "count": 21,
+        "params": {
+          "duration": "4m"
+        },
+        "output": "No responde · proceso activo (último latido hace 4m)"
+      },
+      {
+        "key_id": "wire.session_status.wedged_heartbeat",
+        "count": 1000000,
+        "params": {
+          "duration": "4m"
+        },
+        "output": "No responde · proceso activo (último latido hace 4m)"
+      },
+      {
+        "key_id": "wire.session_status.working",
+        "count": 0,
+        "params": {},
+        "output": "Trabajando"
+      },
+      {
+        "key_id": "wire.session_status.working",
+        "count": 1,
+        "params": {},
+        "output": "Trabajando"
+      },
+      {
+        "key_id": "wire.session_status.working",
+        "count": 2,
+        "params": {},
+        "output": "Trabajando"
+      },
+      {
+        "key_id": "wire.session_status.working",
+        "count": 5,
+        "params": {},
+        "output": "Trabajando"
+      },
+      {
+        "key_id": "wire.session_status.working",
+        "count": 21,
+        "params": {},
+        "output": "Trabajando"
+      },
+      {
+        "key_id": "wire.session_status.working",
+        "count": 1000000,
+        "params": {},
+        "output": "Trabajando"
+      },
+      {
+        "key_id": "wire.session_status.attached",
+        "count": 0,
+        "params": {},
+        "output": "Abierta"
+      },
+      {
+        "key_id": "wire.session_status.attached",
+        "count": 1,
+        "params": {},
+        "output": "Abierta"
+      },
+      {
+        "key_id": "wire.session_status.attached",
+        "count": 2,
+        "params": {},
+        "output": "Abierta"
+      },
+      {
+        "key_id": "wire.session_status.attached",
+        "count": 5,
+        "params": {},
+        "output": "Abierta"
+      },
+      {
+        "key_id": "wire.session_status.attached",
+        "count": 21,
+        "params": {},
+        "output": "Abierta"
+      },
+      {
+        "key_id": "wire.session_status.attached",
+        "count": 1000000,
+        "params": {},
+        "output": "Abierta"
+      },
+      {
+        "key_id": "wire.session_status.ready",
+        "count": 0,
+        "params": {},
+        "output": "Lista"
+      },
+      {
+        "key_id": "wire.session_status.ready",
+        "count": 1,
+        "params": {},
+        "output": "Lista"
+      },
+      {
+        "key_id": "wire.session_status.ready",
+        "count": 2,
+        "params": {},
+        "output": "Lista"
+      },
+      {
+        "key_id": "wire.session_status.ready",
+        "count": 5,
+        "params": {},
+        "output": "Lista"
+      },
+      {
+        "key_id": "wire.session_status.ready",
+        "count": 21,
+        "params": {},
+        "output": "Lista"
+      },
+      {
+        "key_id": "wire.session_status.ready",
+        "count": 1000000,
+        "params": {},
+        "output": "Lista"
+      },
+      {
+        "key_id": "wire.session_status.exec_headless",
+        "count": 0,
+        "params": {},
+        "output": "En ejecución sin interfaz (exec)"
+      },
+      {
+        "key_id": "wire.session_status.exec_headless",
+        "count": 1,
+        "params": {},
+        "output": "En ejecución sin interfaz (exec)"
+      },
+      {
+        "key_id": "wire.session_status.exec_headless",
+        "count": 2,
+        "params": {},
+        "output": "En ejecución sin interfaz (exec)"
+      },
+      {
+        "key_id": "wire.session_status.exec_headless",
+        "count": 5,
+        "params": {},
+        "output": "En ejecución sin interfaz (exec)"
+      },
+      {
+        "key_id": "wire.session_status.exec_headless",
+        "count": 21,
+        "params": {},
+        "output": "En ejecución sin interfaz (exec)"
+      },
+      {
+        "key_id": "wire.session_status.exec_headless",
+        "count": 1000000,
+        "params": {},
+        "output": "En ejecución sin interfaz (exec)"
+      },
+      {
+        "key_id": "wire.session_status.waiting",
+        "count": 0,
+        "params": {
+          "jobs": 0
+        },
+        "output": "Esperando 0 trabajos"
+      },
+      {
+        "key_id": "wire.session_status.waiting",
+        "count": 1,
+        "params": {
+          "jobs": 1
+        },
+        "output": "Esperando 1 trabajo"
+      },
+      {
+        "key_id": "wire.session_status.waiting",
+        "count": 2,
+        "params": {
+          "jobs": 2
+        },
+        "output": "Esperando 2 trabajos"
+      },
+      {
+        "key_id": "wire.session_status.waiting",
+        "count": 5,
+        "params": {
+          "jobs": 5
+        },
+        "output": "Esperando 5 trabajos"
+      },
+      {
+        "key_id": "wire.session_status.waiting",
+        "count": 21,
+        "params": {
+          "jobs": 21
+        },
+        "output": "Esperando 21 trabajos"
+      },
+      {
+        "key_id": "wire.session_status.waiting",
+        "count": 1000000,
+        "params": {
+          "jobs": 1000000
+        },
+        "output": "Esperando 1.000.000 de trabajos"
+      },
+      {
+        "key_id": "wire.session_status.waiting_subagents",
+        "count": 0,
+        "params": {
+          "jobs": 0,
+          "subagents": 0
+        },
+        "output": "Esperando 0 trabajos · 0 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.waiting_subagents",
+        "count": 1,
+        "params": {
+          "jobs": 1,
+          "subagents": 1
+        },
+        "output": "Esperando 1 trabajo · 1 subagente en curso"
+      },
+      {
+        "key_id": "wire.session_status.waiting_subagents",
+        "count": 2,
+        "params": {
+          "jobs": 2,
+          "subagents": 2
+        },
+        "output": "Esperando 2 trabajos · 2 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.waiting_subagents",
+        "count": 5,
+        "params": {
+          "jobs": 5,
+          "subagents": 5
+        },
+        "output": "Esperando 5 trabajos · 5 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.waiting_subagents",
+        "count": 21,
+        "params": {
+          "jobs": 21,
+          "subagents": 21
+        },
+        "output": "Esperando 21 trabajos · 21 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.waiting_subagents",
+        "count": 1000000,
+        "params": {
+          "jobs": 1000000,
+          "subagents": 1000000
+        },
+        "output": "Esperando 1.000.000 de trabajos · 1.000.000 de subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_jobs",
+        "count": 0,
+        "params": {
+          "count": 0
+        },
+        "output": "0 trabajos en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_jobs",
+        "count": 1,
+        "params": {
+          "count": 1
+        },
+        "output": "1 trabajo en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_jobs",
+        "count": 2,
+        "params": {
+          "count": 2
+        },
+        "output": "2 trabajos en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_jobs",
+        "count": 5,
+        "params": {
+          "count": 5
+        },
+        "output": "5 trabajos en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_jobs",
+        "count": 21,
+        "params": {
+          "count": 21
+        },
+        "output": "21 trabajos en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_jobs",
+        "count": 1000000,
+        "params": {
+          "count": 1000000
+        },
+        "output": "1.000.000 de trabajos en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_running",
+        "count": 0,
+        "params": {
+          "count": 0
+        },
+        "output": "0 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_running",
+        "count": 1,
+        "params": {
+          "count": 1
+        },
+        "output": "1 subagente en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_running",
+        "count": 2,
+        "params": {
+          "count": 2
+        },
+        "output": "2 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_running",
+        "count": 5,
+        "params": {
+          "count": 5
+        },
+        "output": "5 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_running",
+        "count": 21,
+        "params": {
+          "count": 21
+        },
+        "output": "21 subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_running",
+        "count": 1000000,
+        "params": {
+          "count": 1000000
+        },
+        "output": "1.000.000 de subagentes en curso"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued",
+        "count": 0,
+        "params": {
+          "count": 0
+        },
+        "output": "0 subagentes en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued",
+        "count": 1,
+        "params": {
+          "count": 1
+        },
+        "output": "1 subagente en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued",
+        "count": 2,
+        "params": {
+          "count": 2
+        },
+        "output": "2 subagentes en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued",
+        "count": 5,
+        "params": {
+          "count": 5
+        },
+        "output": "5 subagentes en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued",
+        "count": 21,
+        "params": {
+          "count": 21
+        },
+        "output": "21 subagentes en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued",
+        "count": 1000000,
+        "params": {
+          "count": 1000000
+        },
+        "output": "1.000.000 de subagentes en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued_addend",
+        "count": 0,
+        "params": {
+          "count": 0
+        },
+        "output": "0 en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued_addend",
+        "count": 1,
+        "params": {
+          "count": 1
+        },
+        "output": "1 en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued_addend",
+        "count": 2,
+        "params": {
+          "count": 2
+        },
+        "output": "2 en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued_addend",
+        "count": 5,
+        "params": {
+          "count": 5
+        },
+        "output": "5 en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued_addend",
+        "count": 21,
+        "params": {
+          "count": 21
+        },
+        "output": "21 en cola"
+      },
+      {
+        "key_id": "wire.session_status.delegating_queued_addend",
+        "count": 1000000,
+        "params": {
+          "count": 1000000
+        },
+        "output": "1.000.000 en cola"
+      }
+    ]
+  },
+  "note": "Read-only audit. No catalogue/code/test/ledger/history edits. ES-1 also occurs in pre-existing dormant and shipped tui.status.jobs; unchanged pre-existing bytes are not a new gate. All 14 additions otherwise semantically accurate and idiomatic; all 31 namespace entries read against English and context."
+}

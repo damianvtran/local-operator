@@ -51,6 +51,14 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root.mkdir(mode=0o700)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *a, **kw: None)
+    # The sign-in below would start the org Agent Hub boundary on an unjoined
+    # daemon thread that writes under ``root/hub`` with ``mkdir(parents=True)``.
+    # It can outlive this test: pytest (retention "failed") deletes a passing
+    # test's tmp_path, the late thread recreates ``<tmp>/owner``, and pytest
+    # 8.x reuses that numbered dir for the next same-prefix test, whose
+    # ``root.mkdir`` above then fails with EEXIST (intermittent CI SETUP
+    # error). The org hub gate is not what these tests exercise.
+    monkeypatch.setattr(AuthStore, "_org_hub_boundary", lambda self, boundary: None)
     auth = AuthStore(root / "auth.db", config_dir=root)
     row = auth.complete_radient_login(asyncio.run(_verified_login_result("account-a")))
     own = identity.load_or_mint(root)

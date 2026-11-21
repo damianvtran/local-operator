@@ -421,15 +421,18 @@ async def test_a_wedged_rows_tooltip_carries_the_remedy_and_an_error_rows_does_n
     The ``error`` row is the reopen case, so the pairing matters as much as the
     presence: the clause must not travel to a row whose remedy is different.
     """
-    from local_operator.session.catalog import WEDGED_STATUS
-    from local_operator.tui.widgets.session_sidebar import WEDGED_REMEDY
+    from local_operator.session.catalog import wedged_status
+
+    # The English bytes of the keyed remedy clause (tui.session_sidebar.tooltip.
+    # status_wedged around the literal `lop stop` command token).
+    WEDGED_REMEDY = "lop stop if it stays silent"
 
     now = time.time()
     wedged = CatalogEntry(SessionRow("quiet0000001", now, "Quiet owner", live_state="wedged"))
     failed = CatalogEntry(
         SessionRow("failed000001", now, "Failed turn"), unseen=True, completion_kind="error"
     )
-    assert wedged.status == WEDGED_STATUS
+    assert wedged.status == wedged_status()
     assert failed.status == "Unseen error"
 
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -455,7 +458,7 @@ async def test_a_wedged_rows_tooltip_carries_the_remedy_and_an_error_rows_does_n
         await pilot.pause()
         lines = str(sidebar.tooltip or "").splitlines()
         assert len(lines) == 3, lines
-        assert WEDGED_STATUS in lines[1], lines
+        assert wedged_status() in lines[1], lines
         assert lines[1].endswith(WEDGED_REMEDY), lines
 
         await pilot.hover("#session-sidebar", offset=(8, _row_y(failed.id)))
@@ -584,8 +587,12 @@ async def test_switch_burst_in_one_event_batch_steps_once_per_press():
         await _await_first_attach(app, pilot)
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
+        # Pausing the poll alone leaves the open-time ONE-SHOT catalog worker
+        # in flight; if it lands on top of these rows the presses compute their
+        # target from the real (empty) list and this burst steps once, not three
+        # times. Quiescing retires that read as well (the failing witness: CI
+        # shard 3.13/4, `AssertionError: ['c']`).
+        _quiesce_sidebar_refresh(app)
         app._session_sidebar.set_entries(_hover_entries(("a", "sess", "c", "d")))
         hops: list[str] = []
 
@@ -615,8 +622,9 @@ async def test_switch_burst_with_a_drain_between_presses_still_steps_once_each()
         await _await_first_attach(app, pilot)
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
+        # Same reason as the batched twin above: the drain between presses is
+        # exactly the window a late catalog landing needs to overwrite the rows.
+        _quiesce_sidebar_refresh(app)
         app._session_sidebar.set_entries(_hover_entries(("a", "sess", "c", "d")))
         hops: list[str] = []
 
@@ -1671,7 +1679,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     this table describes. Enumerating it here would assert a pairing no surface
     renders; the companion test drives the real render path instead.
     """
-    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.session.catalog import wedged_status
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import (
         ATTACHED_MARKER,
@@ -1687,7 +1695,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     #: glyph a row drew is a contradiction the user would have to resolve.
     ALLOWED = {
         NEEDS_YOU_MARKER: {"Approval needed", "Answer needed"},
-        WEDGED_MARKER: {WEDGED_STATUS},
+        WEDGED_MARKER: {wedged_status()},
         ATTACHED_MARKER: {"Open"},
         # The sentences ``catalog.delegating_label`` builds for the counts
         # enumerated below. ``2 subagents running`` is a PREFIX of the two-count
@@ -2044,7 +2052,7 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
     """
     from textual.geometry import Region
 
-    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.session.catalog import wedged_status
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import WEDGED_MARKER
 
@@ -2056,7 +2064,7 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
         "✓": {"Unseen completion"},
         "✗": {"Unseen error"},
         "⊘": {"Unseen interruption", "Unseen interruption — retired for an update"},
-        WEDGED_MARKER: {WEDGED_STATUS},
+        WEDGED_MARKER: {wedged_status()},
         "!": {"Approval needed", "Answer needed"},
     }
     now = time.time()
@@ -3058,7 +3066,7 @@ def test_a_quiet_owner_reads_as_not_answering_with_its_measured_age() -> None:
     unchanged; the age is printed beside the state so the reader is given the
     measurement the sentence is made of rather than a bare adjective.
     """
-    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.session.catalog import wedged_status
     from local_operator.tui.widgets.session_picker import WEDGED_MARKER, row_state_mark
 
     row = SessionRow(
@@ -3069,13 +3077,13 @@ def test_a_quiet_owner_reads_as_not_answering_with_its_measured_age() -> None:
         heartbeat_age_s=243.0,
     )
     status = CatalogEntry(row).status
-    assert status == f"{WEDGED_STATUS} (last heartbeat 4m ago)"
+    assert status == f"{wedged_status()} (last heartbeat 4m ago)"
     assert "responding" not in status
 
     # No measurement (a cold render, a hand-built row): the state survives and
     # the number is absent rather than invented.
     bare = SessionRow("q" * 12, time.time(), "quiet owner", live_state="wedged")
-    assert CatalogEntry(bare).status == WEDGED_STATUS
+    assert CatalogEntry(bare).status == wedged_status()
 
     # And the words still pair with the glyph the row draws: the whole point of
     # the wording change is that this state stays distinguishable from ordinary
