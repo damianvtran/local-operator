@@ -12,10 +12,11 @@ and on a denial, and changes nothing about what enters the child.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from local_operator.harness.types import ToolContext
 from local_operator.network.credentials import github
 from local_operator.network.credentials.types import BorrowTimeout, BrokerError
 from local_operator.tools import builtin
@@ -203,7 +204,10 @@ def test_a_context_without_a_session_id_still_runs_bash(
     command = shlex.join([sys.executable, "-c", "print('MINIMAL-CTX-OK')"])
 
     async def run() -> Any:
-        return await builtin.execute_bash("minimal-ctx", {"command": command}, None, None, _Ctx())
+        # Deliberately a bare duck-typed context missing session_id/ancestor_session_ids:
+        # cast only satisfies pyright, the runtime object stays minimal.
+        ctx = cast(ToolContext, _Ctx())
+        return await builtin.execute_bash("minimal-ctx", {"command": command}, None, None, ctx)
 
     result = asyncio.run(run())
     assert "MINIMAL-CTX-OK" in str(getattr(result, "content", result)), result
