@@ -1,0 +1,7 @@
+{
+  "wire.providers.connect.key_invalid_characters": "В ключе есть символы, недопустимые в ключе API. Скопируйте его заново и повторите попытку.",
+  "wire.providers.connect.key_rejected": "Провайдер {label} отклонил этот ключ API. Проверьте его и повторите попытку.",
+  "wire.providers.connect.key_unreachable": "Не удалось связаться с провайдером {label}, чтобы проверить ключ. Ключ сохранён без проверки.",
+  "wire.providers.connect.key_unverified": "Провайдер {label} сейчас не может проверить этот ключ (HTTP {status}). Ключ сохранён без проверки.",
+  "wire.providers.connect.suggested_automatic": "Авто"
+}
