@@ -268,6 +268,11 @@ def test_an_agent_shell_yes_refuses_to_carry_and_names_the_operator_surface(
     assert declined["files"] == "not_moved" and declined["operator_confirmation_required"]
     assert f"lop sessions move {SESSION} --to {target}" in declined["operator_surfaces"]
     assert "move card" in declined["message"], declined
+    assert "desktop_move_card" in declined["operator_surfaces"]
+    # Keyed copy (cli.sessions_move_workset), English on the wire for the agent.
+    assert declined["message_envelope"]["code"] == (
+        "cli.sessions_move_workset.agent_needs_operator"
+    )
     _still_on_a(server_a, bhome)
 
 

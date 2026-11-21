@@ -12,7 +12,7 @@
   "cli.sessions_move_workset.prompt_sends": "Gửi các tệp làm việc này tới {device}? [y/N] ",
   "cli.sessions_move_workset.prompt_stays": "Chuyển {session} sang {device} và để các tệp làm việc này lại trên {source}? [y/N] ",
   "cli.sessions_move_workset.aborted": "Chưa chuyển: các tệp làm việc chưa được xác nhận.",
-  "cli.sessions_move_workset.needs_confirmation": "Cuộc trò chuyện này có tệp làm việc trên {source}. Xem lại bằng --dry-run, rồi chạy lại với --confirm-working-set {digest} (hoặc --yes), hoặc với --without-working-set để giữ chúng lại ở đó.",
+  "cli.sessions_move_workset.needs_confirmation": "Cuộc trò chuyện này có tệp làm việc trên {source}. Xem lại bằng --dry-run, rồi chạy lại với --confirm-working-set {digest}, hoặc với --without-working-set để giữ chúng lại ở đó.",
   "cli.sessions_move_workset.changed": "Các tệp làm việc đã thay đổi kể từ khi được hiển thị; đây là danh sách hiện tại.",
   "cli.sessions_move_workset.unknown": "Không đọc được các tệp làm việc trên {source} (kho: {repo}) nên chưa chuyển gì. Hãy sửa kho đó, hoặc chạy lại với --without-working-set để giữ mọi tệp làm việc lại ở đó.",
   "cli.sessions_move_workset.unsupported": "{device} đang chạy bản lop cũ, không liệt kê được tệp làm việc của cuộc trò chuyện này. Hãy cập nhật lop ở đó, hoặc chạy lại với --without-working-set để giữ chúng lại trên thiết bị đó.",
@@ -85,5 +85,8 @@
   "cli.sessions_move_workset.probe_refused_by_policy": "{device} sẽ không kết nối tới {remote}: địa chỉ này bị chính sách từ chối (không phải máy chủ công khai)",
   "cli.sessions_move_workset.receipt_sent": "Các tệp làm việc đã được gửi tới {device}: {count, plural, other {# worktree đã được nhận ở đó}}; {device} khôi phục chúng khi cuộc trò chuyện đến nơi.",
   "cli.sessions_move_workset.receipt_sent_row": "Đã gửi {path} tới {device}.",
-  "cli.sessions_move_workset.receipt_sent_unknown": "Các tệp làm việc đã được gửi tới {device}, nhưng phản hồi của nó chưa đến thiết bị này; hãy kiểm tra trên {device} những worktree nào đã được khôi phục. Thiết bị này vẫn giữ bản sao của mình."
+  "cli.sessions_move_workset.receipt_sent_unknown": "Các tệp làm việc đã được gửi tới {device}, nhưng phản hồi của nó chưa đến thiết bị này; hãy kiểm tra trên {device} những worktree nào đã được khôi phục. Thiết bị này vẫn giữ bản sao của mình.",
+  "cli.sessions_move_workset.yes_preflight_failed": "--yes chưa xác nhận: không hỏi được {device} xem có nhận được các tệp làm việc không ({cause}), nên chưa chuyển gì. Hãy thử lại, hoặc chạy lại với --without-working-set để giữ chúng ở chỗ cũ.",
+  "cli.sessions_move_workset.yes_carry_unavailable": "--yes chưa xác nhận: {device} không nhận được các tệp làm việc, nên chúng sẽ ở lại chỗ cũ. Chưa chuyển gì. Chạy lại với --without-working-set để chỉ chuyển cuộc trò chuyện, hoặc thử lại khi {device} đã nhận được.",
+  "cli.sessions_move_workset.agent_needs_operator": "{flag} chưa xác nhận: gửi tệp làm việc sang thiết bị khác cần người vận hành xác nhận, mà lệnh này chạy từ shell của một agent. Chưa chuyển gì; các tệp vẫn ở chỗ cũ. Người vận hành có thể xác nhận trên thẻ di chuyển trong ứng dụng máy tính hoặc di động, bằng cách chạy {command}, hoặc truyền --confirm-working-set kèm mã tóm tắt mà {dry_run_command} hiển thị. Để chỉ chuyển cuộc trò chuyện, hãy chạy lại với --without-working-set."
 }

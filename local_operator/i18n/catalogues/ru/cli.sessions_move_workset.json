@@ -12,7 +12,7 @@
   "cli.sessions_move_workset.prompt_sends": "Отправить эти рабочие файлы на {device}? [y/N] ",
   "cli.sessions_move_workset.prompt_stays": "Перенести {session} на {device}, оставив эти рабочие файлы на {source}? [y/N] ",
   "cli.sessions_move_workset.aborted": "Не перенесено: рабочие файлы не подтверждены.",
-  "cli.sessions_move_workset.needs_confirmation": "У этого разговора есть рабочие файлы на {source}. Просмотрите их с --dry-run, затем запустите снова с --confirm-working-set {digest} (или --yes) либо с --without-working-set, чтобы оставить их там.",
+  "cli.sessions_move_workset.needs_confirmation": "У этого разговора есть рабочие файлы на {source}. Просмотрите их с --dry-run, затем запустите снова с --confirm-working-set {digest} либо с --without-working-set, чтобы оставить их там.",
   "cli.sessions_move_workset.changed": "Рабочие файлы изменились после показа; вот актуальный список.",
   "cli.sessions_move_workset.unknown": "Не удалось прочитать рабочие файлы на {source} (репозиторий: {repo}), поэтому ничего не перенесено. Исправьте этот репозиторий или запустите снова с --without-working-set, чтобы оставить там все рабочие файлы.",
   "cli.sessions_move_workset.unsupported": "На {device} установлена старая версия lop, которая не может перечислить рабочие файлы этого разговора. Обновите там lop или запустите снова с --without-working-set, чтобы оставить их на том устройстве.",
@@ -85,5 +85,8 @@
   "cli.sessions_move_workset.probe_refused_by_policy": "{device} не будет обращаться к {remote}: политика отклоняет этот адрес (это не публичный хост)",
   "cli.sessions_move_workset.receipt_sent": "Рабочие файлы отправлены на {device}: там {count, plural, one {получен # worktree} few {получено # worktree} many {получено # worktree} other {получено # worktree}}; {device} восстанавливает их при прибытии разговора.",
   "cli.sessions_move_workset.receipt_sent_row": "{path} отправлен на {device}.",
-  "cli.sessions_move_workset.receipt_sent_unknown": "Рабочие файлы отправлены на {device}, но его ответ не дошёл до этого устройства; проверьте на {device}, какие worktree восстановлены. На этом устройстве осталась его копия."
+  "cli.sessions_move_workset.receipt_sent_unknown": "Рабочие файлы отправлены на {device}, но его ответ не дошёл до этого устройства; проверьте на {device}, какие worktree восстановлены. На этом устройстве осталась его копия.",
+  "cli.sessions_move_workset.yes_preflight_failed": "--yes ничего не подтвердил: не удалось спросить {device}, может ли оно принять рабочие файлы ({cause}), поэтому ничего не перенесено. Попробуйте ещё раз или запустите снова с --without-working-set, чтобы оставить их на месте.",
+  "cli.sessions_move_workset.yes_carry_unavailable": "--yes ничего не подтвердил: {device} не может принять рабочие файлы, поэтому они остались бы на месте. Ничего не перенесено. Запустите снова с --without-working-set, чтобы перенести только разговор, или попробуйте ещё раз, когда {device} сможет их принять.",
+  "cli.sessions_move_workset.agent_needs_operator": "{flag} ничего не подтвердил: для отправки рабочих файлов на другое устройство нужно подтверждение оператора, а эта команда запущена из оболочки агента. Ничего не перенесено, файлы остаются на месте. Оператор может подтвердить это в карточке переноса в настольном или мобильном приложении, выполнив {command} или передав --confirm-working-set с дайджестом, который показывает {dry_run_command}. Чтобы перенести только разговор, запустите снова с --without-working-set."
 }

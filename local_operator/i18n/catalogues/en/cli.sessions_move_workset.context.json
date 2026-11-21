@@ -67,7 +67,7 @@
   "cli.sessions_move_workset.needs_confirmation": {
     "role": "CLI error when a script moved a conversation with working files without confirming",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "Keep --dry-run, --confirm-working-set, --yes, --without-working-set verbatim; {digest} is a sha256: token, verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
+    "note": "Keep --dry-run, --confirm-working-set, --without-working-set verbatim; {digest} is a sha256: token, verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on. --yes is deliberately NOT offered here: it can now refuse (it only confirms a plan that sends the files, and never from an agent's shell), so the line names the explicit digest instead."
   },
   "cli.sessions_move_workset.changed": {
     "role": "CLI notice: the list changed between showing and confirming",
@@ -418,5 +418,20 @@
     "role": "CLI receipt line on the SOURCE when the destination's answer about the working files never arrived",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "{device} is the destination device name, verbatim. Must not imply the files stayed: they may be on {device}."
+  },
+  "cli.sessions_move_workset.yes_preflight_failed": {
+    "role": "CLI refusal when `lop sessions move --yes` could not ask the destination whether it can receive the working files",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --yes and --without-working-set verbatim. {device} is the destination device's name (or id), verbatim. {cause} is the relay's own English reason (or a short code), verbatim and untranslated. Nothing was moved: --yes refuses rather than guessing that the files should stay. 'working files' = the conversation's git worktrees and uncommitted/unpushed work."
+  },
+  "cli.sessions_move_workset.yes_carry_unavailable": {
+    "role": "CLI refusal when `lop sessions move --yes` would only move the conversation because the destination cannot receive the working files (not allowed, or an older lop)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --yes and --without-working-set verbatim. {device} is the destination device's name (or id), verbatim. Nothing was moved: leaving the files behind must be asked for explicitly with --without-working-set, so --yes refuses. 'would stay' is conditional: the move did not happen."
+  },
+  "cli.sessions_move_workset.agent_needs_operator": {
+    "role": "CLI refusal when a move that would send working files to another device was confirmed from an AI agent's shell (--yes or --confirm-working-set); read by the agent and relayed to the human operator",
+    "tone": "plain, factual, calm; explains who must confirm, without blame",
+    "note": "{flag} is the literal flag the agent used (--yes or --confirm-working-set), verbatim. {command} and {dry_run_command} are full `lop sessions move ...` commands, verbatim, never translated. Keep --confirm-working-set and --without-working-set verbatim. 'operator' = the human who owns this machine; 'agent's shell' = a command an AI agent ran. 'move card' = the confirmation card the desktop/mobile app shows when moving a conversation. 'digest' = the scope_digest token printed by --dry-run. Do NOT say the agent is blocked or forbidden: the sentence only says nothing moved and who can confirm."
   }
 }

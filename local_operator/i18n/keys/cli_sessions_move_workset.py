@@ -21,6 +21,13 @@ def advice_stays(*, source: str, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.advice_stays", {"source": source, "device": device})
 
 
+def agent_needs_operator(*, flag: str, command: str, dry_run_command: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.agent_needs_operator",
+        {"flag": flag, "command": command, "dry_run_command": dry_run_command},
+    )
+
+
 def brings_summary(
     *,
     worktrees: int | float,
@@ -409,3 +416,11 @@ def worktree_line(
             "untracked": untracked,
         },
     )
+
+
+def yes_carry_unavailable(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.yes_carry_unavailable", {"device": device})
+
+
+def yes_preflight_failed(*, device: str, cause: str) -> Msg:
+    return Msg("cli.sessions_move_workset.yes_preflight_failed", {"device": device, "cause": cause})

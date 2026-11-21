@@ -12,7 +12,7 @@
   "cli.sessions_move_workset.prompt_sends": "将这些工作文件发送到{device}？[y/N] ",
   "cli.sessions_move_workset.prompt_stays": "将{session}移动到{device}，并把这些工作文件留在{source}上？[y/N] ",
   "cli.sessions_move_workset.aborted": "未移动：工作文件未获确认。",
-  "cli.sessions_move_workset.needs_confirmation": "此对话在{source}上有工作文件。请先用--dry-run查看，然后使用--confirm-working-set {digest}（或--yes）重新运行，或使用--without-working-set将它们留在原处。",
+  "cli.sessions_move_workset.needs_confirmation": "此对话在{source}上有工作文件。请先用--dry-run查看，然后使用--confirm-working-set {digest}重新运行，或使用--without-working-set将它们留在原处。",
   "cli.sessions_move_workset.changed": "工作文件在显示后已发生变化；以下是当前列表。",
   "cli.sessions_move_workset.unknown": "无法读取{source}上的工作文件（仓库：{repo}），因此没有移动任何内容。请修复该仓库，或使用--without-working-set重新运行，把所有工作文件留在原处。",
   "cli.sessions_move_workset.unsupported": "{device}上的lop版本过旧，无法列出此对话的工作文件。请在该设备上更新lop，或使用--without-working-set重新运行，将它们留在该设备上。",
@@ -85,5 +85,8 @@
   "cli.sessions_move_workset.probe_refused_by_policy": "{device}不会连接{remote}：该地址被策略拒绝（不是公共主机）",
   "cli.sessions_move_workset.receipt_sent": "工作文件已发送到{device}：{count, plural, other {已在那里收到#个worktree}}；对话到达时{device}会恢复它们。",
   "cli.sessions_move_workset.receipt_sent_row": "已将{path}发送到{device}。",
-  "cli.sessions_move_workset.receipt_sent_unknown": "工作文件已发送到{device}，但它的答复没有送达本设备；请在{device}上查看哪些worktree已恢复。本设备仍保留自己的副本。"
+  "cli.sessions_move_workset.receipt_sent_unknown": "工作文件已发送到{device}，但它的答复没有送达本设备；请在{device}上查看哪些worktree已恢复。本设备仍保留自己的副本。",
+  "cli.sessions_move_workset.yes_preflight_failed": "--yes 未确认：无法询问{device}能否接收工作文件（{cause}），因此没有移动任何内容。请重试，或使用--without-working-set重新运行，把它们留在原处。",
+  "cli.sessions_move_workset.yes_carry_unavailable": "--yes 未确认：{device}无法接收工作文件，它们会留在原处。没有移动任何内容。请使用--without-working-set重新运行以只迁移对话，或等{device}能够接收后再试。",
+  "cli.sessions_move_workset.agent_needs_operator": "{flag} 未确认：把工作文件发送到另一台设备需要操作者确认，而此命令是在智能体的 shell 中运行的。没有移动任何内容，文件仍留在原处。操作者可以在桌面或移动应用的迁移卡片上确认、运行 {command}，或者用 {dry_run_command} 显示的摘要传入 --confirm-working-set。若只迁移对话，请使用--without-working-set重新运行。"
 }
