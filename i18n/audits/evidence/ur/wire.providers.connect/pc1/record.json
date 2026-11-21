@@ -1,0 +1,25 @@
+{
+  "locale": "ur",
+  "namespace": "wire.providers.connect",
+  "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+  "target_sha256": "71ee5bd71309ca929db1c3ac9f1078fef1d9582daab454b011960f03859e3bcf",
+  "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21"
+  },
+  "auditor": {
+    "agent": "translation-auditor (conn-audit-ur; session d33088a037d2)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "unresolved_blocker_major": 0,
+  "keys_read": 5,
+  "findings": [],
+  "note": "Independent of translator; translator identity supplied by delegation. Actual auditor model openai/gpt-6.1-sol, no fallback used. Read all 5 English/Urdu keys and context, providers/key_check.py classification and transport failure, model/defaults.py suggested_model_for/localized suggestion, auth/models route serialization and key-save refusal flow. Compared shipped Urdu wire.errors.auth/bedrock API-key vocabulary and wire.settings automatic wording. API کلید, جانچ, تصدیق کے بغیر محفوظ and خودکار consistent. Respectful imperative; API/HTTP are sanctioned Latin acronyms. No plurals/markup/skeletons. Exact message_arguments tuple parity including order; HTTP 429 and OpenAI preserved on render_message for all 5. No manual bidi controls. Character lengths en→ur: 78→99,54→72,79→91,96→96,9→6; contextual error sentences have no pinned width budget; compact name shorter than source. Logical RTL punctuation/token order sound; no browser screenshot or native RTL-layout claim. check.py --catalogues-only: 0 problems. Worktree HEAD b5bb56079c5067fd2efc81d6d223ac0283171142; target uncommitted catalogue bytes pinned above."
+}
