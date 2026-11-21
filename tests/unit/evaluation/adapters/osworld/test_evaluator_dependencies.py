@@ -15,7 +15,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import BinaryIO
 
 import pytest
 from lop_osworld_v2_adapter import evaluator_dependencies as deps
@@ -165,16 +165,30 @@ def test_declared_wrapper_gets_only_validated_path(
 
 
 @pytest.mark.parametrize(
-    ("body", "reason"),
+    ("body", "reason", "tool_status"),
     [
-        ("import os\nwhile True: os.write(1, b'x' * 4096)", "exceeded.*TSV response size"),
-        ("import time; time.sleep(60)", "timed out"),
-        ("import os, time; os.close(1); time.sleep(60)", "timed out"),
+        (
+            "import os\nwhile True: os.write(1, b'x' * 4096)",
+            "exceeded.*TSV response size",
+            -signal.SIGKILL,
+        ),
+        ("import time; time.sleep(60)", "timed out", -signal.SIGKILL),
+        ("import os, time; os.close(1); time.sleep(60)", "timed out", -signal.SIGKILL),
+        (
+            f"import os; os.write(1, {_HEADER + _PAGE + b'x'!r}); os._exit(0)",
+            "exceeded.*TSV response size",
+            0,
+        ),
     ],
-    ids=["flood", "silent", "closed-stdout"],
+    ids=["flood", "silent", "closed-stdout", "already-exited"],
 )
 def test_probe_reaps_owned_process_on_limit(
-    pinned: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, reason: str
+    pinned: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    reason: str,
+    tool_status: int,
 ) -> None:
     tools = tmp_path / "host-tools"
     _tool(tools, body)
@@ -183,19 +197,156 @@ def test_probe_reaps_owned_process_on_limit(
     calls: list[subprocess.Popen[bytes]] = []
     popen = subprocess.Popen
 
-    def capture(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
-        assert kwargs.get("start_new_session") is True
-        child = popen(*args, **kwargs)
+    def capture(
+        argv: list[str],
+        *,
+        stdin: int | BinaryIO,
+        stdout: int,
+        stderr: int,
+        env: dict[str, str],
+        cwd: str,
+        process_group: int,
+    ) -> subprocess.Popen[bytes]:
+        assert process_group == (calls[0].pid if calls else 0)
+        child = popen(
+            argv,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            cwd=cwd,
+            process_group=process_group,
+        )
         calls.append(child)
+        if process_group and tool_status == 0:
+            # Force natural exit before the worker reads the oversized output.
+            assert child.wait(timeout=5) == 0
         return child
 
     monkeypatch.setattr(subprocess, "Popen", capture)
     with pytest.raises(ProvisioningError, match=reason):
         _check(pinned, (str(tools),))
-    (child,) = calls
-    assert child.returncode == -signal.SIGKILL
-    with pytest.raises(ChildProcessError):
-        os.waitpid(child.pid, os.WNOHANG)
+    guard, child = calls
+    assert guard.returncode == -signal.SIGKILL
+    assert child.returncode == tool_status
+    for process in calls:
+        with pytest.raises(ChildProcessError):
+            os.waitpid(process.pid, os.WNOHANG)
+
+
+# Use the real reset path with synthetic task bytes and no provider. The worker
+# has its own session, just as it would under AdapterSupervisor.
+_RESET_WORKER = """
+import asyncio, hashlib, sys
+from pathlib import Path
+from lop_osworld_v2_adapter.adapter import OSWorldV2Adapter
+from lop_osworld_v2_adapter import evaluator_dependencies as deps
+from local_operator.evaluation.adapters.api import ScopedInfraValue
+from tests.unit.evaluation.adapters.osworld import fixtures
+from tests.unit.evaluation.adapters.osworld.test_evaluator_dependencies import _RELEASE
+from tests.unit.evaluation.adapters.osworld.test_secrets_and_rescue import (
+    _AWS_SECRETS, _INFRA, _prepared, _reset, _workspace,
+)
+
+async def run():
+    root, episode_id, tools = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+    workspace = _workspace(root, {'task_025': fixtures.PLAIN}, provider={'provider': 'aws'})
+    (workspace / 'benchmark_release.json').write_bytes(_RELEASE)
+    source = (workspace / 'tasks' / 'task_025.py').read_bytes()
+    deps._TASK_025_SOURCE_SHA256 = hashlib.sha256(source).hexdigest()
+    deps._V21_RELEASE_SHA256 = hashlib.sha256(_RELEASE).hexdigest()
+    deps._OCR_TIMEOUT_SECONDS = 60  # Cancellation, not the local deadline, must end the probe.
+    deps.os.defpath = tools
+    adapter = OSWorldV2Adapter(workspace_root=workspace)
+
+    def forbidden():
+        raise AssertionError('reset attempted to build a provider')
+
+    adapter._build_provider = forbidden
+    await _prepared(adapter, episode_id, (*_INFRA, ScopedInfraValue(
+        name='EVALUATOR_TOOL_PATH', purpose='benchmark_compute', value=tools,
+    )))
+    await adapter.reset_start(_reset(episode_id, 'task_025', root, _AWS_SECRETS))
+
+asyncio.run(run())
+"""
+
+
+def test_hard_reset_cancellation_ends_exact_probe_and_helper(
+    tmp_path: Path, episode_id: str
+) -> None:
+    ready = tmp_path / "probe-lifetime"
+    os.mkfifo(ready, 0o600)
+    tools = tmp_path / "host-tools"
+    _tool(
+        tools,
+        "import os, signal\n"
+        f"fd = os.open({str(ready)!r}, os.O_WRONLY)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "role = 'helper' if os.fork() == 0 else 'probe'\n"
+        "signal.alarm(20)  # Last-resort test cleanup on a failed assertion.\n"
+        "os.write(fd, f'{role} {os.getpid()} {os.getpgrp()}\\n'.encode())\n"
+        "while True: signal.pause()",
+    )
+    env = {
+        "HOME": str(tmp_path),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / ".local-operator"),
+        "PYTHONPATH": os.pathsep.join(path for path in sys.path if os.path.isabs(path)),
+    }
+    with os.fdopen(os.open(ready, os.O_RDONLY | os.O_NONBLOCK), "rb", buffering=0) as reader:
+        # Hold a writer until both fake processes have reported. After that,
+        # their own descriptors are the only writers and EOF proves both ended.
+        with os.fdopen(os.open(ready, os.O_WRONLY | os.O_NONBLOCK), "wb") as placeholder:
+            worker = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-B",
+                    "-s",
+                    "-c",
+                    _RESET_WORKER,
+                    str(tmp_path),
+                    episode_id,
+                    str(tools),
+                ],
+                env=env,
+                start_new_session=True,
+            )
+            identities: dict[str, tuple[int, int]] = {}
+            try:
+                for _ in range(2):
+                    assert select.select([reader], [], [], 10)[0], "fake OCR did not start"
+                    role, pid, group = reader.readline().decode().split()
+                    identities[role] = (int(pid), int(group))
+                assert set(identities) == {"probe", "helper"}
+                probe, probe_group = identities["probe"]
+                helper, helper_group = identities["helper"]
+                assert probe != helper and probe_group == helper_group
+                assert os.getpgid(probe) == os.getpgid(helper) == probe_group
+                placeholder.close()
+                # The supervisor's last teardown step is this exact signal.
+                # The worker cannot run Python finally blocks after SIGKILL.
+                os.killpg(worker.pid, signal.SIGKILL)
+                assert worker.wait(timeout=5) == -signal.SIGKILL
+                assert select.select([reader], [], [], 5)[
+                    0
+                ], f"OCR processes survived: {identities}"
+                assert os.read(reader.fileno(), 1) == b""
+            finally:
+                if worker.poll() is None:
+                    os.killpg(worker.pid, signal.SIGKILL)
+                    worker.wait(timeout=5)
+                # On the negative control the old probe escaped the worker
+                # group. Never leave it on the test host, even on failure.
+                placeholder.close()
+                if not select.select([reader], [], [], 0)[0]:
+                    for pid, group in identities.values():
+                        try:
+                            if os.getpgid(pid) == group:
+                                os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if identities:
+                        assert select.select([reader], [], [], 5)[0], "fake OCR cleanup failed"
 
 
 def test_child_diagnostics_are_never_reported(pinned: Path, tmp_path: Path) -> None:
