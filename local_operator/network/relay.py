@@ -11728,14 +11728,14 @@ class RelayServer:
         THE REFRESH IS SCHEDULED ON THE PAGE LOOP because ``start_refresh`` is
         loop-resident by construction (it creates a task on the RUNNING loop),
         and this handler runs on the LINK'S READER thread. SINGLE-FLIGHT MEANS
-        PER LOOP HERE: ``transcript_index`` joins an in-flight task only when it
-        was recorded for the same loop — a request from another loop starts a
-        FRESH task and replaces the map's entry. Every stored-page read in this
-        process shares the one page loop, so concurrent frame reads join one
-        scan; a refresh already running on ANOTHER loop (the desktop bridge's,
-        another process) is duplicated, not joined — safe (the same journal, an
-        idempotent cache write), and exactly why this side schedules its own
-        rather than assuming anyone else's scan is in flight. The submit is
+        ACROSS LOOPS AND PROCESSES. Every stored-page read shares the one page
+        loop; a refresh this relay already runs on another of its loops (the
+        source-availability join) is joined through a proxy task
+        (``start_refresh``'s cross-loop join). The desktop bridge's refresh of
+        the same journal runs in ANOTHER PROCESS (``lop serve``), which no task
+        can join: there ``refresh_index``'s per-session build lock makes the
+        later builder wait for the first one's publication and take its
+        exact-signature hit, so the two opens cost one scan. The submit is
         taken under ``_page_loop_lock`` for the same reason
         ``_stored_page_read``'s is: a ``stop`` landing between choosing the loop
         and submitting must hand this read either the live loop or a fresh one,
@@ -11774,14 +11774,14 @@ class RelayServer:
     async def _schedule_frame_index_refresh(self, session_id: str) -> None:
         """Create the index refresh task, on the page loop.
 
-        THE LOOP IS THE JOIN CONDITION, not just the executor: ``start_refresh``
-        joins a task only for the loop it was recorded under, and every
-        stored-page read here shares this one — so concurrent frame reads join
-        ONE scan. (A refresh already running on another loop is not joined; see
-        :meth:`_stored_frame_index` for the scope and why the duplicate is
-        safe.) A coroutine rather than a direct call because ``start_refresh``
-        reads ``asyncio.get_running_loop()`` — it must run where a loop is
-        running, which is the page loop and only the page loop on this side.
+        Every stored-page read here shares this loop, so concurrent frame reads
+        join ONE task; a refresh another of this process's live loops already
+        runs is joined through ``start_refresh``'s cross-loop proxy, and the
+        desktop bridge's build in ``lop serve`` (another process) through
+        ``refresh_index``'s build lock (see :meth:`_stored_frame_index`). A
+        coroutine rather than a direct call because ``start_refresh`` reads
+        ``asyncio.get_running_loop()`` — it must run where a loop is running,
+        which is the page loop and only the page loop on this side.
         """
         from local_operator.session import transcript_index as index_module
 
