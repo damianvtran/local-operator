@@ -917,7 +917,7 @@ def test_registry_failure_is_a_typed_503_with_nothing_written(tmp_path, monkeypa
     r = TargetRig(tmp_path, monkeypatch)
 
     def unavailable(*_args, **_kwargs):
-        raise ProfileRegistryUnavailable("fixture: registry unreadable")
+        raise ProfileRegistryUnavailable(1)
 
     monkeypatch.setattr(desktop_profiles, "validate_target", unavailable)
     response = r.start(_target_body(keyed, team="squad"))
