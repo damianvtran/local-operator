@@ -2249,7 +2249,10 @@ def read_cold_tail(
     scan starts at ``boundary - (longest needle - 1)`` instead of ``0``: a
     spelling wholly inside ``[0, boundary)`` is excluded by the prior proof, and
     any other occurrence ends past ``boundary`` so starts at or above that
-    start. WHY: an ACTIVE session's journal grows between opens, so the cold
+    start. The overlap is DEFENSIVE: ``boundary`` is always a row start and no
+    needle contains a newline, so today no real journal places a spelling
+    across it; it keeps the answer exact if either ever stops holding.
+    WHY: an ACTIVE session's journal grows between opens, so the cold
     metadata record misses on every open, and without this each open re-scanned
     the whole journal below the tail (measured on a 55 MB fixture with no spend
     row: 55,112,712 bytes per grown open). The answer is unchanged either way;

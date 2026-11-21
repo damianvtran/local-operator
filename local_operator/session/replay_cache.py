@@ -525,7 +525,10 @@ def _record_absence(key: ReplayKey, path: Path, boundary: int, needles: tuple[by
     target = absence_proof_path(path)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(f".{os.getpid()}.tmp")
+        # Per pid AND thread: two ``to_thread`` builds for one session in one
+        # process would otherwise interleave into one temp file (fail-safe, but
+        # a wasted proof).
+        tmp = target.with_suffix(f".{os.getpid()}-{threading.get_ident()}.tmp")
         tmp.write_text(
             json.dumps(
                 {

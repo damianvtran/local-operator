@@ -10,6 +10,11 @@ These tests hold the three properties the incremental proof must keep:
 * a rewrite (new inode), a truncation below the boundary or a changed boundary
   row falls back to the full scan;
 * the record filed is byte-equal to the one a cold full proof files.
+
+NOT COVERED, BY DESIGN: a same-length in-place edit of a row BELOW the boundary
+(same inode, unchanged boundary row) is accepted and undetected — the same
+append-prefix limit ``_extends`` documents. No journal writer rewrites earlier
+bytes in place.
 """
 
 from __future__ import annotations
