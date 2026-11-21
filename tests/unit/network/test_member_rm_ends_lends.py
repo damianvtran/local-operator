@@ -38,7 +38,9 @@ from tests.unit.network.test_credentials_github import (  # noqa: F401 — fixtu
     github_api,
     owner,
 )
+from tests.unit.network.test_credentials_held_offline import _stop_owner
 from tests.unit.network.test_credentials_hold_github_mcp import (  # noqa: F401
+    HOLD_S,
     MCP_KEY,
     _past_window,
     held,
@@ -82,6 +84,23 @@ def _secrets(rig: Any) -> list[str]:
     return [rig.gh.access_token, rig.mcp.access_token]
 
 
+def _refused_because_removed(client: Any, result: Any) -> bool:
+    """True only when B's refusal is the REMOVAL, not the hold simply running out.
+
+    Why both halves (review R1-1): the hold here is 6 s, so any "not a Grant"
+    poll longer than that passes on ordinary expiry too — B never learning it was
+    removed then still reads green, as ``owner_offline``. The removal is proven by
+    B's OWN membership check reading inactive (the self row #4394's verified
+    notice flips) AND the exact borrowed-authority refusal ``not_a_holder``.
+    ``test_hold_expiry_alone_never_reads_as_removal`` is the negative control.
+    """
+    return (
+        client._self_membership_active() is False  # noqa: SLF001
+        and isinstance(result, BrokerError)
+        and result.code == "not_a_holder"
+    )
+
+
 def test_an_unreachable_member_rm_names_each_lend_left_usable(
     held: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
@@ -97,16 +116,17 @@ def test_an_unreachable_member_rm_names_each_lend_left_usable(
     net = held.mesh
     receipt, server = _remove_while_offline(held, monkeypatch)
     try:
+        # B came back and dialled A: first its OWN record must say it was removed
+        # (the verified notice, applied to B's self row) — waiting on any refusal
+        # instead would also pass once the 6 s hold simply ran out (R1-1).
+        learned = net_fixtures.wait_for(
+            lambda: not held.client._self_membership_active(),  # noqa: SLF001
+            timeout_s=20.0,
+        )
+        assert learned, "B reconnected and still reads itself an active member"
         _past_window(held.mcp)
-        served = held.client.request_grant_sync(MCP_KEY, provider="mcp-oauth")
-        # B came back and dialled A: the authenticated notice dropped its borrowed
-        # authority, so nothing is served from the hold any more.
-        assert net_fixtures.wait_for(
-            lambda: not isinstance(
-                held.client.request_grant_sync(MCP_KEY, provider="mcp-oauth"), Grant
-            ),
-            timeout_s=10.0,
-        ), served
+        refused = held.client.request_grant_sync(MCP_KEY, provider="mcp-oauth")
+        assert _refused_because_removed(held.client, refused), refused
     finally:
         server.stop()
     assert "lends_open" in receipt, f"the removal receipt is silent about lends: {receipt}"
@@ -134,6 +154,29 @@ def test_an_unreachable_member_rm_names_each_lend_left_usable(
     assert any("revocation requested at the source" in line for line in lines), lines
     # The removed member's rows leave the ledger: nothing is ever lent to it again.
     assert lends_mod.close_holder(net.a.root, net.network_id, net.borrower) == []
+
+
+def test_hold_expiry_alone_never_reads_as_removal(held: Any) -> None:  # noqa: F811
+    """Negative control for R1-1: a member NOT removed, its hold aged past expiry.
+
+    The owner goes away (so B serves from the hold), nobody runs ``member rm``,
+    and the hold runs out. The old "anything but a Grant" poll passes here —
+    which is exactly why it could not tell removal from expiry — while
+    ``_refused_because_removed`` must stay False: B is still a member in its own
+    eyes and the refusal is ``owner_offline``, not ``not_a_holder``.
+    """
+    client, net = held.client, held.mesh
+    _stop_owner(net)
+    _past_window(held.mcp)
+    weak_passed = net_fixtures.wait_for(
+        lambda: not isinstance(client.request_grant_sync(MCP_KEY, provider="mcp-oauth"), Grant),
+        timeout_s=HOLD_S + 5,
+    )
+    assert weak_passed, "the hold never expired; the control proves nothing"
+    expired = client.request_grant_sync(MCP_KEY, provider="mcp-oauth")
+    assert isinstance(expired, BrokerError) and expired.code == "owner_offline", expired
+    assert client._self_membership_active() is True  # noqa: SLF001
+    assert not _refused_because_removed(client, expired), expired
 
 
 def test_a_reachable_member_rm_ends_the_lends_on_the_member(held: Any) -> None:  # noqa: F811
