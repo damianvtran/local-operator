@@ -4657,7 +4657,10 @@ async def _github_git_injections(
         return {}
     store = getattr(context, "variables", None)
     extra: dict[str, Any] = {}
-    session_id = context.session_id or ""
+    # getattr, not attribute access: this runs on EVERY bash call, and minimal
+    # duck-typed contexts (e2e probes passing only cwd + variables) carry no
+    # session_id. Absence reads as "no session" — no outage note dedup key.
+    session_id = getattr(context, "session_id", None) or ""
     refused: list[Any] = []
     if notes is not None:
         sink = notes

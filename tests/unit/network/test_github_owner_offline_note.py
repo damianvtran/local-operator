@@ -171,3 +171,39 @@ def test_the_outage_note_is_told_once_per_session_per_outage(
     up["value"] = False
     second_outage = [bash("synthetic-a") for _ in range(3)]
     assert [t.count(NOTE) for t in second_outage] == [1, 0, 0], second_outage
+
+
+def test_a_context_without_a_session_id_still_runs_bash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A duck-typed tool context (only ``cwd`` + ``variables``) must run bash.
+
+    Regression: hoisting ``context.session_id`` to the top of the GitHub
+    injection made EVERY bash call dereference it, so callers that pass a
+    minimal context — the e2e ``_Ctx`` probes — raised AttributeError before
+    the child even started. The context protocol never promised that attribute
+    (nor ``ancestor_session_ids``), so its absence must read as "no session".
+    """
+    import asyncio
+    import shlex
+    import sys
+
+    from local_operator.variables import VariableStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    class _Ctx:
+        variables = VariableStore(cwd=str(tmp_path))
+        cwd = str(tmp_path)
+
+    assert not hasattr(_Ctx(), "session_id")
+    assert not hasattr(_Ctx(), "ancestor_session_ids")
+    command = shlex.join([sys.executable, "-c", "print('MINIMAL-CTX-OK')"])
+
+    async def run() -> Any:
+        return await builtin.execute_bash("minimal-ctx", {"command": command}, None, None, _Ctx())
+
+    result = asyncio.run(run())
+    assert "MINIMAL-CTX-OK" in str(getattr(result, "content", result)), result
