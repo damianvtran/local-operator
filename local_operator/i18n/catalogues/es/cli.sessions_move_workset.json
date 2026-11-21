@@ -90,7 +90,7 @@
   "cli.sessions_move_workset.deps_description": "Indica, para cada worktree que un movimiento restauró en este dispositivo, si su node_modules o .venv aún está por crear, ya existe o no se pudo comprobar. Es de solo lectura: nunca ejecuta un gestor de paquetes ni instala, enlaza o elimina nada. --status es obligatorio.",
   "cli.sessions_move_workset.deps_session_help": "el id de la conversación cuyo conjunto de trabajo llegó a este dispositivo",
   "cli.sessions_move_workset.deps_status_help": "mostrar el estado, sin ejecutar ni instalar nada",
-  "cli.sessions_move_workset.deps_header": "Estado de las dependencias de {session} en este dispositivo. No se ejecutó ni se instaló nada.",
+  "cli.sessions_move_workset.deps_header": "Estado de las dependencias del último conjunto de trabajo de {session} restaurado en este dispositivo. No se ejecutó ni se instaló nada.",
   "cli.sessions_move_workset.deps_row": "{state} · {cwd} ({kind})",
   "cli.sessions_move_workset.deps_row_plain": "{state} · {cwd}",
   "cli.sessions_move_workset.deps_state_pending": "Sin preparar",

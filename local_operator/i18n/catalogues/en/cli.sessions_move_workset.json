@@ -90,7 +90,7 @@
   "cli.sessions_move_workset.deps_description": "Reports, for each worktree a move restored on this device, whether its node_modules or .venv still has to be created, already exists, or could not be checked. It is read-only: it never runs a package manager and never installs, links or removes anything. --status is required.",
   "cli.sessions_move_workset.deps_session_help": "the conversation id whose working set arrived on this device",
   "cli.sessions_move_workset.deps_status_help": "show the status; nothing is run or installed",
-  "cli.sessions_move_workset.deps_header": "Dependency status of {session} on this device. Nothing was run or installed.",
+  "cli.sessions_move_workset.deps_header": "Dependency status of the working set of {session} last restored on this device. Nothing was run or installed.",
   "cli.sessions_move_workset.deps_row": "{state} · {cwd} ({kind})",
   "cli.sessions_move_workset.deps_row_plain": "{state} · {cwd}",
   "cli.sessions_move_workset.deps_state_pending": "Not set up",

@@ -90,7 +90,7 @@
   "cli.sessions_move_workset.deps_description": "针对移动在本设备上恢复的每个worktree，报告其node_modules或.venv是仍需创建、已经存在，还是无法检查。此命令只读：从不运行包管理器，也不安装、链接或删除任何内容。必须指定--status。",
   "cli.sessions_move_workset.deps_session_help": "工作集已到达本设备的对话id",
   "cli.sessions_move_workset.deps_status_help": "显示状态；不运行也不安装任何内容",
-  "cli.sessions_move_workset.deps_header": "{session}在本设备上的依赖状态。未运行或安装任何内容。",
+  "cli.sessions_move_workset.deps_header": "本设备上最近一次恢复的{session}工作集的依赖状态。未运行或安装任何内容。",
   "cli.sessions_move_workset.deps_row": "{state} · {cwd}（{kind}）",
   "cli.sessions_move_workset.deps_row_plain": "{state} · {cwd}",
   "cli.sessions_move_workset.deps_state_pending": "未设置",

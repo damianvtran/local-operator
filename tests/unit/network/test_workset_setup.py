@@ -64,8 +64,14 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     return {"home": home, "config": config, "bin": bindir, "launched": launched}
 
 
-def _restored(config: Path, rows: list[str], *, waiting: Sequence[str] = ()) -> Path:
-    """THIS device's restore record, as ``workset_move.restore_arrived`` writes it."""
+def _restored(
+    config: Path, rows: list[str], *, waiting: Sequence[str] = (), epoch: str = "e1"
+) -> Path:
+    """THIS device's restore record, as ``workset_move.restore_arrived`` writes it.
+
+    ``epoch`` is the move that staged it (``lease_epoch`` in the record); the arrival
+    note binds to it, so ``e1`` matches ``_spool``'s move unless a test says otherwise.
+    """
     directory = config / "network" / "workset-in" / SID
     directory.mkdir(parents=True)
     plans, restored = [], {}
@@ -76,7 +82,8 @@ def _restored(config: Path, rows: list[str], *, waiting: Sequence[str] = ()) -> 
         plans.append({"n": n, "path": path})
         restored[str(n)] = {"state": "pending_restore", "path": path, "reason": "x"}
     (directory / "pending.json").write_text(
-        json.dumps({"plans": plans, "restored": restored}), encoding="utf-8"
+        json.dumps({"lease_epoch": epoch, "plans": plans, "restored": restored}),
+        encoding="utf-8",
     )
     return directory
 
@@ -395,7 +402,7 @@ def test_no_working_set_here_says_nothing_about_dependencies() -> None:
     assert "setup-deps" not in text and "Dependency trees" not in text
 
 
-def _spool(env: dict[str, Path]) -> tuple[str, Any]:
+def _spool(env: dict[str, Path], epoch: str = "e1") -> tuple[str, Any]:
     from types import SimpleNamespace
 
     from local_operator.network import mobility
@@ -407,10 +414,10 @@ def _spool(env: dict[str, Path]) -> tuple[str, Any]:
         root=env["config"], workset_home=str(env["home"]), _own_label=lambda: "desk"
     )
     state = mobility._arrival_resume_note(
-        server, SID, lease_epoch="e1", block=None, source="laptop"
+        server, SID, lease_epoch=epoch, block=None, source="laptop"
     )
     again = mobility._arrival_resume_note(
-        server, SID, lease_epoch="e1", block=None, source="laptop"
+        server, SID, lease_epoch=epoch, block=None, source="laptop"
     )
     assert again == "already_delivered"
     return state, peek_inbox(env["config"] / "sessions" / SID)
@@ -450,5 +457,121 @@ def test_an_unreadable_tree_at_arrival_still_spools_the_guard(env: dict[str, Pat
     assert state == "delivered"
     (row,) = rows
     assert "- ~/src/app: npm, status unknown" in row.text
+    _assert_status_only(row.text)
+    assert not env["launched"].exists()
+
+
+# ------------------------------------------- S2-R2: the note binds to THIS move
+
+
+def test_an_earlier_moves_record_never_speaks_for_this_arrival(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S2-R2: a return that carried no working set leaves the earlier move's record in
+    ``workset-in/<sid>``. The note for THIS move (epoch e2) must not present that
+    record's checkout as this arrival's — and must not even inspect its paths."""
+    _worktree(env["home"], "src/old-checkout", {"package-lock.json": "{}"})
+    _restored(env["config"], ["~/src/old-checkout"], waiting=["~/src/old-later"], epoch="e1")
+
+    def no_path_inspection(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("an earlier move's worktree was inspected for this arrival")
+
+    monkeypatch.setattr(workset_setup, "_worktree_rows", no_path_inspection)
+
+    state, rows = _spool(env, epoch="e2")
+
+    assert state == "delivered"
+    (row,) = rows
+    assert "old-checkout" not in row.text and "old-later" not in row.text
+    assert "Dependency trees" not in row.text and "setup-deps" not in row.text
+    assert "No working files were recorded" in row.text
+    assert not env["launched"].exists()
+
+
+@pytest.mark.parametrize("current", ["", "e2"], ids=["no-epoch", "other-epoch"])
+def test_the_bound_reader_returns_nothing_for_another_or_no_epoch(
+    env: dict[str, Path], current: str
+) -> None:
+    """An empty epoch never matches (no manufactured binding); the record is untouched."""
+    _worktree(env["home"], "src/app", {"package-lock.json": "{}"})
+    directory = _restored(env["config"], ["~/src/app"], epoch="e1")
+    before = (directory / "pending.json").read_bytes()
+
+    got = workset_setup.dependency_status(env["config"], env["home"], SID, lease_epoch=current)
+
+    assert got is None
+    assert (directory / "pending.json").read_bytes() == before
+
+
+def test_the_same_moves_record_is_reported_and_the_standalone_query_names_its_epoch(
+    env: dict[str, Path],
+) -> None:
+    _worktree(env["home"], "src/app", {"package-lock.json": "{}"})
+    _restored(env["config"], ["~/src/app"], epoch="e1")
+
+    bound = workset_setup.dependency_status(env["config"], env["home"], SID, lease_epoch="e1")
+    standalone = workset_setup.dependency_status(env["config"], env["home"], SID)
+
+    assert bound is not None and standalone is not None
+    assert [(r.cwd, r.state) for r in bound.rows] == [("~/src/app", "pending")]
+    assert standalone.to_json()["restore_record"] == {"state": "read", "lease_epoch": "e1"}
+
+
+_DAMAGED: dict[str, bytes] = {
+    "bad-json": b"{bad",
+    "bad-utf8": b"\xff\xfe{}",
+    "not-an-object": b"[]",
+    "plans-not-a-list": b'{"lease_epoch": "e1", "plans": "x", "restored": {}}',
+    "plans-missing": b'{"lease_epoch": "e1", "restored": {}}',
+    "plan-not-a-mapping": b'{"lease_epoch": "e1", "plans": ["x"], "restored": {}}',
+    "restored-not-a-mapping": b'{"lease_epoch": "e1", "plans": [{"n": 0}], "restored": []}',
+    "epoch-not-a-string": b'{"lease_epoch": 5, "plans": [{"n": 0}], "restored": {}}',
+}
+
+
+@pytest.mark.parametrize("raw", list(_DAMAGED.values()), ids=list(_DAMAGED))
+@pytest.mark.parametrize("bound", [None, "e1"], ids=["standalone", "arrival"])
+def test_a_damaged_record_is_unknown_never_absent_and_never_a_traceback(
+    env: dict[str, Path], raw: bytes, bound: str | None
+) -> None:
+    """S7-R2 / R2-1 / U10 / D13: unreadable is not "no working set arrived"."""
+    directory = env["config"] / "network" / "workset-in" / SID
+    directory.mkdir(parents=True)
+    (directory / "pending.json").write_bytes(raw)
+
+    # The standalone call keeps the pre-S2-R2 signature, so it discriminates on 71cbd4d.
+    kwargs = {} if bound is None else {"lease_epoch": bound}
+    got = workset_setup.dependency_status(env["config"], env["home"], SID, **kwargs)
+
+    assert got is not None
+    assert (got.state, got.rows, got.not_restored) == ("unknown", [], [])
+    assert got.to_json()["restore_record"]["state"] == "unreadable"
+    assert (directory / "pending.json").read_bytes() == raw
+
+
+@pytest.mark.skipif(_ROOT_SKIPS_PERMISSIONS, reason="root reads a 000 file")
+def test_an_unreadable_record_file_is_unknown(env: dict[str, Path]) -> None:
+    directory = _restored(env["config"], ["~/src/app"])
+    (directory / "pending.json").chmod(0)
+    try:
+        got = workset_setup.dependency_status(env["config"], env["home"], SID)
+    finally:
+        (directory / "pending.json").chmod(0o600)
+
+    assert got is not None and got.state == "unknown" and got.rows == []
+
+
+def test_a_damaged_record_at_arrival_keeps_the_guard_and_names_no_path(
+    env: dict[str, Path],
+) -> None:
+    directory = env["config"] / "network" / "workset-in" / SID
+    directory.mkdir(parents=True)
+    (directory / "pending.json").write_text('{"plans": ["~/src/old"]', encoding="utf-8")
+
+    state, rows = _spool(env, epoch="e2")
+
+    assert state == "delivered"
+    (row,) = rows
+    assert "Status unknown" in row.text and "~/src/old" not in row.text
     _assert_status_only(row.text)
     assert not env["launched"].exists()

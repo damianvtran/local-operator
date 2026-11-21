@@ -90,7 +90,7 @@
   "cli.sessions_move_workset.deps_description": "Indique, pour chaque worktree qu’un déplacement a restauré sur cet appareil, si son node_modules ou son .venv reste à créer, existe déjà ou n’a pas pu être vérifié. La commande est en lecture seule : elle ne lance jamais de gestionnaire de paquets et n’installe, ne lie ni ne supprime rien. --status est obligatoire.",
   "cli.sessions_move_workset.deps_session_help": "l’identifiant de la conversation dont l’ensemble de travail est arrivé sur cet appareil",
   "cli.sessions_move_workset.deps_status_help": "afficher l’état, sans rien exécuter ni installer",
-  "cli.sessions_move_workset.deps_header": "État des dépendances de {session} sur cet appareil. Rien n’a été exécuté ni installé.",
+  "cli.sessions_move_workset.deps_header": "État des dépendances du dernier ensemble de travail de {session} restauré sur cet appareil. Rien n’a été exécuté ni installé.",
   "cli.sessions_move_workset.deps_row": "{state} · {cwd} ({kind})",
   "cli.sessions_move_workset.deps_row_plain": "{state} · {cwd}",
   "cli.sessions_move_workset.deps_state_pending": "Non préparé",

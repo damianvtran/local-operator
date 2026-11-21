@@ -90,7 +90,7 @@
   "cli.sessions_move_workset.deps_description": "Сообщает для каждого worktree, восстановленного переносом на этом устройстве, нужно ли ещё создать его node_modules или .venv, существует ли он уже или его не удалось проверить. Команда только читает: она никогда не запускает менеджер пакетов и ничего не устанавливает, не связывает и не удаляет. --status обязателен.",
   "cli.sessions_move_workset.deps_session_help": "id разговора, рабочий набор которого пришёл на это устройство",
   "cli.sessions_move_workset.deps_status_help": "показать состояние, ничего не запуская и не устанавливая",
-  "cli.sessions_move_workset.deps_header": "Состояние зависимостей {session} на этом устройстве. Ничего не запускалось и не устанавливалось.",
+  "cli.sessions_move_workset.deps_header": "Состояние зависимостей последнего рабочего набора {session}, восстановленного на этом устройстве. Ничего не запускалось и не устанавливалось.",
   "cli.sessions_move_workset.deps_row": "{state} · {cwd} ({kind})",
   "cli.sessions_move_workset.deps_row_plain": "{state} · {cwd}",
   "cli.sessions_move_workset.deps_state_pending": "Не подготовлено",

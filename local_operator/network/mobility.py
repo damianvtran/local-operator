@@ -2743,20 +2743,25 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
 ARRIVAL_NOTE_MARKER = "move-arrival-note.json"
 
 
-def _dependency_status(server: "RelayServer", session_id: str) -> dict[str, Any] | None:
+def _dependency_status(
+    server: "RelayServer", session_id: str, lease_epoch: str
+) -> dict[str, Any] | None:
     """THIS device's read-only dependency status for the arrival note, or ``None``.
 
     Read from THIS device's restore record and tree (``workset_setup``), never the
     peer's block, and computed only: nothing runs, links or installs here. ``None``
-    means no working set arrived on this device. A failure is NOT "nothing pending"
-    (review R3 on #4378): it becomes ``{"state": "unknown"}`` so the note keeps its
-    do-not-set-up guard and points at ``--status`` instead of omitting the paragraph.
+    means no working set arrived on this device WITH THIS MOVE: the record is bound
+    to ``lease_epoch``, because an earlier move's record outlives a return that
+    carried no files and must not be presented as this arrival's (S2-R2 on #4378).
+    A failure is NOT "nothing pending" (review R3 on #4378): it becomes
+    ``{"state": "unknown"}`` so the note keeps its do-not-set-up guard and points at
+    ``--status`` instead of omitting the paragraph.
     """
     try:
         from local_operator.network import workset_move, workset_setup
 
         status = workset_setup.dependency_status(
-            Path(server.root), workset_move.home_of(server), session_id
+            Path(server.root), workset_move.home_of(server), session_id, lease_epoch=lease_epoch
         )
     except Exception:  # noqa: BLE001 — advice only; the move has already committed
         logger.debug("mobility: no dependency status for %s", session_id, exc_info=True)
@@ -2812,7 +2817,7 @@ def _arrival_resume_note(
             session_id=session_id,
             source=source,
             destination=str(server._own_label()),  # noqa: SLF001
-            dependencies=_dependency_status(server, session_id),
+            dependencies=_dependency_status(server, session_id, lease_epoch),
         )
         written = append_inbox(
             directory,

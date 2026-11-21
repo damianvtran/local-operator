@@ -442,7 +442,7 @@
   "cli.sessions_move_workset.deps_header": {
     "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
     "tone": "plain, factual, calm",
-    "note": "First line of the status report. {session} is a conversation id, verbatim. Must say nothing was run or installed."
+    "note": "First line of the status report. {session} is a conversation id, verbatim. Must say the report is about the working set LAST restored on this device (a later move may have brought no working set, so it is not proof of the latest move) and that nothing was run or installed."
   },
   "cli.sessions_move_workset.deps_row": {
     "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",

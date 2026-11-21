@@ -90,7 +90,7 @@
   "cli.sessions_move_workset.deps_description": "Cho biết, với mỗi worktree mà lần chuyển đã khôi phục trên thiết bị này, node_modules hoặc .venv của nó còn cần tạo, đã tồn tại, hay không kiểm tra được. Lệnh chỉ đọc: không bao giờ chạy trình quản lý gói và không cài đặt, liên kết hay xóa gì. Bắt buộc có --status.",
   "cli.sessions_move_workset.deps_session_help": "id của cuộc trò chuyện có tập làm việc đã đến thiết bị này",
   "cli.sessions_move_workset.deps_status_help": "hiển thị trạng thái; không chạy hay cài đặt gì",
-  "cli.sessions_move_workset.deps_header": "Trạng thái phụ thuộc của {session} trên thiết bị này. Không có gì được chạy hay cài đặt.",
+  "cli.sessions_move_workset.deps_header": "Trạng thái phụ thuộc của tập làm việc của {session} được khôi phục gần đây nhất trên thiết bị này. Không có gì được chạy hay cài đặt.",
   "cli.sessions_move_workset.deps_row": "{state} · {cwd} ({kind})",
   "cli.sessions_move_workset.deps_row_plain": "{state} · {cwd}",
   "cli.sessions_move_workset.deps_state_pending": "Chưa thiết lập",

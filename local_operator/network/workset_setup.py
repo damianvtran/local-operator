@@ -39,6 +39,7 @@ TRUTHFULNESS RULES the states encode (review findings S7/U2/R6 on #4378):
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -109,11 +110,19 @@ class DependencyStatus:
     session_id: str
     rows: list[StatusRow]
     not_restored: list[str]  # source paths whose worktree is not restored here (yet)
+    #: The move (lease epoch) whose restore record these rows came from. A record is
+    #: replaced only when a LATER move stages a working set, so a standalone query
+    #: reports the LAST restored set, not necessarily the latest move (S2-R2 on #4378).
+    #: Data for a reader, never authority: nothing here acts on it.
+    lease_epoch: str = ""
+    #: ``"read"``, or ``"unreadable"`` when the record exists but could not be read
+    #: or is not the shape the restore writes (then there are no rows, state unknown).
+    record: str = "read"
 
     @property
     def state(self) -> str:
         states = {row.state for row in self.rows}
-        if "unknown" in states:
+        if self.record != "read" or "unknown" in states:
             return "unknown"
         if self.not_restored or states & {"pending", "refused", "manual"}:
             return "pending"
@@ -130,6 +139,7 @@ class DependencyStatus:
             "state": self.state,
             "rows": [asdict(row) for row in self.rows],
             "not_restored": list(self.not_restored),
+            "restore_record": {"state": self.record, "lease_epoch": self.lease_epoch},
         }
 
 
@@ -203,18 +213,45 @@ def _valid_session_id(session_id: str) -> bool:
     return bool(workset_move._SESSION_ID.match(str(session_id)))
 
 
-def _restored_rows(config: Path, session_id: str) -> tuple[list[dict[str, Any]], list[str]]:
-    """THIS device's restore record: (restored rows, source paths not restored)."""
-    from local_operator.network import workset_move
+class _UnreadableRecord(Exception):
+    """The restore record exists but cannot be read, or is not the shape the restore writes."""
 
-    pending = workset_move._read_json(_arrived_dir(config, session_id) / "pending.json")
-    if pending is None:
-        return [], []
-    restored = pending.get("restored") or {}
+
+def _read_record(config: Path, session_id: str) -> dict[str, Any] | None:
+    """THIS device's restore record, validated; ``None`` only when there is none.
+
+    Typed on purpose (S7-R2/R2-1/U10/D13 on #4378): ``workset_move._read_json`` folds
+    every failure into ``None``, which a status reader would report as "no working set
+    arrived" — a damaged record must read as UNKNOWN instead, never as absent. Only
+    ``FileNotFoundError`` means absent. The shape check covers exactly what the reader
+    dereferences, so a hand-edited or truncated record cannot traceback past here.
+    """
+    path = _arrived_dir(config, session_id) / "pending.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:  # ValueError: bad JSON or bad UTF-8
+        raise _UnreadableRecord(type(exc).__name__) from exc
+    if not isinstance(record, dict):
+        raise _UnreadableRecord("not an object")
+    plans, restored = record.get("plans"), record.get("restored", {})
+    if not isinstance(plans, list) or not all(isinstance(plan, Mapping) for plan in plans):
+        raise _UnreadableRecord("plans")
+    if not isinstance(restored, Mapping):
+        raise _UnreadableRecord("restored")
+    if not isinstance(record.get("lease_epoch", ""), str):
+        raise _UnreadableRecord("lease_epoch")
+    return record
+
+
+def _restored_rows(record: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """A validated restore record: (restored rows, source paths not restored)."""
+    restored = record.get("restored") or {}
     rows: list[dict[str, Any]] = []
     waiting: list[str] = []
-    for plan in pending.get("plans") or []:
-        row = restored.get(str(plan.get("n"))) if isinstance(restored, Mapping) else None
+    for plan in record["plans"]:
+        row = restored.get(str(plan.get("n")))
         if isinstance(row, Mapping) and row.get("state") == "restored" and row.get("dest_path"):
             rows.append(dict(row))
         else:
@@ -253,17 +290,38 @@ def _worktree_rows(
     return out
 
 
-def dependency_status(config: Path, home: Path, session_id: str) -> DependencyStatus | None:
+def dependency_status(
+    config: Path, home: Path, session_id: str, *, lease_epoch: str | None = None
+) -> DependencyStatus | None:
     """The dependency status of every worktree of ``session_id`` restored on this device.
 
     ``None`` when no working set arrived here (or the id is not a session id).
     Read-only: see the module docstring. A worktree whose lockfiles or placement
     cannot be read yields one ``unknown`` row for that worktree, so one unreadable
-    tree never hides the others nor turns into a claim about them.
+    tree never hides the others nor turns into a claim about them. A record that
+    exists but cannot be read is an ``unknown`` status with no rows, never ``None``.
+
+    ``lease_epoch`` BINDS the answer to one move (S2-R2 on #4378). The record is keyed
+    by session id alone and survives a later move that staged no working set (a return
+    without files leaves the earlier record in place), so the arrival note of move E
+    passes E: a record written by any other move is not this arrival's working set and
+    yields ``None`` — checked before any path is inspected, so no earlier checkout's
+    rows, paths or targets reach the note. ``None`` (the standalone ``--status``) reads
+    the last restored record whatever move wrote it and reports its epoch as data.
     """
     if not _valid_session_id(session_id):
         return None
-    rows, waiting = _restored_rows(config, session_id)
+    try:
+        record = _read_record(config, session_id)
+    except _UnreadableRecord:
+        return DependencyStatus(session_id, [], [], record="unreadable")
+    if record is None:
+        return None
+    recorded_epoch = str(record.get("lease_epoch") or "")
+    # An empty epoch on either side binds to nothing: never manufacture a match.
+    if lease_epoch is not None and (not lease_epoch or recorded_epoch != lease_epoch):
+        return None
+    rows, waiting = _restored_rows(record)
     if not rows and not waiting:
         return None
     roots = workset.restore_roots(config)
@@ -278,7 +336,7 @@ def dependency_status(config: Path, home: Path, session_id: str) -> DependencySt
                     dest_rel, "", state="unknown", reason=f"unreadable ({type(exc).__name__})"
                 )
             )
-    return DependencyStatus(session_id, out, waiting)
+    return DependencyStatus(session_id, out, waiting, lease_epoch=recorded_epoch)
 
 
 __all__ = [

@@ -694,6 +694,9 @@ def test_status_text_says_nothing_ran_and_lists_every_row(
     out = capsys.readouterr().out
     assert code == 0
     assert "Nothing was run or installed." in out.splitlines()[0]
+    # S2-R2: a standalone query reports the LAST restored set, not proof of the
+    # latest move (a later move may have carried no working set).
+    assert "last restored on this device" in out.splitlines()[0]
     assert "Not set up · ~/src/app (npm)" in out
     assert "Not restored on this device yet: ~/src/later" in out
     assert "this command never does that" in out
@@ -704,3 +707,33 @@ def test_status_text_says_nothing_ran_and_lists_every_row(
     with pytest.raises(SystemExit):
         cli.build_cli_parser().parse_args(["sessions", "--help"])
     assert "move,setup-deps,sync" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
+def test_status_of_a_damaged_record_is_unknown_not_absent(
+    as_json: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R2-1 / U10 / D13: a corrupt record used to read "no working set" (rc 1) or
+    traceback; it is an answered query whose status is unknown (rc 0)."""
+    config = tmp_path / "config"
+    arrived = config / "network" / "workset-in" / SESSION
+    arrived.mkdir(parents=True)
+    (arrived / "pending.json").write_text('{"plans": ["x"], "restored": {}}')
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    argv = ["sessions", "setup-deps", SESSION, "--status", *(["--json"] if as_json else [])]
+
+    code = cli.sessions_setup_deps_command(cli.build_cli_parser().parse_args(argv))
+
+    out = capsys.readouterr()
+    assert code == 0
+    assert "No working set" not in out.out + out.err
+    if as_json:
+        document = json.loads(out.out)
+        assert document["state"] == "unknown" and document["rows"] == []
+        assert document["restore_record"] == {"state": "unreadable", "lease_epoch": ""}
+    else:
+        assert "could not be read" in out.out

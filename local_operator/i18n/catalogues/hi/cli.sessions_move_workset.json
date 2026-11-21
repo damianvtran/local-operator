@@ -90,7 +90,7 @@
   "cli.sessions_move_workset.deps_description": "इस डिवाइस पर मूव से रीस्टोर हुए हर worktree के लिए बताता है कि उसका node_modules या .venv अभी बनना बाकी है, पहले से मौजूद है, या जाँचा नहीं जा सका। यह केवल पढ़ता है: यह कभी कोई पैकेज मैनेजर नहीं चलाता और कुछ भी इंस्टॉल, लिंक या हटाता नहीं। --status ज़रूरी है।",
   "cli.sessions_move_workset.deps_session_help": "उस बातचीत की id जिसका वर्किंग सेट इस डिवाइस पर आया",
   "cli.sessions_move_workset.deps_status_help": "स्थिति दिखाएँ; कुछ भी चलाया या इंस्टॉल नहीं किया जाता",
-  "cli.sessions_move_workset.deps_header": "इस डिवाइस पर {session} की dependency स्थिति। कुछ भी चलाया या इंस्टॉल नहीं किया गया।",
+  "cli.sessions_move_workset.deps_header": "इस डिवाइस पर आख़िरी बार रीस्टोर हुए {session} के वर्किंग सेट की dependency स्थिति। कुछ भी चलाया या इंस्टॉल नहीं किया गया।",
   "cli.sessions_move_workset.deps_row": "{state} · {cwd} ({kind})",
   "cli.sessions_move_workset.deps_row_plain": "{state} · {cwd}",
   "cli.sessions_move_workset.deps_state_pending": "सेट अप नहीं",
