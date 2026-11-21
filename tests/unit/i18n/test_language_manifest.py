@@ -356,6 +356,30 @@ def test_gate_fails_on_a_new_missing_key(synthetic_catalogues: Path) -> None:
     assert not result.stale and not result.unknown
 
 
+@pytest.mark.parametrize("layout", ["complete", "missing_namespace", "missing_locale"])
+def test_gate_checks_whole_missing_catalogue_paths(
+    synthetic_catalogues: Path, layout: str
+) -> None:
+    # Runtime English fallback must keep working for old/incomplete packages,
+    # but admission checks every declared locale, not just discovered files.
+    messages = {"demo.title": "Title", "demo.body": "Body"}
+    (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps(messages))
+    if layout == "complete":
+        (synthetic_catalogues / "fr" / "demo.json").write_text(
+            json.dumps({"demo.title": "Titre", "demo.body": "Corps"})
+        )
+    elif layout == "missing_locale":
+        (synthetic_catalogues / "fr").rmdir()
+
+    result = _gate(_LANGUAGES, _allowance())
+    expected = (
+        set()
+        if layout == "complete"
+        else {("fr", "demo", "demo.title"), ("fr", "demo", "demo.body")}
+    )
+    assert result == GateResult(expected, set(), set())
+
+
 def test_gate_accepts_an_allowanced_missing_key(synthetic_catalogues: Path) -> None:
     (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps({"demo.title": "Title"}))
     result = _gate(_LANGUAGES, _allowance(("fr", "demo", ["demo.title"])))
