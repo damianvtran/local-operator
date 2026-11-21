@@ -5233,8 +5233,16 @@ class DesktopSessionBridge:
             )
             return resident if source == expected else None
         step = _OpenFrameSteps(self.session_id)
+        # Large journals also accept a companion the journal has grown past by
+        # run-neutral rows (``index_read_model._prefix_tail``; see
+        # ``_journal_order_page``'s "LARGE JOURNALS STAY ON THE COMPANION").
         finished, projected = await _bounded_frame_read(
-            paint_deadline, index_read_model.summary, self.root, self.session_id, source
+            paint_deadline,
+            index_read_model.summary,
+            self.root,
+            self.session_id,
+            source,
+            prefix_ok=transcript_index.companion_first(self.root, self.session_id),
         )
         if not finished:
             step("frame_source.summary", state="deadline")
@@ -5283,6 +5291,7 @@ class DesktopSessionBridge:
                 reaches_eof=reaches_eof,
                 order_ids=order_ids,
                 source=source,
+                prefix_ok=transcript_index.companion_first(self.root, self.session_id),
             )
             if not finished:
                 return None, None
@@ -5437,11 +5446,28 @@ class DesktopSessionBridge:
         worker (a thread cannot be cancelled) and ``_bounded_frame_read`` retrieves
         its outcome; it is not retried here. A standalone ``/history``
         (``paint_deadline=None``) still waits for the companion in full.
+
+        LARGE JOURNALS STAY ON THE COMPANION (``transcript_index.companion_first``,
+        ADR ``docs/design/transcript-index-off-process.md`` step 2). Two changes,
+        both only above ``COMPANION_FIRST_MIN_BYTES``:
+
+        * the companion may answer for a journal that has GROWN since it was
+          published (``prefix_ok``, the append-prefix rule in
+          ``index_read_model._extends``) whenever every row asked about lies in
+          the covered prefix; a page reaching an appended row still falls to (3);
+        * a companion answer does NOT arm the resident scan. For these journals
+          that "warm" is a whole-index hydration on serve's GIL (~1.1 s for the
+          808 MB anchor) that the 4-slot resident LRU evicts again as soon as the
+          operator switches across more than four large conversations -- so it
+          was re-paid on most opens. Re-opening the companion is the cheaper
+          steady state (a page-bounded SQLite read), which is the trade the
+          25/25-reopen measurement above did NOT have to weigh at 36.5 MB.
         """
         ids = list(dict.fromkeys(ids))
         source = index_read_model.page_source(pages)
         if self._apply_journal_order(answer, source, ids):
             return answer
+        large = transcript_index.companion_first(self.root, self.session_id)
         finished, projected = await _bounded_frame_read(
             paint_deadline,
             index_read_model.order_facts,
@@ -5450,12 +5476,14 @@ class DesktopSessionBridge:
             collected_ids=[row["id"] for row in answer["entries"]],
             order_ids=ids,
             source=source,
+            prefix_ok=large,
         )
         if not finished:
             _OpenFrameSteps(self.session_id)("journal_order.companion", state="deadline")
             return self._journal_page(answer, pages, ids)
         if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
-            self._warm_resident_scan()
+            if not large:
+                self._warm_resident_scan()
             return answer
         # A missing, stale, corrupt or unsupported projection is NOT an error: the
         # policy below is exactly what an absent companion answered before this
@@ -5534,6 +5562,11 @@ class DesktopSessionBridge:
 
             async def correct() -> None:
                 try:
+                    if (
+                        transcript_index.companion_first(self.root, self.session_id)
+                        and await self._companion_order_correction()
+                    ):
+                        return
                     task, _ = transcript_index.start_refresh(self.root, self.session_id)
                     await asyncio.shield(task)
                     if self._closing:
@@ -5581,6 +5614,91 @@ class DesktopSessionBridge:
 
             self._order_correction = asyncio.create_task(correct())
         return answer
+
+    async def _companion_order_correction(self) -> bool:
+        """Publish the pending journal-order coordinates from the companion.
+
+        ``True`` when every pending row was answered (events published, rows
+        consumed); ``False`` leaves ``_order_pending`` untouched for base's
+        resident correction, which then runs exactly as before.
+
+        WHY, MEASURED (ADR ``docs/design/transcript-index-off-process.md`` step
+        2; real-path rig on this PR, 6 x 70 MB journals at load 40-100): on a
+        loaded host the 120 ms first-frame budget is spent before the companion
+        reads start, so most opens of a large journal answered ``building`` and
+        this correction's ``start_refresh`` re-hydrated the whole index on
+        serve's GIL -- 6 ``index.refresh_start`` per six-session pass, every
+        pass, because the 4-slot resident LRU evicts across the switch. The
+        correction is after paint and owes no deadline, so it can afford the
+        page-bounded SQLite read the frame could not.
+
+        THE SAME ORDINALS AS THE RESIDENT PATH, NOT ALWAYS THE SAME EVENTS
+        (review round 1, m2). Pending rows are grouped by the page source they
+        were read under, each group is answered by
+        ``index_read_model.order_selection`` under the append-prefix rule, and
+        the batches come from the one existing
+        ``journal_order_correction_batches``. For a group read under the
+        current source the events match the resident path's. For a group read
+        under an OLDER source of the same append-only journal the resident path
+        publishes ``reconcile`` (its ``original != expected`` rule against one
+        index) while this one publishes that group's ``journal_seq`` rows: the
+        values are the ones a reconcile would re-fetch, because an append never
+        renumbers a covered row. A group the companion cannot prove -- missing,
+        stale past a visible append, corrupt -- fails the attempt and the
+        caller falls to the resident path for what is still pending.
+
+        ROWS ADDED WHILE THIS AWAITS ARE ANSWERED TOO (review round 1, m1). A
+        page that queues pending rows while this task is in flight starts no
+        task of its own (``_order_correction`` is not done), so this loops
+        until a pass finds nothing new. Each pass consumes only the entries it
+        answered; a later pass that cannot prove its group returns ``False``,
+        leaving exactly the unanswered entries to the resident path.
+        """
+        answered_before = False
+        while True:
+            pending = dict(self._order_pending)
+            if not pending:
+                return answered_before
+            groups: dict[Any, list[str]] = {}
+            for id_, (_descriptor, original) in pending.items():
+                if original is None:
+                    return False
+                groups.setdefault(original, []).append(id_)
+            answered: list[tuple[Any, list[dict[str, Any]]]] = []
+            for original, ids in groups.items():
+                result = await asyncio.to_thread(
+                    index_read_model.order_selection,
+                    self.root,
+                    self.session_id,
+                    order_ids=ids,
+                    source=original,
+                    prefix_ok=True,
+                )
+                if result.state != "ready" or not result.value.journal_generation:
+                    return False
+                selection = result.value
+                rows = [
+                    {**pending[id_][0], "journal_seq": selection.journal_rows[id_]}
+                    for id_ in ids
+                    if id_ in selection.journal_rows
+                ]
+                answered.append((selection, rows))
+            if self._closing:
+                return True
+            for id_, value in pending.items():
+                if self._order_pending.get(id_) is value:
+                    del self._order_pending[id_]
+            for selection, rows in answered:
+                for batch in transcript_index.journal_order_correction_batches(selection, rows):
+                    self.publish(
+                        "event",
+                        {
+                            "type": JOURNAL_ORDER_EVENT,
+                            "journal_generation": selection.journal_generation,
+                            "rows": batch,
+                        },
+                    )
+            answered_before = True
 
     async def _peer_source_read(
         self,
