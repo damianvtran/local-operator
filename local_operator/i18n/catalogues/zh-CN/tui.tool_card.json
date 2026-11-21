@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.chip.you": "你：",
+  "tui.tool_card.fetch.cache": "缓存{state}",
+  "tui.tool_card.fetch.fetched": "已获取：{url}",
+  "tui.tool_card.fetch.final": "（重定向至{url}）",
+  "tui.tool_card.hint.collapse": "折叠",
+  "tui.tool_card.hint.expand": "展开",
+  "tui.tool_card.hint.interrupt": "按{chord}中断",
+  "tui.tool_card.imagegen.requests_ahead": "{count, plural, other {前面还有{shown}个请求}}",
+  "tui.tool_card.live.earlier_lines": "{count, plural, other {之前的{shown}行未显示}}",
+  "tui.tool_card.live.earlier_output_hidden": "之前的输出未显示",
+  "tui.tool_card.live.no_output_yet": "暂无输出",
+  "tui.tool_card.live.running": "运行中",
+  "tui.tool_card.more.diff_lines": "{count, plural, other {另有{shown}行差异}}",
+  "tui.tool_card.more.lines": "{count, plural, other {另有{shown}行}}",
+  "tui.tool_card.more.search_lines": "{count, plural, other {另有{shown}行搜索结果}}",
+  "tui.tool_card.status.stop_unconfirmed": "停止未确认"
+}
