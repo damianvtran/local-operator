@@ -30663,9 +30663,18 @@ class Session:
         from artifact sizes after the fact).
 
         Read off the SAME resolved trigger the gate uses, not a second notion
-        of it: the token term is ``should_compact`` with no advice and no byte
-        figure, the byte term is the plan's own payload against the resolved
-        wire trigger (the comparison ``should_compact`` makes).
+        of it: the token term is the plan's context against
+        ``resolve_threshold_tokens`` (the resolver ``should_compact`` reads for
+        that term, with its strict ``>`` and its "unknown window disables the
+        token term" rule), the byte term is the plan's own payload against the
+        resolved wire trigger (the comparison ``should_compact`` makes).
+
+        It deliberately does NOT call ``should_compact`` again. The gate made
+        the decision once; a diagnostic re-running it is a second evaluation
+        that hosts and test doubles observe (QA round 1, Q2: a resolver double
+        that records each decision saw a third call), and a re-run of the
+        decision is exactly the kind of thing that can drift from the one the
+        gate made. Reading the resolved thresholds is a pure lookup.
 
         ``wire_bytes_before`` measures ``plan.llm_history``, the payload the
         pass planned against and the one :meth:`_fires_on_size_alone` reads.
@@ -30686,13 +30695,11 @@ class Session:
                 compaction_api, self._render_history(list(self._context.messages))
             )
             over_bytes = trigger_bytes > 0 and before > trigger_bytes
-            # No byte figure and no advice: the token term by itself.
-            over_tokens = _should_compact(
-                compaction_api,
-                plan.context_tokens,
-                self.effective_model.context_window,
-                plan.settings,
-                False,
+            # The token term by itself, without advice: the resolved threshold,
+            # never a second ``should_compact`` call (see the docstring).
+            window = self.effective_model.context_window
+            over_tokens = window > 0 and plan.context_tokens > int(
+                compaction_api.resolve_threshold_tokens(window, plan.settings)
             )
         except Exception:  # noqa: BLE001 — a diagnostic must never fail the pass
             logger.debug("compaction trigger diagnostics failed; omitted", exc_info=True)

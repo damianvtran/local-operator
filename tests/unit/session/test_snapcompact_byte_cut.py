@@ -112,10 +112,14 @@ def _acceptance_band(settings: CompactionSettings) -> int:
 
 def _stamped_images(messages) -> int:
     """Producer-stamped captures only: a snapcompact marker's archive frames
-    are images too, and they are not what these tests count."""
+    are images too, and they are not what these tests count.
+
+    ``Message`` only: after a pass the live context opens with the
+    ``compaction_summary`` ``CustomMessage``, which has no ``content``."""
     return sum(
         1
         for message in messages
+        if isinstance(message, Message)
         for block in message.content
         if isinstance(block, ImageContent) and block.captured_frame is not None
     )
@@ -511,6 +515,35 @@ async def test_compaction_end_records_a_byte_fired_pass_and_its_byte_figures(tmp
     assert end.wire_bytes_after <= _band(settings) < end.wire_bytes_before
     # The token pair is untouched by the new fields.
     assert end.tokens_before == plan.context_tokens and end.strategy == plan.strategy
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_end_trigger_fields_never_re_run_the_decision(tmp_path, monkeypatch):
+    """QA round 1, Q2: the diagnostic reads resolved thresholds, it never asks
+    ``should_compact`` again. The gate decided once, while planning; a re-run
+    is a second evaluation hosts and doubles observe (``test_session.py``'s
+    ``test_compaction_runs_when_due`` records every decision) and one free to
+    drift from the decision the gate actually made."""
+    settings = CompactionSettings(threshold_tokens=5_000, keep_recent_tokens=14_000)
+    session = _make_session(tmp_path, compaction_settings=settings)
+    events: list[object] = []
+    session.subscribe(events.append)
+    await _grow(session, 14, stamp=True)  # token-fired, under the byte trigger
+
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan)
+    real = api.should_compact
+    calls: list[int] = []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api, "should_compact", counting)
+    fields = session._compaction_trigger_fields(plan)
+    assert calls == [], "the trigger diagnostic re-ran the compaction decision"
+    assert fields["trigger"] == "tokens"
     await session.dispose()
 
 
