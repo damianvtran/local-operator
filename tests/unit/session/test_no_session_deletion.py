@@ -2285,6 +2285,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the broker's own socket file, at a fixed basename it bound, matched by inode",
     ),
+    # Withdrawing a secret-session lineage marker. Both callers pass a path
+    # under `session.lineage_dir()` = config_dir()/secrets/live-sessions: the
+    # `<pid>-<start>-<hex8>` FILE `_publish_lineage_marker` O_EXCL-created for
+    # this registration (on close), or an entry of that same directory whose
+    # name starts `<digits>-<digits>` and whose process is gone (stale-marker
+    # pruning). Never under sessions/, and unlink refuses directories.
+    (
+        "local_operator/secrets/session.py::_withdraw_lineage_marker",
+        "<path>.unlink",
+        "a <pid>-<start>-<hex> marker FILE under config_dir()/secrets/live-sessions",
+    ),
     # Same path, same reasoning, opposite direction: a socket left behind by a
     # broker that was SIGKILLed is a corpse, and it is only removed after a
     # connect() probe proves nothing is listening on it.
