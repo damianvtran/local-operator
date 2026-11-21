@@ -165,6 +165,89 @@ def test_declared_wrapper_gets_only_validated_path(
 
 
 @pytest.mark.parametrize(
+    ("guard_body", "reason", "guard_statuses"),
+    [
+        (
+            "import os; os.write(2, b'private guard diagnostic'); os._exit(37)",
+            "could not start its host process guard",
+            # EOF may wake the worker just before the exiting guard is waitable.
+            (37, -signal.SIGKILL),
+        ),
+        (
+            "import os, signal; os.write(1, b'!'); signal.pause()",
+            "could not start its host process guard",
+            (-signal.SIGKILL,),
+        ),
+        ("import signal; signal.pause()", "timed out", (-signal.SIGKILL,)),
+    ],
+    ids=["exit-after-exec", "invalid-ack", "silent-startup"],
+)
+def test_guard_startup_failure_never_launches_ocr(
+    pinned: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    guard_body: str,
+    reason: str,
+    guard_statuses: tuple[int, ...],
+) -> None:
+    tools = tmp_path / "host-tools"
+    tool = _tool(tools, _HEALTHY)
+    if reason == "timed out":
+        # The fake guard never signals readiness, even after lease EOF.
+        monkeypatch.setattr(deps, "_OCR_TIMEOUT_SECONDS", 1)
+    guards: list[subprocess.Popen[bytes]] = []
+    ocr_launches: list[list[str]] = []
+    popen = subprocess.Popen
+
+    def inject_guard(
+        argv: list[str],
+        *,
+        stdin: int | BinaryIO,
+        stdout: int,
+        stderr: int,
+        env: dict[str, str],
+        cwd: str,
+        process_group: int,
+    ) -> subprocess.Popen[bytes]:
+        if argv[0] == str(tool):
+            ocr_launches.append(argv)
+            # Don't actually start OCR or leave the fake guard running if
+            # the worker regresses to admitting OCR immediately after exec.
+            guards[0].kill()
+            pytest.fail("OCR launch attempted before guard readiness")
+        assert not guards and process_group == 0
+        assert argv[:4] == [sys.executable, "-I", "-S", "-c"]
+        guard = popen(
+            [*argv[:4], guard_body],
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            cwd=cwd,
+            process_group=process_group,
+        )
+        guards.append(guard)
+        return guard
+
+    monkeypatch.setattr(subprocess, "Popen", inject_guard)
+    try:
+        with pytest.raises(ProvisioningError, match=reason) as refusal:
+            _check(pinned, (str(tools),))
+        assert "private guard diagnostic" not in str(refusal.value)
+        (guard,) = guards
+        assert guard.returncode in guard_statuses
+        with pytest.raises(ChildProcessError):
+            os.waitpid(guard.pid, os.WNOHANG)
+    finally:
+        for guard in guards:
+            if guard.returncode is None:
+                guard.kill()
+                guard.wait(timeout=5)
+        # A cleanup error from the old implementation must not mask admission.
+        assert not ocr_launches, "OCR launch attempted before guard readiness"
+
+
+@pytest.mark.parametrize(
     ("body", "reason", "tool_status"),
     [
         (

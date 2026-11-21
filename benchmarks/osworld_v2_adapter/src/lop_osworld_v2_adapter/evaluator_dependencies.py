@@ -61,37 +61,63 @@ class _OCRProbeCleanupError(Exception):
     pass
 
 
+class _OCRProbeGuardStartupError(Exception):
+    pass
+
+
 # The guard leads the probe's group in the worker's session. Only the worker
 # owns the write end: normal unwinding and even supervisor SIGKILL both close
 # it. The guard stays alive to signal its OWN group, even if tesseract already
 # exited and a helper is all that remains. This also avoids signaling a dead
 # group leader (Darwin can report EPERM for a zombie-only group).
-_OCR_GROUP_GUARD = """
+_OCR_GUARD_READY = b"R"
+_OCR_GROUP_GUARD = f"""
 import os
 import signal
 
-while os.read(0, 1):
+read_lease = os.read
+kill_group = os.killpg
+pgid = os.getpid()
+sigkill = signal.SIGKILL
+os.write(1, {_OCR_GUARD_READY!r})
+while read_lease(0, 1):
     pass
-os.killpg(os.getpid(), signal.SIGKILL)
+kill_group(pgid, sigkill)
 """
 
 
 def _run_ocr_probe(tool: str, env: dict[str, str]) -> bytes:
     argv = [tool, "stdin", "stdout", "-l", "eng", "--psm", "6", "tsv"]
+    deadline = time.monotonic() + _OCR_TIMEOUT_SECONDS
     read_fd, write_fd = os.pipe()
     child: subprocess.Popen[bytes] | None = None
+    ready = False
     with os.fdopen(write_fd, "wb") as lease, ExitStack() as streams:
         with os.fdopen(read_fd, "rb") as owner:
             guard = subprocess.Popen(
                 [sys.executable, "-I", "-S", "-c", _OCR_GROUP_GUARD],
                 stdin=owner,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 env={},
                 cwd="/",
                 process_group=0,
             )
         try:
+            # Popen only confirms exec. Joining the group is safe only after
+            # the guard has initialized its lease watcher, within the same
+            # time budget the OCR command gets.
+            assert guard.stdout is not None
+            with guard.stdout, selectors.DefaultSelector() as selector:
+                selector.register(guard.stdout, selectors.EVENT_READ)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise subprocess.TimeoutExpired(argv, _OCR_TIMEOUT_SECONDS)
+                if os.read(guard.stdout.fileno(), 1) != _OCR_GUARD_READY:
+                    raise _OCRProbeGuardStartupError
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(argv, _OCR_TIMEOUT_SECONDS)
+            ready = True
             child = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE,
@@ -101,7 +127,6 @@ def _run_ocr_probe(tool: str, env: dict[str, str]) -> bytes:
                 cwd="/",
                 process_group=guard.pid,
             )
-            deadline = time.monotonic() + _OCR_TIMEOUT_SECONDS
             assert child.stdin is not None and child.stdout is not None
             output = bytearray()
             # Leave stdout open until group cleanup; closing it on overflow
@@ -126,16 +151,19 @@ def _run_ocr_probe(tool: str, env: dict[str, str]) -> bytes:
             returncode = child.wait(timeout=max(0, deadline - time.monotonic()))
         finally:
             lease.close()
-            # Reap within one probe-sized budget. Preserve the original OCR
-            # diagnosis only if the guard actually completed group cleanup.
-            deadline = time.monotonic() + _OCR_TIMEOUT_SECONDS
+            # Reap within one probe-sized budget. Before readiness no OCR
+            # process joined the group. Kill just the guard: startup may have
+            # stalled before it could notice the closed lease.
+            reap_deadline = time.monotonic() + _OCR_TIMEOUT_SECONDS
             try:
-                status = guard.wait(timeout=max(0, deadline - time.monotonic()))
+                if not ready:
+                    guard.kill()
+                status = guard.wait(timeout=max(0, reap_deadline - time.monotonic()))
                 if child is not None:
-                    child.wait(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired as exc:
+                    child.wait(timeout=max(0, reap_deadline - time.monotonic()))
+            except (OSError, subprocess.TimeoutExpired) as exc:
                 raise _OCRProbeCleanupError from exc
-            if status != -signal.SIGKILL:
+            if ready and status != -signal.SIGKILL:
                 raise _OCRProbeCleanupError
     if returncode:
         raise subprocess.CalledProcessError(returncode, argv)
@@ -212,6 +240,8 @@ def _require_tesseract(
         raise refuse("the OCR readiness check timed out") from None
     except _OCRProbeOutputLimit:
         raise refuse("the OCR readiness check exceeded the blank-image TSV response size") from None
+    except _OCRProbeGuardStartupError:
+        raise refuse("the OCR readiness check could not start its host process guard") from None
     except _OCRProbeCleanupError:
         raise refuse("the OCR readiness check could not confirm host process cleanup") from None
     except subprocess.CalledProcessError as exc:
