@@ -234,3 +234,46 @@ def test_a_lone_surrogate_label_is_a_typed_refusal_not_a_codec_error() -> None:
 def test_a_frame_without_its_object_is_refused() -> None:
     with pytest.raises(BodyFrameRefused):
         decode_untrusted_object("VERIFIED SOURCE\ntenant_id: org_example\n")
+
+
+# -- Channel participation discipline (operator 2026-11-20: "all agents seem to
+# always respond to that message"). The frame is the only live text of a
+# conversation wake, so the rule must ride it — for channels and groups only.
+
+
+@pytest.mark.parametrize("kind", ["channel", "group"])
+def test_channel_and_group_frames_carry_the_participation_rule(kind: str) -> None:
+    from local_operator.harness.message_types import (
+        BRIDGE_CHANNEL_PARTICIPATION_RULE,
+        BRIDGE_RECEIVER_RULES,
+    )
+
+    frame = build_body_frame(
+        _source(conversation_kind=kind), conversation_label="qa", sender_label="Ben", body="ok?"
+    )
+    header = frame.partition("VERIFIED SOURCE")[0]
+    assert header.splitlines() == [BRIDGE_RECEIVER_RULES, BRIDGE_CHANNEL_PARTICIPATION_RULE]
+    assert "no_reply" in BRIDGE_CHANNEL_PARTICIPATION_RULE
+    # One line, and no blank line anywhere in the trusted head (row parsers).
+    assert "\n" not in BRIDGE_CHANNEL_PARTICIPATION_RULE
+    assert "\n\n" not in frame.partition("UNTRUSTED DATA OBJECT")[0]
+    assert decode_untrusted_object(frame)["body"] == "ok?"
+
+
+@pytest.mark.parametrize("kind", ["dm", None])
+def test_dm_and_unknown_kind_frames_omit_the_participation_rule(kind: str | None) -> None:
+    from local_operator.harness.message_types import BRIDGE_CHANNEL_PARTICIPATION_RULE
+
+    frame = build_body_frame(
+        _source(conversation_kind=kind), conversation_label="dm", sender_label="Ben", body="hi"
+    )
+    assert BRIDGE_CHANNEL_PARTICIPATION_RULE not in frame
+    assert frame == build_body_frame(
+        _source(), conversation_label="dm", sender_label="Ben", body="hi"
+    )
+
+
+def test_an_open_conversation_kind_is_refused() -> None:
+    with pytest.raises(BodyFrameRefused) as refused:
+        _source(conversation_kind="broadcast").validated()
+    assert refused.value.code == "source_conversation_kind_invalid"

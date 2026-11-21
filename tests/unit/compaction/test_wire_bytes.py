@@ -33,12 +33,14 @@ from local_operator.compaction.pruning import (
 from local_operator.compaction.thresholds import (
     DEFAULT_WIRE_BYTES_BUDGET,
     DEFAULT_WIRE_BYTES_TRIGGER,
+    WIRE_LANDING_BAND,
     WIRE_RECOVERY_BAND,
     CompactionSettings,
     cleared_wire_headroom,
     resolve_wire_bytes_budget,
     resolve_wire_bytes_trigger,
     should_compact,
+    wire_landing_bytes,
 )
 from local_operator.compaction.tokens import (
     estimate_messages_tokens,
@@ -826,6 +828,79 @@ def test_wire_recovery_band_is_inert_when_the_byte_trigger_is_off() -> None:
     scheduled; with bytes disabled it must not become a second veto."""
     settings = CompactionSettings(wire_bytes_trigger=0)
     assert cleared_wire_headroom(10**12, settings) is True
+
+
+# ---------------------------------------------------------------------------
+# WIRE_LANDING_BAND: where a byte-fired pass AIMS, as distinct from the
+# acceptance line above. The two used to be one constant, so a pass landed
+# with 20% of the trigger to spare (under three full-size screenshots) and
+# re-fired every few tool groups, rewriting the prompt prefix each time.
+# ---------------------------------------------------------------------------
+
+
+def test_the_landing_target_leaves_at_least_as_much_room_as_it_keeps() -> None:
+    """The target: after a byte-fired pass, real room under the trigger.
+
+    Half the trigger or better. On the default 16 MB trigger that is 8 MB,
+    against the 3.2 MB the shared 0.8 constant left.
+    """
+    settings = CompactionSettings()
+    trigger = resolve_wire_bytes_trigger(settings)
+    landing = wire_landing_bytes(settings)
+
+    assert landing == int(WIRE_LANDING_BAND * trigger)
+    assert 0 < landing <= trigger // 2
+    assert trigger - landing >= landing
+    # Strictly more room than the acceptance line alone would leave.
+    assert trigger - landing > trigger - int(WIRE_RECOVERY_BAND * trigger)
+
+
+def test_a_pass_that_lands_on_target_always_clears_the_auto_continue_band() -> None:
+    """The relation the two constants must keep.
+
+    A pass that hits its landing target and is then judged "no headroom" has
+    its auto-continue suppressed: the dead loop ``WIRE_RECOVERY_BAND`` exists
+    to prevent, re-entered by retuning one constant without the other.
+    """
+    assert WIRE_LANDING_BAND <= WIRE_RECOVERY_BAND
+    for trigger_bytes in (DEFAULT_WIRE_BYTES_TRIGGER, 4_000_000, 1_000, 3):
+        settings = CompactionSettings(wire_bytes_trigger=trigger_bytes)
+        assert cleared_wire_headroom(wire_landing_bytes(settings), settings) is True
+
+
+def test_a_landing_band_retuned_above_the_acceptance_band_is_clamped(monkeypatch) -> None:
+    """Enforced by the resolver, not only by the constants' current values."""
+    from local_operator.compaction import thresholds
+
+    monkeypatch.setattr(thresholds, "WIRE_LANDING_BAND", 0.95)
+    settings = CompactionSettings()
+    trigger = resolve_wire_bytes_trigger(settings)
+
+    landing = thresholds.wire_landing_bytes(settings)
+    assert landing == int(WIRE_RECOVERY_BAND * trigger)
+    assert cleared_wire_headroom(landing, settings) is True
+
+
+def test_the_landing_target_follows_the_configured_trigger_and_its_off_switch() -> None:
+    assert wire_landing_bytes(CompactionSettings(wire_bytes_trigger=4_000_000)) == int(
+        WIRE_LANDING_BAND * 4_000_000
+    )
+    # Disabled byte trigger: no target at all, so no byte-side work happens.
+    assert wire_landing_bytes(CompactionSettings(wire_bytes_trigger=0)) == 0
+    # The trigger is clamped to the hard budget; the target follows the clamp.
+    clamped = CompactionSettings(wire_bytes_budget=10_000_000, wire_bytes_trigger=50_000_000)
+    assert wire_landing_bytes(clamped) == int(WIRE_LANDING_BAND * 10_000_000)
+
+
+def test_the_acceptance_band_itself_is_unchanged() -> None:
+    """Only the landing moved. The auto-continue predicate still accepts a
+    pass the cut's protections stopped short of the target."""
+    settings = CompactionSettings()
+    trigger = resolve_wire_bytes_trigger(settings)
+    assert WIRE_RECOVERY_BAND == 0.8
+    between = int(0.7 * trigger)
+    assert wire_landing_bytes(settings) < between
+    assert cleared_wire_headroom(between, settings) is True
 
 
 # ---------------------------------------------------------------------------

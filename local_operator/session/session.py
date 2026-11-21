@@ -22668,12 +22668,17 @@ class Session:
         name = fetched.get("conversation_name")
         kind = fetched.get("sender_kind")
         sender = fetched.get("sender_label")
+        # The body read's ``conversation_kind`` (pinned in the body-response
+        # fixture) decides whether the frame carries the channel participation
+        # rule; absent on an older hub, which keeps the pre-rule frame.
+        conversation_kind = fetched.get("conversation_kind")
         return FetchedBody(
             body=body,
             body_sha256=body_hash,
             conversation_label=name if isinstance(name, str) else "",
             sender_label=sender if isinstance(sender, str) else "",
             sender_kind=kind if isinstance(kind, str) else "unknown",
+            conversation_kind=conversation_kind if isinstance(conversation_kind, str) else None,
         )
 
     def _pending_body_followup_row(
@@ -29405,13 +29410,20 @@ class Session:
     def _capture_elision_budget(self, compaction_api: Any, plan: _CompactionPlan) -> int | None:
         """The byte ceiling capture elision targets at a pass, or ``None``.
 
-        The target is the SAME band the auto-continue gate measures against --
-        ``WIRE_RECOVERY_BAND`` x the resolved wire trigger -- because that is
-        the definition of "created real headroom" this package already uses: a
-        pass that lands there schedules its continuation, while one that
-        merely shaved a capture and is still over the trigger would re-fire
-        next turn (the dead-loop the band exists to prevent, restated in the
-        trigger's own units).
+        Two cases, keyed on the SAME condition the byte-aware cut is keyed on
+        (:meth:`_advance_cut_for_wire_band`: the planned request is over the
+        byte trigger), so the cut's projection of elision and the elision the
+        commit performs always use one figure:
+
+        - Over the byte trigger: the landing target
+          (:meth:`_wire_landing_bytes`). This pass exists because of image
+          weight, and one that merely shaved a capture and is still near the
+          trigger re-fires a few tool groups later, each time rewriting the
+          prompt prefix.
+        - Not over it (a token-fired, manual or advised pass): the acceptance
+          band (:meth:`_wire_band_bytes`), exactly as before the landing
+          target existed. Nothing about such a pass is driven by bytes, so it
+          must not start shedding captures it kept yesterday.
 
         ``None`` when the byte trigger is disabled or the resolvers are
         absent: a session that never opted into byte pressure keeps exactly
@@ -29419,6 +29431,11 @@ class Session:
         knob do no elision work at all. A ruler failure is ``None`` too -- the
         band check's posture: it may never fail a pass.
         """
+        trigger = self._wire_trigger_bytes(compaction_api, plan.settings)
+        if trigger is None:
+            return None
+        if self._wire_bytes_of(compaction_api, plan.llm_history) > trigger:
+            return self._wire_landing_bytes(compaction_api, plan.settings)
         return self._wire_band_bytes(compaction_api, plan.settings)
 
     def _wire_trigger_bytes(self, compaction_api: Any, settings: Any) -> int | None:
@@ -29443,17 +29460,56 @@ class Session:
     def _wire_band_bytes(self, compaction_api: Any, settings: Any) -> int | None:
         """``WIRE_RECOVERY_BAND`` x the resolved wire trigger, or ``None``.
 
-        The ONE definition of "a pass created real byte headroom" for the two
-        places that must land inside it: capture elision (the kept rows) and
-        the byte-aware cut (:meth:`_advance_cut_for_wire_band`). Neither
-        restates the arithmetic, so they cannot drift from each other or from
-        the auto-continue gate's :func:`cleared_wire_headroom`.
+        The ACCEPTANCE line: the auto-continue gate's
+        :func:`cleared_wire_headroom`, and the elision ceiling of a pass that
+        is not under byte pressure (:meth:`_capture_elision_budget`). Where a
+        byte-fired pass AIMS is :meth:`_wire_landing_bytes`, which is lower.
         """
         band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
         trigger = self._wire_trigger_bytes(compaction_api, settings)
         if band is None or trigger is None:
             return None
         return int(float(band) * trigger)
+
+    def _wire_landing_bytes(self, compaction_api: Any, settings: Any) -> int | None:
+        """The byte size a byte-fired pass aims to land the request at, or ``None``.
+
+        The ONE landing target for the two places that must land inside it:
+        the byte-aware cut (:meth:`_advance_cut_for_wire_band`) and capture
+        elision on a pass over the byte trigger
+        (:meth:`_capture_elision_budget`). Neither restates the arithmetic, so
+        they cannot drift from each other.
+
+        The target is ``thresholds.wire_landing_bytes`` (``WIRE_LANDING_BAND``
+        x the resolved wire trigger), deliberately BELOW the acceptance line
+        (:meth:`_wire_band_bytes`). They used to be one number, and a pass that
+        aims at its own acceptance line lands with 20% of the trigger to
+        spare: under three full-size screenshots, so the byte trigger re-fired
+        every few tool groups and each pass rewrote the prompt prefix. The
+        acceptance line is unchanged and stays at or above this target (the
+        resolver clamps it), so a pass that hits the target always clears the
+        auto-continue gate.
+
+        A compaction module without the resolver (a partial test double that
+        predates it) falls back to the acceptance band rather than losing the
+        byte-aware cut altogether.
+        """
+        landing: Any = getattr(compaction_api, "wire_landing_bytes", None)
+        if not callable(landing):
+            return self._wire_band_bytes(compaction_api, settings)
+        if self._wire_trigger_bytes(compaction_api, settings) is None:
+            return None
+        try:
+            target: Any = landing(settings)
+        except Exception:  # noqa: BLE001 — a ruler failure must not fail the pass
+            logger.debug("wire landing resolution failed; wire band skipped", exc_info=True)
+            return None
+        # Same narrowing posture as ``_wire_trigger_bytes``: a duck-typed
+        # resolver can hand back anything, and a non-positive target means
+        # "disabled", never "land at zero bytes".
+        if not isinstance(target, int) or target <= 0:
+            return None
+        return target
 
     def _advance_cut_for_wire_band(
         self,
@@ -29486,9 +29542,9 @@ class Session:
         previous marker (its archive frames included) and the preserved user
         turns it carries forward. The first pass of a session has no marker to
         measure, so it is under-counted by one fresh archive (46-315 KB across
-        the three provider shapes, 0.3-2% of the trigger) -- inside the 20%
-        the band leaves, and a constant to cover it would be a guess dressed as
-        a measurement.
+        the three provider shapes, 0.3-2% of the trigger) -- inside the room
+        the landing band leaves under the trigger, and a constant to cover it
+        would be a guess dressed as a measurement.
 
         Capture elision runs on the kept rows at the commit
         (:meth:`_capture_elision_budget`), so the ruler counts the bytes it will
@@ -29500,7 +29556,10 @@ class Session:
         partial test double without the helper keeps the plain cut.
         """
         advance: Any = getattr(compaction_api, "advance_cut_to_wire_band", None)
-        band = self._wire_band_bytes(compaction_api, settings)
+        # The LANDING target, not the acceptance band: this walk only runs
+        # while the request is over the byte trigger (the guard below), which
+        # is the case the landing target exists for.
+        band = self._wire_landing_bytes(compaction_api, settings)
         trigger = self._wire_trigger_bytes(compaction_api, settings)
         if not callable(advance) or band is None or trigger is None:
             return cut
@@ -29529,7 +29588,7 @@ class Session:
                 # window, like the marker and preserved turns. It is small
                 # (count-bounded), but counting it here keeps the band's
                 # arithmetic honest rather than leaving a constant-sized
-                # undercount for the 20% margin to absorb.
+                # undercount for the landing margin to absorb.
                 or (
                     carried_key is not None
                     and isinstance(message.provider_payload, dict)
@@ -29558,8 +29617,10 @@ class Session:
             )
 
             # Same budget the commit hands elision (``_capture_elision_budget``
-            # is the band on the KEPT rows alone, ``fixed`` excluded), so the
-            # projection is exactly what the commit will do to this window.
+            # is the landing target on the KEPT rows alone whenever the request
+            # is over the byte trigger, which it is here; ``fixed`` excluded),
+            # so the projection is exactly what the commit will do to this
+            # window.
             projected, _elided = reclaim_captures_to_wire_budget(llm_history[index:], budget=band)
             return fixed + self._wire_bytes_of(compaction_api, projected)
 
@@ -31748,6 +31809,7 @@ class Session:
                     # trigger misfired. The hint is read here only to render
                     # that sentence; nothing about the pass depends on it.
                     detail=_advisor_detail(plan.advisor_hint),
+                    **self._compaction_trigger_fields(plan),
                 )
             )
             return outcome
@@ -31759,6 +31821,74 @@ class Session:
             await _settle_before_end(before_end, failed)
             await self._emit(CompactionEndEvent(reason=reason, success=False))
             return failed
+
+    def _compaction_trigger_fields(self, plan: _CompactionPlan) -> dict[str, Any]:
+        """Which size term fired a pass, and the byte figures either side of it.
+
+        The diagnostic half of ``compaction_end``. The token pair on that event
+        cannot say WHY a pass ran: a screenshot-heavy session compacts on the
+        serialized-request trigger at a small fraction of its token threshold,
+        and with only token figures recorded that reads as the trigger
+        misfiring (three recorded episodes had 25 / 18 / 11 such passes, the
+        first at ~35k tokens of 400k, and their byte sizes had to be estimated
+        from artifact sizes after the fact).
+
+        Read off the SAME resolved trigger the gate uses, not a second notion
+        of it: the token term is the plan's context against
+        ``resolve_threshold_tokens`` (the resolver ``should_compact`` reads for
+        that term, with its strict ``>`` and its "unknown window disables the
+        token term" rule), the byte term is the plan's own payload against the
+        resolved wire trigger (the comparison ``should_compact`` makes).
+
+        It deliberately does NOT call ``should_compact`` again. The gate made
+        the decision once; a diagnostic re-running it is a second evaluation
+        that hosts and test doubles observe (QA round 1, Q2: a resolver double
+        that records each decision saw a third call), and a re-run of the
+        decision is exactly the kind of thing that can drift from the one the
+        gate made. Reading the resolved thresholds is a pure lookup.
+
+        ``wire_bytes_before`` measures ``plan.llm_history``, the payload the
+        pass planned against and the one :meth:`_fires_on_size_alone` reads.
+        ``wire_bytes_after`` measures a fresh render of the committed context,
+        the list the next request sends and the one
+        :meth:`_cleared_wire_headroom` judges. Must be called AFTER the commit.
+
+        Costs one render and two structural byte sums per committed pass (no
+        tokenizer), against a pass that just made a summarization or archive
+        call. Returns ``{}`` on any failure, leaving the event's defaults: a
+        diagnostic must never fail the pass it describes.
+        """
+        compaction_api = plan.compaction_api
+        try:
+            trigger_bytes = self._wire_trigger_bytes(compaction_api, plan.settings) or 0
+            before = self._wire_bytes_of(compaction_api, plan.llm_history)
+            after = self._wire_bytes_of(
+                compaction_api, self._render_history(list(self._context.messages))
+            )
+            over_bytes = trigger_bytes > 0 and before > trigger_bytes
+            # The token term by itself, without advice: the resolved threshold,
+            # never a second ``should_compact`` call (see the docstring).
+            window = self.effective_model.context_window
+            over_tokens = window > 0 and plan.context_tokens > int(
+                compaction_api.resolve_threshold_tokens(window, plan.settings)
+            )
+        except Exception:  # noqa: BLE001 — a diagnostic must never fail the pass
+            logger.debug("compaction trigger diagnostics failed; omitted", exc_info=True)
+            return {}
+        if over_tokens and over_bytes:
+            fired = "tokens+wire_bytes"
+        elif over_bytes:
+            fired = "wire_bytes"
+        elif over_tokens:
+            fired = "tokens"
+        else:
+            fired = "none"
+        return {
+            "trigger": fired,
+            "wire_bytes_before": before,
+            "wire_bytes_after": after,
+            "wire_bytes_trigger": trigger_bytes,
+        }
 
     def _fires_on_size_alone(
         self, compaction_api: Any, context_tokens: int, settings: Any, wire_bytes: int
