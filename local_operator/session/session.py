@@ -1541,6 +1541,11 @@ class _CompactionPlan:
     #: this pass and not recorded as continuable, which is the horizon the raw
     #: floor has (its anchor is cut away on exactly this pass).
     dense_tail_closed: bool = False
+    # Economic snapcompact authorizes the actual prepared replay, then commits
+    # these same bytes. Never generate the archive twice or pay a fallback.
+    economic_summary: list[tuple[str, dict[str, Any] | None]] = dataclass_field(
+        default_factory=list, compare=False
+    )
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
     memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
@@ -5577,13 +5582,6 @@ class Session:
         #: cannot establish a warm cache until that request reports usage.
         self._idle_cache_anchor_ms = 0
         # --- Turn-end economic compaction (``compaction/economics.py``) -----
-        #: ``(provider, model_id, ttl) -> (p_read, p_write, p_input)`` in $ per
-        #: token, or ``None`` when the route is unpriced. Process-local: a price
-        #: lookup resolves the model registry on a worker thread, which is not
-        #: worth repeating at every wake of a session that wakes every 16 s.
-        self._economic_price_cache: dict[
-            tuple[str, str, float], tuple[float, float, float] | None
-        ] = {}
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
         # The advisor call was already off the turn, but the PASS it authorised
@@ -29738,49 +29736,116 @@ class Session:
             logger.debug("high-wake classification failed", exc_info=True)
         return self._aida_is_hers()
 
-    async def _economic_prices(self) -> tuple[float, float, float] | None:
-        """``(p_read, p_write, p_input)`` in $/token for the serving route, or None.
+    async def _economic_prices(
+        self, context_tokens: int | None = None
+    ) -> tuple[float, float, float] | None:
+        """Serving-request rates, not million-token probes, in dollars/token.
 
-        Priced through ``spend.price_call`` on unit usages, the same resolver
-        the spend band and analytics use, so the rule and the bill agree. The
-        write price follows the TTL tier the last request actually wrote
-        (1 h is 2x input on Anthropic, 5 m 1.25x). Unknown pricing returns
-        None, and the predicate then fails CLOSED (no economic pass).
+        Every bucket uses the SAME full prompt size and dispatch provenance.
+        Inclusive-input providers must include cached tokens in input_tokens;
+        otherwise one tuple silently mixes short- and long-context tariffs.
+        Deliberately uncached: size, service tier, TTL, schedule and route all
+        affect prices. Unknown provenance disables only this optional pass.
         """
-        provider = (
-            self._idle_cache_route[0] if self._idle_cache_route else self.effective_model.provider
+        provider, model_id = self._idle_cache_route or (
+            self.effective_model.provider,
+            self.effective_model.model_id,
         )
-        model_id = (
-            self._idle_cache_route[1] if self._idle_cache_route else self.effective_model.model_id
-        )
-        ttl = float(self._idle_cache_ttl_s or 0.0)
-        key = (str(provider), str(model_id), ttl)
-        if key in self._economic_price_cache:
-            return self._economic_price_cache[key]
+        count = int(context_tokens or self._idle_gate_tokens() or 0)
+        provenance = self._economic_price_provenance(str(provider))
+        if count <= 0 or provenance is None:
+            return None
         from local_operator.compaction.idle import CACHE_TTL_1H_S
+        from local_operator.model.configure import _cache_tokens_are_inside_input
 
-        unit = 1_000_000
-        write_fields: dict[str, int] = {"cache_write_tokens": unit}
-        write_fields[
-            "cache_write_1h_tokens" if ttl >= CACHE_TTL_1H_S else "cache_write_5m_tokens"
-        ] = unit
+        inclusive = _cache_tokens_are_inside_input(str(provider))
+        ttl = float(self._idle_cache_ttl_s or 0.0)
+        write = {"cache_write_tokens": count}
+        write["cache_write_1h_tokens" if ttl >= CACHE_TTL_1H_S else "cache_write_5m_tokens"] = count
 
         def lookup() -> tuple[float, float, float] | None:
             prices: list[float] = []
-            for fields in ({"cache_read_tokens": unit}, write_fields, {"input_tokens": unit}):
-                micro, known = price_call(str(provider), str(model_id), Usage(**fields))
+            for fields in ({"cache_read_tokens": count}, write, {"input_tokens": count}):
+                fields = dict(fields)
+                if inclusive:
+                    fields["input_tokens"] = count
+                micro, known = price_call(
+                    str(provider), str(model_id), Usage(**fields, **provenance)
+                )
                 if not known:
                     return None
-                prices.append(micro / 1e6 / unit)
+                prices.append(micro / 1e6 / count)
             return prices[0], prices[1], prices[2]
 
         try:
-            result = await asyncio.to_thread(lookup)
-        except Exception:  # noqa: BLE001 - unpriced, never a failed turn
+            return await asyncio.to_thread(lookup)
+        except Exception:  # noqa: BLE001 - an optimization never breaks turn end
             logger.debug("economic compaction: pricing failed", exc_info=True)
-            result = None
-        self._economic_price_cache[key] = result
-        return result
+            return None
+
+    def _economic_price_provenance(self, provider: str) -> dict[str, Any] | None:
+        """Only carry a tariff stamp from the route that actually served it."""
+        route = self._idle_cache_route
+        if route is not None and route != (
+            self.effective_model.provider,
+            self.effective_model.model_id,
+        ):
+            return None
+        usage = self._last_usage
+        if provider == "openai" and (
+            usage is None or usage.openai_service_tier not in ("default", "fast")
+        ):
+            return None
+        return {
+            "openai_service_tier": usage.openai_service_tier if usage else None,
+            "openai_long_context": usage.openai_long_context if usage else False,
+        }
+
+    async def _economic_summary_cost(self, plan: _CompactionPlan) -> float | None:
+        """Price the actual summary template/span plus its generation bound.
+
+        Retained operator turns are still summary input. Net context savings
+        cannot price this request. A fresh Anthropic system may incur cache
+        creation, so use the larger of uncached input and a full 5m write.
+        A route change/fallback with unknown serving tariff fails closed.
+        """
+        api = plan.compaction_api
+        previous, span = api.split_leading_marker(
+            [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)]
+        )
+        prompt = api.build_compaction_prompt(span, previous_summary=previous)
+        from local_operator.compaction.tokens import count_text_tokens
+        from local_operator.model.configure import _cache_tokens_are_inside_input
+
+        count = int(await self._offloaded(api, "estimate_messages_tokens", [Message.user(prompt)]))
+        count += count_text_tokens(api.SUMMARIZATION_SYSTEM_PROMPT)
+        # The local/provider ruler calibration also applies to the summary's
+        # serialized text. Never scale down a conservatively larger local count.
+        context = int(self._last_usage.context_tokens or 0) if self._last_usage else 0
+        prefix = int(getattr(self._last_usage, "system_tokens", 0) or 0)
+        kappa = max(1.0, (context - prefix) / max(1, plan.tokens_before))
+        count = math.ceil(count * kappa)
+        provider, model_id = self._model.provider, self._model.model_id
+        if (provider, model_id) != (self.effective_model.provider, self.effective_model.model_id):
+            return None
+        provenance = self._economic_price_provenance(provider)
+        if provenance is None:
+            return None
+        common = {**provenance, "output_tokens": api.MAX_SUMMARY_TOKENS}
+        full_write = {"cache_write_tokens": count, "cache_write_5m_tokens": count}
+        if _cache_tokens_are_inside_input(provider):
+            full_write["input_tokens"] = count
+
+        def lookup() -> float | None:
+            costs = [
+                price_call(provider, model_id, Usage(input_tokens=count, **common)),
+                price_call(provider, model_id, Usage(**full_write, **common)),
+            ]
+            if not all(known for _, known in costs):
+                return None
+            return max(micro for micro, _ in costs) / 1e6
+
+        return await asyncio.to_thread(lookup)
 
     def _economic_cold_next(self, median_gap_ms: int) -> bool:
         """Whether the next request is expected to miss the cache anyway.
@@ -29801,26 +29866,19 @@ class Session:
     ) -> int:
         """Project the pass's residual from a REAL cut plan, in provider tokens.
 
-        ``kept window + capped preserved block + marker allowance`` measured by
+        ``kept window + capped preserved block + actual marker/carry`` measured by
         the local ruler, scaled by this session's own provider/ruler ratio
         ``kappa`` (provider conversation tokens over the plan's local estimate,
-        clamped to [1, ECONOMIC_KAPPA_MAX]), plus the shared system/tools
-        prefix. The preserved block is capped with the SAME cap the commit will
-        use, so the high-wake bound is reflected before it is ever applied.
+        floored at one, never clipped downward), plus the shared system/tools
+        prefix. The preserved block uses the unchanged commit cap. Snapcompact
+        prepares and reuses the real archive; text summaries reserve the full
+        configured output bound. This is a conservative projection, not a
+        promise that local text tokens equal future provider billing.
         """
-        from local_operator.compaction.economics import (
-            ECONOMIC_ARCHIVE_ALLOWANCE_TOKENS,
-            ECONOMIC_KAPPA_MAX,
-        )
-        from local_operator.compaction.tokens import count_text_tokens
-
         api = plan.compaction_api
         to_summarize = plan.llm_history[: plan.cut]
         kept = plan.llm_history[plan.cut :]
         kept_tokens = int(await self._offloaded(api, "estimate_messages_tokens", kept))
-        summarized_tokens = int(
-            await self._offloaded(api, "estimate_messages_tokens", to_summarize)
-        )
         genuine_user_ids = {
             message.id
             for message in self._context.messages
@@ -29828,16 +29886,83 @@ class Session:
         }
         turns: list[Any] = list(api.extract_preserved_user_turns(to_summarize, genuine_user_ids))
         turns = list(api.collapse_relaunch_briefs(turns))
-        capped = api.cap_preserved_user_turns(turns, cap=self._preserved_turns_cap(plan.settings))
-        preserved_tokens = sum(
-            count_text_tokens(str(turn.get("text", ""))) for turn in capped.turns
+        previous = self._transcript.latest_entry("compaction") if self._transcript else None
+        previous_payload = previous.payload if previous is not None else {}
+        dropped = _payload_count(previous_payload, "preserved_turns_dropped")
+        shed = _payload_count(previous_payload, "preserved_turns_shed")
+        # A resumed legacy marker may have been healed only in rendered context.
+        # Match commit's two-source reconciliation before pricing its notice.
+        for message in self._context.messages:
+            carried_dropped, carried_shed = api.elision_counts_of(message)
+            dropped = max(dropped, int(carried_dropped))
+            shed = max(shed, int(carried_shed))
+        capped = api.cap_preserved_user_turns(
+            turns,
+            cap=self._preserved_turns_cap(plan.settings),
+            already_dropped_genuine=dropped,
+            already_dropped_injections=shed,
         )
-        allowance = min(ECONOMIC_ARCHIVE_ALLOWANCE_TOKENS, summarized_tokens)
-        local = kept_tokens + preserved_tokens + allowance
+        if plan.strategy == "snapcompact":
+            from local_operator.compaction import snapcompact
+
+            # Prepare ONCE under the turn lock and reuse these exact bytes at
+            # commit. Raster/layout failure must not buy an unchecked paid LLM
+            # fallback; ordinary size/manual passes retain that safety net.
+            prepared = await self._produce_summary(
+                api,
+                [m for m in to_summarize if _is_summarizable(m)],
+                plan.strategy,
+                settings=plan.settings,
+                allow_llm_fallback=False,
+                **self._dense_tail_kwargs(plan),
+            )
+            plan.economic_summary[:] = [prepared]
+            payload = (prepared[1] or {}).get("snapcompact")
+            archive = snapcompact.Archive.model_validate(payload)
+            visual_count = snapcompact.replayed_frame_count(archive)
+            visual = visual_count * snapcompact.frame_token_estimate_for(
+                self.effective_model.provider, self.effective_model.model_id
+            )
+            summary, preserve_data = prepared
+        else:
+            # Count the empty marker's framing separately from the bounded
+            # generated text. No model call is bought for a residual estimate.
+            summary, preserve_data = "", None
+            visual_count = 0
+            visual = 0
+        preserve_data = with_attachment_manifest(
+            preserve_data, to_summarize, world_root=self._confinement_root
+        )
+        marker = build_compaction_marker(summary, preserve_data)
+        rendered_marker = self._convert_to_llm([marker])
+        from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE
+
+        marker_tokens = int(await self._offloaded(api, "estimate_messages_tokens", rendered_marker))
+        # The converter ruler already charges each replayed image at its local
+        # image price. Replace, don't double-add, the provider visual cost.
+        text_archive = marker_tokens - visual_count * IMAGE_TOKEN_ESTIMATE
+        if plan.strategy != "snapcompact":
+            from local_operator.compaction.tokens import count_text_tokens
+
+            # A provider/local-tokenizer mismatch can activate the post-hoc
+            # truncation guard, whose notice is appended beyond the text cap.
+            text_archive += api.MAX_SUMMARY_TOKENS + count_text_tokens(api.SUMMARY_TRUNCATED_MARKER)
+        preserved = [Message.user(str(turn.get("text", ""))) for turn in capped.turns]
+        # Elision is a derived notice, not a retained operator turn. Include its
+        # current counts and this plan's new drops, as commit does.
+        notice = api.elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
+        if notice:
+            preserved.append(Message.user(notice))
+        carried = render_carried_tier(*self._carried_tier_live_state())
+        if carried is not None:
+            preserved.extend(self._convert_to_llm([carried]))
+        preserved_tokens = int(await self._offloaded(api, "estimate_messages_tokens", preserved))
+        local = kept_tokens + preserved_tokens + text_archive
+        allowance = text_archive + visual
         kappa = 1.0
         if plan.tokens_before > 0 and provider_context > prefix_tokens:
             kappa = (provider_context - prefix_tokens) / plan.tokens_before
-        kappa = min(ECONOMIC_KAPPA_MAX, max(1.0, kappa))
+        kappa = max(1.0, kappa)
         # The pieces, so a rollout can tell a task-floor-wide kept window (the
         # usual reason a re-check refuses) from a preserved or archive excess.
         logger.debug(
@@ -29848,7 +29973,7 @@ class Session:
             allowance,
             kappa,
         )
-        return int(prefix_tokens + local * kappa)
+        return math.ceil(prefix_tokens + local * kappa + visual)
 
     async def _journal_economic_decline(
         self, context_tokens: int, why: str, decision: Any = None
@@ -29934,17 +30059,17 @@ class Session:
             )
             baseline, _idle_declined, marker_id = _idle_growth_baseline(self._transcript)
             declined = _economic_declined_at(self._transcript, marker_id)
-            prices = await self._economic_prices()
+            prices = await self._economic_prices(gate_tokens)
             p_read, p_write, p_input = prices if prices is not None else (0.0, 0.0, 0.0)
             strategy = self._resolve_strategy(settings)
             streak = economics.low_yield_streak(yields, ratio=economics.ECONOMIC_MAX_RESIDUAL_RATIO)
             cold_next = self._economic_cold_next(stats.median_gap_ms)
 
+            # Cheap admission is optimistic (zero call cost); only the exact
+            # plan can authorize payment, after the actual request is priced.
+            pass_cost = 0.0
+
             def judge(residual: int | None) -> Any:
-                # Snapcompact folds without a model call; an LLM summary reads
-                # the summarized span uncached, priced at the input rate.
-                gain = max(0, gate_tokens - (residual or gate_tokens))
-                pass_cost = 0.0 if strategy == "snapcompact" else gain * p_input
                 return economics.economic_compaction_due(
                     enabled=True,
                     strategy=strategy,
@@ -29990,9 +30115,36 @@ class Session:
                 await self._journal_economic_decline(gate_tokens, f"refused:{planned.reason}")
                 return False
             provider_context = int(self._last_usage.context_tokens or 0) if self._last_usage else 0
-            exact = await self._economic_exact_residual(
-                planned, prefix_tokens=stats.prefix_tokens, provider_context=provider_context
-            )
+            try:
+                exact = await self._economic_exact_residual(
+                    planned, prefix_tokens=stats.prefix_tokens, provider_context=provider_context
+                )
+            except Exception:  # noqa: BLE001 - paid fallback is not authorized
+                await self._journal_economic_decline(gate_tokens, "pass_failed")
+                return False
+            rewrite_prices = await self._economic_prices(exact)
+            # EOQ assumes one tariff over its interval. Crossing a whole-prompt
+            # tier violates that model; decline rather than mix its rates.
+            # price_call rounds each total to a micro-dollar: only tolerate
+            # the combined half-micro rounding errors divided by prompt size,
+            # not an arbitrary percentage that could hide a real tariff delta.
+            rounding_error = 0.5e-6 / max(1, gate_tokens) + 0.5e-6 / max(1, exact)
+            if (
+                prices is None
+                or rewrite_prices is None
+                or any(
+                    not math.isclose(a, b, rel_tol=0.0, abs_tol=rounding_error)
+                    for a, b in zip(prices, rewrite_prices)
+                )
+            ):
+                await self._journal_economic_decline(gate_tokens, "recheck:tariff_change")
+                return False
+            if strategy != "snapcompact":
+                quoted = await self._economic_summary_cost(planned)
+                if quoted is None:
+                    await self._journal_economic_decline(gate_tokens, "recheck:unpriced_pass")
+                    return False
+                pass_cost = quoted
             decision = judge(exact)
             if not decision.due:
                 await self._journal_economic_decline(
@@ -31406,7 +31558,10 @@ class Session:
         await self._cancel_background_compaction()
         await self._emit(CompactionStartEvent(reason=reason))
         return await self._finish_compaction(
-            plan, reason=reason, summarized=None, before_end=before_end
+            plan,
+            reason=reason,
+            summarized=plan.economic_summary[0] if plan.economic_summary else None,
+            before_end=before_end,
         )
 
     async def _cancel_background_compaction(self) -> None:
@@ -32550,6 +32705,7 @@ class Session:
         dense_tail: int = 0,
         dense_previous_chars: int = 0,
         dense_closed: bool = False,
+        allow_llm_fallback: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
 
@@ -32657,6 +32813,10 @@ class Session:
                 )
                 return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:
+                if not allow_llm_fallback:
+                    # Below-size economics priced this strategy as free. A
+                    # paid fallback is a different, unauthorized transaction.
+                    raise
                 logger.warning("snapcompact failed; falling back to context-full", exc_info=True)
         # A pass after the first plans over ``[marker, *kept]``: the previous
         # summary is folded through the template's ``<previous-summary>``

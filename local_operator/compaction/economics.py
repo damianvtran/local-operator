@@ -68,7 +68,6 @@ __all__ = [
     "COMPACTION_ECONOMIC_PASS_TYPE",
     "ECONOMIC_ARCHIVE_ALLOWANCE_TOKENS",
     "ECONOMIC_COLD_READ_FRACTION",
-    "ECONOMIC_KAPPA_MAX",
     "ECONOMIC_MAX_RESIDUAL_RATIO",
     "ECONOMIC_MIN_SAMPLES",
     "ECONOMIC_RATE_WINDOW",
@@ -107,17 +106,11 @@ ECONOMIC_MIN_SAMPLES = 50
 #: separates the two populations with a wide margin either side.
 ECONOMIC_COLD_READ_FRACTION = 0.5
 
-#: Ruler tokens allowed for the pass's own marker (summary, carried tier,
-#: snapcompact archive text) when the context holds no previous marker to
-#: measure. The chief of staff's measured marker was 31,378 ruler tokens.
+#: CHEAP admission hint only, never an upper bound or final authorization.
+#: The chief of staff's measured marker was 31,378 ruler tokens. The exact
+#: recheck prepares/reuses the actual snapcompact replay (including frames),
+#: or reserves the text strategy's configured generation bound, plus carry.
 ECONOMIC_ARCHIVE_ALLOWANCE_TOKENS = 32_000
-
-#: Ceiling on the provider/ruler ratio ``kappa`` used to convert local ruler
-#: estimates into provider tokens. Measured 1.54 on the chief of staff; images
-#: and dense non-English text can push it higher, but past 3 the estimate is
-#: more likely broken than true, and a too-large kappa only over-estimates the
-#: residual (a declined pass), never the reverse.
-ECONOMIC_KAPPA_MAX = 3.0
 
 #: HIGH-WAKE classification: at least this many turn requests in the trailing
 #: :data:`HIGH_WAKE_WINDOW_MS`. 90 in 6 h is 15 requests/h, the fleet's p75
