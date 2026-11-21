@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.extra.compose.composed": "{size} تیار ہوا",
+  "tui.tool_card.extra.compose.composing": "تیاری جاری… {facts}",
+  "tui.tool_card.extra.compose.never_sent": "کبھی نہیں بھیجی گئی · {facts}",
+  "tui.tool_card.extra.compose.nothing_composed": "کچھ تیار نہیں ہوا",
+  "tui.tool_card.extra.fetch.attempts": "{count, plural, one {{shown} کوشش} other {{shown} کوششیں}}",
+  "tui.tool_card.extra.fetch.attempts_profiles": "{count, plural, one {{shown} کوشش ({profiles})} other {{shown} کوششیں ({profiles})}}",
+  "tui.tool_card.extra.fetch.lines": "{count, plural, one {{shown} لائن} other {{shown} لائنیں}}",
+  "tui.tool_card.extra.search.provider": "فراہم کنندہ: {provider}",
+  "tui.tool_card.extra.search.provider_auth": "فراہم کنندہ: {provider} ({auth_mode})",
+  "tui.tool_card.extra.search.sources": "ذرائع:",
+  "tui.tool_card.extra.search.untitled": "بلا عنوان نتیجہ",
+  "tui.tool_card.extra.send.failed_reason": "{word}: {cause}",
+  "tui.tool_card.extra.send.mode.now": "ابھی",
+  "tui.tool_card.extra.send.mode.quiet": "خاموش",
+  "tui.tool_card.extra.send.mode.wake": "بیداری",
+  "tui.tool_card.extra.send.model": "ماڈل"
+}
