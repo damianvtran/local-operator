@@ -201,8 +201,68 @@ async def test_the_registered_tool_reads_the_witness_from_its_context(tmp_path: 
     # The same call with a context that carries no witness refuses, sends nothing.
     bare = await tool.execute("call_2", _args(), None, None, ToolContext(bridge_runtime=runtime))
     assert bare.is_error is True
+    assert bare.details is not None
     assert bare.details["code"] == OWNER_CONFIRMATION_REQUIRED
     assert len(hub.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("latest_text", "replacement_id", "replacement_name"),
+    [
+        ("Cancel that. Do not rename the channel.", None, None),
+        (f"rename {CONV} to Different Room", CONV, "Different Room"),
+        (f"rename bcv_other123 to {NEW_NAME}", "bcv_other123", NEW_NAME),
+    ],
+)
+@pytest.mark.asyncio
+async def test_latest_typed_steering_supersedes_the_prior_rename(
+    tmp_path: Path,
+    latest_text: str,
+    replacement_id: str | None,
+    replacement_name: str | None,
+) -> None:
+    session = _session(tmp_path)
+    prior = Message.user(ASK)
+    _start_run(session, prior)
+    assert session.owner_turn_witness(ASK).entry_id == prior.id
+    # Like consumed steering: append within the SAME run, without resetting its
+    # owner rows. The previous command must no longer authorize an owner POST.
+    latest = Message.user(latest_text)
+    session._note_run_input(latest)
+    hub = Hub()
+    runtime = _runtime(tmp_path, hub)
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    context = ToolContext(bridge_runtime=runtime, owner_turn_witness=session.owner_turn_witness)
+    refused = await tool.execute("stale_command", _args(), None, None, context)
+    assert refused.is_error is True
+    assert refused.details is not None
+    assert refused.details["code"] == OWNER_CONFIRMATION_REQUIRED
+    assert session.owner_turn_witness(ASK).reason == owner_turn.REASON_NOT_NAMED
+    assert hub.requests == []
+    assert _audit_rows(tmp_path)[0]["authorized_by_entry_id"] is None
+
+    if replacement_id is not None and replacement_name is not None:
+        renamed = await tool.execute(
+            "current_command",
+            _args(channel_id=replacement_id, name=replacement_name),
+            None,
+            None,
+            context,
+        )
+        assert renamed.is_error is False, renamed
+        assert len(hub.requests) == 1
+        request = hub.requests[0]
+        assert request.method == "POST"
+        assert request.url.path == f"/v1/messaging/conversations/{replacement_id}/rename"
+        assert json.loads(request.content) == {"name": replacement_name, "tenant_id": TENANT}
+        rows = _audit_rows(tmp_path)
+        assert [row["outcome"] for row in rows] == [
+            OWNER_CONFIRMATION_REQUIRED,
+            "authorized",
+            "renamed",
+        ]
+        assert all(row["authorized_by_entry_id"] == latest.id for row in rows[1:])
 
 
 def test_the_session_hands_its_witness_to_every_tool_context(tmp_path: Path) -> None:
@@ -467,7 +527,8 @@ async def test_a_credential_shaped_name_is_refused_and_withheld_from_the_audit(
 ) -> None:
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
     session = _session(tmp_path)
-    _start_run(session, Message.user(f"rename {CONV} to {token}"))
+    typed = Message.user(f"rename {CONV} to {token}")
+    _start_run(session, typed)
     hub = Hub()
     outcome = await execute_bridge(
         _runtime(tmp_path, hub), _args(name=token), owner_turn=session.owner_turn_witness
@@ -476,7 +537,9 @@ async def test_a_credential_shaped_name_is_refused_and_withheld_from_the_audit(
     assert hub.requests == []
     raw = rename_audit_path(tmp_path / "config").read_text()
     assert token not in raw
-    assert _audit_rows(tmp_path)[0]["reason"] == "credential_shaped_name"
+    row = _audit_rows(tmp_path)[0]
+    assert row["reason"] == "credential_shaped_name"
+    assert row["authorized_by_entry_id"] == typed.id
 
 
 @pytest.mark.asyncio
@@ -510,29 +573,50 @@ async def test_an_earlier_turn_never_authorizes_a_later_wake(tmp_path: Path) -> 
     assert _audit_rows(tmp_path)[0]["authorized_by_entry_id"] is None
 
 
+@pytest.mark.parametrize("source", ["owner", "nonmatching", "peer", "superseded"])
 @pytest.mark.asyncio
-async def test_unknown_model_confirmation_fields_cannot_grant_authority(tmp_path: Path) -> None:
+async def test_unknown_model_confirmation_fields_cannot_grant_authority(
+    tmp_path: Path, source: str
+) -> None:
     session = _session(tmp_path)
-    _start_run(session, Message.user(ASK))
+    typed = Message.user(ASK)
+    inputs = {
+        "owner": [typed],
+        "nonmatching": [Message.user(f"rename {CONV} to Different Room")],
+        "peer": [_peer(ASK)],
+        "superseded": [typed, Message.user("Cancel that rename.")],
+    }
+    _start_run(session, *inputs[source])
     hub = Hub()
     outcome = await execute_bridge(
         _runtime(tmp_path, hub), _args(owner_confirmed=True), owner_turn=session.owner_turn_witness
     )
     assert outcome["code"] == "invalid_request"
     assert hub.requests == []
+    row = _audit_rows(tmp_path)[0]
+    assert row["reason"] == "invalid_arguments"
+    assert row["authorized_by_entry_id"] == (typed.id if source == "owner" else None)
 
 
+@pytest.mark.parametrize("matching_owner", [False, True])
 @pytest.mark.asyncio
 async def test_a_fence_refusal_is_audited_and_never_calls_the_hub(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, matching_owner: bool
 ) -> None:
     monkeypatch.setattr(
         host_mod,
         "owner_fence_refusal",
         lambda runtime: {"code": "not_designated", "error": "not designated"},
     )
+    session = _session(tmp_path)
+    typed = Message.user(ASK)
+    _start_run(session, typed if matching_owner else _peer(ASK))
     hub = Hub()
-    outcome = await execute_bridge(_runtime(tmp_path, hub), _args())
+    outcome = await execute_bridge(
+        _runtime(tmp_path, hub), _args(), owner_turn=session.owner_turn_witness
+    )
     assert outcome["code"] == "not_designated"
     assert hub.requests == []
-    assert _audit_rows(tmp_path)[0]["outcome"] == "not_designated"
+    row = _audit_rows(tmp_path)[0]
+    assert row["outcome"] == "not_designated"
+    assert row["authorized_by_entry_id"] == (typed.id if matching_owner else None)

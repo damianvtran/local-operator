@@ -2864,7 +2864,23 @@ async def _channel_rename(
     # below, after the fence and the id check, with its own row.
     secret = secret_guard.refuse_secret_in("channel_rename", name) if name else None
     recorded_name = _WITHHELD_NAME if secret is not None else name
-    entry_id = ""
+    # Collect only host-validated, exact current-turn linkage before local
+    # refusals. This is audit provenance, not admission: all validation and the
+    # strict fence still run before the authorization check or any hub request.
+    from local_operator.harness import owner_turn as owner_turn_mod
+
+    witness: Any = None
+    if callable(owner_turn):
+        try:
+            witness = owner_turn(f"rename {conversation_id} to {name}")
+        except Exception:  # noqa: BLE001 — a failing witness is no witness
+            logger.warning("bridge channel_rename: owner-turn witness raised", exc_info=True)
+            witness = None
+    entry_id = (
+        witness.entry_id
+        if isinstance(witness, owner_turn_mod.OwnerTurnWitness) and witness.ok
+        else ""
+    )
 
     def _audit(outcome: str, *, reason: str = "", **extra: Any) -> None:
         extra.setdefault("authorized_by_entry_id", entry_id)
@@ -2928,15 +2944,6 @@ async def _channel_rename(
             pass  # the refusal below already sends nothing
         return secret
 
-    from local_operator.harness import owner_turn as owner_turn_mod
-
-    witness: Any = None
-    if callable(owner_turn):
-        try:
-            witness = owner_turn(f"rename {conversation_id} to {name}")
-        except Exception:  # noqa: BLE001 — a failing witness is no witness
-            logger.warning("bridge channel_rename: owner-turn witness raised", exc_info=True)
-            witness = None
     if (
         not isinstance(witness, owner_turn_mod.OwnerTurnWitness)
         or not witness.ok

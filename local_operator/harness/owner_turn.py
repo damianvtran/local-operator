@@ -118,10 +118,12 @@ def decide(
     requested = _command(required_text)
     if requested is None:
         return OwnerTurnWitness(False, reason=REASON_NOT_NAMED)
-    # Newest first: the audit should cite the most recent message that asked.
-    for entry_id, text in reversed(owner_rows):
-        if entry_id and _command(text) == requested:
-            return OwnerTurnWitness(True, entry_id=entry_id)
+    # Typed steering supersedes earlier owner instructions, including when it
+    # cancels a rename or replaces its target/name. Falling back to an older
+    # matching row would turn revoked intent into authority to act as the owner.
+    entry_id, text = owner_rows[-1]
+    if entry_id and _command(text) == requested:
+        return OwnerTurnWitness(True, entry_id=entry_id)
     return OwnerTurnWitness(False, reason=REASON_NOT_NAMED)
 
 
