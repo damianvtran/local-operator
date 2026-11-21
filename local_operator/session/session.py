@@ -5584,12 +5584,6 @@ class Session:
         self._economic_price_cache: dict[
             tuple[str, str, float], tuple[float, float, float] | None
         ] = {}
-        #: The pre-compaction memory prompt for a HIGH-WAKE pass that evicted
-        #: operator turns from the verbatim block: ``(marker_id, text)``. Rides
-        #: the advisory ``<memory_hint>`` tail for the first turn after the pass
-        #: only, then is dropped (``_maybe_compact``), so it costs its ~1k
-        #: tokens a handful of requests, not every wake.
-        self._eviction_hint: tuple[str, str] | None = None
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
         # The advisor call was already off the turn, but the PASS it authorised
@@ -29343,10 +29337,6 @@ class Session:
         5. After a successful pass, schedule auto-continue only when the
            residual cleared the recovery band (``residual <= 0.8 * threshold``).
         """
-        # The high-wake eviction prompt rides the FIRST turn after its pass
-        # (it is armed further down this method, at the pass's own turn end);
-        # reaching here again means that turn has ended, so it has been shown.
-        self._eviction_hint = None
         # The turn is over and the next one has not started: the safest
         # boundary there is, and the one a mid-turn spawn most often lands on
         # (a pass spawned at the last tool batch finishes while the model
@@ -29747,64 +29737,6 @@ class Session:
         except Exception:  # noqa: BLE001 - a classification, never a turn failure
             logger.debug("high-wake classification failed", exc_info=True)
         return self._aida_is_hers()
-
-    @staticmethod
-    def _evicted_turn_headlines(
-        before: Sequence[Mapping[str, object]], after: Sequence[Mapping[str, object]]
-    ) -> list[str]:
-        """One line per GENUINE turn this pass dropped from the verbatim block.
-
-        Newest first, ``[id] first 80 chars``: enough for the model to tell a
-        standing instruction from a one-off request and to peek the rest.
-        Harness-notice shapes are excluded; they were never the operator's.
-        """
-        from local_operator.harness.rows import is_harness_notice_text
-
-        kept = {str(turn.get("id", "")) for turn in after}
-        lines: list[str] = []
-        for turn in reversed(list(before)):
-            turn_id = str(turn.get("id", ""))
-            text = str(turn.get("text", ""))
-            if turn_id in kept or is_harness_notice_text(text):
-                continue
-            flat = " ".join(text.split())
-            lines.append(f"[{turn_id}] {flat[:80]}{'…' if len(flat) > 80 else ''}")
-        return lines
-
-    #: Most evicted-turn headlines the pre-compaction memory prompt lists; the
-    #: rest are counted. 20 lines of ~25 tokens keep the prompt near 1k tokens.
-    _EVICTION_HINT_MAX_LINES = 20
-
-    def _arm_eviction_hint(self, marker_id: str, lines: list[str]) -> None:
-        """Arm the high-wake memory prompt for the pass that just committed.
-
-        Reuses the advisory ``<memory_hint>`` channel (``memory_capture``'s
-        prompt tail) instead of a per-turn injection: it is shown on the
-        requests of the FIRST turn after the pass and then dropped, so a
-        session waking every 16 s pays for it a handful of times per pass. Only
-        for high-wake sessions, where the 24k cap actually evicts.
-        """
-        if not lines or not self._is_high_wake():
-            self._eviction_hint = None
-            return
-        shown = lines[: self._EVICTION_HINT_MAX_LINES]
-        more = len(lines) - len(shown)
-        body = "\n".join(f"- {line}" for line in shown)
-        if more > 0:
-            body += f"\n- (+{more} older)"
-        text = (
-            f'<memory_hint compaction="{marker_id}" evicted="{len(lines)}">\n'
-            f"This compaction dropped {len(lines)} older operator message(s) from verbatim "
-            "context (newest first, first 80 chars):\n"
-            f"{body}\n"
-            "If any is a standing instruction, decision or routing id that still binds, "
-            "store it now as one atomic fact prefixed `instruction:`, `decision:` or "
-            "`routing:` (memory(op='store', text=...)). Full text: "
-            f"sessions(op='peek', session='{self._session_id}', query=<words>). "
-            "Before acting on an operator ask, memory(op='recall', text=...) first.\n"
-            "</memory_hint>"
-        )
-        self._eviction_hint = (marker_id, text)
 
     async def _economic_prices(self) -> tuple[float, float, float] | None:
         """``(p_read, p_write, p_input)`` in $/token for the serving route, or None.
@@ -31773,7 +31705,6 @@ class Session:
             # sharing ``_advisor_floor_cap``'s task term evicted real
             # constraints on a small keep window.
             cap: Any = getattr(compaction_api, "cap_preserved_user_turns", None)
-            evicted_lines: list[str] = []
             preserved_turns_cap: int | None = None
             # Carried forward so the figure keeps describing everything ever
             # dropped from this block. Read as NUMBERS — from the previous
@@ -31820,7 +31751,6 @@ class Session:
                     already_dropped_genuine=preserved_turns_dropped,
                     already_dropped_injections=preserved_turns_shed,
                 )
-                evicted_lines = self._evicted_turn_headlines(preserved_user_turns, capped.turns)
                 preserved_user_turns = list(capped.turns)
                 preserved_turns_dropped = capped.genuine_dropped
                 preserved_turns_shed = capped.injections_dropped
@@ -31919,7 +31849,6 @@ class Session:
                 # size and manual passes, whose records stay byte-identical.
                 trigger=reason if reason in ("idle", "economic") else None,
             )
-            self._arm_eviction_hint(memory_marker.id, evicted_lines)
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale
             # advisor passes (#413) from ever writing candidates or a watermark.
@@ -33995,22 +33924,13 @@ class Session:
             )
         except Exception:  # noqa: BLE001 — a partial double must not evict
             return DEFAULT_PRESERVED_TURN_CAP
-        cap = max(keep_recent, capacity_cap)
-        # HIGH-WAKE bound (``economics.PRESERVED_HIGH_WAKE_CAP``). An always-on
-        # session's operator traffic is almost all injected, so its genuine
-        # turns accumulate for weeks without any one pass ever trimming them:
-        # the chief of staff carried 84k ruler tokens (~140k provider, 55-60%
-        # of every post-pass request) frozen across passes. The tighter cap
-        # is still floored at ``keep_recent`` for the reason above, applies
-        # only to sessions whose cadence makes the residual the dominant cost,
-        # and evicts the OLDEST turns first; they stay in the transcript
-        # (the elision notice points at ``sessions(op='peek')``) and the
-        # eviction hint asks the model to store what still binds.
-        if self._is_high_wake():
-            from local_operator.compaction.economics import PRESERVED_HIGH_WAKE_CAP
-
-            cap = min(cap, max(keep_recent, PRESERVED_HIGH_WAKE_CAP))
-        return cap
+        # Fail CLOSED on tighter high-wake preservation: a headline/peek hint
+        # after eviction does not preserve a standing operator instruction.
+        # A future tighter bound needs a pre-commit checkpoint through session
+        # memory's admission boundaries and a durable acknowledgement of the
+        # full evicted text first. Until then cadence changes only economics,
+        # never the amount of verbatim operator context kept.
+        return max(keep_recent, capacity_cap)
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
         """A copy of the live message list that a provider will actually accept.

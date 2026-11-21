@@ -25,7 +25,6 @@ from local_operator.compaction.economics import (
     COMPACTION_ECONOMIC_PASS_TYPE,
 )
 from local_operator.harness.types import CustomMessage
-from local_operator.memory_capture import session_tail
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from tests.unit.session.test_compaction_idle import (
@@ -210,10 +209,10 @@ async def test_unpriced_route_never_compacts(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_high_wake_cap_tightens_only_high_wake_sessions(tmp_path, monkeypatch):
+async def test_high_wake_cap_fails_closed_without_memory_checkpoint(tmp_path, monkeypatch):
     settings = CompactionSettings(keep_recent_tokens=400)
     high = make(tmp_path / "h", Provider(), monkeypatch, high_wake=True)
-    assert high._preserved_turns_cap(settings) == economics.PRESERVED_HIGH_WAKE_CAP
+    assert high._preserved_turns_cap(settings) == 100_000  # no acknowledged checkpoint
     await high.dispose()
     low = make(tmp_path / "l", Provider(), monkeypatch, high_wake=False)
     assert low._preserved_turns_cap(settings) == 100_000  # 400k // 4, unchanged
@@ -227,48 +226,6 @@ def test_high_wake_rate_threshold_counts_the_trailing_six_hours():
     assert not economics.is_high_wake_rate(recent[:-1], now_ms=now)
     stale = [now - economics.HIGH_WAKE_WINDOW_MS - 1] + recent[:-1]
     assert not economics.is_high_wake_rate(stale, now_ms=now)
-
-
-@pytest.mark.asyncio
-async def test_high_wake_eviction_hint_lists_dropped_operator_turns_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(economics, "PRESERVED_HIGH_WAKE_CAP", 60)
-
-    async def no_economic(self):
-        return False
-
-    # One pass, the manual one, so every eviction is this marker's own.
-    monkeypatch.setattr(Session, "_maybe_economic_compact", no_economic)
-    directory = tmp_path / "s"
-    provider = Provider()
-    # keep_recent below the tiny cap so the cap (not keep_recent) binds.
-    session = make(directory, provider, monkeypatch, keep_recent_tokens=40)
-    for index in range(8):
-        await session.prompt(f"standing instruction {index}: always route billing via ops " * 3)
-    outcome = await session.compact_now()
-    assert outcome.ran
-    marker = markers(directory)[-1]
-    assert marker.payload.get("preserved_turns_dropped", 0) > 0
-    assert session._eviction_hint is not None and session._eviction_hint[0] == marker.id
-    tail = await session_tail(session)
-    assert f'compaction="{marker.id}" evicted=' in tail
-    assert "standing instruction 0" in tail
-    assert "memory(op='store'" in tail and "sessions(op='peek'" in tail
-    # Shown for the first turn after the pass, then dropped.
-    await session.prompt("next")
-    assert session._eviction_hint is None
-    assert "evicted=" not in await session_tail(session)
-    await session.dispose()
-
-
-@pytest.mark.asyncio
-async def test_low_wake_pass_arms_no_eviction_hint(tmp_path, monkeypatch):
-    directory = tmp_path / "s"
-    session = make(directory, Provider(), monkeypatch, high_wake=False, keep_recent_tokens=40)
-    for index in range(4):
-        await session.prompt(f"instruction {index} " * 20)
-    assert (await session.compact_now()).ran
-    assert session._eviction_hint is None
-    await session.dispose()
 
 
 @pytest.mark.asyncio

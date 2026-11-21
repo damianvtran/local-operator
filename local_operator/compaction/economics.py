@@ -75,7 +75,6 @@ __all__ = [
     "EconomicDecision",
     "HIGH_WAKE_MIN_REQUESTS",
     "HIGH_WAKE_WINDOW_MS",
-    "PRESERVED_HIGH_WAKE_CAP",
     "UsageStats",
     "backoff_growth",
     "delta_star",
@@ -129,16 +128,6 @@ ECONOMIC_KAPPA_MAX = 3.0
 #: half of all active windows, i.e. ordinary busy tool loops, as high-wake.
 HIGH_WAKE_MIN_REQUESTS = 90
 HIGH_WAKE_WINDOW_MS = 6 * 3600 * 1000
-
-#: Ruler-token cap on the verbatim preserved-user-turn block for HIGH-WAKE
-#: sessions (``Session._preserved_turns_cap``). The chief of staff carried
-#: 84,390 ruler tokens (1,297 turns, ~130-147k provider tokens, 55-60% of its
-#: post-pass request), frozen byte-identical across passes because almost all
-#: of its traffic is injected, not typed. 24,000 keeps the newest 412 of those
-#: turns (median turn 215 chars); older ones stay in the transcript and are
-#: recallable with ``sessions(op='peek', regex=...)``, and the pre-pass memory
-#: hint asks the model to store standing instructions before they leave.
-PRESERVED_HIGH_WAKE_CAP = 24_000
 
 #: Transcript custom types (``append_custom``; never LLM context), the durable
 #: half of the anti-thrash rule exactly like ``compaction_idle_*``: a restarted
