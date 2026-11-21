@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "Recherche de mises à jour : source {source} ; version {version} ; état de préparation {readiness} ; âge du cache {age}.",
+  "cli.update_discovery.check.cached_unverified": "Impossible de vérifier la dernière version sur PyPI. La version en cache {version} ne fait pas autorité ; rien n’a été installé.",
+  "cli.update_discovery.check.ahead": "La version installée de local-operator ({installed}) est plus récente que la version observée sur PyPI ({latest}) ; aucune rétrogradation n’a été tentée."
+}
