@@ -319,6 +319,52 @@ def test_a_stop_sweeps_an_earlier_invocations_runtime_and_spares_the_unmarked(
                 child.wait(timeout=5)
 
 
+def test_a_build_restart_stop_leaves_owned_runtimes_running(tmp_path: Path, monkeypatch) -> None:
+    """An upgrade's ``kickstart -k`` must not sweep the runtimes the supervisor owns.
+
+    Incident 2026-11-20: every ``lop-update`` SIGTERMed 3-12 wake-owned runtimes
+    through this stop handler, and one mid-turn runtime then held the operator's
+    prompt for ~7 minutes behind a subagent. The restart is recognised by the same
+    fact the restart acts on — this supervisor's generation is not ``current`` —
+    so the stand-in for a stale generation is the probe returning a path. Fails on
+    the pre-fix tree: the marked runtime exits -SIGTERM.
+    """
+    from local_operator import update
+
+    monkeypatch.delenv(owned_runtimes.OWNER_ENV, raising=False)
+    monkeypatch.delenv("LOP_WAKE_SUPERVISOR_ACTIVE", raising=False)
+    monkeypatch.setattr(
+        update,
+        "stale_generation_of_process",
+        lambda pid: tmp_path / "generations" / "20261120T171250Z-0.108.5",
+    )
+    root = tmp_path / "root"
+    root.mkdir()
+    owned = _spawn_stand_in(root, "s3upgrade01", owner="token-from-an-earlier-invocation")
+    try:
+        _await_probe([owned])
+        _stop_a_real_serve(root, monkeypatch, [owned])
+        assert _exited(owned, timeout=2.0) is None, "a build restart swept an owned runtime"
+    finally:
+        if owned.poll() is None:
+            owned.kill()
+            owned.wait(timeout=5)
+
+
+def test_a_restart_probe_that_fails_still_sweeps(monkeypatch) -> None:
+    """The uncertain direction keeps the sweep: a probe fault is not a restart."""
+    from local_operator import update
+    from local_operator.wakes import supervisor
+
+    def boom(pid: int) -> None:
+        raise OSError("ps unavailable")
+
+    monkeypatch.setattr(update, "stale_generation_of_process", boom)
+    assert supervisor._stop_is_build_restart() is False
+    monkeypatch.setattr(update, "stale_generation_of_process", lambda pid: None)
+    assert supervisor._stop_is_build_restart() is False
+
+
 # ---------------------------------------------------------------------------
 # #3028 review r4 MAJOR-2: the marker must not travel past the runtimes the
 # supervisor forks itself. TWO HOPS through the real env builder
@@ -656,3 +702,101 @@ def test_a_candidate_with_only_a_run_record_is_keyed_from_it(tmp_path: Path, mon
 
     assert owned_runtimes.sweep(root, owner="owner-a") == [111]
     assert seen[0] is not None and seen[0]["started_at"] == 1_799_990_123.5
+
+
+def _census(monkeypatch, rows) -> None:
+    """Serve ``rows`` to ``count_owned`` as a READABLE process table.
+
+    ``count_owned`` answers ``None`` unless its ``ps -eo`` run printed something,
+    so the fake census calls the runner it is handed (stubbed to one line) before
+    returning the rows; the per-pid probe answers from the same rows.
+    """
+    from local_operator.session.runtime import reclaim
+
+    monkeypatch.setattr(reclaim, "_run_command", lambda command, timeout_s: "1 ps")
+
+    def _processes(run=None):  # noqa: ANN001, ANN202
+        if run is not None:
+            run(["ps", "-ww", "-eo", "pid=,command="], 1.0)
+        return rows
+
+    monkeypatch.setattr(reclaim, "runtime_processes", _processes)
+    monkeypatch.setattr(
+        reclaim,
+        "process_row",
+        lambda pid, run=None: next(row for row in rows if row.pid == pid),  # noqa: ARG005
+    )
+
+
+def _env_row(pid: int, env: str, owner: str = "owner-a", session_id: str = "s-1"):
+    marker = f"LOP_MOBILE_CHILD_RESUME={session_id} {owned_runtimes.OWNER_ENV}={owner}"
+    return SimpleNamespace(
+        pid=pid, age_s=30.0, command=f"{sys.executable} -m {RUNTIME_MODULE} {env} {marker}"
+    )
+
+
+def test_a_store_path_with_a_space_is_counted_and_swept_as_its_own(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#4222 QA Q2: a spaced root read as ``scoped 0 wide 2`` and the supervisor moved.
+
+    The root used to be read up to the first space, so ``<tmp>/My Store`` read as
+    ``<tmp>/My`` and the scoped census called the runtime foreign — the one answer
+    that licenses an exec while a conversation is owned.
+    """
+    root = tmp_path / "My Store" / "cfg"
+    rows = [_env_row(111, f"LOCAL_OPERATOR_CONFIG_DIR={root}")]
+    _census(monkeypatch, rows)
+    assert owned_runtimes.count_owned(root) == 1
+    assert owned_runtimes.count_owned(None) == 1
+    sent: list[int] = []
+    monkeypatch.setattr(owned_runtimes.os, "kill", lambda pid, sig: sent.append(pid))
+    assert owned_runtimes.sweep(root, any_owner=True) == [111]
+
+
+def test_a_trailing_slash_on_the_runtimes_root_is_the_same_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``paths.config_dir`` is ``Path(override)``, so ``/a/b/`` is ``/a/b`` to the runtime."""
+    root = tmp_path / "cfg"
+    rows = [_env_row(111, f"LOCAL_OPERATOR_CONFIG_DIR={root}/")]
+    _census(monkeypatch, rows)
+    assert owned_runtimes.count_owned(root) == 1
+    sent: list[int] = []
+    monkeypatch.setattr(owned_runtimes.os, "kill", lambda pid, sig: sent.append(pid))
+    assert owned_runtimes.sweep(root, any_owner=True) == [111]
+
+
+def test_an_undecidable_root_counts_as_owned_but_is_never_signalled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Fail safe in both directions (#4222 QA Q2).
+
+    No ``LOCAL_OPERATOR_CONFIG_DIR`` and no ``HOME`` leaves no root to compare,
+    and a root containing `` NAME=`` reads short with the target as one possible
+    reading. Both COUNT (a move or restart is only deferred) and neither is
+    SIGNALLED (a signal to another store's conversation cannot be undone).
+    """
+    root = tmp_path / "a X=b"
+    rows = [
+        _env_row(111, ""),
+        _env_row(222, f"LOCAL_OPERATOR_CONFIG_DIR={root}"),
+    ]
+    _census(monkeypatch, rows)
+    assert owned_runtimes.count_owned(root) == 2
+    sent: list[int] = []
+    monkeypatch.setattr(owned_runtimes.os, "kill", lambda pid, sig: sent.append(pid))
+    assert owned_runtimes.sweep(root, any_owner=True) == []
+    assert sent == []
+
+
+def test_a_foreign_spaced_root_still_does_not_pin_this_store(tmp_path: Path, monkeypatch) -> None:
+    """The fail-safe is narrow: an unrelated root, spaced or not, is still a mismatch."""
+    ours = tmp_path / "ours"
+    rows = [
+        _env_row(111, f"LOCAL_OPERATOR_CONFIG_DIR={tmp_path / 'My Store'}"),
+        _env_row(222, f"HOME={tmp_path / 'other home'}"),
+    ]
+    _census(monkeypatch, rows)
+    assert owned_runtimes.count_owned(ours) == 0
+    assert owned_runtimes.count_owned(None) == 2

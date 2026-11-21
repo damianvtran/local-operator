@@ -1,0 +1,102 @@
+Execution log captured from subprocess responses; not audit notes.
+Provenance reference: i18n/audits/evidence/ru/cli.serve_readiness/sd1/record.json
+UTC started: 2026-11-16T04:40:14.404733+00:00
+
+$ git rev-parse HEAD
+STDOUT:
+e4a6b6e1d01ef269604fe6d005e6bce1453b66ca
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python i18n/audits/evidence/ru/cli.serve_readiness/sd1/mechanical.py.txt
+STDOUT:
+PASS strict JSON, duplicate rejection, exact source/target/context key parity: 11/11
+Note: independent explicit category check supplements repo validator, which rejects invalid categories but need not require every category.
+PASS cli.serve_readiness.unproven: args=(); plural=(); rendered cells=118..118; width hints={}
+PASS cli.serve_readiness.not_reporting: args=(); plural=(); rendered cells=62..62; width hints={}
+PASS cli.serve_readiness.not_this_daemon: args=(); plural=(); rendered cells=64..64; width hints={}
+PASS cli.serve_readiness.unknown_state: args=(); plural=(); rendered cells=39..39; width hints={}
+PASS cli.serve_readiness.install_unknown: args=(); plural=(); rendered cells=58..58; width hints={}
+PASS cli.serve_readiness.cgroup_unknown: args=(); plural=(); rendered cells=69..69; width hints={}
+PASS cli.serve_readiness.recorded_gap: args=(('recorded', 'simple'), ('install', 'simple')); plural=(); rendered cells=93..93; width hints={}
+RENDER cli.serve_readiness.unknown count=1: демон `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+RENDER cli.serve_readiness.unknown count=2: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=5: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=1.5: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+PASS cli.serve_readiness.unknown: args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=170..172; width hints={}
+RENDER cli.serve_readiness.stale count=1: демон `lop serve` на node-1 (123, 456) использует build-A, но установленная сборка — build-B: размещённые на нём удалённые сессии используют ту другую сборку
+RENDER cli.serve_readiness.stale count=2: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=1.5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+PASS cli.serve_readiness.stale: args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=157..158; width hints={}
+RENDER cli.serve_readiness.other_unit count=1: демон `lop serve` на node-1 находится под управлением другой службы (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=2: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=1.5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+PASS cli.serve_readiness.other_unit: args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=106..106; width hints={}
+PASS cli.serve_readiness.identity_restart: args=(('device', 'simple'),); plural=(); rendered cells=190..190; width hints={}
+PASS 11/11 mechanical checks; 3 plural messages exercised at 0,1,2,5,11,21,22,25,101,1.5. Plain-text width measurements only, not rendered UI or wrapping proof.
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --help
+STDOUT:
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+STDERR:
+
+EXIT_CODE: 0
+
+Re-execution after adding provenance-only reproduction docstring:
+$ .venv/bin/python i18n/audits/evidence/ru/cli.serve_readiness/sd1/mechanical.py.txt
+STDOUT:
+PASS strict JSON, duplicate rejection, exact source/target/context key parity: 11/11
+Note: independent explicit category check supplements repo validator, which rejects invalid categories but need not require every category.
+PASS cli.serve_readiness.unproven: args=(); plural=(); rendered cells=118..118; width hints={}
+PASS cli.serve_readiness.not_reporting: args=(); plural=(); rendered cells=62..62; width hints={}
+PASS cli.serve_readiness.not_this_daemon: args=(); plural=(); rendered cells=64..64; width hints={}
+PASS cli.serve_readiness.unknown_state: args=(); plural=(); rendered cells=39..39; width hints={}
+PASS cli.serve_readiness.install_unknown: args=(); plural=(); rendered cells=58..58; width hints={}
+PASS cli.serve_readiness.cgroup_unknown: args=(); plural=(); rendered cells=69..69; width hints={}
+PASS cli.serve_readiness.recorded_gap: args=(('recorded', 'simple'), ('install', 'simple')); plural=(); rendered cells=93..93; width hints={}
+RENDER cli.serve_readiness.unknown count=1: демон `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+RENDER cli.serve_readiness.unknown count=2: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=5: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=1.5: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+PASS cli.serve_readiness.unknown: args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=170..172; width hints={}
+RENDER cli.serve_readiness.stale count=1: демон `lop serve` на node-1 (123, 456) использует build-A, но установленная сборка — build-B: размещённые на нём удалённые сессии используют ту другую сборку
+RENDER cli.serve_readiness.stale count=2: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=1.5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+PASS cli.serve_readiness.stale: args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=157..158; width hints={}
+RENDER cli.serve_readiness.other_unit count=1: демон `lop serve` на node-1 находится под управлением другой службы (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=2: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=1.5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+PASS cli.serve_readiness.other_unit: args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=106..106; width hints={}
+PASS cli.serve_readiness.identity_restart: args=(('device', 'simple'),); plural=(); rendered cells=190..190; width hints={}
+PASS 11/11 mechanical checks; 3 plural messages exercised at 0,1,2,5,11,21,22,25,101,1.5. Plain-text width measurements only, not rendered UI or wrapping proof.
+
+STDERR:
+
+EXIT_CODE: 0

@@ -102,8 +102,118 @@ _SCREENING_UNAVAILABLE = {
     "batch_unresolved",
     # No evaluated screening model is reachable: nothing judged the message.
     "screening_model_unavailable",
+    # Spine codes written before any verdict and re-driven on the retry backoff
+    # (holds trace 2026-11-18: ``conversation_failed`` published "Held for
+    # review" for every message during the 19:13-19:46Z hub outage).
+    "conversation_failed",
+    "retry_failed",
+    "hold",
+    "body_unavailable",
+    "body_hash_mismatch",
+    "mismatched_id",
+    "sender_malformed",
+    "attachments_malformed",
+    "envelope_missing",
+    "bridge_meta_invalid",
+    "display_context_invalid",
+    "attachments_unbound",
+    "files_unbound",
+    "stale_claim",
+    "stale_claim_retry",
+    "state_unreadable",
+    "not_enrolled",
+    "owner_mismatch",
+    "privacy_pending",
+    "privacy_control_unavailable",
 }
-_DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused"}
+# Delivery-side waits
+# after a verdict, or owner-setup waits like ``bridge_off`` (holds trace).
+_DELIVERY_PENDING = {
+    "delivery_failed",
+    # a replayed card id the receiver still holds in flight: the SAME id is
+    # re-sent on the retry backoff (PR #3478 QA r1), so it is transient.
+    "card_unconfirmed",
+    "bridge_off",
+    "phase_refused",
+    "ack_recovery",
+    "ack_refused",
+    "ack_not_confirmed",
+    "envelope_refused",
+    "receipt_unavailable",
+    "reservation_refused",
+    "invalid_body_reservation",
+    "credential_changed",
+    "consent_revoked",
+    "no_designation",
+    "open_chief_of_staff",
+    "badge_only",
+    "claimed_elsewhere",
+}
+# ``awaiting_review`` BY DECISION, not by fall-through: a person decides (the
+# owner-review and work-scope holds), or the hold is terminal and fail-closed so
+# only the owner can move it — claiming a transient delay would be false.
+_AWAITING_REVIEW = {
+    # a person decides (``screening_failed`` is a Discard-only review code)
+    "screening_failed",
+    # card hand-off identity refusals no retry clears on its own: a legacy row
+    # with no provenance (never auto-replayed), a binding that no longer matches
+    # the live owner/session/state, and partition drift (PR #3478 QA r1).
+    "card_provenance_unknown",
+    "card_binding_mismatch",
+    "card_handoff_split",
+    # owner-action holds: only the owner can restore the authority the hub
+    # withdrew (``OWNER_ACTION_HOLD_CODES``, published awaiting_review on main)
+    "sign_in_required",
+    "consent_required",
+    "owner_ineligible",
+    "screener_required",
+    # a write-once conflict the resolver keeps: the committed verdict no
+    # longer stands under the live policy, so no retry clears it (S-4)
+    "write_once_conflict",
+    "model_hold",
+    "model_refused",
+    "reply_truncated",
+    "bounce_without_category",
+    "work_scope_hold",
+    # content this build can never screen
+    "size_exceeded",
+    "invalid_content",
+    "invalid_content_type",
+    "body_invalid",
+    "envelope_malformed",
+    "envelope_unbound",
+    # damaged proof, schema or feed state
+    "proof_corrupt",
+    "schema_damaged",
+    "schema_unsupported",
+    "schema_unversioned",
+    "ref_migration_conflict",
+    "malformed_feed_ref",
+    # identity, ACK-binding and verdict anomalies, and a local quarantine
+    "verdict_identity_mismatch",
+    "ack_binding_mismatch",
+    "ack_tuple_mismatch",
+    "bounce_receipt_missing",
+    "screening_bounce",
+    "screening_hold",
+    "screening_unknown",
+    "local_quarantine",
+    # settled A8 privacy holds: a completed stage is reused, never re-run
+    "privacy_verdict_hold",
+    "privacy_verdict_bounce",
+    "privacy_invalid",
+    "privacy_unreachable",
+    "privacy_timeout",
+    "privacy_no_credential",
+    "privacy_budget_exhausted",
+    "privacy_uncertain",
+    "privacy_identity_unknown",
+    "privacy_identity_mismatch",
+    "privacy_unsupported_input",
+    "privacy_runner_unavailable",
+    "privacy_proof_missing",
+    "privacy_commit_interrupted",
+}
 
 
 def test_every_screening_category_has_exactly_the_contract_class() -> None:
@@ -168,18 +278,41 @@ def test_every_emitted_hold_code_maps_to_the_contract_class() -> None:
         assert delivery_hold_class(code) in DELIVERY_HOLD_CLASSES
 
 
-def test_the_contract_awaiting_review_examples() -> None:
-    for code in (
-        "model_hold",
-        "local_quarantine",
-        "ack_recovery",
-        "owner_mismatch",
-        "schema_damaged",
-        "body_hash_mismatch",
-        "bounce_without_category",
-        "screening_hold",
+def test_every_hold_code_has_exactly_one_decided_class() -> None:
+    """The full table: every emitted code (and family) is classified ON PURPOSE.
+
+    Before the 2026-11-18 holds trace, 66 codes reached ``awaiting_review`` only
+    because they were absent from both lists, so a transient spine failure told
+    members "Held for review". Now each code sits in exactly one of the three
+    sets above, and a new code fails here until someone decides its class.
+    """
+
+    universe = _emitted_hold_codes() | set(store_mod._FAMILY_HOLD_CODES)
+    tables = (_SCREENING_UNAVAILABLE, _DELIVERY_PENDING, _AWAITING_REVIEW)
+    assert not (_SCREENING_UNAVAILABLE & _DELIVERY_PENDING)
+    assert not (_SCREENING_UNAVAILABLE & _AWAITING_REVIEW)
+    assert not (_DELIVERY_PENDING & _AWAITING_REVIEW)
+    assert set().union(*tables) == universe
+    for expected, table in (
+        ("screening_unavailable", _SCREENING_UNAVAILABLE),
+        ("delivery_pending", _DELIVERY_PENDING),
+        ("awaiting_review", _AWAITING_REVIEW),
     ):
-        assert delivery_hold_class(code) == "awaiting_review", code
+        for code in sorted(table):
+            assert delivery_hold_class(code) == expected, code
+
+
+def test_a_transient_spine_failure_is_never_published_as_a_review() -> None:
+    # The outage case itself, and the codes the trace named.
+    for code in (
+        "conversation_failed",
+        "body_unavailable",
+        "sender_malformed",
+        "attachments_malformed",
+        "retry_failed",
+    ):
+        assert delivery_hold_class(code) == "screening_unavailable", code
+    assert delivery_hold_class("ack_recovery") == "delivery_pending"
 
 
 @pytest.mark.parametrize(
@@ -187,7 +320,7 @@ def test_the_contract_awaiting_review_examples() -> None:
     [
         ("phase_refused:anything_the_hub_said", "delivery_pending"),
         ("policy_stale:policy_epoch", "screening_unavailable"),
-        ("ack_recovery:whatever", "awaiting_review"),
+        ("ack_recovery:whatever", "delivery_pending"),
         ("breaker_open:extra", "awaiting_review"),  # not a family: unknown
         ("", "awaiting_review"),
         (None, "awaiting_review"),
@@ -201,7 +334,7 @@ def test_families_collapse_and_unknowns_are_conservative(code: Any, expected: st
 
 
 def test_codes_written_as_literals_in_the_connector_are_covered() -> None:
-    """A literal ``"code": "<x>"`` hold in the connector must be a known code.
+    """A literal ``"code": "<x>"`` or ``held("<x>")`` hold in the connector must be known.
 
     Otherwise it would fall to ``awaiting_review`` by accident rather than by
     decision. The whitelist is #3189's; this pins that the delivery-state
@@ -209,10 +342,15 @@ def test_codes_written_as_literals_in_the_connector_are_covered() -> None:
     """
 
     root = Path(store_mod.__file__).parent / "connector"
-    literal = re.compile(r'"code":\s*"([a-z_]+)"')
+    # ``held("<x>")`` is the conversation spine's publish path: ``files_unbound``
+    # was written there and reached no list until the 2026-11-18 holds trace.
+    literals = (re.compile(r'"code":\s*"([a-z_]+)"'), re.compile(r'\bheld\("([a-z_]+)"\)'))
     found: set[str] = set()
     for path in root.glob("*.py"):
-        found |= set(literal.findall(path.read_text(encoding="utf-8")))
+        text = path.read_text(encoding="utf-8")
+        for literal in literals:
+            found |= set(literal.findall(text))
+    assert "conversation_failed" in found  # the held() scan is live
     unknown = found - _emitted_hold_codes() - {"admission_unverified", "screening_bounce"}
     assert not unknown, f"connector hold codes outside the whitelist: {sorted(unknown)}"
 
@@ -537,8 +675,40 @@ def test_a_pre_screen_hold_publishes_held_too(tmp_path, monkeypatch, setup, code
     hold = Store(config_dir).screening_hold(a, ref.encode())
     assert hold is not None and hold["hold_code"] == code
     assert screened == [] and admits == []
-    assert [(p["message_id"], p["hold_class"]) for p in published] == [(MID, "awaiting_review")]
+    # Nothing judged these bytes and the row is re-driven on the backoff, so the
+    # sender is told screening is unavailable, never that a person is reviewing
+    # it (holds trace 2026-11-18; both used to fall through to awaiting_review).
+    assert [(p["message_id"], p["hold_class"]) for p in published] == [
+        (MID, "screening_unavailable")
+    ]
     assert code not in json.dumps({k: v for k, v in published[0].items() if k != "access"})
+
+
+def test_an_unexpected_spine_failure_publishes_screening_unavailable(tmp_path, monkeypatch) -> None:
+    """The 19:13-19:46Z outage (holds trace 2026-11-18): an exception inside the
+    conversation spine is held ``conversation_failed`` and re-driven, and the
+    sender was told "Held for review". Through the real retry pass and publish."""
+
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+
+    a, config_dir, server, published, admits = _rig(tmp_path, monkeypatch)
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("hub went away mid-read")
+
+    monkeypatch.setattr(conversation_mod, "_card_metadata", boom)
+    ref = _ref(server)
+    Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    out = _retry(a, config_dir)
+
+    assert out["outcomes"][0]["action"] == "hold"
+    hold = Store(config_dir).screening_hold(a, ref.encode())
+    assert hold is not None and hold["hold_code"] == "conversation_failed"
+    assert admits == []
+    assert [(p["message_id"], p["hold_class"]) for p in published] == [
+        (MID, "screening_unavailable")
+    ]
 
 
 def test_the_engagement_gate_keeps_its_code_and_publishes_nothing(tmp_path, monkeypatch) -> None:

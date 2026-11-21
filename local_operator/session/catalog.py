@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_operator.info.model import format_duration
+from local_operator.i18n.messages import Msg
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session import temporary
 from local_operator.session.archived import archived_ids
@@ -30,16 +30,27 @@ from local_operator.session.creation import (
 
 logger = logging.getLogger(__name__)
 
-#: The words for a row whose owner has stopped reporting (``live_state ==
-#: "wedged"``), optionally followed by the measured age.
-#:
-#: A constant rather than a literal in :meth:`CatalogEntry.status` because a
-#: SECOND home for it already exists: the sidebar's glyph/description pairing
-#: tests name every phrase the glyphs may carry, and a copy of this string there
-#: is a copy that drifts. ``/info`` and the wake surfaces paraphrase the same
-#: fact in their own sentences — those are sentences, not labels, and they are
-#: asserted where they are built.
-WEDGED_STATUS = "Not answering · process alive"
+
+def wedged_status() -> str:
+    """The words for a row whose owner has stopped reporting (``live_state ==
+    "wedged"``), without the measured age.
+
+    A named function rather than an inline render in :meth:`CatalogEntry.status`
+    because a SECOND home for it already exists: the sidebar's glyph/description
+    pairing tests name every phrase the glyphs may carry, and a copy of this
+    string there is a copy that drifts. ``/info`` and the wake surfaces
+    paraphrase the same fact in their own sentences — those are sentences, not
+    labels, and they are asserted where they are built.
+
+    A FUNCTION, not the former ``WEDGED_STATUS`` constant: the words live in the
+    ``wire.session_status`` catalogue and must be rendered in the product
+    language at read time, so a module-level English string would pin every
+    locale to English (the operator's "no English anywhere" requirement).
+    """
+    from local_operator.i18n.keys import wire_session_status
+
+    return _terminal_label(wire_session_status.wedged())
+
 
 #: The status codes whose sessions are RUNNING: work in progress, and therefore
 #: the rows no listing may hide behind its own expander.
@@ -82,12 +93,10 @@ class CatalogEntry:
     #: that build entries positionally, keep working unchanged.
     completion_token: str = ""
     anchor_id: str = ""
-    #: WHY the outcome is an error, when the store carries a reason — the
-    #: harness-authored cause sentence for a cut-off, or the provider's own
-    #: message for a provider error. Appended to the sidebar's two error
-    #: spellings so a row reports a cause instead of only a class. Additive and
-    #: defaulted, so every existing construction site (including the positional
-    #: ones in the sidebar tests) keeps working unchanged.
+    #: Original diagnostic, unchanged from attention storage. Known harness
+    #: causes select localized summaries; arbitrary provider prose is NOT a
+    #: translation parameter. Unknown provider diagnostics retain their legacy
+    #: English row pending a separate, useful-detail-preserving UI contract.
     completion_reason: str = ""
     #: Set ONLY on rows from the hidden subagent population.
     #:
@@ -429,7 +438,17 @@ class CatalogEntry:
         # Mirror status_code's defensive suppression of a phantom gate. New
         # producers clear pending, but readers also consume older peer records.
         if self.row.pending and self.row.live_state != "wedged":
-            return "Approval needed" if self.row.pending == "approval" else "Answer needed"
+            # Rendered from ``wire.session_status`` like every rung below: the
+            # client prints this label verbatim (it may not re-derive status),
+            # so English here is English in every locale. ``status_code`` keeps
+            # the stable machine spelling clients branch on.
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(
+                wire_session_status.approval_needed()
+                if self.row.pending == "approval"
+                else wire_session_status.answer_needed()
+            )
         # BEFORE the unseen branch, and mirrored by `shows_completion_mark`,
         # which is what the sidebar suppresses the mark on. A row that is
         # wedged or busy describes itself by what it is doing now.
@@ -444,9 +463,16 @@ class CatalogEntry:
         # the desktop catalogue's ``status.label``, so the same sentence
         # travels to the app unchanged.
         if self.row.live_state == "wedged":
+            # Two whole messages, not a base plus an English suffix: a
+            # translator must be able to move the age inside the sentence.
             age = self.row.heartbeat_age_s
-            measured = f" (last heartbeat {format_duration(age)} ago)" if age is not None else ""
-            return f"{WEDGED_STATUS}{measured}"
+            if age is None:
+                return wedged_status()
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(
+                wire_session_status.wedged_heartbeat(duration=status_duration(age))
+            )
         # THE DRAIN OUTRANKS "Working", and says it in the record's own words.
         # A draining runtime IS working, so "Working" was true and useless: the
         # one thing a reader needs off this row is that the runtime has already
@@ -461,15 +487,17 @@ class CatalogEntry:
         if self.row.waiting_on > 0:
             return waiting_label(self.row.waiting_on, self.row.subagents_running or 0)
         if self.row.live_state == "busy":
-            return "Working"
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(wire_session_status.working())
         if self.shows_completion_mark:
             if self.completion_kind == "error":
-                return self._error_label("Unseen error")
+                return self._error_label(unseen=True)
             if self.completion_kind in {"interrupted", "retired"}:
-                return self._stop_label("Unseen interruption")
-            return {"interrupted": "Unseen interruption"}.get(
-                self.completion_kind, "Unseen completion"
-            )
+                return self._stop_label(unseen=True)
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(wire_session_status.unseen_completion())
         # Follows ``row_state_mark``'s precedence EXACTLY, so the tooltip can
         # never name a different state from the glyph beside it. The glyph is a
         # single character and the description is where a user finds out what it
@@ -481,7 +509,11 @@ class CatalogEntry:
         # it must still be the words (round 1, D1: a cold row with a stopped
         # schedule drew the wake mark while the tooltip said "Recent").
         if self.row.live_state == "attached":
-            return "Open"
+            from local_operator.i18n.keys import wire_session_status
+
+            # Key is ``attached`` (the live_state it names), not ``open``,
+            # which would shadow the builtin in the generated key module.
+            return _terminal_label(wire_session_status.attached())
         # The rung's words. Same position as the arm in :attr:`status_code`, and
         # the same predicate: the COUNT is spelled into the label because that is
         # what the transport already carries — no new payload field is needed for
@@ -514,7 +546,13 @@ class CatalogEntry:
             # says so above, because what it is doing outranks what kind it is —
             # the same precedence ``row_state_mark`` follows, so the words and
             # the glyph still cannot disagree.
-            return "Running headless (exec)" if self.row.kind == "exec" else "Ready"
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(
+                wire_session_status.exec_headless()
+                if self.row.kind == "exec"
+                else wire_session_status.ready()
+            )
         if self.row.wakes:
             # Dormant: the schedule exists but the session was stopped, so it is
             # not going to fire. Named rather than hidden — a user who sees the
@@ -527,93 +565,165 @@ class CatalogEntry:
             # the vocabulary for one fact across two surfaces; the receipt's
             # word is the established one, so this follows it rather than
             # asking the receipt to move.
-            count = self.row.wakes
-            return f"Stopped ({count} wake{'s' if count != 1 else ''} dormant)"
+            from local_operator.i18n.keys import wire_session_status
+
+            return _terminal_label(wire_session_status.dormant(count=self.row.wakes))
         if self.completion_token:
             if self.completion_kind == "error":
-                return self._error_label("Error")
+                return self._error_label()
             if self.completion_kind in {"interrupted", "retired"}:
-                return self._stop_label("Interrupted")
-            return {"interrupted": "Interrupted"}.get(self.completion_kind, "Complete")
-        return "Recent"
+                return self._stop_label()
+            from local_operator.i18n.keys import wire_session_status
 
-    def _stop_label(self, base: str) -> str:
-        """``Interrupted``/``Unseen interruption`` plus the rung, when it escalated.
+            return _terminal_label(wire_session_status.complete())
+        from local_operator.i18n.keys import wire_session_status
 
-        The half of design round 1's D1 that the classification change left
-        open. The kind was already right — a stop the operator asked for paints
-        ``⊘`` in the interrupted ink rather than ``✗`` — but the reason reached
-        no surface, so a rung-3 SIGKILL and a rung-1 request produced
-        byte-identical rows and the tooltip said nothing the operator could act
-        on. :func:`incidents.stop_rung_phrase` is the phrase and it is empty for
-        the plain request rung, deliberately: this row's own word already says
-        the user stopped it, and ``/stop`` is exactly what rung 1 is.
+        return _terminal_label(wire_session_status.recent())
 
-        The same budget rule as :meth:`_error_label` — one logical line, no
-        parenthetical stack — and the same tolerance: an empty reason returns
-        the spelling BYTE-IDENTICAL to today's, so every pre-taxonomy record and
-        every plain stop renders exactly as it always has.
+    def _stop_label(self, *, unseen: bool = False) -> str:
+        """Select complete messages by state, never interpolate an English base.
 
-        THE RETIRED ARM (design round 2, D3) suffixes with the cause that
-        actually produced the row, not a stop rung: in this app ``Interrupted``
-        means the OPERATOR stopped the thing (the rung phrases read "killed by
-        /stop"), and a build drain has no operator act behind it — the label
-        must not misattribute agency. Same suffix pattern, same warning ink and
-        status code; only the words gain the cause.
+        Retirement is an update action, not an operator stop. Legacy attribution
+        is decoded only at incidents' existing stored-English boundary; unknown
+        provenance stays a truthful generic interruption. Raw reasons remain on
+        the completion record, independent of the localized label.
         """
-        from local_operator.incidents import stop_rung_phrase
+        from local_operator.i18n.keys import wire_session_status as keys
+        from local_operator.incidents import stop_rung_from_reason
 
         if self.completion_kind == "retired":
-            # Backend-composed and printed verbatim by every client (the sidebar
-            # contract forbids re-deriving status), so the cause is keyed like
-            # ``scheduled_label``. ``base`` is the row's already-composed word.
-            from local_operator.i18n.keys import wire_session_status
-            from local_operator.i18n.messages import render
+            return _terminal_label(keys.unseen_retirement() if unseen else keys.retired())
+        rung, command = stop_rung_from_reason(self.completion_reason or "")
+        if rung == "sigterm":
+            message = (
+                keys.unseen_signal_stop(command=command or "none")
+                if unseen
+                else keys.signal_stop(command=command or "none")
+            )
+        elif rung == "sigkill":
+            message = (
+                keys.unseen_forced_kill(command=command or "none")
+                if unseen
+                else keys.forced_kill(command=command or "none")
+            )
+        else:
+            message = keys.unseen_interruption() if unseen else keys.interrupted()
+        return _terminal_label(message)
 
-            message = wire_session_status.retired_label(base=base)
-            return render(message.code, dict(message.params), locale=_label_locale())
-        phrase = stop_rung_phrase(self.completion_reason or "")
-        return f"{base} — {phrase}" if phrase else base
+    def _error_label(self, *, unseen: bool = False) -> str:
+        """Localize known harness causes without losing external diagnostics.
 
-    def _error_label(self, base: str) -> str:
-        """``Error``/``Unseen error`` plus the reason, when there is one.
-
-        The ONE-LINE BUDGET IS THE ROW, not the tooltip, and the earlier wording
-        here said the opposite (design round 1, D6, which measured it): the
-        ``Tooltip`` widget WRAPS — an error row renders 36×5 and 36×6 cells and
-        the longest sentence winds over four rows above the id line — so a
-        claim that the tooltip truncates was the justification for dropping a
-        parenthetical that would in fact fit. What the sidebar cannot afford is
-        the ROW's single description cell, and what the reason is trimmed to is
-        therefore its first SENTENCE: the parenthetical DETAIL
-        (``runtime-retired`` carries a build pair — ``(0.54.11@b133eba →
-        0.54.12@402af7f)`` — which is useful in the incident card the model
-        reads and noise in a list of sessions) is dropped for brevity, not for
-        clipping. An empty reason leaves the spelling BYTE-IDENTICAL to today's,
-        which is what keeps every pre-taxonomy record and every completion
-        unchanged.
+        Unknown provider prose retains the entire legacy English row, rather
+        than mixing a translated prefix with an untranslated reason or silently
+        dropping the desktop's only diagnostic. That path is unresolved i18n
+        programme work, NOT a fully localized message or accepted exception.
+        CLI WHY (incidents.outcome_summary) keeps its separate contract.
         """
-        reason = (
-            self.completion_reason.strip().splitlines()[0].strip()
-            if self.completion_reason.strip()
-            else ""
+        from local_operator.i18n.keys import wire_session_status as keys
+        from local_operator.incidents import cause_from_reason
+
+        cause = cause_from_reason(self.completion_reason or "")
+        if cause:
+            message = (
+                keys.unseen_error_cause(cause=cause.replace("-", "_"))
+                if unseen
+                else keys.error_cause(cause=cause.replace("-", "_"))
+            )
+        elif self.completion_reason.strip():
+            return _legacy_external_error_label(self.completion_reason, unseen=unseen)
+        else:
+            message = keys.unseen_error() if unseen else keys.error()
+        return _terminal_label(message)
+
+
+def _legacy_external_error_label(reason: str, *, unseen: bool) -> str:
+    """Retain the pre-extraction external-detail contract byte for byte.
+
+    The desktop list/feed have no separate reason field. Localizing this path
+    needs a reviewed diagnostic-access contract, outside this bounded slice;
+    generic replacement would erase useful information from those interfaces.
+    Do not pass this raw prose as a supposedly translated message parameter.
+    """
+    base = "Unseen error" if unseen else "Error"
+    sentence = reason.strip().splitlines()[0].strip().split(" (", 1)[0].rstrip()
+    if len(sentence) > 160:
+        sentence = sentence[:157].rstrip() + "…"
+    return f"{base} — {sentence}"
+
+
+def _terminal_label(message: Msg) -> str:
+    """Use the catalogue's config-owned locale for backend labels, not UI state."""
+    from local_operator.i18n.messages import render
+
+    return render(message.code, dict(message.params), locale=_label_locale())
+
+
+def status_duration(seconds: float) -> str:
+    """A compact elapsed time (``42s`` / ``4m`` / ``3h 12m`` / ``2d 4h``) in the
+    row-label language, for insertion into a ``wire.session_status`` sentence.
+
+    WHY a catalogue render rather than :func:`local_operator.info.model.format_duration`:
+    the unit letters are product copy inside a localized label, so an ASCII
+    ``4m`` inside a French sentence was English leaking into a translated row
+    (the operator's "no English anywhere" requirement). ``info.model`` stays
+    stdlib-only by contract and keeps its own ASCII spelling for ``/info``;
+    migrating that screen is a separate slice.
+
+    CONSTRAINTS:
+
+    * The four branches and their thresholds are ``info.model.format_duration``'s
+      exactly, so English output is byte-identical to what the row printed
+      before (pinned by ``tests/unit/session/test_catalog_status_duration.py``).
+    * Locale comes from :func:`_label_locale` via :func:`_terminal_label` — the
+      same config-owned language as the enclosing sentence, never the TUI's
+      active-locale seam — so the duration cannot disagree with its sentence.
+    * ``days`` is passed as a pre-rendered ASCII digit string, not an ICU
+      ``number``: the renderer supports no ``::group-off`` skeleton (only
+      ``integer|percent|decimal``), and a number argument would turn a
+      1000-day age into ``1,000d`` where English printed ``1000d``. No shipped
+      locale transliterates digits (``i18n.format`` emits ASCII digits for all),
+      so the string loses nothing. The other arms are bounded below 1000
+      (seconds/minutes < 60, hours < 24), so their ``number`` arguments never
+      group.
+    * Negative ages clamp to zero like the original; callers handle ``None``
+      ("not measured") themselves — this never renders ``unknown``.
+    """
+    from local_operator.i18n.keys import wire_session_status
+
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return _terminal_label(wire_session_status.duration_seconds(count=total))
+    if total < 3600:
+        return _terminal_label(wire_session_status.duration_minutes(count=total // 60))
+    if total < 86400:
+        return _terminal_label(
+            wire_session_status.duration_hours_minutes(
+                hours=total // 3600, minutes=(total % 3600) // 60
+            )
         )
-        if not reason:
-            return base
-        sentence = reason.split(" (", 1)[0].rstrip()
-        if len(sentence) > 160:
-            # A provider's own message can be a paragraph; the tooltip cannot
-            # grow a second line for it.
-            sentence = sentence[:157].rstrip() + "…"
-        return f"{base} — {sentence}"
+    return _terminal_label(
+        wire_session_status.duration_days_hours(
+            days=str(total // 86400), hours=(total % 86400) // 3600
+        )
+    )
 
 
 def waiting_label(jobs: int, subagents: int = 0) -> str:
-    """Shared sentence-case label for a foreground wait, not generic busy."""
-    head = f"Waiting on {jobs} {'job' if jobs == 1 else 'jobs'}"
+    """Shared sentence-case label for a foreground wait, not generic busy.
+
+    Two WHOLE ICU messages (with and without the subagent count) rather than a
+    head plus an appended clause: English pluralised by hand (``== 1``) is wrong
+    for locales with more than two plural forms, and a translator must be free
+    to reorder the clauses. Only the ``subagents > 0`` choice stays here,
+    because "0 subagents running" is noise the row never printed.
+    """
+    from local_operator.i18n.keys import wire_session_status
+
     if subagents > 0:
-        head += f" · {subagents} {'subagent' if subagents == 1 else 'subagents'} running"
-    return head
+        return _terminal_label(
+            wire_session_status.waiting_subagents(jobs=jobs, subagents=subagents)
+        )
+    return _terminal_label(wire_session_status.waiting(jobs=jobs))
 
 
 def delegating_label(running: int, queued: int, jobs: int = 0) -> str:
@@ -647,16 +757,26 @@ def delegating_label(running: int, queued: int, jobs: int = 0) -> str:
     and ``sr-only`` carry verbatim, and naming it lets any surface that wants the
     same sentence ask for it instead of assembling a second vocabulary (U11).
     """
+    # Each addend is its own catalogue message (seven present/absent shapes
+    # would otherwise be seven near-duplicate sentences per locale); every
+    # segment is a complete phrase with locale plural rules, and only the
+    # language-neutral `` · `` separator is joined here. The queued addend
+    # drops its noun when it follows the running segment, so it is a distinct
+    # key rather than the same message with a stripped word.
+    from local_operator.i18n.keys import wire_session_status as keys
+
     parts = []
     if jobs > 0:
-        parts.append(f"{jobs} {'job' if jobs == 1 else 'jobs'} running")
+        parts.append(_terminal_label(keys.delegating_jobs(count=jobs)))
     if running > 0:
-        parts.append(f"{running} {'subagent' if running == 1 else 'subagents'} running")
+        parts.append(_terminal_label(keys.delegating_running(count=running)))
     if queued > 0:
         parts.append(
-            f"{queued} queued"
-            if running > 0
-            else f"{queued} {'subagent' if queued == 1 else 'subagents'} queued"
+            _terminal_label(
+                keys.delegating_queued_addend(count=queued)
+                if running > 0
+                else keys.delegating_queued(count=queued)
+            )
         )
     return " · ".join(parts)
 
@@ -788,7 +908,7 @@ def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> S
     """``status_of``'s pair with the CLOCK term removed — the edge channel's key.
 
     WHY THE PAIR IS NOT ENOUGH (review round 1, MINOR 2). One label carries a
-    live clock: the ``wedged`` arm embeds ``format_duration(heartbeat_age_s)``
+    live clock: the ``wedged`` arm embeds ``status_duration(heartbeat_age_s)``
     (``46s`` -> ``47s`` -> ``1m``), so a wedged session's pair changes with the
     clock alone, with no write and no event behind it — roughly one change per
     second for the 45-59 s window after the beat crosses

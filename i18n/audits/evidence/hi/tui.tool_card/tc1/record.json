@@ -1,0 +1,76 @@
+{
+  "locale": "hi",
+  "namespace": "tui.tool_card",
+  "date": "2026-11-20",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "files": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.json",
+      "sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/tui.tool_card.json",
+      "sha256": "50e639cc252bb8bbededd498bb8e3f1032cba2d368070bce05afcc43d1e1e722"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.context.json",
+      "sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087"
+    }
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "93731d9f018f",
+    "date": "2026-11-20",
+    "fallback": "none",
+    "result": "failed",
+    "unresolved_blocker_major": 1
+  },
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "HI-TC-1",
+        "severity": "major",
+        "key": "tui.tool_card.more.diff_lines",
+        "current": "{count, plural, one {{shown} और diff पंक्ति} other {{shown} और diff पंक्तियाँ}}",
+        "proposed": "{count, plural, one {{shown} और बदलाव की पंक्ति} other {{shown} और बदलाव की पंक्तियाँ}}",
+        "reason": "Literal English diff remains in a human-facing elision marker, not a command/tool identifier; glossary lines 19–50 and 118–127 and Hindi style guide lines 21–28 do not sanction it. Violates the explicit no-English interface goal."
+      }
+    ],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "fail",
+  "keys_read": 16,
+  "validation": {
+    "key_and_argument_parity": "pass",
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "no_exact_selectors": "pass",
+    "render_samples": 36,
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "maxCells": "5 of 5 bounded keys pass",
+    "manual_bidi_controls": "none",
+    "rtl": "not applicable: Hindi is LTR",
+    "rendered_ui": "not performed; runtime string formatting and cell_len only",
+    "comparison_keys": [
+      "tui.small.copy_picker.more_lines",
+      "tui.small.subagent_panel.ctrl_g_expand",
+      "tui.small.todo_panel.collapse",
+      "tui.small.todo_panel.expand",
+      "wire.tool_rows.bridge.outcome.unconfirmed",
+      "wire.tool_rows.bridge.outcome_short.unconfirmed"
+    ]
+  },
+  "status": "failed",
+  "note": "Independent read-only audit of all 16 English/target/context entries at worktree HEAD 4e164d26c8ecc5a8f5fe8d510526277efc4fdd0e; target uncommitted. Translator identity/model supplied by delegation, not independently established: translator / anthropic/claude-opus-5-5. No repo edits. All remaining 15 keys clean; no material width expansion. कैश sanctioned by hi guide lines 10–12 and 25–26; miss, URL, ctrl+c preserved as literal arguments."
+}

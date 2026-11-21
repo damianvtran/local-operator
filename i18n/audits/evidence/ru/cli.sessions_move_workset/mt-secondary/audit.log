@@ -1,0 +1,23 @@
+# Second independent safety audit — ru — PR #4245 delta (22 cli.sessions_move_workset + 6 wire.settings mesh_* keys vs 696a18338)
+# auditor session 1946542ef662 (anthropic/claude-opus-5-5); worktree HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10
+
+## HOWTO gates (each alone)
+# HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10 origin/main 1d7e456afbb93d14e855884a4eb988cbbe5f7553 — before second-audit receipts
+$ python scripts/i18n/generate.py --check
+generate.py --check: 179 artifact(s) byte-identical
+exit=0
+$ python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ python scripts/i18n/check.py --audit-base origin/main
+check.py: ok — 235 file(s) scanned, 2714 literal(s) at or below the baseline, catalogues consistent; 107 advisory finding(s) (report-only until activated)
+exit=0
+
+## Independent mechanical pass + plural renders (n=0,1,2,5,21; source=mbp, device=studio)
+ru cli.sessions_move_workset: 22 delta keys present=True; mismatches=none
+ru wire.settings: 6 delta keys present=True; mismatches=[('help', ['256 MiB'], [])]
+ru n=0: Рабочие файлы получены с mbp: здесь восстановлено 0 worktree. | 0 worktree ещё не восстановлены; это устройство повторит попытку при перезапуске своего relay, а файлы по-прежнему есть на mbp. | Рабочие файлы отправлены на studio: там получено 0 worktree; studio восстанавливает их при прибытии разговора.
+ru n=1: Рабочие файлы получены с mbp: здесь восстановлено 1 worktree. | 1 worktree ещё не восстановлен; это устройство повторит попытку при перезапуске своего relay, а файлы по-прежнему есть на mbp. | Рабочие файлы отправлены на studio: там получен 1 worktree; studio восстанавливает их при прибытии разговора.
+ru n=2: Рабочие файлы получены с mbp: здесь восстановлено 2 worktree. | 2 worktree ещё не восстановлены; это устройство повторит попытку при перезапуске своего relay, а файлы по-прежнему есть на mbp. | Рабочие файлы отправлены на studio: там получено 2 worktree; studio восстанавливает их при прибытии разговора.
+ru n=5: Рабочие файлы получены с mbp: здесь восстановлено 5 worktree. | 5 worktree ещё не восстановлены; это устройство повторит попытку при перезапуске своего relay, а файлы по-прежнему есть на mbp. | Рабочие файлы отправлены на studio: там получено 5 worktree; studio восстанавливает их при прибытии разговора.
+ru n=21: Рабочие файлы получены с mbp: здесь восстановлено 21 worktree. | 21 worktree ещё не восстановлен; это устройство повторит попытку при перезапуске своего relay, а файлы по-прежнему есть на mbp. | Рабочие файлы отправлены на studio: там получен 21 worktree; studio восстанавливает их при прибытии разговора.

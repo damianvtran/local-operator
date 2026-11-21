@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.services_heavy",
+  "history_sha256": "f9af889f0cd4cff3ad5f2e0a086cab14043a137adba4cbf67c978b5a667cc4ca",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "15dbe0c3cc4e5eed1309e34070c6f70df6c126d11057b98ac19eae1c21293f93",
+      "translator": {
+        "agent": "coder agent (lopdev team; commit 117f0383b; session id not relayed)",
+        "model": "not relayed to auditor",
+        "fallback": "unknown",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "copy-reviewer agent acting as i18n auditor (lopdev team, session bae8340eabcb; independent of the coder)",
+        "session": "bae8340eabcb",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target zh-CN/cli.services_heavy.json sha256 99a73ff9793d3d8c5e0f32c7ed734ff328341dde55f4b358f85f0e2e8ca7bdc8 (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. N1 (NIT, not changed): timeout «最长时间（秒）（默认：…）» stacks two parentheticals; kept because （秒） is established catalogue precedent (15 occurrences). 请 used on the next-step bodies (heavy_description, no_command) per style guide. Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "6030d2a2f32786c31c223706df5364c383eb04bc7d9df6e23dd9c5d2870d7d52",
+      "translator": {
+        "agent": "coder agent (lopdev team; commits 002ba4840 + remediation d1c53d681; session id not relayed)",
+        "model": "not relayed to auditor",
+        "fallback": "unknown",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team; round 1 session 50f2395eb392, round 2 session 02399cb08595); wrote no locale value",
+        "session": "02399cb08595",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 2 for PR #4264 (fix/heavy-lease-audit) at head d1c53d681, 2026-11-19. Target zh-CN/cli.services_heavy.json sha256 cd9f509e8027d57754f314c2e5dea86d36c5761fb4ca230b59cd686f15ad4c39. New keys audited: events_header, event_line, no_events, audit_row. Round 2 re-audit of the round-1 failures, now fixed in d1c53d681: audit_row (I4: no CJK/placeholder spaces). Each value is byte-identical to the corrected strings from round 1, checked by codepoint compare; placeholders, indentation and colons kept; no stray Cc/Cf. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comments: PR #4264 '### i18n audit — round 1' (#issuecomment-6999094193) and '### i18n audit — round 2'."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "44fd63869090faf44a686b6561444685b71d314f60c7b74fd2c895405e04aeff",
+      "translator": {
+        "agent": "coder agent (lopdev team; PR #4279 keys at 677e51c23 + remediation a8bfabbd1; PR #4264 keys at 002ba4840 + d1c53d681); convergence merge d58b77b13 changed no value",
+        "model": "anthropic/claude-opus-5-5 for the #4279 keys (per #issuecomment-7003591943); not relayed for the #4264 keys",
+        "fallback": "unknown",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "reviewer agent acting as independent i18n auditor (lopdev team, PR #4279 round 3); wrote no locale value",
+        "session": "e1afd72e36ff",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 3 for PR #4279 (feat/run-bounded-start-by) at head da210a7fb, 2026-11-20, after convergence merge d58b77b13 with origin/main 73f021ab2 (#4264). Target zh-CN/cli.services_heavy catalogue_sha256 f7031a5cb026a4565ffefa6eab85c3bf3fb7ef40fadab7c4745cbb33b107297d (16 keys). The 3 PR keys start_by, late_start, not_start_by are codepoint-equal to the values passed at R2 head a8bfabbd1 (#issuecomment-7003667726), and their en text and context notes are unchanged since a8bfabbd1; the 13 main keys are codepoint-equal to origin/main 73f021ab2, whose chain passed at en 6030d2a2. Re-read the 3 PR keys against the current en (which adds only #4264's events_header, event_line, no_events, audit_row): no shared terminology moved (queue, exit status/code, seconds and lease/log terms consistent within the namespace); placeholders {start_by} {now} {late} {value} and code spans match en; NFC; no Cc/Cf/NBSP/bidi controls. Commits d2b2f3242 and da210a7fb touch no i18n file. Translator and auditor are the same model family (disclosed). No native-speaker review or rendered frame claimed. Comment: PR #4279 '### i18n audit — round 3 (post-convergence receipts)'."
+    }
+  ]
+}

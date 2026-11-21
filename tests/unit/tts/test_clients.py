@@ -100,3 +100,22 @@ async def test_the_byo_leg_never_retries_an_auth_refusal() -> None:
 
     assert _formats(seen) == ["mp3_44100_192"]
     assert caught.value.status_code == 401
+
+
+_SYNTH_KEY = "xk9Q7m2ZrTb4WcL8vNd3Hs5Yp"
+
+
+@pytest.mark.asyncio
+async def test_a_transport_failure_never_quotes_the_key() -> None:
+    # h11 puts the whole header value in its message when it cannot carry it.
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError(f"Illegal header value b'{_SYNTH_KEY} '")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(APIError) as caught:
+            await ElevenLabsTtsClient(_SYNTH_KEY, client=http).synthesize("hello", params=PARAMS)
+    finally:
+        await http.aclose()
+    assert "request failed" in str(caught.value)
+    assert _SYNTH_KEY not in str(caught.value) and _SYNTH_KEY[:8] not in str(caught.value)

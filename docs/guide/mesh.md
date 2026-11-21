@@ -33,6 +33,7 @@ compare on two screens.
 ```bash
 lop network init devmesh                 # create the network, mint this device's identity, start the relay
 lop network invite --role drive          # a single-use token, written to a file, never printed into a pipe
+lop network invite --role read --no-credential-offers   # read-only rig: no share list, no grants
 ```
 
 It prints where the token went; hand that file to the other device out of band

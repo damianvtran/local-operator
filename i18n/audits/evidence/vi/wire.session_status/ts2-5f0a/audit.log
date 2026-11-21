@@ -1,0 +1,387 @@
+{
+  "execution": "scoped check.check_catalogues() with scratch catalogue root; runtime.render_message on actual submitted messages; independent AST category/select completeness guard",
+  "validator_problems": [],
+  "negative_controls": {
+    "missing_key_rejected": true,
+    "renamed_placeholder_rejected": true,
+    "bad_syntax_rejected": true,
+    "missing_one_repo_accepted_known_gap": "not applicable: vi only requires other",
+    "missing_one_independent_guard_rejected": "not applicable",
+    "missing_cause_independent_guard_rejected": true,
+    "missing_cause_repo_accepted": true
+  },
+  "formatter_cases": [
+    {
+      "message_id": "wire.session_status.retired_label",
+      "parameters": {
+        "base": "Interrupted"
+      },
+      "formatted": "Interrupted — đã ngừng để cập nhật"
+    },
+    {
+      "message_id": "wire.session_status.interrupted",
+      "parameters": {},
+      "formatted": "Gián đoạn"
+    },
+    {
+      "message_id": "wire.session_status.unseen_interruption",
+      "parameters": {},
+      "formatted": "Gián đoạn — chưa đọc"
+    },
+    {
+      "message_id": "wire.session_status.retired",
+      "parameters": {},
+      "formatted": "Gián đoạn — đã ngừng để cập nhật"
+    },
+    {
+      "message_id": "wire.session_status.unseen_retirement",
+      "parameters": {},
+      "formatted": "Gián đoạn — chưa đọc — đã ngừng để cập nhật"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — đã dừng bằng tín hiệu"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — đã dừng bằng tín hiệu qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — bị buộc kết thúc"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — bị buộc kết thúc qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "Gián đoạn — chưa đọc — bị buộc kết thúc"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "Gián đoạn — chưa đọc — bị buộc kết thúc qua /stop --all"
+    },
+    {
+      "message_id": "wire.session_status.complete",
+      "parameters": {},
+      "formatted": "Hoàn tất"
+    },
+    {
+      "message_id": "wire.session_status.unseen_completion",
+      "parameters": {},
+      "formatted": "Hoàn tất — chưa đọc"
+    },
+    {
+      "message_id": "wire.session_status.recent",
+      "parameters": {},
+      "formatted": "Gần đây"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 0
+      },
+      "formatted": "Đã dừng (0 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 1
+      },
+      "formatted": "Đã dừng (1 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 2
+      },
+      "formatted": "Đã dừng (2 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 5
+      },
+      "formatted": "Đã dừng (5 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 21
+      },
+      "formatted": "Đã dừng (21 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 101
+      },
+      "formatted": "Đã dừng (101 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 0.5
+      },
+      "formatted": "Đã dừng (0,5 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 1.5
+      },
+      "formatted": "Đã dừng (1,5 lượt thức dậy tạm ngưng)"
+    },
+    {
+      "message_id": "wire.session_status.error",
+      "parameters": {},
+      "formatted": "Lỗi"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error",
+      "parameters": {},
+      "formatted": "Lỗi — chưa đọc"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "user_stop"
+      },
+      "formatted": "Lỗi — người dùng đã dừng"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "Lỗi — runtime tự kết thúc khi chạm ngưỡng đình trệ"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "continuation_limit"
+      },
+      "formatted": "Lỗi — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "output_limit"
+      },
+      "formatted": "Lỗi — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "Lỗi — đã ngừng để cập nhật"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_shutdown"
+      },
+      "formatted": "Lỗi — runtime bị kết thúc trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "Lỗi — runtime rời đi để cập nhật sau ngưỡng tiến triển"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "Lỗi — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_killed"
+      },
+      "formatted": "Lỗi — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "install_mid_update"
+      },
+      "formatted": "Lỗi — bản cài đặt bị thay thế trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "owner_lost"
+      },
+      "formatted": "Lỗi — runtime ngừng phản hồi trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "disposed"
+      },
+      "formatted": "Lỗi — phiên bị giải phóng trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "Lỗi"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "Lỗi"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "user_stop"
+      },
+      "formatted": "Lỗi — chưa đọc — người dùng đã dừng"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "Lỗi — chưa đọc — runtime tự kết thúc khi chạm ngưỡng đình trệ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "continuation_limit"
+      },
+      "formatted": "Lỗi — chưa đọc — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "output_limit"
+      },
+      "formatted": "Lỗi — chưa đọc — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "Lỗi — chưa đọc — đã ngừng để cập nhật"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_shutdown"
+      },
+      "formatted": "Lỗi — chưa đọc — runtime bị kết thúc trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "Lỗi — chưa đọc — runtime rời đi để cập nhật sau ngưỡng tiến triển"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "Lỗi — chưa đọc — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_killed"
+      },
+      "formatted": "Lỗi — chưa đọc — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "install_mid_update"
+      },
+      "formatted": "Lỗi — chưa đọc — bản cài đặt bị thay thế trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "owner_lost"
+      },
+      "formatted": "Lỗi — chưa đọc — runtime ngừng phản hồi trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "disposed"
+      },
+      "formatted": "Lỗi — chưa đọc — phiên bị giải phóng trong lượt"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "Lỗi — chưa đọc"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "Lỗi — chưa đọc"
+    }
+  ],
+  "counts": {
+    "keys": 17,
+    "cause_arms_per_seen_unseen": 13,
+    "rendered_cases": 54
+  },
+  "not_claimed": [
+    "runtime",
+    "visual",
+    "pseudo",
+    "native RTL",
+    "admission to shipped locales"
+  ]
+}

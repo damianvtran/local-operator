@@ -45,6 +45,12 @@ async function loadWorker() {
   const local = new Map([
     ["token", "tok"],
     ["port", 4099],
+    // The driven tab (chrome.tabs.get below) sits on an approved site, as any
+    // tab the agent reached through open/goto does: page commands re-check the
+    // tab's current origin against these grants (surface-origin.ts), and an
+    // unapproved page would answer origin_not_allowed before the driver ever
+    // attached — which is not the role behaviour these rows pin.
+    ["origins", { "https://example.com": "allow" }],
   ]);
   const writes = [];
   const attached = [];

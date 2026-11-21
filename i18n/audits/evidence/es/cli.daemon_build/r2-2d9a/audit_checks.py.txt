@@ -1,0 +1,46 @@
+"""cli.daemon_build audit checks (i18n-auditor, session 2d9a335da8ba, round 2).
+Mechanical parity + terminology census + typography probes. Read-only."""
+import glob, hashlib, json, re
+from collections import Counter
+C = "local_operator/i18n/catalogues"
+LOCS = ["fr", "es", "zh-CN", "vi"]
+NS = "cli.daemon_build"
+def load(l):
+    d = {}
+    for f in glob.glob(f"{C}/{l}/*.json"):
+        if not f.endswith(".context.json"):
+            d.update(json.load(open(f)))
+    return d
+sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+E = json.load(open(f"{C}/en/{NS}.json"))
+print("en", sha(f"{C}/en/{NS}.json"), "context", sha(f"{C}/en/{NS}.context.json"), "keys", len(E))
+ph = lambda s: sorted(re.findall(r"\{[^}]*\}", s)); bt = lambda s: sorted(re.findall(r"`[^`]*`", s))
+for l in LOCS:
+    p = f"{C}/{l}/{NS}.json"; d = json.load(open(p))
+    bad = [k for k in E if k not in d or ph(d[k]) != ph(E[k]) or bt(d[k]) != bt(E[k])]
+    print(f"[parity] {l} sha={sha(p)} keys={len(d)} added={sorted(set(d)-set(E))} dropped={sorted(set(E)-set(d))} placeholder/backtick mismatches={bad}")
+en = load("en"); L = {l: load(l) for l in LOCS}
+hits = [k for k, v in en.items() if re.search(r"\bbuild\b", v) and not k.startswith(NS)]
+print(f"[term] en keys (outside {NS}) containing 'build': {len(hits)}")
+for l, pats in [("fr", ["build", "version"]), ("es", ["compilaci", "versi"]), ("zh-CN", ["构建", "版本"]), ("vi", ["bản dựng", "phiên bản"])]:
+    c = Counter(p for k in hits for p in pats if p in L[l].get(k, ""))
+    new = Counter(p for v in json.load(open(f"{C}/{l}/{NS}.json")).values() for p in pats if p in v)
+    print(f"[term] {l} established(build keys)={dict(c)} new {NS}={dict(new)}")
+svc = [k for k in en if k.startswith("cli.services_help.") and "build" in en[k]]
+for l in ["fr", "es", "zh-CN"]:
+    for k in svc[:3]:
+        print(f"[term] {l} {k}: {L[l][k][:90]}")
+fr = json.load(open(f"{C}/fr/{NS}.json"))
+frall = "\n".join(v for k, v in L["fr"].items() if not k.startswith(NS))
+print(f"[typo] fr catalogue U+202F before ';' = {frall.count(chr(0x202f)+';')}, plain space before ';' = {frall.count(' ;')}")
+for k, v in fr.items():
+    if ";" in v: print(f"[typo] fr {k}: char before ';' = U+{ord(v[v.index(';')-1]):04X}")
+zh = json.load(open(f"{C}/zh-CN/{NS}.json")); zhall = "\n".join(v for k, v in L["zh-CN"].items() if not k.startswith(NS))
+print(f"[typo] zh-CN catalogue CJK+space+'{{' = {len(re.findall(r'[一-鿿] \{', zhall))}, CJK+'{{' = {len(re.findall(r'[一-鿿]\{', zhall))}; CJK+space+'`' = {len(re.findall(r'[一-鿿] `', zhall))}, CJK+'`' = {len(re.findall(r'[一-鿿]`', zhall))}")
+for k, v in zh.items(): print(f"[typo] zh-CN {k}: spaced tokens = {re.findall(r'. [{`]|[}`] .', v)}")
+# round 2: fr/vi collocation probe for the "running on the new build" attachment (FR2-1 / VI-1)
+for l, pat in [("fr", r"en cours d’exécution sur"), ("es", r"en ejecución con"), ("vi", r"đang chạy trên")]:
+    d = json.load(open(f"{C}/{l}/{NS}.json"))
+    for k, v in d.items():
+        if re.search(pat, v): print(f"[attach] {l} {k}: contains '{pat}'")
+print("[git] head", __import__("subprocess").check_output(["git","rev-parse","HEAD"]).decode().strip())

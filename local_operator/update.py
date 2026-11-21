@@ -2477,9 +2477,23 @@ def generation_in_argv(argv: str) -> Path | None:
     fields = argv.split(None, 1)
     if not fields:
         return None
-    candidate = Path(fields[0])
+    return generation_containing(Path(fields[0]))
+
+
+def generation_containing(path: Path) -> Path | None:
+    """The generation root ``path`` lies under, spelled as an ANCESTOR of ``path``.
+
+    The path-level half of :func:`generation_in_argv`, with the same lexical-file /
+    resolved-ancestors rule (see there for why both halves are load-bearing). The
+    answer is one of ``path``'s own (unresolved) ancestors, so a caller can
+    ``path.relative_to(answer)`` to re-anchor the same file under
+    :func:`pointer_path` — which is what the bash tool's ``lop`` shim does so its
+    link follows ``lop update`` instead of pinning the generation it was made in.
+
+    ``None`` for a path not under ``generations_dir()`` and for that directory itself.
+    """
     generations = generations_dir().resolve()
-    for parent in candidate.parents:
+    for parent in path.parents:
         if parent.parent.resolve() == generations:
             return parent
     return None
@@ -9518,6 +9532,106 @@ def _main_pid(fields: Mapping[str, str]) -> int | None:
     return pid if pid > 0 else None
 
 
+def systemd_install_build_line(
+    *,
+    name: str,
+    unit: str,
+    recovery: str,
+    restart_when_unproven: bool,
+    systemctl: Callable[..., Any] | None = None,
+    stale_of: Callable[[int], Path | None] | None = None,
+    verdict_of: Callable[[int], bool | None] | None = None,
+) -> launchd.InstallBuildCheck:
+    """The Linux installers' build check after ``enable --now``.
+
+    THE SAME TRAP AS THE MACOS "ALREADY CURRENT" BRANCH (field finding,
+    2026-11-18): ``systemctl --user enable --now`` does not restart a unit that
+    is already running, and the unit file names the stable shim, so a re-install
+    after an upgrade left the old build serving.
+
+    Answers the SAME :class:`launchd.InstallBuildCheck` as the macOS
+    :func:`launchd.check_running_build_on_install`, so both platforms share the
+    keyed ``cli.daemon_build`` copy and the same failure handling (review R1-2:
+    a ``failed`` outcome fails the install, it is not an ordinary step).
+
+    PROOF FIRST, via #4175's :func:`_systemd_restart_if_build_moved` reused
+    UNCHANGED (the update path's behaviour is not this PR's to alter): it
+    restarts on proven staleness and answers ``current`` otherwise. THAT
+    ``current`` CONFLATES "proven current" WITH "could not read" (its two-state
+    reader maps unreadable to not-stale; review R1-1), which on a pip/uv
+    in-place install left the old process running in silence. So a ``current``
+    is re-asked here with the tri-state reader: ``False`` stays silent; anything
+    else restarts when the daemon can take an unrequested bounce
+    (``restart_when_unproven`` — mobile, mirroring macOS) and otherwise answers
+    ``unconfirmed``, whose step names ``recovery``.
+
+    The collaborators are injectable so tests never reach a live user manager.
+    """
+    from local_operator import supervisors
+
+    run = systemctl or supervisors.systemctl_user
+    staleness = stale_of or stale_generation_of_process
+    verdict_reader = verdict_of or generation_staleness_of_process
+    # The mover's proof, captured on the way through: its ``restarted`` detail
+    # is the generation, but its ``unverified`` detail is a sentence, and the
+    # keyed step needs the bare generation either way.
+    proven: list[Path] = []
+
+    def stale_capture(pid: int) -> Path | None:
+        found = staleness(pid)
+        if found is not None:
+            proven.append(found)
+        return found
+
+    moved = _systemd_restart_if_build_moved(
+        name=name,
+        unit=unit,
+        recovery=recovery,
+        keeps_children=False,
+        systemctl=run,
+        stale_of=stale_capture,
+    )
+    if moved.kind in {"restarted", "unverified"}:
+        # ``unverified`` = a NEW MainPID whose build could not be read: the same
+        # confirmation (a new process behind the unit) macOS's ``restarted``
+        # rests on, so it gets the same line.
+        generation = proven[0].name if proven else moved.detail
+        return launchd.InstallBuildCheck(kind="restarted", recovery=recovery, generation=generation)
+    if moved.kind in {"failed", "stale"}:
+        # ``stale`` (a deferral) cannot arise with ``keeps_children=False``; if
+        # it ever does, a needed restart did not happen, which is a failure.
+        return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+    if moved.kind != "current":
+        # not-installed / not-addressable: the unit this install just enabled
+        # is not one this home can address; the enable step already spoke.
+        return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+    try:
+        pid = _main_pid(_systemd_show(run, unit))
+        if pid is None:
+            # A stopped unit right after ``enable --now`` has no running build
+            # to be stale; whatever stopped it is the install's health check's.
+            return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+        if verdict_reader(pid) is False:
+            return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+        # None (unreadable) or a late True (the pointer moved between the
+        # mover's read and this one) is UNPROVEN, as on macOS.
+        if not restart_when_unproven:
+            return launchd.InstallBuildCheck(kind="unconfirmed", recovery=recovery)
+        restarted = run("restart", unit, timeout=120)
+        if getattr(restarted, "returncode", 1) != 0:
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        after = _main_pid(_systemd_show(run, unit))
+        if after is None or after == pid:
+            # No NEW process: the restart did not happen, whatever the exit
+            # code said (the mover's and ``launchd._await_new_pid``'s rule).
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        return launchd.InstallBuildCheck(kind="restarted-unconfirmed", recovery=recovery)
+    except Exception:  # noqa: BLE001 — an install's build probe never raises
+        if restart_when_unproven:
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        return launchd.InstallBuildCheck(kind="unconfirmed", recovery=recovery)
+
+
 def _systemd_restart_if_build_moved(
     *,
     name: str,
@@ -10799,6 +10913,18 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
         "runtimes": {
             "measured": measured,
             **{key: value if measured else None for key, value in counts.items()},
+            # "RETIRING", NOT "LEFT BEHIND" (update-parity item 4, 2026-11-18). The
+            # receipt is written seconds after the flip, but an idle runtime on a
+            # superseded generation leaves on its OWN soft refresh — the settle
+            # (``buildwatch.BUILD_SETTLE_S``, 10 s) plus a stagger of up to
+            # ``BUILD_STAGGER_S`` (20 s) — so ``known_old_idle`` alone read as
+            # runtimes the update had stranded when they were ~30 s from gone.
+            # The smaller of the two honest fixes: a label, not a 35 s re-count
+            # that would hold every `lop update` exit (and the desktop app's
+            # blocking wait on this line) for a reading that changes nothing it
+            # does. Additive, so the ``rolling-no-kill-v1`` keys keep their
+            # meaning; busy ones are NOT retiring — they wait for their turn.
+            "retiring": counts["known_old_idle"] if measured else None,
         },
     }
 

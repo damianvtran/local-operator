@@ -22,6 +22,7 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator.server import registry as serve_registry
 from local_operator.server.app import app, lifespan
+from tests.unit.server.app_state import restored_app_state
 
 
 @pytest.fixture
@@ -41,15 +42,10 @@ def restore_app_state() -> Iterator[None]:
     that way would restore the test's own changes. It matters here because
     ``advertised_address(app)`` reads the announced address off this state.
     """
-    saved = {key: app.state[key] for key in app.state}
-    state = app.state
-    try:
+    # The shared helper also detaches lifespan-closed hosts, so a lifespan run
+    # here cannot hand a closed auth store back to the next test.
+    with restored_app_state(app):
         yield
-    finally:
-        for key in list(state):
-            del state[key]
-        for key, value in saved.items():
-            state[key] = value
 
 
 @pytest.mark.asyncio

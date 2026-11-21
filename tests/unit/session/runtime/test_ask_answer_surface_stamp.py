@@ -601,6 +601,9 @@ async def _serve_asks(tmp_path: Path, cap: bytes, queue: AskQueue) -> Any:
             return None
 
     session = _AskSession()
+    # The production invariant the minted-here rule reads (F2 Part C): a session
+    # owns the ask queue for its OWN id, so its ``session_id`` is the queue's.
+    session.session_id = queue._session_id
     handle = ServingSessionHandle(
         session, asyncio.get_running_loop(), cwd=str(tmp_path), auto_approve=False
     )
@@ -651,6 +654,8 @@ async def test_the_real_socket_stamps_desktop_only_for_a_proved_frame(
             frame["operator_cap"] = conn.proof(cap)
         reply = await _send(conn, None, frame)
         assert reply["op"] == "ack", reply
+        # F2: the ack names the label the runtime stamped, on the real wire.
+        assert reply.get("surface") == ("desktop" if present_proof else "unverified"), reply
         conn.close()
     finally:
         await live.close(config)

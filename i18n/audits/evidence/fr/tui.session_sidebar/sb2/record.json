@@ -1,0 +1,124 @@
+{
+  "locale": "fr",
+  "namespace": "tui.session_sidebar",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "target_sha256": "4310b521ae76884debc01ece86a3301396c2bc8750f6c46291295eb69dbe3e04",
+  "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+  "input_hashes": {
+    "en": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+    "target_locale": "4310b521ae76884debc01ece86a3301396c2bc8750f6c46291295eb69dbe3e04",
+    "context": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+  },
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "3deb22e4f13a",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": {
+    "changed_keys": [
+      "tui.session_sidebar.footer.asks_note",
+      "tui.session_sidebar.footer.hub_note"
+    ],
+    "semantic_keys_audited": 2,
+    "context_keys_read": 20,
+    "total_sidebar_keys_read": 21,
+    "additional_catalogue_context": "tui.hub_links.detail.title: Liens de hub",
+    "not_full_namespace_reaudit": true
+  },
+  "findings": [],
+  "runtime_checks": [
+    {
+      "key": "tui.session_sidebar.footer.asks_note",
+      "en": "asks: {count}",
+      "fr": "quest. {count}",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "maxCells": 10,
+      "samples": [
+        {
+          "count": 0,
+          "text": "quest. 0",
+          "cells": 8
+        },
+        {
+          "count": 1,
+          "text": "quest. 1",
+          "cells": 8
+        },
+        {
+          "count": 9,
+          "text": "quest. 9",
+          "cells": 8
+        },
+        {
+          "count": 10,
+          "text": "quest. 10",
+          "cells": 9
+        },
+        {
+          "count": 99,
+          "text": "quest. 99",
+          "cells": 9
+        }
+      ]
+    },
+    {
+      "key": "tui.session_sidebar.footer.hub_note",
+      "en": "hub: {count}",
+      "fr": "liens : {count}",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "maxCells": 10,
+      "samples": [
+        {
+          "count": 0,
+          "text": "liens : 0",
+          "cells": 9
+        },
+        {
+          "count": 1,
+          "text": "liens : 1",
+          "cells": 9
+        },
+        {
+          "count": 9,
+          "text": "liens : 9",
+          "cells": 9
+        },
+        {
+          "count": 10,
+          "text": "liens : 10",
+          "cells": 10
+        },
+        {
+          "count": 99,
+          "text": "liens : 99",
+          "cells": 10
+        }
+      ]
+    }
+  ],
+  "note": "Independent round-2 delta audit only; prior round-1 unchanged keys are not re-certified by this receipt. Read all 21 English/French sidebar pairs as composition context, plus hub door title (1 further key). liens matches the shipped title noun Liens; required U+202F is present before colon. quest. is an intelligible terse abbreviation of questions in the pending-answer context. Mixed punctuation is acceptable here: an abbreviation followed directly by its count is readable, and adding French spaced colon to quest. would exceed 10 cells at two digits. Both labels retain lower-case compact register; no address-form, plural-branch or RTL issue applies. Real footer joins complete notes with middle-dot separators and drops whole variants, not label fragments. No rendered frame or full UI fit sign-off claimed; required runtime strings/cell budgets verified at 0,1,9,10,99. No provider fallback used."
+}

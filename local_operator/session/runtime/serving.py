@@ -634,6 +634,23 @@ def _question_prose(question: Any) -> str:
 REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
 
 
+def _origin_kwargs(fn: Any, mesh_origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``{"mesh_origin": ...}`` for a session seam that takes it, else ``{}``.
+
+    Probed like every optional keyword this handle threads into its session
+    (``harness_injected``, ``owner_typed``): a reduced or third-party session
+    from before the mesh-origin carriage keeps its exact old call shape, and
+    there is nothing to pass when no stamp was minted (local, legacy).
+    """
+    if mesh_origin is None:
+        return {}
+    try:
+        accepts = "mesh_origin" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"mesh_origin": dict(mesh_origin)} if accepts else {}
+
+
 def _file_admission_for(
     locality: str | None, capabilities: Iterable[str] | None, operation: str
 ) -> Any:
@@ -717,6 +734,10 @@ class _PromptCommand:
     documents: list["DocumentContent"] | None = None
     #: False for a prompt from a remote connection (see ``prompt``).
     owner_typed: bool = True
+    #: The receiving runtime's mesh origin stamp for a remote prompt
+    #: (``network/origin.py``), threaded to ``Session.prompt`` so the durable row
+    #: carries it. ``None`` for a local prompt and for every legacy producer.
+    mesh_origin: dict[str, Any] | None = None
     # Frozen before queue/spool; never serialized into inbox/receipt JSON.
     _file_capture: Any = None
     #: ADR 0009: the connection's surface, decided by the control server, or
@@ -1389,7 +1410,8 @@ class ServingSessionHandle(SessionHandle):
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         #: Set by :meth:`refuse_gates_for_exit` once a SIGNAL has committed this
         #: runtime to leaving: every gate opened afterwards answers at once with
-        #: the deny/escape answer instead of parking. See that method for why.
+        #: the deny/escape answer instead of parking. See that method for why;
+        #: :meth:`reopen_gates_after_yield` is its single reversal.
         self._gates_closed_for_exit = False
         # request_id -> (monotonic instant, settled value) for gates that LANDED
         # recently. The desktop answer path retries ONCE under the same id when an
@@ -3375,6 +3397,7 @@ class ServingSessionHandle(SessionHandle):
         source: str = SOURCE_PEER,
         command_id: str = "",
         harness_injected: bool = False,
+        mesh_origin: Mapping[str, Any] | None = None,
         message_id: str = "",
         custom_type: str = "",
         bridge_meta: dict[str, Any] | None = None,
@@ -3465,6 +3488,13 @@ class ServingSessionHandle(SessionHandle):
                     source=source,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    # OWNER rows only (M-2): a peer row is the sender's to shape,
+                    # so it never carries a stamp, whatever a caller passed.
+                    mesh_origin=(
+                        dict(mesh_origin)
+                        if mesh_origin is not None and source == SOURCE_USER
+                        else None
+                    ),
                     # The peer sender's identity, carried across the handover so
                     # the successor's delivery is idempotent against a row that
                     # was spooled twice (see ``inbox.InboxLine.message_id``).
@@ -3757,12 +3787,27 @@ class ServingSessionHandle(SessionHandle):
         Gates opened AFTER this answer immediately too, without parking: the
         model's next step after a denial is often another gated call, and a
         fresh card would hold the drain open exactly as the first one did.
-        One-way for the life of the process — it is only called on an exit
-        that has already been committed to. Returns how many parked gates were
+        One-way except for :meth:`reopen_gates_after_yield` — it is only called
+        on an exit that has already been committed to. Returns how many parked gates were
         settled, for the log.
         """
         self._gates_closed_for_exit = True
         return self._deny_pending_gates()
+
+    def reopen_gates_after_yield(self) -> None:
+        """Let gates park again: an unattended signal drain admitted the owner's prompt.
+
+        ``process._yield_signal_drain_to_owner`` lifts the admission latch so an
+        operator's prompt runs here instead of waiting behind a subagent for a
+        successor. That operator is present and can answer a card, so the reason
+        :meth:`refuse_gates_for_exit` gives (nobody can answer before the exit)
+        no longer holds; left closed, every approval in their turn was silently
+        denied and every ask read as "escaped" (agent review round 1 on #4355,
+        R1). A card parked afterwards reads as a step in flight, which the
+        signal bound spares rather than reaps — acceptable with the operator at
+        the composer. Settled gates stay settled; this only affects new ones.
+        """
+        self._gates_closed_for_exit = False
 
     def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.
@@ -4362,10 +4407,17 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         wait_for_turn: bool = True,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``mesh_origin`` is the stamp the control server minted for a REMOTE
+        connection (``network/origin.py``; never from a frame). It rides beside
+        ``owner_typed`` to ``Session.prompt`` and, when this runtime is leaving,
+        onto the spooled line's own ``InboxLine.mesh_origin`` field — never into
+        its ``sender``, which peer rows share (mesh-origin-stamp M-2).
 
         ``input_surface`` is the ADR 0009 origin the control server derived from
         the authenticated connection (``mobile``/``remote``/``desktop``/``tui``/
@@ -4570,6 +4622,7 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                 )
             except BaseException:
                 # No durable spool owns the message on failure/cancellation: release
@@ -4624,6 +4677,7 @@ class ServingSessionHandle(SessionHandle):
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
+                        mesh_origin=mesh_origin,
                     )
                 except BaseException:
                     # A failed/cancelled spool has no successor-owned message to
@@ -4690,6 +4744,7 @@ class ServingSessionHandle(SessionHandle):
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
             owner_typed=owner_typed,
+            mesh_origin=dict(mesh_origin) if mesh_origin is not None else None,
             _file_capture=file_capture,
             input_surface=input_surface,
         )
@@ -5628,6 +5683,8 @@ class ServingSessionHandle(SessionHandle):
                         fields["_file_capture"] = command._file_capture
                     if "owner_typed" in parameters and not command.owner_typed:
                         fields["owner_typed"] = False
+                    if "mesh_origin" in parameters and command.mesh_origin is not None:
+                        fields["mesh_origin"] = command.mesh_origin
                     if "input_surface" in parameters and command.input_surface is not None:
                         fields["input_surface"] = command.input_surface
                     if "input_mode" in parameters:
@@ -5696,7 +5753,20 @@ class ServingSessionHandle(SessionHandle):
                 # projection: a turn that RAISES emits no error event, so this
                 # string is the only description of what went wrong.
                 self._last_prompt_failure = str(exc)
-                logger.exception("mobile prompt failed after admission")
+                # Imported here: only a failed admission pays for it.
+                from local_operator.session.declared_mcp_ready import (
+                    DeclaredMcpToolsUnavailable,
+                )
+
+                if isinstance(exc, DeclaredMcpToolsUnavailable):
+                    # An EXPECTED refusal whose message already names the tools,
+                    # servers and reason: exec prints it as ``exec failed: …``.
+                    # A 13-line ERROR traceback ahead of that line is noise in a
+                    # pipeline worker's stderr (review N1 / QA O3), so the stack
+                    # stays available at debug only.
+                    logger.debug("mobile prompt refused before any request", exc_info=True)
+                else:
+                    logger.exception("mobile prompt failed after admission")
             except BaseException:
                 # KeyboardInterrupt/SystemExit retain their process semantics;
                 # the finally block still removes exactly the failed admission.
@@ -5722,10 +5792,13 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
+        # ``mesh_origin``: see ``prompt`` — the receiver-minted stamp, carried to
+        # the queued row and to the spooled line alike.
         # ``input_surface``: see ``prompt`` — the ADR 0009 origin of this steer.
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
@@ -5790,6 +5863,7 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    mesh_origin=mesh_origin,
                     _file_admission=_file_admission,
                     input_surface=input_surface,
                 )
@@ -5870,6 +5944,7 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> tuple[str, bool]:
@@ -5917,6 +5992,7 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                     raise_reader=False,
                 )
             finally:
@@ -5961,6 +6037,7 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                     raise_reader=False,
                 )
             except Exception:
@@ -6005,6 +6082,8 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        if "mesh_origin" in parameters and mesh_origin is not None:
+            fields["mesh_origin"] = dict(mesh_origin)
         if "_file_capture" in parameters:
             fields["_file_capture"] = file_capture
         if "input_surface" in parameters and input_surface is not None:
@@ -7410,6 +7489,7 @@ class ServingSessionHandle(SessionHandle):
         value: str,
         question_index: int | None = None,
         by: str = UNVERIFIED_SURFACE,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str:
         # ``question_index`` is accepted for protocol parity with the TUI handle
         # (U8 guard). An owned session assigns a DISTINCT request_id per question
@@ -7427,7 +7507,7 @@ class ServingSessionHandle(SessionHandle):
         # (``asks/surfaces.stamp_answer_surface``): ``mirror`` only when the
         # frame proved the operator capability. The fail-closed default is for
         # a caller that never went through that seam.
-        mirrored = await self._mirror_ask_answer(request_id, value, by=by)
+        mirrored = await self._mirror_ask_answer(request_id, value, by=by, mesh_origin=mesh_origin)
         if mirrored is not None:
             return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
@@ -7441,7 +7521,12 @@ class ServingSessionHandle(SessionHandle):
         return "answered"
 
     async def _mirror_ask_answer(
-        self, request_id: str, value: str | None, *, by: str = UNVERIFIED_SURFACE
+        self,
+        request_id: str,
+        value: str | None,
+        *,
+        by: str = UNVERIFIED_SURFACE,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
@@ -7480,7 +7565,10 @@ class ServingSessionHandle(SessionHandle):
         # settle the ask in one atomic write. ``ask_respond`` stays atomic and
         # still refuses a partial map — a whole-ask client has no reason to send
         # one, and accepting it there would be a second, weaker contract.
-        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by)
+        # The receiver-minted mesh origin (``network/origin.py``) rides only when
+        # there is one, so a session from before the carriage keeps its call shape.
+        origin_kwargs = _origin_kwargs(self._session.answer_ask_question, mesh_origin)
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by, **origin_kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):
@@ -7499,6 +7587,27 @@ class ServingSessionHandle(SessionHandle):
         await self._session.reconcile_asks()
         return "answered"
 
+    def ask_minted_here(self, ask_id: str) -> bool:
+        """Whether this runtime process minted ``ask_id`` (F2 Part C).
+
+        Read by the runtime's answer stamp OFF the session loop, so it reads
+        only the session id and the process-local minted set
+        (``asks/surfaces``). It must NOT call ``Session.ask_queue()`` there:
+        that getter constructs the queue lazily, and racing the session loop's
+        own construction could leave two queues. A session double with no
+        ``session_id`` is asked through its queue instead; neither reads
+        ``True`` for an ask this process did not mint (fail-closed).
+        """
+        from local_operator.asks.surfaces import minted_here
+
+        session_id = getattr(self._session, "session_id", None)
+        if isinstance(session_id, str) and session_id:
+            return minted_here(session_id, ask_id)
+        getter = getattr(self._session, "ask_queue", None)
+        queue = getter() if callable(getter) else None
+        probe = getattr(queue, "minted_here", None)
+        return bool(probe(ask_id)) if callable(probe) else False
+
     @_on_session_loop
     async def ask_respond(
         self,
@@ -7506,6 +7615,7 @@ class ServingSessionHandle(SessionHandle):
         answers: dict[str, list[str]],
         by: str = "",
         attachments: Mapping[str, Sequence["ImageContent"]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str:
         """Answer a QUEUED ask (design §2.4). Additive op: an old registrant
         answers ``unknown op``, and a runtime without the queue refuses in words.
@@ -7525,6 +7635,8 @@ class ServingSessionHandle(SessionHandle):
         # a handle that takes it keeps the pictures, one that does not is
         # refused-not-stripped by every sender.
         kwargs: dict[str, Any] = {"attachments": attachments} if attachments else {}
+        # Stored as ``answered_by.mesh_origin`` (mesh-origin-stamp §4).
+        kwargs.update(_origin_kwargs(self._session.respond_ask, mesh_origin))
         outcome = self._session.respond_ask(ask_id, answers, by=by or "remote", **kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
@@ -7565,7 +7677,13 @@ class ServingSessionHandle(SessionHandle):
         return "decided"
 
     @_on_session_loop
-    async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+    async def ask_revise(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        by: str = "",
+        mesh_origin: Mapping[str, Any] | None = None,
+    ) -> str:
         """REVISE a queued ask's recorded answer before it is delivered (design §10).
 
         The same op family, the same atomic whole-ask body and the same awaited
@@ -7586,7 +7704,10 @@ class ServingSessionHandle(SessionHandle):
         the loop, which is exactly the accepted-and-then-dropped interleaving
         §10 forbids.
         """
-        outcome = self._session.revise_ask(ask_id, answers, by=by or "remote")
+        # A revision's stamp is folded with the first answer's by the store, so an
+        # unstamped or unverified revision voids ``verified`` (§2 rule 4, M-8).
+        origin_kwargs = _origin_kwargs(self._session.revise_ask, mesh_origin)
+        outcome = self._session.revise_ask(ask_id, answers, by=by or "remote", **origin_kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the revision was refused"))
         # Awaited for the same reason ``ask_respond`` awaits it: it starts the

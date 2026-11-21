@@ -711,6 +711,21 @@ def strict_boundary(runner, monkeypatch, tmp_path):
     )
     monkeypatch.setattr(runner.time, "monotonic", lambda: 0.0)
     monkeypatch.setattr(runner.time, "sleep", forbidden)
+    # No real subreaper/census either: the escaped-descendant sweep proves an
+    # empty population, so this fixture stays about the owned-group boundary.
+    swept = SimpleNamespace(proven=True, remaining=[], signalled=[], describe=lambda: "")
+    tracker = SimpleNamespace(
+        bind=lambda pgid: None, reap_orphans=lambda: None, sweep=lambda **k: swept
+    )
+    monkeypatch.setattr(
+        runner,
+        "escaped_descendants",
+        SimpleNamespace(
+            enable_subreaper=lambda: (True, False),
+            restore_subreaper=lambda previous: None,
+            Tracker=SimpleNamespace(before_spawn=lambda **k: tracker),
+        ),
+    )
 
     def run():
         rc = runner.run(
@@ -737,7 +752,8 @@ def test_strict_finalization_reconciles_late_interruptions(strict_boundary, poin
     rc, row, admitted = run()
     assert state["wait_calls"] == 1
     assert row["command_exit_code"] == 0 and row["cleanup_status"] == "proven-empty"
-    assert row["descendant_cleanup"] == "unknown"
+    # The (stubbed) escaped-descendant sweep proved its population gone too.
+    assert row["descendant_cleanup"] == "proven-empty"
     assert rc == (0 if point is None else 130)
     assert row["termination_cause"] == ("child-exit" if point is None else "interruption")
     assert admitted is (point is None)

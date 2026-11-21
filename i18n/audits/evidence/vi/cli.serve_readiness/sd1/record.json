@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon Vietnamese",
+    "session": "77442ce206e1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "acf0a84cd992",
+    "actual_model_source": "Session host context declares openai/gpt-6.1-sol; no fallback incident observed in this audit session.",
+    "fallback": null,
+    "date": "2026-11-16",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "provenance_source": "Requesting task explicitly identifies translator task and actual model; translator runtime not independently inspected."
+  },
+  "source_audit_revision": {
+    "head": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+    "uncommitted_catalogues": true,
+    "worktree": "/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade",
+    "merged_or_on_main_claim": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/cli.serve_readiness.json",
+      "sha256": "76639bf0411f16c4c5a38c3f5ed852df89736e6cfb6c73658b6a7dcc1b261d1d"
+    }
+  },
+  "guidance_hashes": [
+    {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    }
+  ],
+  "artifacts": {
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/audit.log",
+      "sha256": "1ade5d35c85aab1e4596f7abacc3f3477ed898f666babd2847bc0bfb10ac4eb9"
+    },
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/report.md",
+      "sha256": "6dd44a653faf2b124b527045f21ebe033dfa95b18455e47b4e3d225f9bfc871a"
+    },
+    "ledger-receipt.json": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/ledger-receipt.json",
+      "sha256": "f3868eb3cd6b754df5e05bb65cc3ba72b9ebd0cd75256876ea260bdeea89f6b6"
+    }
+  },
+  "artifact_roles": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_subprocess_commands_stdout_stderr_exit_codes",
+    "ledger-receipt.json": "single_ledger_row_validated_by_append_dry_run",
+    "receipt.json": "bundle_integrity_manifest_with_explicit_record_reference"
+  },
+  "findings_report": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/report.md",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "VI-SD1-01"
+    ],
+    "minor_count": 1,
+    "nit_count": 0
+  },
+  "finding_summary": [
+    {
+      "id": "VI-SD1-01",
+      "severity": "MINOR",
+      "key": "cli.serve_readiness.cgroup_unknown",
+      "report": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/report.md"
+    }
+  ],
+  "mechanical_validation": {
+    "repository_catalogue_command": [
+      ".venv/bin/python",
+      "scripts/i18n/check.py",
+      "--catalogues-only"
+    ],
+    "exit_code": 0,
+    "problem_count": 0,
+    "per_key_parser_exit_code": 0,
+    "vi_cldr_categories": [
+      "other"
+    ],
+    "plural_keys": [
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.stale",
+      "cli.serve_readiness.other_unit"
+    ],
+    "plural_sample_counts": [
+      0,
+      1,
+      2,
+      5,
+      101
+    ],
+    "strict_json_and_duplicate_key_checks": true,
+    "placeholder_names_kinds_order_match": true,
+    "nfc_and_no_combining_marks": true,
+    "command_literals_preserved": true
+  },
+  "receipt_validation": {
+    "mode": "dry-run",
+    "exit_code": 0,
+    "expected_history_sha256_at_check": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "note_char_count": 168,
+    "history_appended_by_auditor": false
+  },
+  "coverage": {
+    "all_keys_read": true,
+    "all_11_keys_semantically_audited": true,
+    "all_11_keys_idiom_glossary_fit_assessed": true,
+    "rtl": "not_applicable_vi_is_ltr",
+    "independent_passes_in_this_bundle": 1,
+    "second_independent_high_visibility_pass_claimed": false,
+    "rendered_ui_evidence_claimed": false,
+    "no_max_cells_or_max_chars_hints": true,
+    "translation_or_mt_service_used": false
+  },
+  "current_bytes_match_audited_hashes": true,
+  "retention": {
+    "canonical_root": "i18n/audits/evidence",
+    "new_evidence_only": true,
+    "catalogues_edited": false,
+    "committed_by_auditor": false,
+    "parent_responsible_for_history_append_and_commit": true
+  },
+  "original_lost_evidence": {
+    "status": "not_applicable_new_audit_no_original_lost"
+  },
+  "backdated": false
+}

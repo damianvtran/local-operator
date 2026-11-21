@@ -137,6 +137,7 @@ from local_operator.harness.types import (
     FAULT_KEY,
     INTERRUPTED_FAULTS,
     AgentMessage,
+    AskOption,
     AskQuestion,
     ImageContent,
     Message,
@@ -151,12 +152,14 @@ from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_session_move_workset as _wsc_keys
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
 from local_operator.i18n.keys import tui_small as _small_keys
 from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.keys import tui_update as _upd
+from local_operator.i18n.keys import tui_welcome
 from local_operator.i18n.keys import wire_language_receipts as _lang_keys
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import register_refresh, tr
@@ -258,6 +261,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.bridge_card_body import card_body_loader
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
     OperatorCommandProvider,
@@ -314,6 +318,7 @@ from local_operator.tui.events import (
     WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.link_targets import (
     LinkTarget,
     build_link_targets,
@@ -369,6 +374,8 @@ from local_operator.tui.session_move import (
     MoveTo,
     parse_move_to,
     run_session_move,
+    run_session_move_preflight,
+    stale_relay_message,
 )
 from local_operator.tui.session_navigation import SessionNavigation
 from local_operator.tui.session_presentation import (
@@ -485,6 +492,7 @@ from local_operator.tui.widgets.library_view import (
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
+from local_operator.tui.widgets.move_workset_confirm import MoveWorkingSetConfirmScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
 from local_operator.tui.widgets.notifications_view import (
     NotificationsView,
@@ -628,6 +636,8 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: The `/move --to` working-set card's own copy (design §11.3, §12).
+_wsc_render = tr("tui.session_move_workset")
 #: The `/language` receipts live in a deferred wire namespace so the phone-sheet
 #: twin (`session/runtime/serving.py`) renders the SAME words; resolved per call.
 _lang_t = tr("wire.language_receipts")
@@ -656,6 +666,14 @@ _t_asks = tr("tui.asks")
 #: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
 #: the two module constants below on a live language move.
 _t_setup = tr("tui.setup_cues")
+#: The welcome screen's audited "not logged in — /login {provider}" line, reused by
+#: the model picker's footer for a provider whose STORED sign-in is dead
+#: (`_reauth_status`): the same remedy in the same words on both screens.
+#: Resolved through ``display_tr`` with the SAME command island the welcome
+#: screen declares (``widgets/welcome.py``): RTL prose (``ur`` ships) orders
+#: neighbouring LTR runs right-to-left, so a raw ``tr`` would paint
+#: ``google-vertex /login`` there (code review round 1, R1-3).
+_t_welcome = display_tr("tui.welcome", technical_commands=("/login {provider}",))
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
@@ -2041,6 +2059,15 @@ RETITLE_MIN_GAP_S = 30.0
 #: TUI diagnostics go to the log FILE, never the terminal — stderr belongs to
 #: the rendered app (see ``local_operator.logger.file_logging``).
 logger = logging.getLogger("local_operator.tui.app")
+
+#: The community page's slash words (dark; see ``_dispatchable_slash``).
+_COMMUNITY_SLASHES = frozenset({"/community", "/orgs"})
+
+
+def _community_enabled() -> bool:
+    from local_operator.community import community_enabled
+
+    return community_enabled()
 
 
 def _has_transcript(directory: "Path") -> bool:
@@ -6682,6 +6709,9 @@ class OperatorApp(App[None]):
         self._library_focus_restore: Any | None = None
         #: The ``/notifications`` page (lane L2): a sibling of the library mode.
         self._notifications_view: Any | None = None
+        #: The ``/community`` page (``widgets/community_view.py``) while it is up.
+        self._community_view: Any | None = None
+        self._community_focus_restore: Any | None = None
         self._notifications_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
@@ -26174,6 +26204,12 @@ class OperatorApp(App[None]):
         token = text.split(maxsplit=1)[0].lower() if text.strip() else ""
         if not token.startswith("/"):
             return False
+        if token in _COMMUNITY_SLASHES and _community_enabled():
+            # The community page's two words (RFC v2.4, TUI frames T1/T9) are
+            # NOT registry rows while the community ships dark: a row would
+            # show in /help, the picker and every desktop/mobile slash list.
+            # They are commands only on a machine with the pilot switch on.
+            return True
         # Matched on the same key the dispatch builds its map with, so the two
         # cannot disagree about spelling: `f"/{cap.command}"` there, the typed
         # first token here, both case-folded.
@@ -28713,7 +28749,11 @@ class OperatorApp(App[None]):
 
     # -- the agent's own questions --------------------------------------------
     async def request_user_choice(
-        self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
+        self,
+        questions: list[AskQuestion],
+        *,
+        source: SessionInteraction | None = None,
+        card_options: dict[str, Any] | None = None,
     ) -> dict[str, list[str]] | None:
         """The ``ask`` tool's surface while this app owns the terminal.
 
@@ -28726,6 +28766,13 @@ class OperatorApp(App[None]):
         answered nothing. Both are ANSWERS, not failures: the tool reports the
         empty case as "the user did not answer" so the model falls back to its
         own recommendation.
+
+        ``card_options``: host keywords for :class:`AskPickerScreen`
+        (``allow_free_text``, ``title``, ``exit_hint``, ``initial_rows``) for a
+        caller that is NOT the agent's ``ask`` — the Bedrock login reuses this
+        card and must not be headed "the agent needs your decision" or offer a
+        free-text row its answer cannot use (#4270 D2/D3/D5). The ``ask`` tool
+        passes none, so its card is unchanged.
 
         A future rather than ``push_screen_wait``, which requires a worker: this
         coroutine is the tool call, and moving it into a worker would put the
@@ -28770,7 +28817,7 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        card = AskPickerScreen(questions, answered)
+        card = AskPickerScreen(questions, answered, **(card_options or {}))
         # Same hint as the approval card, for the same reason — the copy
         # differs by kind because an ask is answerable from here (see
         # `AskPickerScreen.set_remote_device`).
@@ -37542,6 +37589,74 @@ class OperatorApp(App[None]):
                     drop_checking()
                     self._system_notice(refusal, "warning")
                     return
+                # THE WORKING-SET GATE, BEFORE THE LEAVE (docs/design/move-working-
+                # set.md §11.3): a conversation that worked in git worktrees needs
+                # the user's explicit approval, so the preflight runs while the
+                # check row is still up and a non-empty manifest pushes the card.
+                # Cancelled → nothing left, nothing moved. A failed preflight is
+                # not a stop — the move is asked next and the owner's gate refuses
+                # an unconfirmed working set by itself — EXCEPT a stale relay
+                # (``relay_restart_required``, below), which cannot run the gate.
+                # ``--keep`` is not gated (the source keeps everything); its
+                # receipt says what it lacks.
+                confirm_digest = ""
+                without_working_set = bool(request.without_working_set)
+                if without_working_set:
+                    # NO PREFLIGHT ON THIS PATH, SO ASK THE RELAY DIRECTLY (review
+                    # M1, round 3): ``request_move`` refuses a stale relay for
+                    # ``--without-working-set`` too, and without this check that
+                    # refusal arrived only after the user had been moved off the
+                    # conversation. Same sentence, same stop-before-the-leave as R9.
+                    # NOT GATED ON ``--keep`` (review m1, round 4): a kept copy of the
+                    # current conversation still leaves it first, and the CLI still
+                    # sends the flag, so the stale relay refuses that form too.
+                    stale = await asyncio.to_thread(stale_relay_message)
+                    if stale:
+                        drop_checking()
+                        self._system_notice(stale, "warning")
+                        return
+                if not request.keep and not without_working_set:
+                    preflight = await asyncio.to_thread(
+                        run_session_move_preflight, target_id, request.to
+                    )
+                    block = preflight.get("working_set")
+                    # EXCEPT A PLAIN RECALL (review M1, round 9): ``request_move``
+                    # refuses only its dry run — the stale relay would run that as a
+                    # real recall — and forwards the plain recall, which the remote
+                    # owner gates on its own (``working_set_unsupported`` for anything
+                    # to carry). Stopping here would refuse a chat-only recall that
+                    # moved before the gate existed. A queued recall is still refused
+                    # by ``request_move``, so it stops here as before.
+                    plain_recall = request.to == "local" and not request.queue
+                    if preflight.get("code") == "relay_restart_required" and not plain_recall:
+                        # A STALE RELAY IS A STOP, NOT A FALL-THROUGH (review R9): it
+                        # cannot run the gate, and ``request_move`` refuses the move
+                        # itself for the same reason — so stop BEFORE the leave, with
+                        # the refusal's own "restart the relay" remedy, rather than
+                        # detach the user and only then report it.
+                        drop_checking()
+                        self._system_notice(str(preflight.get("message") or ""), "warning")
+                        return
+                    if (
+                        preflight.get("ok")
+                        and preflight.get("confirmation_required")
+                        and isinstance(block, dict)
+                    ):
+                        drop_checking()
+                        decision = await self.push_screen_wait(
+                            MoveWorkingSetConfirmScreen(
+                                block, session_id=target_id, device=request.to
+                            )
+                        )
+                        if decision == "without":
+                            without_working_set = True
+                        elif decision == "confirm":
+                            confirm_digest = str(block.get("scope_digest") or "")
+                        else:
+                            # A deliberate Cancel is not a failure (review D7): a
+                            # neutral note, never the CLI's "not confirmed" refusal.
+                            self._system_notice(_wsc_render(_wsc_keys.cancelled()), "note")
+                            return
                 # WITHDRAWN BEFORE THE LEAVE: the check row belongs to the
                 # transcript the leave is about to replace (U1), so leaving it
                 # mounted would paint "checking …" into a session that is gone.
@@ -37566,12 +37681,30 @@ class OperatorApp(App[None]):
                     keep=request.keep,
                     queue=request.queue,
                     drop_session_roles=request.drop_session_roles,
+                    confirm_working_set=confirm_digest,
+                    without_working_set=without_working_set,
                 )
             finally:
                 self._move_in_flight = False
             self._publish_move_result(
                 target_id, request, result, phase_notice, left=leaving, home=home_label
             )
+            # WHAT THE MOVE DID NOT CARRY, stated on the receipt (design §11.2): a
+            # confirmed move in this build leaves the worktrees on the source, and a
+            # keep copy arrives without them. Rendered from the owner's block.
+            block = result.get("working_set") if isinstance(result, dict) else None
+            if isinstance(block, dict) and result.get("ok"):
+                from local_operator.network import workset_text
+
+                source = result.get("from_device") or {}
+                lines = workset_text.receipt_lines(
+                    block,
+                    source=str(source.get("name") or source.get("device_id") or ""),
+                )
+                if lines:
+                    # ONE notice: the headline and its indented rows (QA Q-2) read as
+                    # one receipt, not a stack of separate warnings.
+                    self._system_notice("\n".join(lines), "warning")
 
         self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
 
@@ -40729,6 +40862,84 @@ class OperatorApp(App[None]):
             return
         self._close_library_view()
         self._cmd_librarian("open", self._system_notice)
+
+    # -- the community page (``/community``, ``/orgs``; dark) ----------------
+
+    def _cmd_community(self, command: str, arg: str) -> None:
+        """``/community [browse|settings|join]`` opens the page; ``/orgs`` the switcher.
+
+        The switcher opens AS the page's overlay so it has the page's org
+        data and keys; ``esc`` from it closes the whole page when ``/orgs``
+        was the reason it opened (TUI frames, "Org switching is not leaving").
+        """
+        word = arg.strip().lower()
+        if command == "/orgs":
+            mode = "orgs"
+        else:
+            mode = {"browse": "browse", "settings": "settings", "join": "join"}.get(word, "page")
+        if self._community_view is not None:
+            self._community_view.open_mode(mode)
+            return
+        self._open_community_view(mode)
+
+    def _open_community_view(self, mode: str = "page") -> None:
+        """Enter the full-page community mode: the notifications page's contract."""
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.tui.community_backend import LiveCommunityBackend
+        from local_operator.tui.widgets.community_view import CommunityView
+
+        self._close_file_viewer()
+        self._close_notifications_view()
+        self._close_agent_form()
+        self._close_team_form()
+        self._close_settings_view()
+        self._community_focus_restore = self.focused
+        view = CommunityView(LiveCommunityBackend(_config_dir()), mode=mode)
+        self._community_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_community_view(self) -> bool:
+        """Leave the community mode and restore the conversation. True if open."""
+        view = self._community_view
+        if view is None:
+            return False
+        self._community_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._community_focus_restore
+        self._community_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_community_view_dismissed(self, message: Any) -> None:
+        message.stop()
+        self._close_community_view()
+
+    def on_community_org_selected(self, message: Any) -> None:
+        """A private org was picked: record-only; the bridge's private flow is unchanged."""
+        message.stop()
+        self._close_community_view()
+        from local_operator.i18n.keys import tui_community as _ck
+        from local_operator.tui.i18n_status import display_tr as _dtr
+
+        self._system_notice(_dtr("tui.community")(_ck.orgs_switched(name=message.name)), "info")
 
     # -- the notifications page (``/notifications``) -----------------------
 
@@ -45150,6 +45361,13 @@ class OperatorApp(App[None]):
         # single-token form, so ``/new foo`` is untouched.
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
+
+        if command in _COMMUNITY_SLASHES and _community_enabled():
+            # Frontend-LOCAL, like `/notifications`: the page reads this
+            # machine's community client, and the page is the receipt. Never
+            # routed to an owner (an older owner has no such command).
+            self._cmd_community(command, arg)
+            return
 
         # Authoring is a frontend-owned page, never a slash sent to an owner
         # on another device. Refuse here before its capability table can route
@@ -49649,7 +49867,14 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
+            # A dead stored sign-in LEADS, ahead of the access note: its rows
+            # are offered as usable yet every turn on them fails, and the clause
+            # carries the only copy of the exact `/login <id>` command. Behind
+            # the access note `_fit_clauses` dropped it whole at 100 columns and
+            # cut the provider id at 150 (QA round 1, Q1); the generic access
+            # note degrades to `N hidden…` instead, which still says rows hid.
             status=_status_line(
+                _reauth_status(statuses),
                 note,
                 _catalogue_status(statuses),
                 self._owner_catalogue_clipped_note(),
@@ -57633,6 +57858,8 @@ class OperatorApp(App[None]):
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
+        if getattr(definition, "login_kind", None) == "aws":
+            return self._aws_login_callbacks(definition, on_auth_url, on_progress, on_warning)
         if getattr(definition, "local_setup", False):
 
             async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
@@ -57654,6 +57881,18 @@ class OperatorApp(App[None]):
                 displays_warnings=True,
             )
 
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # Post-auth configuration is required even though the browser's
+            # authorization-code paste was optional. No default means empty
+            # Enter cancels rather than accepting an unusable blank project.
+            return await self._request_login_key(
+                str(getattr(definition, "name", "Server")),
+                secret=secret,
+                field_label=field,
+                default=default or None,
+                required_field=True,
+            )
+
         label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
         # WHICH value the prompt is reading, which decides both its wording and
         # whether it masks. ``requires_paste_prompt`` means the paste IS the
@@ -57663,13 +57902,28 @@ class OperatorApp(App[None]):
         secret = bool(getattr(definition, "paste_prompt_required", False))
 
         async def on_manual_code_input() -> str | None:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
             # ``sole_path`` tracks ``secret`` here and is a DIFFERENT question
             # that happens to have the same answer for every provider in the
             # registry: "is the paste the only way this login can finish?".
             # Anthropic's is not (the loopback callback is still listening and a
             # declined paste re-parks), so declining must not be reported as a
             # cancelled login.
-            return await self._request_login_key(str(label), secret=secret, sole_path=secret)
+            return await self._request_login_key(
+                str(label),
+                secret=secret,
+                sole_path=secret,
+                field_label=(
+                    prompt_tr(prompt_keys.field_service_account())
+                    if getattr(definition, "id", None) == "google-vertex-sa"
+                    else None
+                ),
+                required_field=getattr(definition, "id", None) == "google-vertex-sa",
+            )
 
         return LoginCallbacks(
             on_auth_url=on_auth_url,
@@ -57677,6 +57931,97 @@ class OperatorApp(App[None]):
             on_progress=on_progress,
             on_input_rejected=on_input_rejected,
             on_manual_code_input=on_manual_code_input,
+            on_setup_input=on_setup_input,
+            displays_warnings=True,
+        )
+
+    def _aws_login_callbacks(
+        self,
+        definition: object,
+        on_auth_url: Callable[..., None],
+        on_progress: Callable[[str], None],
+        on_warning: Callable[[str], None],
+    ) -> LoginCallbacks:
+        """Hooks for Amazon Bedrock's structured AWS login (login_kind "aws").
+
+        Two surfaces this app already has, no new widget: every pick (method,
+        profile, Region, "sign in now?") is ONE single-select question on the
+        ask picker (`request_user_choice`), and every typed field is the
+        login key prompt (`_request_login_key`), masked for secrets. The flow
+        itself lives in `providers/bedrock/login.py`; this only renders it.
+        """
+        from local_operator.i18n.keys import wire_login_bedrock as bk
+        from local_operator.i18n.messages import render_resolved
+
+        # Lazily, like `_login_callbacks` itself: `callback_server` drags in a
+        # loopback listener's imports that only a login needs.
+        from local_operator.providers.oauth.callback_server import LoginCallbacks
+
+        name = str(getattr(definition, "name", None) or "Amazon Bedrock")
+
+        async def on_choice(
+            title: str, options: list[tuple[str, str, str]], default: str | None
+        ) -> str | None:
+            if len(options) == 1:
+                # The picker's floor is two answers (`AskQuestion`), and a
+                # one-row list is an announcement, not a choice: take it and
+                # say so, rather than asking the user to ratify it.
+                on_progress(f"{title} {options[0][1]}")
+                return options[0][0]
+            by_label = {label: value for value, label, _description in options}
+            initial = next(
+                (index for index, option in enumerate(options) if option[0] == default), None
+            )
+            question = AskQuestion(
+                id="bedrock_login",
+                question=title,
+                options=[
+                    AskOption(label=label, description=description)
+                    for _value, label, description in options
+                ],
+            )
+            answer = await self.request_user_choice(
+                [question],
+                card_options={
+                    # No free-text row (#4270 D2): a typed answer that is not a
+                    # listed row has nowhere to go, and used to cancel the whole
+                    # login. The Region list carries its own "Other…" row,
+                    # which prompts, validates and re-asks.
+                    "allow_free_text": False,
+                    # The user ran /login; no agent is asking (D3).
+                    "title": render_resolved(bk.picker_title()),
+                    "exit_hint": ("esc", "cancel"),
+                    # The default starts under the cursor WITHOUT a
+                    # RECOMMENDED badge: LO has no basis to recommend one AWS
+                    # profile or Region over another (D5).
+                    "initial_rows": [initial],
+                },
+            )
+            picked = (answer or {}).get("bedrock_login") or []
+            return by_label.get(picked[0]) if picked else None
+
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # `render_resolved`, not this module's `_t`: `_t` only looks keys
+            # up in the tui.app catalogue, so a wire.login.bedrock key came
+            # back as its raw id on every Bedrock field (#4270 QA Q1).
+            hint = render_resolved(bk.field_hint())
+            return await self._request_login_key(
+                name,
+                secret=secret,
+                field_label=field,
+                # "" (not None): Enter on an empty OPTIONAL field (the
+                # session token) submits "" instead of cancelling setup.
+                default=default,
+                credential=False,
+                instructions=hint,
+            )
+
+        return LoginCallbacks(
+            on_auth_url=on_auth_url,
+            on_progress=on_progress,
+            on_warning=on_warning,
+            on_setup_input=on_setup_input,
+            on_choice=on_choice,
             displays_warnings=True,
         )
 
@@ -57689,17 +58034,22 @@ class OperatorApp(App[None]):
         field_label: str | None = None,
         default: str | None = None,
         credential: bool = False,
+        required_field: bool = False,
+        instructions: str | None = None,
     ) -> str | None:
-        """Put a paste prompt in the transcript and await the key.
+        """Await a credential, optional OAuth code, or explicit setup field.
 
         Awaited by the login flow on this app's own loop (``_login_flow`` runs
         as a Textual worker), so the block is mounted directly here rather than
         marshalled across threads — the same reason
         :meth:`request_tool_approval` mounts its card inline.
 
-        Returns the pasted text, or ``None`` for a cancel, which is exactly the
-        ``on_manual_code_input`` contract. The value is never logged, never
-        echoed, and is not retained by the block once handed over.
+        Returns the value, or ``None`` for a cancel. Secret values are masked;
+        nonsecret fields and optional OAuth codes remain readable. No value is
+        logged or retained by the block once handed over. ``required_field``
+        selects required-login instructions instead of endpoint setup's
+        keep-default instructions; callers pass no default when empty Enter
+        must cancel. It does not repurpose the optional browser-code fallback.
         """
         from local_operator.tui.widgets.key_prompt import KeyPromptBlock
 
@@ -57715,15 +58065,25 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        instructions = None
-        if field_label:
+        # A caller-supplied hint wins: the defaults below describe the
+        # local-server setup fields ("keeps the current token if the URL is
+        # unchanged"), which is wrong for any other structured login's fields
+        # (Amazon Bedrock's access key, Region, session token).
+        if instructions is None and field_label:
             instructions = (
                 f"Enter keeps {default}"
                 if default and not secret
                 else "Enter continues without a new value; Esc cancels setup."
             )
-        if field_label and secret:
-            instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+            if secret:
+                instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+        if required_field:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
+            instructions = prompt_tr(prompt_keys.hint_required())
         block = KeyPromptBlock(
             provider_label,
             secret=secret,
@@ -58103,7 +58463,10 @@ class OperatorApp(App[None]):
         # email (~138 ms) for a loopback listener only a login needs, and this
         # module is what every interactive session imports.
         from local_operator.harness.types import AbortSignal
-        from local_operator.providers.oauth.callback_server import LoginCancelledError
+        from local_operator.providers.oauth.callback_server import (
+            LoginCancelledError,
+            LoginDeferredError,
+        )
         from local_operator.providers.oauth.radient import RadientLoginDisabled
 
         assert self._providers is not None
@@ -58219,6 +58582,16 @@ class OperatorApp(App[None]):
                 if self._on_config_changed is not None:
                     self._on_config_changed()
                 self._cmd_model_saved(self._notice)
+        except LoginDeferredError as deferred:
+            # The user chose to finish elsewhere (Bedrock's "I'll run it
+            # myself"): a `note`, not a red "login failed" (#4270 D4/Q7), with
+            # the command drawn in the inline-code ink so it can be found and
+            # copied. On its OWN indented row: inline, the fold split the
+            # command across two rows and a split token is drawn plain.
+            # Nothing was stored; the flow raised before any row.
+            command = deferred.command
+            body = f"{deferred}\n  {command}" if command else str(deferred)
+            self._append_block(NoticeBlock(body, "note", accent=command))
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken
@@ -63794,6 +64167,11 @@ class OperatorApp(App[None]):
                 TeamBridgeBlock(
                     bridge_card_text(message.details),
                     bridge_card_sender(message.details),
+                    # ``message_id`` is the persisted CustomMessage.id (the
+                    # entry id the resolver is keyed by).
+                    body_loader=card_body_loader(
+                        getattr(self, "_session", None), message.message_id or ""
+                    ),
                 )
             )
         else:
@@ -67032,6 +67410,9 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     — two footers counting one fact ("3 provider(s) need a login · 42 hidden")
     reads as two separate problems.
 
+    ``reauth_required`` is not reported HERE either, but it is reported: see
+    `_reauth_status`, which the caller places ahead of the access note.
+
     Wording is budgeted, not just chosen. The footer truncates at the picker's
     width and the access note (``2 hidden — /login <provider>``, 28 cells) leads
     it, which leaves 39 cells for this clause at a 100-column terminal. The
@@ -67063,6 +67444,35 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     if empty:
         bits.append(_t(_x.providers_no_live_list(names=", ".join(empty))))
     return " · ".join(bits)
+
+
+def _reauth_status(statuses: dict[str, str]) -> str:
+    """Footer clause naming each provider whose STORED sign-in is dead.
+
+    ``reauth_required`` is a provider the user DID sign in to whose stored grant
+    the IdP has since refused for good (``ProviderController.live_catalogue``).
+    Its rows are NOT hidden — a stored credential still counts as usable for the
+    access filter — so `_catalogue_rows` counts nothing for it, and without this
+    clause the picker showed the bundled rows with no hint that every turn on
+    them would fail until a fresh ``/login``. One clause per provider, in the
+    welcome screen's own audited words (``not logged in — /login <id>``), so the
+    user gets the exact command; the provider id is the command's argument.
+
+    Separate from `_catalogue_status` because of WHERE it goes: the caller puts
+    it first in the status, ahead of the access note. ``model_picker._fit_clauses``
+    keeps leading clauses and drops trailing ones, so behind the access note
+    (``225 hidden — /login <provider> · /model --all shows``, 51 cells) this
+    clause vanished at 100 columns and lost its provider id at 150 (QA round 1,
+    Q1). Leading, it costs 36 cells after the row count and survives at 80.
+    """
+    # Imported here, not at module top: the controller module is heavy and this
+    # module already defers its other imports from it to the call sites.
+    from local_operator.providers.controller import REAUTH_REQUIRED_STATUS
+
+    return " · ".join(
+        _t_welcome(tui_welcome.status_login_required(provider=provider))
+        for provider in sorted(p for p, s in statuses.items() if s == REAUTH_REQUIRED_STATUS)
+    )
 
 
 def _status_line(*bits: str) -> str:

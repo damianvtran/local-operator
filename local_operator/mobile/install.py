@@ -2072,6 +2072,8 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     reason. A preflight that refuses changes nothing on disk.
     """
     steps: list[str] = []
+    # The running-build step, if one was taken (see the return below).
+    build_note: list[str] = []
     kind = supervisors.supervisor()
     if kind is None:
         return {"ok": False, "steps": [], "error": NO_SUPERVISOR_ERROR}
@@ -2139,7 +2141,32 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             reload_needed = True
             if current and _serving(port):
                 reload_needed = False
-                steps.append("LaunchAgent already current and serving; left it loaded")
+                # "CURRENT AND SERVING" IS NOT "ON THIS BUILD" (field finding,
+                # 2026-11-18): after 0.96.5 → 0.106.7 this branch said "already
+                # current" over a daemon started days earlier, and the phone
+                # kept talking to old code until `lop mobile restart`. The plist
+                # names the stable shim, so it is identical across builds; only
+                # the running pid can say which build it loaded.
+                #
+                # UNPROVEN BUILD → RESTART, mirroring the update child
+                # (`update.mobile_refresh_command`: every answer except a proven
+                # "current" bounces). A phone reconnects on its own after the
+                # few-second bounce, and the operator asked for an install.
+                build = launchd.check_running_build_on_install(
+                    label=LABEL,
+                    path=plist_path(),
+                    pid=launchd.job_pid(label=LABEL, path=plist_path(), run=_launchctl),
+                    recovery="lop mobile restart",
+                    run=_launchctl,
+                    restart_when_unproven=True,
+                )
+                if build.kind == "failed":
+                    return {"ok": False, "steps": steps, "error": build.step()}
+                if build.step():
+                    build_note.append(build.step())
+                steps.append(
+                    build.step() or "LaunchAgent already current and serving; left it loaded"
+                )
             elif current and launchd.kickstart(label=LABEL, path=plist_path(), run=_launchctl):
                 reload_needed = False
                 steps.append("restarted the loaded LaunchAgent (its file was already current)")
@@ -2149,7 +2176,7 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
                     return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
                 steps.append("loaded the LaunchAgent")
     elif kind == supervisors.SYSTEMCTL:
-        loaded, detail = _install_systemd(port, dry_run=dry_run, steps=steps)
+        loaded, detail = _install_systemd(port, dry_run=dry_run, steps=steps, build_note=build_note)
         if not loaded:
             return {"ok": False, "steps": steps, "error": detail}
     else:  # schtasks
@@ -2168,7 +2195,10 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     while time.time() < deadline:
         if _serving(port):
             steps.append("health check passed and the auth gate is closed")
-            return {"ok": True, "steps": steps}
+            # ``build`` is the running-build step alone (also in ``steps``), for
+            # a caller that shows no step list — `lop tunnel install` restarting
+            # mobile through `_prepare_mobile` (review R1-3).
+            return {"ok": True, "steps": steps, "build": build_note[0] if build_note else ""}
         time.sleep(0.5)
     return {
         "ok": False,
@@ -2177,7 +2207,9 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     }
 
 
-def _install_systemd(port: int, *, dry_run: bool, steps: list[str]) -> tuple[bool, str]:
+def _install_systemd(
+    port: int, *, dry_run: bool, steps: list[str], build_note: list[str] | None = None
+) -> tuple[bool, str]:
     """Write and enable the Linux user unit. ``(ok, error)``.
 
     The unit file is written wherever ``systemd_path()`` says — that half is
@@ -2215,6 +2247,22 @@ def _install_systemd(port: int, *, dry_run: bool, steps: list[str]) -> tuple[boo
     if loaded.returncode:
         return False, supervisors.translate_systemctl_error(loaded.stderr)
     steps.append(f"enabled the systemd user service ({SYSTEMD_UNIT})")
+    from local_operator import update
+
+    # Unproven build → restart, as on macOS (see the launchd skip branch); a
+    # failed restart fails the install there too (review R1-2).
+    build = update.systemd_install_build_line(
+        name="mobile",
+        unit=SYSTEMD_UNIT,
+        recovery="lop mobile restart",
+        restart_when_unproven=True,
+    )
+    if build.kind == "failed":
+        return False, build.step()
+    if build.step():
+        steps.append(build.step())
+        if build_note is not None:
+            build_note.append(build.step())
     return True, ""
 
 

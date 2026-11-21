@@ -105,6 +105,7 @@ OOMed one on 2026-11-16), up to four on larger ones. Switch:
 checks, JS test runners and `pytest -n` queue for a slot and say whom they wait
 behind; watchers and dev servers never queue; `lop services status` names the
 holder.
+Quick iterations: pass `-n 0` to stay off the slot.
 Wait or retry; never escape the queue by backgrounding a build with
 `nohup`/`setsid` or splitting it across sessions. `systemd-run --user --scope
 -p MemoryMax=…` caps a job in addition to the queue, never instead of it.

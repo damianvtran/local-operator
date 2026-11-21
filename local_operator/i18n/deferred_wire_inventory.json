@@ -11,7 +11,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 872
+        "settings_io.py": 884
       }
     },
     "wire.settings.hub_defaults": {
@@ -386,12 +386,12 @@
       "render_points": [
         {
           "path": "local_operator/session/catalog.py",
-          "symbol": "CatalogEntry._stop_label (render)",
-          "note": "row status label suffix rendered with the memoised label locale and printed verbatim by clients"
+          "symbol": "_terminal_label (render)",
+          "note": "complete messages selected by CatalogEntry.status (terminal rungs via _stop_label/_error_label, and since PR #4334 the live rungs: approval/answer needed, wedged heartbeat, working, unseen completion, attached, ready/exec headless, dormant, complete, recent, waiting) and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
         }
       ],
       "references": {
-        "session/catalog.py": 2
+        "session/catalog.py": 33
       }
     },
     "wire.sessions": {
@@ -472,6 +472,87 @@
         "network/credentials/github.py": 29,
         "network/credentials/messages.py": 5,
         "network/readiness.py": 11
+      }
+    },
+    "wire.errors.bedrock": {
+      "reason": "Amazon Bedrock error remedies and connection-check results rendered in-process by providers/bedrock/errors.py and providers/bedrock/check.py (_text = render_resolved), and server/routes/auth.py renders refusal envelopes with machine-category codes; all carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/providers/bedrock/errors.py",
+          "symbol": "_text / _keys (no_credentials_text, *_error builders, classify_credential_error, provider_error_for)",
+          "note": "Bedrock runtime and credential-resolution remedies rendered in-process via render_resolved and raised as ProviderError text, never a key"
+        },
+        {
+          "path": "local_operator/providers/bedrock/check.py",
+          "symbol": "_text / _keys (check_connection)",
+          "note": "connection-check results rendered in-process via render_resolved and returned as KeyCheck text, never a key"
+        },
+        {
+          "path": "local_operator/server/routes/auth.py",
+          "symbol": "_bedrock_refusal / _bedrock_keys",
+          "note": "Msg.envelope renders text in-process and overrides the namespace ID with the desktop machine-category code; clients never resolve a deferred key"
+        }
+      ],
+      "references": {
+        "providers/bedrock/check.py": 2,
+        "providers/bedrock/errors.py": 2,
+        "server/routes/auth.py": 2
+      }
+    },
+    "wire.login.bedrock": {
+      "reason": "Amazon Bedrock login copy rendered in-process through render_resolved by providers/bedrock/login.py, providers/bedrock/sso_login.py, providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; callbacks and operation snapshots carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/providers/bedrock/login.py",
+          "symbol": "_t / login_bedrock",
+          "note": "_t delegates to render_resolved before choices, fields, progress and LoginError text reach callbacks"
+        },
+        {
+          "path": "local_operator/providers/bedrock/sso_login.py",
+          "symbol": "_run_once",
+          "note": "render_resolved finishes URL instructions and progress before LoginCallbacks"
+        },
+        {
+          "path": "local_operator/providers/auth_cli.py",
+          "symbol": "_aws_callbacks",
+          "note": "render_resolved finishes terminal prompts and invalid-choice text"
+        },
+        {
+          "path": "local_operator/server/utils/desktop_auth.py",
+          "symbol": "DesktopAuth._run_bedrock_sso",
+          "note": "render_resolved finishes operation messages before snapshots cross the wire"
+        },
+        {
+          "path": "local_operator/tui/app.py",
+          "symbol": "OperatorApp._bedrock_login_callbacks",
+          "note": "render_resolved finishes picker title and field hint before local picker or relay serialization"
+        }
+      ],
+      "references": {
+        "providers/auth_cli.py": 1,
+        "providers/bedrock/login.py": 2,
+        "providers/bedrock/sso_login.py": 1,
+        "server/utils/desktop_auth.py": 1,
+        "tui/app.py": 1
+      }
+    },
+    "wire.errors.sdk_spec": {
+      "reason": "SDK specification refusals rendered in-process by session/spec.py and sdk.py through spec_refusal_text (active locale) and raised as a one-string SessionSpecError; the exception carries finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/session/spec.py",
+          "symbol": "spec_refusal_text / SessionSpec.__post_init__",
+          "note": "every keyed refusal is wrapped in spec_refusal_text, which renders the active locale before SessionSpecError(str) is raised; the exception has no code/params attribute"
+        },
+        {
+          "path": "local_operator/sdk.py",
+          "symbol": "open_session / spawn_session / _refuse_attach_extras / _refuse_spawn_extras",
+          "note": "same spec_refusal_text wrapper; the SDK raises finished text in the embedding process and never serialises a catalogue key"
+        }
+      ],
+      "references": {
+        "sdk.py": 16,
+        "session/spec.py": 28
       }
     }
   }

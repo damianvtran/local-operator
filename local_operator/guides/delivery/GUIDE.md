@@ -116,9 +116,10 @@ required surfaces bounded and record them; CI never replaces real-path QA.
 Resource holds forbid hold-class runs, not evidence. Investigate even
 out-of-slice fails.
 
-To wait for heavy work, run it through `bash`, which queues for the slot (#4104;
-serial pytest takes none), or read `lop services status` once; never wait on a
-`pgrep -f` pattern, which matches the waiter's own shell and parents.
+Heavy work queues for the machine slot (#4104; serial pytest takes none): run it
+through `bash`, or `lop services heavy run -- <cmd>`. To wait for the slot use
+`lop services heavy wait`; `heavy status` names holders. Never hand off the slot
+by message or wait on `pgrep -f` (it matches the waiter's own shell).
 
 ## Converge, do not restart
 

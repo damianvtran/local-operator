@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "quest. {count}",
+  "tui.session_sidebar.footer.hub_note": "liens : {count}",
+  "tui.session_sidebar.footer.opening": "Ouverture…",
+  "tui.session_sidebar.footer.refresh_failed": "Échec de l’actualisation",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, one {+{shown} épinglée — défiler} many {+{shown} épinglées — défiler} other {+{shown} épinglées — défiler}}",
+  "tui.session_sidebar.row.untitled": "Sans titre",
+  "tui.session_sidebar.section.active": "Sessions actives",
+  "tui.session_sidebar.section.pinned": "Épinglées",
+  "tui.session_sidebar.section.previous": "Sessions précédentes",
+  "tui.session_sidebar.section.subagent": "Exécutions de sous-agents",
+  "tui.session_sidebar.state.empty": "Pas encore de conversation",
+  "tui.session_sidebar.state.error": "Échec du chargement",
+  "tui.session_sidebar.state.loading": "Chargement des sessions…",
+  "tui.session_sidebar.title": "Sessions",
+  "tui.session_sidebar.tooltip.location": "sur {device}",
+  "tui.session_sidebar.tooltip.location_network": "sur {device} · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "sur {device} · {network} (dernier état connu)",
+  "tui.session_sidebar.tooltip.location_stale": "sur {device} (dernier état connu)",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · {command} si le silence persiste",
+  "tui.session_sidebar.tooltip.unnamed_device": "appareil sans nom",
+  "tui.session_sidebar.tooltip.unreachable": "injoignable · {reason}"
+}

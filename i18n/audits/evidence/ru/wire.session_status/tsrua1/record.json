@@ -1,0 +1,99 @@
+{
+  "locale": "ru",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "audit_id": "tsrua1",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-ru-audit",
+    "session": "56bc997306a1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "3f1cf5b56ba0",
+    "actual_model_source": "Host session model declaration",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "result": "passed",
+    "unresolved_blocker_major_count": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "3f1cf5b56ba0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Task brief and translator receipt.json",
+    "fallback_used": false,
+    "date": "2026-11-19"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/wire.session_status.json",
+      "sha256": "b15cc559652777694f2e252404862095bbdc902f90fe72fcee930a03b698f47c"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/audit.py",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/audit.py",
+      "sha256": "091ffb58cf1fab734c06f132cd9c7e4c9b866270bc50a268c67989f8ea1b2a17"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/audit.log",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/audit.log",
+      "sha256": "740ced7bdb1f2b5372f7bd3cb4aab3c7a0f33d1b7cf0b5f475bef7fef987532f"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/mechanical.json",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/mechanical.json",
+      "sha256": "66f74918814c209204f1fe769af59466ce9061ea8f362ded79ae679bb92c31db"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/setup-control-mistake.log",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/setup-control-mistake.log",
+      "sha256": "3d96719e2c4a8897a1f9a60d470fca2839ad67c01881cf71159ec5adc82f08f2"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/report.md",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/report.md",
+      "sha256": "2f8ddb0babf0fbde172e9d87e3a8f1e3f6e37cf8d6cfbf9e33d1d8ef4804c6dc"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/receipt.json",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/receipt.json",
+      "sha256": "a0ac1fc7dee593ba2eaa3156b0e6fa1752c4d10d6f2749ae37cc8c5df0f06c81"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/receipt-dry-run.log",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/receipt-dry-run.log",
+      "sha256": "4ffe3ef79bb2e9d283d1226c8a160f030f6602995b92624774ea446f23e2cee6"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/56bc997306a1/scratchpad/ru-status-a1/expected-history-sha.txt",
+      "canonical_path_after_promotion": "i18n/audits/evidence/ru/wire.session_status/tsrua1/expected-history-sha.txt",
+      "sha256": "dfa8fcb3b52220f8cf4833fe7b4e0113c029af4269ad5c8bb42f9be00b216c46"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "report.md is reasoning; audit.log is actual execution output; setup-control-mistake.log is the initial rig assertion failure, explained in report.",
+  "second_independent_audit": "pending",
+  "retention_status": "scratch_handoff_not_tracked_or_merged",
+  "canonical_promotion_path": "i18n/audits/evidence/ru/wire.session_status/tsrua1",
+  "repository_write_performed": false,
+  "ledger_dry_run": {
+    "command": "scripts/i18n/ledger.py append --receipt <scratch>/receipt.json --expected-history-sha <expected-history-sha.txt> --dry-run",
+    "exit_code": 0,
+    "actual_output": "i18n/audit-history/ru/wire.session_status.json",
+    "history_sha256": "5b709925ccf156f7113b2087b753b481e12e72dc3ecb04d845965d600f8dce43",
+    "applied": false
+  }
+}

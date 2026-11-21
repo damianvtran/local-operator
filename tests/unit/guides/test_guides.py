@@ -558,6 +558,55 @@ def test_documented_cli_shapes_parse(argv: list[str]) -> None:
     build_cli_parser().parse_args(argv)
 
 
+def test_every_mcp_add_example_in_the_mcp_guide_parses_as_written() -> None:
+    """Agents run guide://mcp's ``mcp add`` examples verbatim, so each must parse.
+
+    ``--arg -y`` exited 2 (``argument --arg: expected one argument``): argparse
+    reads a value that starts with ``-`` as an option, so nothing was saved.
+    ``--arg=-y`` is the spelling that works (PR #4349 agent review round 1, M1).
+    Read from the shipped GUIDE rather than restated here, so a new example
+    with the same trap fails this test instead of an agent's run.
+    """
+    import shlex
+
+    import local_operator.guides as guides_package
+    from local_operator.cli import build_cli_parser
+
+    text = (Path(guides_package.__file__).parent / "mcp" / "GUIDE.md").read_text(encoding="utf-8")
+    commands: list[list[str]] = []
+    for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+        for line in block.replace("\\\n", " ").splitlines():
+            if line.strip().startswith("local-operator mcp add"):
+                commands.append(shlex.split(line, comments=True)[1:])
+    assert len(commands) >= 4, commands  # filesystem, example, linear, tavily
+    for argv in commands:
+        try:
+            build_cli_parser().parse_args(argv)
+        except SystemExit as exc:  # argparse's refusal, which hides the argv
+            raise AssertionError(f"guide://mcp example does not parse: {argv}") from exc
+
+
+def test_the_mcp_guide_names_every_variable_a_stdio_child_receives() -> None:
+    """guide://mcp's allowlist sentence is what a user reads to learn why a key
+    exported in their shell never reaches a server, so it must match the code
+    that builds the child env: ``get_default_environment() | CHILD_QUIET_ENV |
+    cfg.env`` (``mcp/manager.py``). It used to omit the quiet-output defaults,
+    so ``TERM`` read as inherited when the child gets ``dumb`` (PR #4349 agent
+    review round 1, N1). The SDK's list is per-platform; this pins the one the
+    test runs on, and the quiet set everywhere.
+    """
+    from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS
+
+    import local_operator.guides as guides_package
+    from local_operator.mcp.manager import CHILD_QUIET_ENV
+
+    text = (Path(guides_package.__file__).parent / "mcp" / "GUIDE.md").read_text(encoding="utf-8")
+    missing = [name for name in DEFAULT_INHERITED_ENV_VARS if f"`{name}`" not in text]
+    missing += [f"{k}={v}" for k, v in CHILD_QUIET_ENV.items() if f"`{k}={v}`" not in text]
+    assert missing == [], missing
+    assert "CHILD_QUIET_ENV" in text
+
+
 @pytest.mark.asyncio
 async def test_custom_instructions_task_routes_to_the_configuration_guide(
     tmp_path: Path,

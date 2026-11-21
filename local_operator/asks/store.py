@@ -379,16 +379,16 @@ def read_events(session_directory: Path | str, *, strict: bool = False) -> list[
             raise
         logger.warning("ask log unreadable at %s", path, exc_info=True)
         return []
+    # ONE STRICT STAMP PARSER (mesh-origin-stamp review R3-1): this log carries
+    # ``by.mesh_origin`` stamps the fold publishes, so its rows go through the
+    # same parser the import downgrade uses; a stamp on a line that parser
+    # rejects reads ``verified: false``. Ordinary rows stay tolerant (a torn line
+    # is skipped, never fatal: this file is read every minute beside a live
+    # writer).
+    from local_operator.network.origin import read_jsonl_rows
+
     events: list[dict[str, Any]] = []
-    for row in raw.splitlines():
-        if not row.strip():
-            continue
-        try:
-            payload = json.loads(row.decode("utf-8", "replace"))
-        except ValueError:
-            # A torn line (killed mid-write) is skipped, never fatal: this file
-            # is read every minute beside a live writer.
-            continue
+    for payload in read_jsonl_rows(raw):
         if isinstance(payload, dict) and payload.get("ask_id"):
             events.append(payload)
     return events
@@ -920,18 +920,44 @@ def fold(
                 # for the honest case.
                 if isinstance(by, Mapping):
                     surfaces = [str(by.get("surface") or "")]
+                    proofs = {str(by.get("proof") or "")}
                     for event in events:
                         if (
                             event.get("kind") == EVENT_REVISED
                             and str(event.get("ask_id")) == ask_id
                         ):
                             rev_by = event.get("by")
-                            surfaces.append(
-                                str(rev_by.get("surface") or "")
-                                if isinstance(rev_by, Mapping)
-                                else ""
+                            rev_map = rev_by if isinstance(rev_by, Mapping) else {}
+                            surfaces.append(str(rev_map.get("surface") or ""))
+                            proofs.add(str(rev_map.get("proof") or ""))
+                    merged = {**dict(by), "surface": weakest_surface(*surfaces)}
+                    # ``proof`` (F2, R1-m3) follows the same laundering rule:
+                    # it is kept only when EVERY write carried the same one,
+                    # so an unproven revision never sits under a signature.
+                    if len(proofs) != 1 or "" in proofs:
+                        merged.pop("proof", None)
+                    record["answered_by"] = merged
+                    # THE MESH ORIGIN FOLDS THE SAME WAY (mesh-origin-stamp §2
+                    # rule 4, M-8): ``verified`` survives only if EVERY revision
+                    # carries a verified stamp from the same device and runtime; a
+                    # revision with no stamp at all counts as unverified.
+                    first_origin = by.get("mesh_origin")
+                    if isinstance(first_origin, Mapping):
+                        from local_operator.network.origin import fold_answer_origin
+
+                        revision_origins = [
+                            (
+                                event.get("by", {}).get("mesh_origin")
+                                if isinstance(event.get("by"), Mapping)
+                                else None
                             )
-                    record["answered_by"] = {**dict(by), "surface": weakest_surface(*surfaces)}
+                            for event in events
+                            if event.get("kind") == EVENT_REVISED
+                            and str(event.get("ask_id")) == ask_id
+                        ]
+                        record["answered_by"]["mesh_origin"] = fold_answer_origin(
+                            first_origin, revision_origins
+                        )
         records.append(record)
     return records
 

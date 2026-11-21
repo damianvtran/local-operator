@@ -1888,9 +1888,31 @@ def test_a_forged_site_id_is_not_an_operator_signed_card(case: str) -> None:
 
 
 @pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
-def test_a_forged_site_card_from_an_agent_child_never_forwards(tmp_path: Path, case: str) -> None:
-    """S1-1 end to end: the forged card stays on the node even over the binding."""
+def test_a_forged_site_card_from_an_operator_placed_agent_child_is_only_an_ordinary_ask(
+    tmp_path: Path, case: str
+) -> None:
+    """S1-1 end to end on the operator-placed leg (2026-11-21): a forged card earns
+    no standing of its own — it travels exactly as any ordinary ask of that child
+    does (to the bound operator, as a plain ``remote-ask:`` block carrying no
+    authority), and to no other viewer."""
     origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
+    keys = _keys(_wire(node, origin, HEAD, operator_viewer=True))
+    assert keys == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-forged"]
+    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=False)
+    assert "notices" not in _wire(node, origin, CO, operator_viewer=False)
+
+
+@pytest.mark.parametrize("source", ["", NODE, CO])
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_card_from_a_non_operator_placed_agent_child_never_forwards(
+    tmp_path: Path, case: str, source: str
+) -> None:
+    """S1-1 end to end on the signed-only leg (as on base): a child the operator's
+    own device did not place forwards real site cards only, so a forged one stays
+    on the node even over the binding."""
+    origin = _agent(source)
     node = _agent_child_node(tmp_path, origin, site_card=False)
     _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
     assert "notices" not in _wire(node, origin, HEAD, operator_viewer=True)
@@ -1900,15 +1922,20 @@ def test_a_forged_site_card_from_an_agent_child_never_forwards(tmp_path: Path, c
 def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
     tmp_path: Path, source: str
 ) -> None:
-    """The site card (and nothing else) reaches the VERIFIED operator link, wherever
-    the child was placed from: by the operator's Mac (the live repro), started
-    here, or placed by a co-member."""
+    """The site card reaches the VERIFIED operator link, wherever the child was
+    placed from: by the operator's Mac (the live repro), started here, or placed
+    by a co-member. Only the operator-placed child lists its older ordinary ask
+    beside it (:func:`ra.agent_child_forwards_ordinary_asks`); every other
+    child's leg carries the site card alone, exactly as on base."""
     origin = _agent(source)
     node = _agent_child_node(tmp_path, origin)
     # A REAL completion (review R1-1): without one, "no badge" holds vacuously.
     AttentionStore(node / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
     row = _wire(node, origin, HEAD, operator_viewer=True)
-    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    if source == HEAD:
+        assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    else:
+        assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
     if source == HEAD:
         # The Mac placed the child: its completion badge reaches the Mac, as before.
         assert row["attention"] == {"token": TOK1, "outcome": "complete"}
@@ -1921,15 +1948,71 @@ def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
     assert "build" not in _keys(row)
 
 
-@pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
-def test_an_agent_childs_ordinary_ask_and_notify_still_reach_nobody(
+def test_an_operator_placed_agent_childs_ordinary_ask_reaches_the_bound_operator_only(
+    tmp_path: Path,
+) -> None:
+    """Remote parity (2026-11-21; live repro d83f5525a563's a-e9c5, no Mac banner):
+    a child the operator's OWN device placed sends its ordinary ask to the VERIFIED
+    operator viewer, as a local agent child's ask reaches the local inbox. Its
+    notify item never travels, and no unbound viewer — the origin it names, a
+    co-member — gets anything."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain"]  # never "build"
+    assert "asks_unknown" not in row
+    for viewer in (HEAD, CO, NODE):
+        assert "notices" not in _wire(node, origin, viewer, operator_viewer=False), viewer
+    # The target is the caller's VERIFIED operator id, or nobody without one.
+    assert ra.signed_card_target(origin, operator_device_id=HEAD) == HEAD
+    assert ra.signed_card_target(origin, operator_device_id="") == ""
+    assert ra.agent_child_forwards_ordinary_asks(origin, operator_device_id=HEAD)
+    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+
+
+@pytest.mark.parametrize("source", ["", NODE, CO])
+def test_a_non_operator_placed_agent_childs_ordinary_ask_reaches_nobody(
     tmp_path: Path, source: str
 ) -> None:
+    """Security review P1 (narrow gate): ``origin.kind`` is the placing device's own
+    claim, so a co-member could stamp any session it places ``agent``. Ordinary
+    asks travel only when the AUTHENTICATED ``source_device`` is the verified
+    operator; a co-member-placed (or locally started, or source-less) agent child
+    sends NO ordinary ask to anyone, the operator included — and its real site
+    card still reaches the operator, unchanged from base."""
     origin = _agent(source)
     node = _agent_child_node(tmp_path, origin, site_card=False)
-    for viewer, bound in ((HEAD, True), (HEAD, False), (CO, False)):
+    for viewer, bound in ((HEAD, True), (HEAD, False), (CO, False), (NODE, False)):
         assert "notices" not in _wire(node, origin, viewer, operator_viewer=bound), viewer
-    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+    assert not ra.agent_child_forwards_ordinary_asks(origin, operator_device_id=HEAD)
+    # The site card leg is untouched: added now, it alone reaches the operator.
+    _queue_raw(node, "a-site", [_site_question()])
+    assert _keys(_wire(node, origin, HEAD, operator_viewer=True)) == [
+        f"{ra.ASK_NOTICE_PREFIX}a-site"
+    ]
+    assert "notices" not in _wire(node, origin, CO, operator_viewer=False)
+
+
+def test_the_ordinary_ask_gate_needs_a_verified_operator_and_an_agent_child() -> None:
+    """The gate's own truth table: no verified operator, a non-agent row, or a
+    source that is not the operator never widens the agent-child leg."""
+    assert not ra.agent_child_forwards_ordinary_asks(_agent(HEAD), operator_device_id="")
+    assert not ra.agent_child_forwards_ordinary_asks(
+        {"kind": "user", "source_device": HEAD}, operator_device_id=HEAD
+    )
+    assert not ra.agent_child_forwards_ordinary_asks(None, operator_device_id=HEAD)
+    assert not ra.agent_child_forwards_ordinary_asks(_agent(CO), operator_device_id=HEAD)
+
+
+def test_an_agent_childs_asks_share_the_wire_cap_oldest_first(tmp_path: Path) -> None:
+    """Same bounded list as the non-agent path: ``NOTICES_ON_WIRE`` asks, oldest first."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    for index in range(ra.NOTICES_ON_WIRE + 2):
+        _queue_raw(node, f"a-{index:02d}", [{"id": "q0", "question": f"Q{index}?", "options": []}])
+    keys = _keys(_wire(node, origin, HEAD, operator_viewer=True))
+    assert len(keys) == ra.NOTICES_ON_WIRE
+    assert keys[0] == f"{ra.ASK_NOTICE_PREFIX}a-plain"
 
 
 @pytest.mark.parametrize("source", [HEAD, CO])
@@ -1968,3 +2051,156 @@ def test_an_unreadable_ask_log_on_an_agent_child_says_unknown(tmp_path: Path) ->
     row = _wire(node, origin, HEAD, operator_viewer=True)
     assert row.get("asks_unknown") is True and "notices" not in row
     assert "asks_unknown" not in _wire(node, origin, HEAD, operator_viewer=False)
+
+
+# ---------------------------------------------------------------------------
+# Who started an agent child: the forwarded ask's label (PR #4372 "Label")
+# ---------------------------------------------------------------------------
+
+MAC = "d_mac"
+ASK_KEY = f"{ra.ASK_NOTICE_PREFIX}a-e9c5"
+AGENT_BODY = "runs on lop-remote-node-2 · started by an agent on damian-mac"
+
+
+def _labelled_rows(origins: dict[str, Any]) -> dict[str, SessionRow]:
+    """One listing whose rows carry ``origins`` (session id -> stamp origin)."""
+
+    class _Peer:
+        def __init__(self, device_id: str, name: str) -> None:
+            self.device_id, self.name = device_id, name
+            self.network_id, self.reachable, self.reason = "n_test", True, ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer(NODE, "lop-remote-node-2"), _Peer(MAC, "damian-mac")]
+
+        def rows(self) -> list[Any]:
+            return [
+                PeerRow.from_json(
+                    {"session_id": sid, "state": "live", "origin": origin}, device_id=NODE
+                )
+                for sid, origin in origins.items()
+            ]
+
+    rows = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+    return {row.id: row for row in rows}
+
+
+def test_label_names_the_device_whose_agent_started_the_row() -> None:
+    by_id = _labelled_rows(
+        {
+            "a" * 12: {"kind": ra.AGENT_ORIGIN_KIND, "source_device": MAC},
+            "b" * 12: {"kind": "user", "source_device": MAC, "started_by": "operator"},
+            "c" * 12: {"kind": ra.AGENT_ORIGIN_KIND, "source_device": "d_unknown"},
+            "d" * 12: {"kind": ra.AGENT_ORIGIN_KIND},
+            "e" * 12: {},
+        }
+    )
+    assert by_id["a" * 12].remote_started_by_agent_on == "damian-mac"
+    # Not an agent child: no label, whatever the source.
+    assert by_id["b" * 12].remote_started_by_agent_on == ""
+    # A source this device cannot name, or none at all: no label (never an id).
+    assert by_id["c" * 12].remote_started_by_agent_on == ""
+    assert by_id["d" * 12].remote_started_by_agent_on == ""
+    assert by_id["e" * 12].remote_started_by_agent_on == ""
+
+
+def test_label_tolerates_a_malformed_origin() -> None:
+    assert peer_rows._agent_starter_label("agent", {MAC: "damian-mac"}) == ""
+    assert peer_rows._agent_starter_label(None, {MAC: "damian-mac"}) == ""
+    assert peer_rows._agent_starter_label({"kind": ["agent"], "source_device": MAC}, {}) == ""
+
+
+def test_label_names_this_device_from_its_own_identity(tmp_path: Path) -> None:
+    from local_operator.network import identity
+
+    mine = identity.mint(tmp_path, name="damian-mac")
+    names = peer_rows._device_names(tmp_path, {})
+    assert names == {mine.device_id: "damian-mac"}
+    # No identity at all: the peers' names only, no crash.
+    assert peer_rows._device_names(tmp_path / "empty", {}) == {}
+
+
+@pytest.mark.parametrize(
+    ("peers", "body"),
+    [
+        (
+            {NODE: "lop-remote-node-2", CO: "co-laptop"},
+            "runs on lop-remote-node-2 · started by an agent on co-laptop",
+        ),
+        ({NODE: "lop-remote-node-2"}, "runs on lop-remote-node-2"),
+    ],
+    ids=["co-member-named", "co-member-unknown"],
+)
+def test_a_co_member_placed_childs_site_card_names_the_co_member_when_known(
+    tmp_path: Path, root: Path, peers: dict[str, str], body: str
+) -> None:
+    """Review m1, end to end: a GENUINE signed site card from a child an agent on a
+    CO-MEMBER placed travels node -> wire -> the operator's listing -> its row.
+    The label names the co-member only when the receiver's own peers list does
+    (never the raw device id a peer could have written); otherwise the row
+    keeps the plain "runs on <node>" body byte for byte."""
+    origin = _agent(CO)
+    wire = _wire(_agent_child_node(tmp_path, origin), origin, HEAD, operator_viewer=True)
+    # The co-member-placed leg carries the site card alone (no ordinary ask).
+    assert _keys(wire) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+
+    class _Peer:
+        def __init__(self, device_id: str, name: str) -> None:
+            self.device_id, self.name = device_id, name
+            self.network_id, self.reachable, self.reason = "n_test", True, ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer(device_id, name) for device_id, name in peers.items()]
+
+        def rows(self) -> list[Any]:
+            return [PeerRow.from_json(wire, device_id=NODE)]
+
+    [row] = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+    ra.RemoteAttentionWatcher(root).observe([row])
+    [item] = _items(root)
+    assert item["key"].endswith("a-site")
+    assert item["body_md"] == body
+
+
+def _ask_row(started_by: str, key: str = ASK_KEY) -> SessionRow:
+    return _row(notice=(key, 1, "normal", "Which branch should I use?"))._replace(
+        remote_started_by_agent_on=started_by
+    )
+
+
+def test_an_agent_childs_forwarded_ask_says_who_started_it(root: Path) -> None:
+    ra.RemoteAttentionWatcher(root).observe([_ask_row("damian-mac")])
+    [item] = _items(root)
+    assert item["title"] == "Which branch should I use?"
+    assert item["body_md"] == AGENT_BODY
+
+
+def test_an_unlabelled_forwarded_ask_keeps_the_plain_body(root: Path) -> None:
+    ra.RemoteAttentionWatcher(root).observe([_ask_row("")])
+    [item] = _items(root)
+    assert item["body_md"] == "runs on lop-remote-node-2"
+
+
+def test_a_labelled_rows_notify_item_keeps_the_plain_body(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """The "started by an agent" label belongs to an ask, never a notify item."""
+    row = _row(notice=("k", 1, "high", "Deploy finished"))._replace(
+        remote_started_by_agent_on="damian-mac"
+    )
+    ra.RemoteAttentionWatcher(root).observe([row])
+    [item] = _items(root)
+    assert item["body_md"] == "runs on lop-remote-node-2"
+    assert [call["body"] for call in _no_banner_threads] == ["runs on lop-remote-node-2"]
+
+
+def test_a_high_agent_child_ask_banners_with_the_label(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    row = _row(notice=(ASK_KEY, 1, "high", "Approve the deploy?"))._replace(
+        remote_started_by_agent_on="damian-mac"
+    )
+    ra.RemoteAttentionWatcher(root).observe([row])
+    assert [call["body"] for call in _no_banner_threads] == [AGENT_BODY]

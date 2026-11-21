@@ -1,0 +1,68 @@
+{
+  "kind": "translation_provenance_not_audit",
+  "status": "translated",
+  "locale": "es",
+  "namespace": "wire.session_status",
+  "date": "2026-11-19",
+  "key_count": 17,
+  "newly_translated_key_count": 16,
+  "preserved_key_count": 1,
+  "source_commit": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "translator": {
+    "agent": "i18n-translator (terminal-status-es)",
+    "session": "b39246e0d986",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state Model field",
+    "fallback": "No fallback reported in this session",
+    "date": "2026-11-19"
+  },
+  "audited": false,
+  "independent_safety_copy_audits_required": 2,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "previous_es": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/es/wire.session_status.json",
+      "sha256": "024e4624f66b9a4b2f6c1631bcccae9f4390851951b569b2493f45abbab06bc0"
+    },
+    "style_guide": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "HOWTO": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    "RFC": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    },
+    "validator": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/scripts/i18n/check.py",
+      "sha256": "42f327a238dabe6c6becf5d9d591038fa1246c4e15d056a0d58a34bd658f89df"
+    },
+    "runtime": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+    }
+  },
+  "target": {
+    "path": "/Users/damian/.local-operator/sessions/b39246e0d986/scratchpad/terminal-status-es/wire.session_status.json",
+    "sha256": "b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128"
+  },
+  "expected_history_sha256": "133d29bbc8992b2b92758d4b6ff78407c6fb5ab3b732c863d35b07e0ffe3d27c",
+  "append_dry_run_destination": "i18n/audit-history/es/wire.session_status.json",
+  "validation_scope": "Mechanical catalogue/ICU checks only. Namespace fixture; not the full repository check. No rendered UI or integrated application/runtime clearance.",
+  "unknown_external_diagnostic": "Legacy English branch intentionally unchanged; unresolved programme gap, not an allowed exception.",
+  "executed_at": "2026-11-19T20:47:31.635133+00:00"
+}

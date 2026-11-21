@@ -205,6 +205,22 @@ class LoginCancelledError(LoginError):
         super().__init__(message)
 
 
+class LoginDeferredError(LoginError):
+    """The user chose to finish a step outside this login, so nothing was stored.
+
+    Not a failure and not a cancel: Amazon Bedrock's "I'll run it myself"
+    answer to an expired AWS SSO session is a deliberate choice that ends the
+    login with a command to run elsewhere (#4270 design D4 / QA Q7). Hosts
+    render it as a neutral note, exit 0 from the CLI, and set ``command``
+    apart so it can be copied. A ``LoginError`` subclass so any host that does
+    not know it still ends the login rather than storing anything.
+    """
+
+    def __init__(self, message: str, *, command: str = "") -> None:
+        super().__init__(message)
+        self.command = command
+
+
 class LoginTimeoutError(LoginError):
     """No callback/manual code arrived within the timeout window."""
 
@@ -534,9 +550,24 @@ class LoginCallbacks:
     on_warning: Callable[[str], Awaitable[None] | None] | None = None
     on_input_rejected: Callable[[], Awaitable[None] | None] | None = None
     on_manual_code_input: Callable[[], Awaitable[str | None] | str | None] | None = None
-    # Endpoint setup is a sequence of explicit fields, not an OAuth code. The
-    # host decides how to capture them; the controller never touches stdin.
+    # Explicit configuration fields, not an OAuth code: endpoint setup or a
+    # required post-auth project. The host decides how to capture them; flows
+    # never touch stdin. None cancels; an empty value is interpreted by the
+    # caller (optional endpoint fields can keep defaults; required login fields cancel).
     on_setup_input: Callable[[str, str, bool], Awaitable[str | None] | str | None] | None = None
+    #: One single-select choice: ``(title, [(value, label, description)], default)``
+    #: -> the chosen ``value``, or ``None`` to cancel. Structured logins (Amazon
+    #: Bedrock's method / profile / Region pickers, login_kind "aws") ask
+    #: through it so a host can render a real picker. Optional: a host without
+    #: it gets a numbered ``on_setup_input`` prompt instead
+    #: (``providers/bedrock/login.choose``), so existing embedders keep working.
+    on_choice: (
+        Callable[
+            [str, list[tuple[str, str, str]], str | None],
+            Awaitable[str | None] | str | None,
+        ]
+        | None
+    ) = None
     #: Structured facts about the flow a host renders as CONTROLS rather than
     #: prose: ``user_code`` (a device flow's code), ``launch_url`` (the short
     #: loopback ``/launch`` alias) and ``expires_in`` (seconds until the flow's
@@ -1420,6 +1451,16 @@ class OAuthCallbackFlow(ABC):
         finally:
             for task in waiters:
                 task.cancel()
+            # Let the cancelled helper tasks (the paste-code reader above all)
+            # run their cleanup NOW, before ``exchange_token`` runs. A provider
+            # whose exchange opens a second, post-callback prompt (Vertex asks
+            # for a project ID when none is discoverable) otherwise races the
+            # first prompt's teardown: the host's ``finally`` would clear the
+            # NEW prompt's pending state, leaving Desktop with no field to
+            # answer (409 on input) and the CLI with a stale reader.
+            helpers = [task for task in waiters if isinstance(task, asyncio.Task)]
+            if helpers:
+                await asyncio.wait(helpers)
 
         if not done:
             raise LoginTimeoutError(self._timeout_message())

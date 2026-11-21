@@ -170,9 +170,9 @@ async def test_an_archive_with_frames_replays_as_valid_pngs(tmp_path):
     """
     stream = ScriptedStream(["reply"] * 8)
     session = make_session(tmp_path, stream, model=VISION_MODEL)
-    # Dense, full-width pages so the policy KEEPS their images, and past
-    # 2 x HQ_EDGE_FRAMES x 13 916 chars of plain-text edges so the middle is
-    # actually imaged instead of kept verbatim.
+    # Dense, full-width pages so the policy KEEPS their images, and past the
+    # plain-text edges ((HEAD_EDGE_FRAMES + HQ_EDGE_FRAMES) x 13 916 chars) so
+    # the middle is actually imaged instead of kept verbatim.
     for index in range(8):
         await session.prompt(f"dense {index} " + DENSE_RUN)
 
@@ -777,7 +777,8 @@ async def test_the_snapcompact_frame_correction_is_priced_once(tmp_path):
     stream = ScriptedStream(["reply"] * 8)
     session = make_session(tmp_path, stream, model=VISION_MODEL)
     # Dense, full-width pages so the policy keeps their images AND the history
-    # runs past the plain-text edges (2 x HQ_EDGE_FRAMES x 13 916 chars), so
+    # runs past the plain-text edges ((HEAD_EDGE_FRAMES + HQ_EDGE_FRAMES) x
+    # 13 916 chars), so
     # the middle is actually imaged and the correction has frames to price. A
     # smaller history stores an empty frames list and tests nothing.
     for index in range(8):

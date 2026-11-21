@@ -4173,6 +4173,11 @@ class AttachedSession:
     def ask_consent_bearing(self) -> bool:
         """Whether the last ask answer this facade sent carried operator proof.
 
+        FALLBACK ONLY since PR #4132: the route reports the runtime's stamped
+        surface (``StampedReceipt.surface``) and reads this probe only when the
+        runtime predates that ack field, i.e. has no app-signature attestation
+        and no minted-here rule, so the cap decision IS its stamp.
+
         Read by the desktop answer route right after :meth:`ask_respond` (so a
         cold bind that this process just engaged counts), and reported to the
         card as ``consent_bearing``. The value is captured at SEND time from the
@@ -10377,6 +10382,17 @@ class AttachedSession:
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.pending_gate
+
+    @property
+    def queued_engine_live(self) -> bool:
+        """Whether the owner runs the queued-ask engine; see the store's property.
+
+        Paired with :attr:`pending_gate`: an ask-kind gate while this is true is
+        the legacy mirror of a queued ask, not a parked card.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.queued_engine_live
 
     @property
     def has_running_job(self) -> bool:

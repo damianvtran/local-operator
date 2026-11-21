@@ -1,0 +1,190 @@
+{
+  "locale": "fr",
+  "namespace": "tui.tool_card",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "target_sha256": "adf3c3328e511a4442fc660d5819e7894e8c5f8e510a5f3a170d02f7e49cb4a7",
+  "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by delegator; not independently inspected."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "85a9881776ff",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "scope": "Round 2: three changed keys plus composition with more.lines, more.search_lines, hint.expand and tui.small.copy_picker.more_lines. Remaining namespace read for context only, not freshly approved.",
+    "keys_read": 16,
+    "keys_audited": 3
+  },
+  "status": "passed",
+  "findings": [
+    {
+      "id": "F-fr-R2-1",
+      "severity": "minor",
+      "key": "tui.tool_card.more.diff_lines",
+      "current": "{count, plural, one {{shown} ligne de comparaison de plus} many {{shown} de lignes de comparaison de plus} other {{shown} lignes de comparaison de plus}}",
+      "proposed": "Retain the accurate wording; check the composed marker and ⟨déplier⟩ in a rendered narrow card before accepting its width. If a compact variant is required, use {count, plural, one {{shown} ligne de plus} many {{shown} de lignes de plus} other {{shown} lignes de plus}} in the already-visible diff context.",
+      "reason": "Natural French but 30–32 cells at 0–21 versus English 16–18; the actual painter truncates the marker and sheds its expand affordance, so the longer wording merits a rendered fit check rather than an invented hard width failure."
+    }
+  ],
+  "evidence": {
+    "samples": [
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 0,
+        "en": "0 more diff lines",
+        "fr": "0 ligne de comparaison de plus",
+        "en_cells": 17,
+        "fr_cells": 30
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 1,
+        "en": "1 more diff line",
+        "fr": "1 ligne de comparaison de plus",
+        "en_cells": 16,
+        "fr_cells": 30
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 2,
+        "en": "2 more diff lines",
+        "fr": "2 lignes de comparaison de plus",
+        "en_cells": 17,
+        "fr_cells": 31
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 5,
+        "en": "5 more diff lines",
+        "fr": "5 lignes de comparaison de plus",
+        "en_cells": 17,
+        "fr_cells": 31
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 21,
+        "en": "21 more diff lines",
+        "fr": "21 lignes de comparaison de plus",
+        "en_cells": 18,
+        "fr_cells": 32
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 1000000,
+        "en": "1000000 more diff lines",
+        "fr": "1000000 de lignes de comparaison de plus",
+        "en_cells": 23,
+        "fr_cells": 40
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 0,
+        "en": "0 more lines",
+        "fr": "0 ligne de plus",
+        "en_cells": 12,
+        "fr_cells": 15
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 1,
+        "en": "1 more line",
+        "fr": "1 ligne de plus",
+        "en_cells": 11,
+        "fr_cells": 15
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 2,
+        "en": "2 more lines",
+        "fr": "2 lignes de plus",
+        "en_cells": 12,
+        "fr_cells": 16
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 5,
+        "en": "5 more lines",
+        "fr": "5 lignes de plus",
+        "en_cells": 12,
+        "fr_cells": 16
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 21,
+        "en": "21 more lines",
+        "fr": "21 lignes de plus",
+        "en_cells": 13,
+        "fr_cells": 17
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 1000000,
+        "en": "1000000 more lines",
+        "fr": "1000000 de lignes de plus",
+        "en_cells": 18,
+        "fr_cells": 25
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 0,
+        "en": "0 more search lines",
+        "fr": "0 ligne de résultat de plus",
+        "en_cells": 19,
+        "fr_cells": 27
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 1,
+        "en": "1 more search line",
+        "fr": "1 ligne de résultat de plus",
+        "en_cells": 18,
+        "fr_cells": 27
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 2,
+        "en": "2 more search lines",
+        "fr": "2 lignes de résultat de plus",
+        "en_cells": 19,
+        "fr_cells": 28
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 5,
+        "en": "5 more search lines",
+        "fr": "5 lignes de résultat de plus",
+        "en_cells": 19,
+        "fr_cells": 28
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 21,
+        "en": "21 more search lines",
+        "fr": "21 lignes de résultat de plus",
+        "en_cells": 20,
+        "fr_cells": 29
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 1000000,
+        "en": "1000000 more search lines",
+        "fr": "1000000 de lignes de résultat de plus",
+        "en_cells": 25,
+        "fr_cells": 37
+      }
+    ],
+    "message_arguments_parity": "PASS, all 3 changed and 3 direct tui.tool_card neighbours",
+    "typography": "PASS: U+202F before colon in both fetch keys; URL placeholders and parentheses preserved",
+    "composition": "more.diff_lines marker including leading ellipsis: 32/34/42 cells at 1/21/1000000; with space and ⟨déplier⟩: 42/44/52 cells. Painter at tool_card.py:5220-5227 truncates marker and sheds hint when too narrow. No rendered-frame check performed.",
+    "english_leakage": "No unintended English in changed copy; URL is a technical acronym and URL values remain literal.",
+    "rendered_frame": "not performed; width finding is non-blocking and explicitly requests rendered fit evidence"
+  },
+  "note": "Delta-only independent audit; semantic accuracy, idiom, de plus consistency and French plural one/many/other all pass. Receipt hashes cover current complete catalogue and sidecar bytes; this does not independently re-approve unchanged keys."
+}

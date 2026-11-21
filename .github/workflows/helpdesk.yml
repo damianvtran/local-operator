@@ -134,7 +134,12 @@ jobs:
     # mints no app token.
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Measured 2026-11-10..18 (#4074 CI report): healthy sweeps finish in
+    # 0.4–0.7 min (n=sampled schedule runs; median ~0.5 min, max < 1 min), while
+    # hung GitHub API sweeps sat until the next `*/15` cron replaced them
+    # (~15–17 min × 21/day = ~357 runner-min/day). 3 min is >4x the observed
+    # healthy max and bounds any wedged sweep to 3 min instead of 15 min.
+    timeout-minutes: 3
     # Job-level `permissions:` REPLACES the workflow block, so everything this
     # job needs is listed. `actions: write` is the one scope beyond read, and
     # it is what lets `gh workflow run` dispatch helpdesk.yml; it is safe HERE

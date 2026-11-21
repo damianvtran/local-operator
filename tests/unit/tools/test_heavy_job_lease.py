@@ -296,7 +296,243 @@ def test_a_large_memory_request_is_heavy_on_its_own() -> None:
     assert heavy_lease.is_heavy("printf x", None) is None
 
 
-# -- slot sizing ----------------------------------------------------------------
+def _pytest_repo(root: Path, addopts: str | None) -> Path:
+    """A repo whose pyproject carries pytest ``addopts`` (None: no pytest section)."""
+    repo = root / "repo"
+    (repo / "tests" / "unit").mkdir(parents=True)
+    body = '[project]\nname = "x"\n'
+    if addopts is not None:
+        body += f"[tool.pytest.ini_options]\naddopts = {json.dumps(addopts)}\n"
+    (repo / "pyproject.toml").write_text(body)
+    return repo
+
+
+#: node2, 2026-11-18 (installed 0.107.1): heavy pytest runs that returned
+#: ``is_heavy(...) is None`` and so ran with no slot. Run inside a repo whose
+#: addopts are this repo's own (`-n auto`), as they were measured.
+NODE2_UNCLASSIFIED = [
+    (
+        "cd . && env $(env | grep -o '^CMUX_[A-Z_]*' | sed 's/^/-u /') -u NO_COLOR"
+        " make test-affected > log 2>&1; echo rc=$?",
+        "make test",
+    ),
+    (
+        ".venv/bin/python scripts/affected_tests.py --since origin/main"
+        " --python .venv/bin/python --evidence --workers 2 --chunk",
+        "affected_tests --run",
+    ),
+    (
+        "python scripts/run_bounded.py --timeout 600 -- python -m pytest tests/unit/x.py",
+        "pytest -n",
+    ),
+    ("PYTHONPATH=$PWD .venv/bin/python -m pytest -q tests/unit", "pytest -n"),
+]
+
+
+@pytest.mark.parametrize("command,reason", NODE2_UNCLASSIFIED)
+def test_node2_unclassified_heavy_runs_take_the_slot(
+    tmp_path: Path, command: str, reason: str
+) -> None:
+    cwd = str(_pytest_repo(tmp_path, "-n auto --dist worksteal"))
+    assert heavy_lease.is_heavy(command, cwd=cwd) == heavy_lease.HeavyClass(reason)
+
+
+def test_a_command_substitution_never_hides_what_follows_or_what_it_runs() -> None:
+    env_wrapped = "env $(env | grep -o '^CMUX_[A-Z_]*' | sed 's/^/-u /') -u NO_COLOR make test"
+    assert heavy_lease.is_heavy(env_wrapped) == heavy_lease.HeavyClass("make test")
+    assert heavy_lease.is_heavy("echo $(pnpm build)") == heavy_lease.HeavyClass("pnpm build")
+    assert heavy_lease.is_heavy("x=`pnpm build`") == heavy_lease.HeavyClass("pnpm build")
+    assert heavy_lease.is_heavy("echo $(echo $(pnpm build))") == heavy_lease.HeavyClass(
+        "pnpm build"
+    )
+    # Single quotes are literal: nothing runs.
+    assert heavy_lease.is_heavy("echo '$(pnpm build)'") is None
+    assert heavy_lease.is_heavy("env $(cat flags) ls") is None
+
+
+@pytest.mark.parametrize(
+    "command,reason",
+    [
+        ("pytest -q tests/unit", "pytest <directory>"),
+        ("python -m pytest -q", "pytest (whole suite)"),
+        ("python -m pytest -n 0 tests/unit", "pytest <directory>"),
+        (
+            "python scripts/run_bounded.py --timeout 600 -- python -m pytest tests/unit",
+            "pytest <directory>",
+        ),
+        # More than two workers on the command line is heavy even for one file.
+        ("pytest -n 4 tests/unit/x.py", "pytest -n"),
+        ("pytest -n 3 tests/unit/x.py", "pytest -n"),
+        ("pytest -n auto tests/unit/x.py -k slot", "pytest -n"),
+        ("pytest -nlogical tests/unit/x.py", "pytest -n"),
+        ("pytest --numprocesses=4 tests/unit/x.py", "pytest -n"),
+        ('pytest -n "$N" tests/unit/x.py', "pytest -n"),
+        (
+            "env -u NO_COLOR python scripts/run_bounded.py --"
+            " python -m pytest -n 4 tests/unit/x.py",
+            "pytest -n",
+        ),
+    ],
+)
+def test_broad_or_explicitly_parallel_pytest_is_heavy(
+    tmp_path: Path, command: str, reason: str
+) -> None:
+    cwd = str(_pytest_repo(tmp_path, None))
+    assert heavy_lease.is_heavy(command, cwd=cwd) == heavy_lease.HeavyClass(reason)
+
+
+#: Manager decision 79 (2026-11-18 11:52Z, PR #4227): the EFFECTIVE worker
+#: count decides. A quick iteration (one file or node id, `-k` or not) with at
+#: most two effective workers stays light, so it never queues behind a long run.
+TARGETED_OR_INFO = [
+    "pytest tests/unit/x.py -q",
+    "python -m pytest tests/unit/x.py",
+    "pytest tests/unit/x.py -k 'slot and not stale'",
+    # R5: plugin value options (and bare numbers) are not targets.
+    "pytest -n 0 --reruns 2 tests/unit/x.py",
+    "pytest -n 0 --count 3 --html report.html tests/unit/x.py",
+    "pytest -n 0 --some-plugin-opt 5 tests/unit/x.py",
+    "python -m pytest tests/unit/x.py::test_one --deselect tests/unit/x.py::test_two",
+    "python scripts/run_bounded.py --timeout 600 -- python -m pytest tests/unit/x.py",
+    "pytest -n 1 tests/unit/x.py",
+    "pytest -n 2 tests/unit/x.py",
+    "pytest -n 4 -p no:xdist tests/unit/x.py",
+    # Informational: nothing runs a test.
+    "pytest --version",
+    "pytest -V",
+    "python -m pytest --collect-only -q tests/unit",
+    "pytest --co",
+    ".venv/bin/python scripts/affected_tests.py --since origin/main",
+]
+
+
+@pytest.mark.parametrize("command", TARGETED_OR_INFO)
+def test_targeted_pytest_with_few_workers_stays_light(tmp_path: Path, command: str) -> None:
+    assert heavy_lease.is_heavy(command, cwd=str(_pytest_repo(tmp_path, None))) is None
+
+
+@pytest.mark.parametrize(
+    "addopts,command,heavy",
+    [
+        # Repo addopts count: `-n auto` makes a bare single file heavy ...
+        ("-n auto", "pytest tests/unit/x.py", True),
+        ("-n auto", "pytest tests/unit/x.py -k slot", True),
+        ("-n 4", "pytest tests/unit/x.py", True),
+        # ... the command line overrides them: `-n 0..2` or no:xdist is light ...
+        ("-n auto", "pytest -n 0 tests/unit/x.py", False),
+        ("-n auto", "pytest -n0 tests/unit/x.py", False),
+        ("-n auto", "pytest -n 2 tests/unit/x.py -k slot", False),
+        ("-n auto", "pytest -p no:xdist tests/unit/x.py", False),
+        # ... in either direction.
+        ("-n 2", "pytest tests/unit/x.py", False),
+        ("-n 0", "pytest -n auto tests/unit/x.py", True),
+        # A directory is heavy at any worker count; info flags never are.
+        ("-n auto", "pytest -n 0 tests/unit", True),
+        ("-n auto", "pytest --version", False),
+        ("-n auto", "pytest --collect-only", False),
+        # R1: pytest's `-v` is verbose, not version: a bare `pytest -v` is the
+        # whole suite under `-n auto`. `-V`/`--version` stay informational.
+        ("-n auto", "pytest -v", True),
+        ("-n auto", "pytest -vv", True),
+        ("-n auto", "python -m pytest -v", True),
+        ("-n auto", "pytest -V", False),
+        ("-n auto", "py.test --version", False),
+        # R2: attached spellings parse like argparse reads them.
+        ("-n auto", "pytest -pno:xdist tests/unit/x.py", False),
+        ("-n auto", "pytest -n=2 tests/unit/x.py", False),
+        ("-n auto", "pytest -n=3 tests/unit/x.py", True),
+        ("-n auto", "pytest --numprocesses=2 tests/unit/x.py", False),
+        ("-n 0", "pytest -n=auto tests/unit/x.py", True),
+        # R3: `-k` never makes a directory or the whole suite light.
+        ("-n auto", "pytest -n 0 -k slot tests/unit", True),
+        ("-n auto", "pytest -n 0 -k slot", True),
+        ("-n auto", "pytest -n 0 -kslot", True),
+        ("-n auto", "pytest -n 0 -k slot tests/unit/x.py", False),
+        # R4: a `PYTEST_ADDOPTS=` prefix sits between addopts and argv.
+        (None, "PYTEST_ADDOPTS=-n8 pytest tests/unit/x.py", True),
+        (None, "PYTEST_ADDOPTS='-n 8' pytest tests/unit/x.py", True),
+        (None, "env PYTEST_ADDOPTS=-n8 pytest tests/unit/x.py", True),
+        ("-n auto", "PYTEST_ADDOPTS=-n0 pytest tests/unit/x.py", False),
+        ("-n auto", "PYTEST_ADDOPTS=-n0 pytest -n 4 tests/unit/x.py", True),
+        (
+            None,
+            "PYTEST_ADDOPTS=-n8 python scripts/run_bounded.py -- pytest tests/unit/x.py",
+            True,
+        ),
+        (None, "OTHER=-n8 pytest tests/unit/x.py", False),
+    ],
+)
+def test_effective_workers_combine_addopts_and_command_line(
+    tmp_path: Path, addopts: str | None, command: str, heavy: bool
+) -> None:
+    verdict = heavy_lease.is_heavy(command, cwd=str(_pytest_repo(tmp_path, addopts)))
+    assert (verdict is not None) is heavy, verdict
+
+
+def test_pytest_ini_and_setup_cfg_addopts_are_read(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "pytest.ini").write_text("[pytest]\naddopts = -n 4\n")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path / "a")) is not None
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "setup.cfg").write_text("[tool:pytest]\naddopts = -n 3\n")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path / "b")) is not None
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "pyproject.toml").write_text("[tool.pytest.ini_options\nbroken")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path / "c")) is None
+
+
+def test_pytest_addopts_is_read_from_the_command_never_this_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4: only the command text runs; the harness's own env is not its env."""
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-n 8")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(_pytest_repo(tmp_path, None))) is None
+
+
+def test_config_file_option_replaces_the_config_search(tmp_path: Path) -> None:
+    """R4: `-c FILE`/`--config-file FILE` is the config pytest reads, not cwd's."""
+    repo = _pytest_repo(tmp_path, "-n auto")
+    (tmp_path / "serial.ini").write_text("[pytest]\naddopts = -n 0\n")
+    (tmp_path / "wide.ini").write_text("[pytest]\naddopts = -n 6\n")
+    (tmp_path / "wide.toml").write_text('[tool.pytest.ini_options]\naddopts = "-n 6"\n')
+    cwd = str(repo)
+    assert heavy_lease.is_heavy("pytest x.py", cwd=cwd) is not None  # control
+    assert heavy_lease.is_heavy(f"pytest -c {tmp_path}/serial.ini x.py", cwd=cwd) is None
+    for spelling in (
+        f"-c {tmp_path}/wide.ini",
+        f"--config-file {tmp_path}/wide.ini",
+        f"--config-file={tmp_path}/wide.toml",
+        f"-c{tmp_path}/wide.ini",
+    ):
+        assert heavy_lease.is_heavy(f"pytest {spelling} x.py", cwd=cwd) is not None, spelling
+    # Relative paths resolve against the command's cwd; a missing file reads empty.
+    assert heavy_lease.is_heavy("pytest -c ../serial.ini x.py", cwd=cwd) is None
+    assert heavy_lease.is_heavy("pytest -c missing.ini x.py", cwd=cwd) is None
+
+
+def test_pytest_9_native_tool_pytest_table_is_read(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('[tool.pytest]\naddopts = ["-n", "auto"]\n')
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path)) is not None
+    assert heavy_lease.is_heavy("pytest -n 0 x.py", cwd=str(tmp_path)) is None
+
+
+def test_this_repos_own_addopts_make_a_bare_targeted_file_heavy() -> None:
+    """The real pyproject carries `-n auto`; `-n 0` is the quick-iteration escape."""
+    heavy = heavy_lease.is_heavy("python -m pytest tests/unit/x.py", cwd=str(ROOT))
+    assert heavy == heavy_lease.HeavyClass("pytest -n")
+    assert heavy_lease.is_heavy("python -m pytest -n 0 tests/unit/x.py", cwd=str(ROOT)) is None
+
+
+def test_shallow_guess_judges_pytest_like_a_resolved_one() -> None:
+    assert heavy_lease._shallow_guess("x -- python -m pytest -q tests/unit") == (
+        "pytest <directory>"
+    )
+    assert heavy_lease._shallow_guess("x -- pytest -n auto 'a.py'") == "pytest -n"
+    assert heavy_lease._shallow_guess("x -- pytest a.py") is None
+    assert heavy_lease._shallow_guess("x -- pytest a.py -k b") is None
+    assert heavy_lease._shallow_guess("x -- pytest -n 2 a.py") is None
+    # A light pytest never hides a heavy command after it.
+    assert heavy_lease._shallow_guess("pytest a.py && pnpm build") == "pnpm build"
 
 
 @pytest.mark.parametrize(
@@ -442,7 +678,7 @@ def test_status_line_renders_holders_and_ignores_stale_records(tmp_path: Path) -
         line = heavy_lease.status_line(directory, 1, now=time.time() + 12 * 60 + 5)
     finally:
         lease.release()
-    assert line == f"heavy jobs: 1/1 slots held: abc123/{os.getpid()} tsc -b (12m)"
+    assert line == f"heavy jobs: 1/1 slots held: abc123/{os.getpid()} tsc (12m)"  # label (#4264 Q3)
     assert not (directory / "slot-0.json").exists()  # release removes our record
 
 
@@ -628,7 +864,7 @@ def test_status_counts_holders_above_the_current_slot_count(tmp_path: Path) -> N
         first.release()
         second.release()
     assert shrunk.startswith("heavy jobs: 2 held (1 slot now): s0/")
-    assert "s1/" in shrunk and "tsc -b" in shrunk
+    assert "s1/" in shrunk and " tsc (" in shrunk
     assert same.startswith("heavy jobs: 2/2 slots held: ")
 
 
