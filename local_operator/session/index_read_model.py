@@ -360,11 +360,15 @@ def _extends(pub: Publication, live: tuple[int, int, float] | None) -> bool:
     user) is still true: an append can add rows and runs after them, never
     renumber or regroup them.
 
-    "Only grown" is proved, not assumed: the same check the refresh ladder uses
-    before it increments (``refresh_index``'s ``_verify_tail``) -- the last row
-    the scan covered must still end exactly at the recorded offset and still
-    carry the recorded id. An in-place rewrite that kept the inode fails it and
-    the caller takes base's refresh path, as it did before this rule existed.
+    "Only grown" is checked with the same proof the refresh ladder uses before
+    it increments (``refresh_index``'s ``_verify_tail``): the LAST row the scan
+    covered must still end exactly at the recorded offset and still carry the
+    recorded id. That is all it proves. An in-place rewrite that moves or
+    replaces that last covered row fails it and the caller takes base's refresh
+    path; a same-length rewrite of an EARLIER covered row is not detected here
+    (QA round 1, Q2) -- nor by base's incremental refresh, which trusts the
+    same check. No writer rewrites journal bytes in place (compaction swaps
+    the inode via ``os.replace``), so the rule assumes append-only.
     Cost: one bounded backward read of a single row (``_TAIL_VERIFY_LIMIT``), on
     the caller's worker hop.
     """
@@ -831,6 +835,13 @@ def summary(
 #: base's path -- correct, only slower -- so the cap bounds cost, never truth.
 _PREFIX_TAIL_MAX_BYTES = 2 << 20
 
+#: The resident classifier's row kinds that ``_Derivation`` provably ignores for
+#: every companion-served answer (tail summary, run facts, journal order):
+#: ``_track_run`` returns before touching a run and ``consume`` records nothing
+#: for them. ``start`` is deliberately ABSENT -- it is ignored by the run
+#: partition but read by ``emit`` to unsettle the tail run (M1 / Q1).
+_ANSWER_NEUTRAL_KINDS = frozenset({"other"})
+
 
 def _prefix_tail(pub: Publication, source: tuple[int, int, float]) -> list[str]:
     """The ids of the rows appended after ``pub``'s coverage, in journal order.
@@ -838,21 +849,32 @@ def _prefix_tail(pub: Publication, source: tuple[int, int, float]) -> list[str]:
     THE TAIL IS READ DIRECTLY, AND ONLY ANSWERED WHEN IT CANNOT MOVE A FACT. The
     page was read from ``source`` (the grown journal), so its rows may include
     some the companion never derived. Those rows are classified here, from the
-    same bytes the page came from (``[coverage end, source size)``), and the
-    read is answered only when every one of them is a ``custom`` row other than
-    ``completion_attention``: the derivation classifies those as ``start`` or
-    ``other`` (``ti._classify``), and ``_Derivation`` lets neither open, extend
-    nor close a run (its "NEITHER KIND IS A RECORD THE CLIENT EVER SEES"), nor
-    become a checkpoint or a message. Such a row changes exactly one derived
-    fact: it takes the next journal ordinal, ``scan.rows + i``. That is the
-    common live-session append (attention, spend, frontend state checkpoints).
+    same bytes the page came from (``[coverage end, source size)``), BY THE
+    RESIDENT CLASSIFIER ITSELF (``ti._classify``), and the read is answered only
+    when every one of them is a ``custom`` row that classifier calls a kind in
+    :data:`_ANSWER_NEUTRAL_KINDS`. Such a row changes exactly one derived fact:
+    it takes the next journal ordinal, ``scan.rows + i``. That is the common
+    live-session append (spend, frontend state checkpoints, naming).
 
-    Anything else -- a message, a tool row, a completion marker, a compaction, a
-    torn or blank line, an id the prefix already holds, more than
-    :data:`_PREFIX_TAIL_MAX_BYTES` -- raises ``ValueError``, which every caller
-    already maps to base's fallback (``building`` plus the existing correction,
-    or the refresh wait). Nothing here may turn into ``ready`` what the resident
-    derivation would answer differently.
+    WHY THE CLASSIFIER AND NOT A LIST OF ROW TYPES (review round 1, M1 / QA
+    Q1): the first version accepted every ``custom`` row but
+    ``completion_attention``, and so accepted ``attention_started`` -- a
+    ``start`` row, which ``_Derivation.emit`` reads (``last_start_ordinal``) to
+    UNSETTLE a resolved tail run. A settled last run plus one appended start was
+    served ``settled: true`` where the resident scan says ``open``. Asking the
+    resident classifier closes the rule by construction: whatever kind it would
+    give a row is the kind judged here, so a custom type it later learns to
+    treat as a start, marker or message is refused without touching this file.
+    The one remaining assumption -- ``_Derivation`` ignores ``other`` -- is
+    pinned by ``test_an_other_row_is_answer_neutral_to_the_derivation``.
+
+    Anything else -- a start, a message, a tool row, a completion marker, a
+    compaction, a non-``custom`` row of any type, a torn or blank line, an id
+    the prefix already holds, more than :data:`_PREFIX_TAIL_MAX_BYTES` -- raises
+    ``ValueError``, which every caller already maps to base's fallback
+    (``building`` plus the existing correction, or the refresh wait). Nothing
+    here may turn into ``ready`` what the resident derivation would answer
+    differently.
     """
     start, end = pub.signature[1], source[1]
     if end <= start or end - start > _PREFIX_TAIL_MAX_BYTES:
@@ -865,16 +887,25 @@ def _prefix_tail(pub: Publication, source: tuple[int, int, float]) -> list[str]:
     if len(data) != end - start or not data.endswith(b"\n"):
         raise ValueError("torn appended tail")
     ids: list[str] = []
+    offset = start
     for line in data[:-1].split(b"\n"):
+        # Parsed here only to refuse what the classifier would quietly call
+        # ``other`` (a line that is not JSON, not an object, or has no id): such
+        # a row is no proof of an append-only bookkeeping write.
         entry = json.loads(line)
-        payload = entry.get("payload") if isinstance(entry, dict) else None
         if (
-            not isinstance(payload, dict)
+            not isinstance(entry, dict)
             or entry.get("type") != "custom"
-            or payload.get("custom_type") == ti._COMPLETION_ATTENTION
             or not isinstance(entry.get("id"), str)
             or not entry["id"]
         ):
+            raise ValueError("appended row may move a derived fact")
+        # The full line is always handed over: the whole tail is capped at
+        # ``_MAX_KEPT_LINE_BYTES``, so the scan never drops this row's body
+        # either and classifies it from the same bytes.
+        row = ti._classify(0, offset, offset + len(line) + 1, line[: ti._ROW_HEAD_BYTES], line)
+        offset = row.end
+        if row.kind not in _ANSWER_NEUTRAL_KINDS or row.id != entry["id"]:
             raise ValueError("appended row may move a derived fact")
         ids.append(entry["id"])
     if len(set(ids)) != len(ids):
@@ -890,6 +921,12 @@ def _grown_scan(scan: ti.ScanState, tail: list[str], source: Any) -> ti.ScanStat
     journal's end), and each appended row is one more ordinal. The resume
     window belongs to the incremental refresh, never to the frame, and is
     carried unchanged.
+
+    NOT A RESUME POINT (review round 1, n1): ``window_offset``/``window_rows``
+    here are the PUBLICATION's, not the grown journal's. They happen to stay
+    right today because :func:`_prefix_tail` admits no ``start`` row (the only
+    neutral-looking kind that moves ``_Derivation.window``), but nothing may
+    seed an incremental refresh from a ``FrameSummary`` scan.
     """
     return ti.ScanState(
         rows=scan.rows + len(tail),

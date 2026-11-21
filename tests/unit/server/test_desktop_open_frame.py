@@ -1842,7 +1842,9 @@ async def test_a_grown_large_journal_answers_its_prefix_from_the_companion(
         _publish(harness.root, harness.session_id, index)
         directory = harness.root / "sessions" / harness.session_id
         for id_, custom_type, details in (
-            ("attn-after", "attention_started", {"token": "t-after"}),
+            # No ``attention_started``: a start row can unsettle the tail run, so
+            # it is not answer-neutral (review round 1, M1) and falls back.
+            ("name-after", "conversation_name", {"name": "renamed"}),
             ("spend-after", "session_spend.v1", {"usd": 0.01}),
             ("bk-after", "frontend_state_checkpoint_v1", {"blob": "x" * 4096}),
         ):
@@ -2017,3 +2019,62 @@ async def test_a_large_journal_correction_comes_from_the_companion(
         assert calls, "the control arm never took the resident path"
         assert [event["rows"] for event in companion] == [event["rows"] for event in resident]
         assert {event["journal_generation"] for event in resident} == {index.journal_generation}
+
+
+@pytest.mark.asyncio
+async def test_rows_queued_while_the_companion_correction_awaits_are_answered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, m1: a page that queues rows mid-correction is not stranded.
+
+    While ``_companion_order_correction`` awaits its worker read, a page that
+    falls to ``_journal_page`` adds pending rows but starts no task of its own
+    (the correction is not done). The first version consumed only its snapshot
+    and returned ``True``, so those rows got no event until some later page
+    started another correction.
+    """
+    from local_operator.server.utils import desktop_sessions as module
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=2)
+        source = (1, 2, 3.0)
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            bridge._order_pending = {"user01": ({"id": "user01"}, source)}
+            reads: list[list[str]] = []
+
+            def order_selection(*_: Any, order_ids: list[str], **__: Any) -> Any:
+                reads.append(list(order_ids))
+                if len(reads) == 1:
+                    # The concurrent page, landing while the first read is out.
+                    bridge._order_pending["ans01"] = ({"id": "ans01"}, source)
+                return index_read_model.Result(
+                    "ready",
+                    index_read_model.FrameSelection(
+                        checkpoints=[],
+                        runs=[],
+                        messages=[],
+                        journal_rows={"user01": 0, "ans01": 1},
+                        journal_generation="gen",
+                    ),
+                )
+
+            events: list[dict[str, Any]] = []
+            monkeypatch.setattr(module.index_read_model, "order_selection", order_selection)
+            monkeypatch.setattr(
+                module.transcript_index,
+                "journal_order_correction_batches",
+                lambda _selection, rows: [rows] if rows else [],
+            )
+            monkeypatch.setattr(
+                bridge,
+                "publish",
+                lambda kind, payload, **_: (
+                    events.append(payload) if payload.get("type") == JOURNAL_ORDER_EVENT else None
+                ),
+            )
+            assert await bridge._companion_order_correction() is True
+            assert reads == [["user01"], ["ans01"]]
+            published = [row["id"] for event in events for row in event["rows"]]
+            assert published == ["user01", "ans01"]
+            assert bridge._order_pending == {}

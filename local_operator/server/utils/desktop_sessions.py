@@ -5562,58 +5562,73 @@ class DesktopSessionBridge:
         correction is after paint and owes no deadline, so it can afford the
         page-bounded SQLite read the frame could not.
 
-        SAME EVENTS AS THE RESIDENT PATH. Pending rows are grouped by the page
-        source they were read under (the resident path's ``original ==
-        expected`` rule, applied per publication instead of against one
-        index), each group is answered by ``index_read_model.order_selection``
-        under the append-prefix rule, and the batches come from the one
-        existing ``journal_order_correction_batches``. A group the companion
-        cannot prove -- missing, stale past a visible append, corrupt -- fails
-        the whole attempt rather than publishing part of an answer twice.
+        THE SAME ORDINALS AS THE RESIDENT PATH, NOT ALWAYS THE SAME EVENTS
+        (review round 1, m2). Pending rows are grouped by the page source they
+        were read under, each group is answered by
+        ``index_read_model.order_selection`` under the append-prefix rule, and
+        the batches come from the one existing
+        ``journal_order_correction_batches``. For a group read under the
+        current source the events match the resident path's. For a group read
+        under an OLDER source of the same append-only journal the resident path
+        publishes ``reconcile`` (its ``original != expected`` rule against one
+        index) while this one publishes that group's ``journal_seq`` rows: the
+        values are the ones a reconcile would re-fetch, because an append never
+        renumbers a covered row. A group the companion cannot prove -- missing,
+        stale past a visible append, corrupt -- fails the attempt and the
+        caller falls to the resident path for what is still pending.
+
+        ROWS ADDED WHILE THIS AWAITS ARE ANSWERED TOO (review round 1, m1). A
+        page that queues pending rows while this task is in flight starts no
+        task of its own (``_order_correction`` is not done), so this loops
+        until a pass finds nothing new. Each pass consumes only the entries it
+        answered; a later pass that cannot prove its group returns ``False``,
+        leaving exactly the unanswered entries to the resident path.
         """
-        pending = dict(self._order_pending)
-        if not pending:
-            return False
-        groups: dict[Any, list[str]] = {}
-        for id_, (_descriptor, original) in pending.items():
-            if original is None:
-                return False
-            groups.setdefault(original, []).append(id_)
-        answered: list[tuple[Any, list[dict[str, Any]]]] = []
-        for original, ids in groups.items():
-            result = await asyncio.to_thread(
-                index_read_model.order_selection,
-                self.root,
-                self.session_id,
-                order_ids=ids,
-                source=original,
-                prefix_ok=True,
-            )
-            if result.state != "ready" or not result.value.journal_generation:
-                return False
-            selection = result.value
-            rows = [
-                {**pending[id_][0], "journal_seq": selection.journal_rows[id_]}
-                for id_ in ids
-                if id_ in selection.journal_rows
-            ]
-            answered.append((selection, rows))
-        if self._closing:
-            return True
-        for id_, value in pending.items():
-            if self._order_pending.get(id_) is value:
-                del self._order_pending[id_]
-        for selection, rows in answered:
-            for batch in transcript_index.journal_order_correction_batches(selection, rows):
-                self.publish(
-                    "event",
-                    {
-                        "type": JOURNAL_ORDER_EVENT,
-                        "journal_generation": selection.journal_generation,
-                        "rows": batch,
-                    },
+        answered_before = False
+        while True:
+            pending = dict(self._order_pending)
+            if not pending:
+                return answered_before
+            groups: dict[Any, list[str]] = {}
+            for id_, (_descriptor, original) in pending.items():
+                if original is None:
+                    return False
+                groups.setdefault(original, []).append(id_)
+            answered: list[tuple[Any, list[dict[str, Any]]]] = []
+            for original, ids in groups.items():
+                result = await asyncio.to_thread(
+                    index_read_model.order_selection,
+                    self.root,
+                    self.session_id,
+                    order_ids=ids,
+                    source=original,
+                    prefix_ok=True,
                 )
-        return True
+                if result.state != "ready" or not result.value.journal_generation:
+                    return False
+                selection = result.value
+                rows = [
+                    {**pending[id_][0], "journal_seq": selection.journal_rows[id_]}
+                    for id_ in ids
+                    if id_ in selection.journal_rows
+                ]
+                answered.append((selection, rows))
+            if self._closing:
+                return True
+            for id_, value in pending.items():
+                if self._order_pending.get(id_) is value:
+                    del self._order_pending[id_]
+            for selection, rows in answered:
+                for batch in transcript_index.journal_order_correction_batches(selection, rows):
+                    self.publish(
+                        "event",
+                        {
+                            "type": JOURNAL_ORDER_EVENT,
+                            "journal_generation": selection.journal_generation,
+                            "rows": batch,
+                        },
+                    )
+            answered_before = True
 
     async def _peer_source_read(
         self,

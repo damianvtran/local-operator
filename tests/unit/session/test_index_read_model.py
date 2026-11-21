@@ -1220,7 +1220,9 @@ def test_a_run_neutral_append_matches_the_grown_derivation(publication):
     root, _ = publication
     path = root / "sessions" / SID / "transcript.jsonl"
     source = _append(
-        path, _custom("s1", "attention_started", token="t"), _custom("b1", "session_spend.v1")
+        path,
+        _custom("s1", "frontend_state_checkpoint_v1", state={}),
+        _custom("b1", "session_spend.v1"),
     )
     collected = ["u2", "a2", "s1", "b1"]
     assert _all_reads(root, source, prefix_ok=False, collected=collected) == ["stale"] * 3
@@ -1309,3 +1311,177 @@ def test_a_torn_or_oversized_tail_and_an_in_place_rewrite_are_refused(publicatio
     st = path.stat()
     rewritten = (st.st_ino, st.st_size, st.st_mtime)
     assert "ready" not in _all_reads(root, rewritten, prefix_ok=True, collected=["u2"])
+
+
+def _settled_tail_journal(root: Path) -> Path:
+    """One run whose completion marker settled it: ``start, u1, a1, marker``."""
+    return _journal(
+        root,
+        [
+            _custom("s1", "attention_started", token="t1"),
+            *_rows(1),
+            _custom("m1", "completion_attention", token="t1", kind="complete", anchor="a1"),
+        ],
+    )
+
+
+def test_a_start_appended_to_a_settled_run_answers_as_the_resident_scan(tmp_path):
+    """Review round 1, M1 / QA Q1: ``attention_started`` is not answer-neutral.
+
+    ``_Derivation.emit`` settles the tail run only while its marker follows the
+    last start, so a start appended after a settled run reopens it. The prefix
+    read must not keep serving the companion's settled tail.
+    """
+    from local_operator.session import open_frame as frame
+
+    path = _settled_tail_journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None and index.runs[-1].settled
+    _materialize(tmp_path, index)
+    ti._reset_for_tests()
+    source = _append(path, _custom("s2", "attention_started", token="t2"))
+    collected = ["u1", "a1", "m1", "s2"]
+    # Every companion read happens BEFORE the resident refresh below, which
+    # republishes and would leave these reads nothing to answer from.
+    summary = rm.summary(tmp_path, SID, source, prefix_ok=True)
+    facts = rm.frame_facts(
+        tmp_path,
+        SID,
+        collected_ids=collected,
+        reaches_eof=True,
+        order_ids=[],
+        source=source,
+        prefix_ok=True,
+    )
+    states = _all_reads(tmp_path, source, prefix_ok=True, collected=collected)
+    ti._reset_for_tests()
+    grown = ti.refresh_index(tmp_path, SID)
+    assert grown is not None and not grown.runs[-1].settled
+    # Answering is allowed only with the resident scan's answer (open run).
+    if summary.state == "ready":
+        assert summary.value.runs == grown.runs[-1:]
+    if facts.state == "ready":
+        bounds = frame.page_seq_bounds(grown, [{"id": id_} for id_ in collected], reaches_eof=True)
+        assert bounds is not None
+        assert facts.value.runs == frame.publish_runs(
+            grown, first_seq=bounds[0], last_seq=bounds[1]
+        )
+    # Today the rule falls back on a start row.
+    assert "ready" not in states, states
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(_custom("b1", "session_spend.v1", usd=0.1), id="spend"),
+        pytest.param(_custom("f1", "frontend_state_checkpoint_v1", state={}), id="checkpoint"),
+        pytest.param(_custom("x1", "a_custom_type_nobody_wrote_yet.v9"), id="unknown-custom"),
+    ],
+)
+def test_an_accepted_tail_row_is_answer_neutral_on_a_settled_run(tmp_path, row):
+    """Every accepted kind leaves summary, run facts and order exactly resident.
+
+    Pinned on a SETTLED tail run, the shape where a row that moved settlement
+    would show (M1). An unknown custom type is accepted because the resident
+    classifier itself calls it ``other`` -- the rule asks that classifier, so
+    the day it learns the type as a start or marker this read refuses it.
+    """
+    from local_operator.session import open_frame as frame
+
+    path = _settled_tail_journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    _materialize(tmp_path, index)
+    ti._reset_for_tests()
+    source = _append(path, row)
+    collected = ["u1", "a1", "m1", str(row["id"])]
+    summary = rm.summary(tmp_path, SID, source, prefix_ok=True)
+    facts = rm.frame_facts(
+        tmp_path,
+        SID,
+        collected_ids=collected,
+        reaches_eof=True,
+        order_ids=[str(row["id"])],
+        source=source,
+        prefix_ok=True,
+    )
+    order = rm.order_facts(
+        tmp_path, SID, collected_ids=collected, order_ids=[], source=source, prefix_ok=True
+    )
+    assert (summary.state, facts.state, order.state) == ("ready",) * 3
+    ti._reset_for_tests()
+    grown = ti.refresh_index(tmp_path, SID)
+    assert grown is not None and grown.runs[-1].settled
+    assert summary.value.runs == grown.runs[-1:]
+    assert summary.value.scan.rows == grown.scan.rows
+    bounds = frame.page_seq_bounds(grown, [{"id": id_} for id_ in collected], reaches_eof=True)
+    assert bounds is not None
+    assert facts.value.runs == frame.publish_runs(grown, first_seq=bounds[0], last_seq=bounds[1])
+    assert facts.value.rows == {id_: grown.journal_rows[id_] for id_ in collected}
+    assert order.value.rows == {id_: grown.journal_rows[id_] for id_ in collected}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(
+            {"id": "z1", "ts": 9.0, "type": "brand_new_row_type", "payload": {}}, id="unknown-type"
+        ),
+        pytest.param(
+            {
+                "id": "h1",
+                "ts": 9.0,
+                "type": "message",
+                "payload": {"kind": "custom", "custom_type": "wake", "content": "x"},
+            },
+            id="injected-message",
+        ),
+        pytest.param(_custom("s9", "attention_started", token="t9"), id="start"),
+    ],
+)
+def test_a_row_the_classifier_does_not_call_neutral_falls_back(publication, row):
+    root, _ = publication
+    source = _append(root / "sessions" / SID / "transcript.jsonl", row)
+    assert "ready" not in _all_reads(root, source, prefix_ok=True, collected=["u2", "a2"])
+
+
+def test_an_other_row_is_answer_neutral_to_the_derivation():
+    """The one assumption ``_ANSWER_NEUTRAL_KINDS`` rests on, pinned directly.
+
+    Feeding ``other`` rows into ``_Derivation`` -- after a settled run and mid
+    run -- must leave every emitted checkpoint, message and run unchanged. If the
+    derivation ever starts reading ``other`` rows this fails, and the prefix
+    rule must narrow with it.
+    """
+    assert rm._ANSWER_NEUTRAL_KINDS == frozenset({"other"})
+    rows = [
+        _custom("s1", "attention_started", token="t1"),
+        *_rows(1),
+        _custom("m1", "completion_attention", token="t1", kind="complete", anchor="a1"),
+        _custom("s2", "attention_started", token="t2"),
+        *[{**r, "id": f"{r['id']}b"} for r in _rows(1)],
+    ]
+    filler = _custom("o", "session_spend.v1")
+
+    def derive(with_other: bool) -> Any:
+        state = ti._Derivation()
+        ordinal = 0
+        for row in rows:
+            for item in ([row, {**filler, "id": f"o{ordinal}"}] if with_other else [row]):
+                line = json.dumps(item).encode()
+                classified = ti._classify(ordinal, 0, 0, line[: ti._ROW_HEAD_BYTES], line)
+                if str(item["id"]).startswith("o"):
+                    assert classified.kind == "other"
+                state.consume(classified)
+                ordinal += 1
+        checkpoints, messages, runs = state.emit(
+            prior_checkpoints=[], prior_messages=[], turn_base=0
+        )
+        # Ordinals shift by construction; compare everything ordinal-free.
+        strip = lambda items: [  # noqa: E731
+            {k: v for k, v in vars(i).items() if "seq" not in k and "ordinal" not in k}
+            for i in items
+        ]
+        return strip(checkpoints), strip(messages), strip(runs)
+
+    assert derive(True) == derive(False)
