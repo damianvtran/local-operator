@@ -284,3 +284,171 @@ def test_mutation_control_len_would_let_a_wide_word_overrun(
     queued.mark_queued()
     monkeypatch.setattr(tool_card, "cell_len", len)
     assert _status(queued, cap=5) == [_WIDE_RUNNING]
+
+
+# --- Round-1 remediation (review R1 = QA Q1 = design D1, review R2) ---------
+#
+# The synthetic `fr` above proves the words are keyed; these use the SHIPPED
+# catalogues, because the defect was a settled send/switch row keeping the
+# English it was built with: its summary was composed once, and the paint-time
+# readers then compared that frozen text against the ACTIVE language's words,
+# so after en->fr the words stayed English, an extra `Partiel` appeared and the
+# outcome word lost its amber run.
+
+_AMBER = "tool.status.partial_glyph"
+
+
+@pytest.fixture
+def shipped_locale(monkeypatch: pytest.MonkeyPatch):
+    """Real catalogues; no app refreshers, and English restored afterwards."""
+    monkeypatch.setattr(text, "_refreshers", [])
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    text.set_active_locale("en")
+    yield
+    text.set_active_locale("en")
+
+
+def _settled_send_rows() -> dict[str, ToolCard]:
+    """The send rows whose summary leads with an outcome word, settled in en."""
+    cards: dict[str, ToolCard] = {}
+    wake = ToolCard("s1", "send", {"target": "release-owner", "message": "gates are green"})
+    wake.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    cards["send_wake_unconfirmed"] = wake
+    # A QUIET send keeps its mode marker in front of the word (design N2).
+    quiet = ToolCard("s2", "send", {"target": "release-owner", "message": "fyi", "wake": False})
+    quiet.mark_done(
+        "receipt", {"delivery": {"state": "unconfirmed"}, "wake": False, "partial_result": True}
+    )
+    cards["send_delivery_unconfirmed"] = quiet
+    reused = ToolCard("s3", "send", {"target": "release-owner", "message": "same note"})
+    reused.mark_done(
+        "duplicate suppressed",
+        {
+            "duplicate_suppressed": True,
+            "original_receipt": {"details": {"wake": True, "delivery": {"state": "delivered"}}},
+        },
+    )
+    cards["reused"] = reused
+    lost = ToolCard("s4", "send", {"target": "ghost-session", "message": "hi"})
+    lost.mark_failed(
+        "could not deliver to ghost-session: refused",
+        details={"delivery": {"state": "failed", "reason": "this session cannot receive"}},
+    )
+    cards["send_not_delivered"] = lost
+    for outcome in ("switched", "unchanged", "pending", "partial"):
+        switch = ToolCard(
+            f"m-{outcome}", "send", {"pid": 48213, "model": "deepseek/deepseek-flash"}
+        )
+        details: dict[str, object] = {"outcome": outcome}
+        if outcome == "partial":
+            details["partial_result"] = True
+        switch.mark_done("receipt", details)
+        cards[f"switch_{outcome}"] = switch
+    return cards
+
+
+def _catalogue(locale: str) -> dict[str, str]:
+    raw = json.loads((EN_ROOT / locale / f"{NS}.json").read_text("utf-8"))
+    return {key[len(NS) + 1 :]: value for key, value in raw.items()}
+
+
+#: Which status keys each row's word comes from.
+_ROW_KEYS = {
+    "send_wake_unconfirmed": ("send.wake_unconfirmed",),
+    "send_delivery_unconfirmed": ("send.delivery_unconfirmed",),
+    "reused": ("send.receipt_reused", "send.no_new_wake"),
+    "send_not_delivered": ("send.not_delivered",),
+    "switch_switched": ("switch.switched",),
+    "switch_unchanged": ("switch.unchanged",),
+    "switch_pending": ("switch.pending",),
+    "switch_partial": ("switch.partial",),
+}
+
+
+def _amber_runs(row) -> list[str]:
+    from local_operator.tui import bindings
+
+    amber = bindings.style(_AMBER)
+    return [row.plain[span.start : span.end] for span in row.spans if span.style == amber]
+
+
+def _assert_row_speaks(cards: dict[str, ToolCard], locale: str, other: str) -> None:
+    words, foreign = _catalogue(locale), _catalogue(other)
+    for name, card in cards.items():
+        row = card._build_row(200)
+        for key in _ROW_KEYS[name]:
+            assert words[key] in row.plain, (name, locale, row.plain)
+            assert foreign[key] not in row.plain, (name, locale, row.plain)
+        # The no-double-word guard: an outcome-led row never grows the partial
+        # fallback word in EITHER language.
+        assert words["partial"] not in row.plain, (name, row.plain)
+        assert foreign["partial"] not in row.plain, (name, row.plain)
+    for name, key in (
+        ("send_wake_unconfirmed", "send.wake_unconfirmed"),
+        ("send_delivery_unconfirmed", "send.delivery_unconfirmed"),
+    ):
+        runs = _amber_runs(cards[name]._build_row(200))
+        assert f"{words[key]} · " in runs, (name, locale, runs)
+
+
+def test_settled_send_and_switch_rows_follow_a_live_language_change(shipped_locale) -> None:
+    cards = _settled_send_rows()
+    _assert_row_speaks(cards, "en", "fr")
+    text.set_active_locale("fr")
+    # The SAME cards, repainted: nothing was re-settled.
+    _assert_row_speaks(cards, "fr", "en")
+    text.set_active_locale("en")
+    _assert_row_speaks(cards, "en", "fr")
+
+
+def test_a_rewritten_send_summary_is_not_clobbered_by_the_language_refresh(
+    shipped_locale,
+) -> None:
+    """The refresh recomposes only the summary it built; a later writer wins."""
+    card = _settled_send_rows()["send_wake_unconfirmed"]
+    card._summary = "something else entirely"
+    text.set_active_locale("fr")
+    assert "something else entirely" in card._build_row(200).plain
+
+
+_ISOLATES = "\u2066\u2067\u2069"
+
+
+def _balanced(painted: str) -> bool:
+    depth = 0
+    for char in painted:
+        if char in "\u2066\u2067":
+            depth += 1
+        elif char == "\u2069":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def test_urdu_status_fragments_are_isolated_exactly_once(shipped_locale) -> None:
+    text.set_active_locale("ur")
+    words = _catalogue("ur")
+    stopped = ToolCard("i", "bash", {"command": "sleep 9"})
+    stopped.mark_interrupted()
+    cards = {**_settled_send_rows(), "interrupted": stopped}
+    _ROW_KEYS_UR = {**_ROW_KEYS, "interrupted": ("interrupted",)}
+    for name, card in cards.items():
+        row = card._build_row(200).plain
+        assert _balanced(row), (name, row)
+        for key in _ROW_KEYS_UR[name]:
+            # Exactly ONE projection: one RLI ... PDI around the word, never two.
+            assert row.count(f"\u2067{words[key]}\u2069") == 1, (name, key, row)
+            assert f"\u2067\u2067{words[key]}" not in row, (name, row)
+        # The LTR technical neighbours stay outside the Urdu island.
+        if name.startswith("send_") and name != "send_not_delivered":
+            assert "\u2069 · release-owner" in row, (name, row)
+    # Truncation never strands an open isolate: every cut of the row stays balanced.
+    wake = cards["send_wake_unconfirmed"]
+    for width in range(30, 90):
+        assert _balanced(wake._build_row(width).plain), width
+
+
+def test_english_status_paint_carries_no_isolates(shipped_locale) -> None:
+    for name, card in _settled_send_rows().items():
+        assert not any(c in card._build_row(200).plain for c in _ISOLATES), name

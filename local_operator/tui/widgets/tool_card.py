@@ -124,7 +124,7 @@ from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
-from local_operator.tui.i18n_status import localized_display
+from local_operator.tui.i18n_status import display_tr, localized_display
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TOOL_NAME_COL_MAX,
@@ -171,7 +171,15 @@ def _more_marker(msg) -> str:
 # RENDER time like the chrome above. The STATE TOKENS the card stores and
 # compares (`self._state == "running"`, `"interrupted"`, …) are not copy and
 # stay English; only the word painted for them is keyed.
-_t_st = tr("tui.tool_card.status")
+#
+# `display_tr`, not bare `tr`: it is the render adapter every other painted TUI
+# namespace goes through, and for Urdu it wraps the resolved word in ONE
+# balanced RLI…PDI isolate so the LTR technical text around it on the row
+# (targets, pids, durations) keeps its own direction (review round 1, R2). Every
+# other language gets the plain word back. Each status word is projected here
+# and nowhere else, so no composed string carries a second projection; a cut
+# through an isolate is closed again by :func:`truncate_cells`.
+_t_st = display_tr("tui.tool_card.status")
 _profile_copy = tr_record("tui.profile_actions")
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -871,7 +879,12 @@ def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
     # visible on the error row, whose whole job is to read cleanly beside the
     # outcome glyph. Every caller benefits (band model label, picker
     # descriptions, tool arguments), and the result is never WIDER than before.
-    return "".join(out).rstrip() + ellipsis
+    # Close any bidi isolate the cut left open (an Urdu status word projected by
+    # `_t_st`) BEFORE the ellipsis, so the rest of the row is not laid out
+    # inside it. Text without isolates is untouched.
+    head = "".join(out).rstrip()
+    depth = sum(head.count(c) for c in "\u2066\u2067\u2068") - head.count("\u2069")
+    return head + "\u2069" * max(0, depth) + ellipsis
 
 
 def compact_path(text: str) -> str:
@@ -1102,9 +1115,36 @@ def _failed_delivery_reason(details: object) -> str:
     return reason if isinstance(reason, str) else ""
 
 
-def _delivery_word_run(
-    summary: str, *, partial: bool, is_send: bool, marker: str
-) -> tuple[str, str, str]:
+def _send_outcome_codes(summary: str, args: dict[str, object], details: object) -> tuple[str, str]:
+    """The STABLE tokens of the outcome word a send row's summary leads with.
+
+    ``(delivery_state, switch_outcome)`` -- ``details`` tokens such as
+    ``"mailbox"`` or ``"partial"``, or ``""`` when that arm put no word on the
+    row. The paint-time readers (the no-double-word guard and the amber word run)
+    classify the row by THESE, never by matching the summary against the active
+    language's words: the summary may have been composed in another language, and
+    a localized word is copy, not a value to parse (review round 1, R1).
+
+    "Put a word on the row" is decided by running the very composers that build
+    the summary and seeing whether they changed it, so the eligibility rules
+    (the ``model · `` marker, the mode-marker prefix, duplicate suppression) live
+    in one place and cannot drift from this classifier. Both sides of each
+    comparison are built in the same call, in the same language.
+    """
+    if not isinstance(details, Mapping):
+        return "", ""
+    switched = _switch_outcome_summary(summary, details)
+    outcome = details.get("outcome")
+    switch_code = outcome if switched != summary and isinstance(outcome, str) else ""
+    if details.get("duplicate_suppressed") is True:
+        return "", switch_code
+    delivery = details.get("delivery")
+    state = delivery.get("state") if isinstance(delivery, Mapping) else None
+    applied = _delivery_outcome_summary(switched, args, details) != switched
+    return (state if applied and isinstance(state, str) else ""), switch_code
+
+
+def _delivery_word_run(summary: str, *, word: str, marker: str) -> tuple[str, str, str]:
     """Split a settled send summary into its delivery word and the rest.
 
     The word is the state's carrier on the collapsed row, and it was painted in
@@ -1116,22 +1156,24 @@ def _delivery_word_run(
     its own. An empty first element means "paint the whole summary as one run",
     which is every other tool and every send whose state carries no word.
     """
-    if not (partial and is_send):
+    # ``word`` is THIS row's word, chosen by the caller from the row's stored
+    # delivery-state token (``""`` = not a partial send, one run), in the same
+    # language the summary was composed in -- so locating it is splitting text
+    # this module built, never guessing which language's word it is (R1).
+    if not word:
         return "", "", summary
-    for word in delivery_outcome_words().values():
-        prefix = f"{word} · "
-        if summary.startswith(prefix):
-            return "", prefix, summary[len(prefix) :]
-        # The PREFIXED form: the mode marker leads and the state word follows it
-        # (design round 1, N2), so the word is the middle run. The marker is
-        # THIS row's, asked of the same function that built the summary -- the
-        # first version enumerated ``quiet`` and therefore missed the ``now``
-        # marker a steer with ``wake=false`` carries, which painted the word in
-        # the summary's ink AND the ``Partial`` fallback beside it (agent review
-        # round 2, MINOR-1).
-        marker_prefix = f"{marker} · {prefix}" if marker else ""
-        if marker_prefix and summary.startswith(marker_prefix):
-            return f"{marker} · ", prefix, summary[len(marker_prefix) :]
+    prefix = f"{word} · "
+    if summary.startswith(prefix):
+        return "", prefix, summary[len(prefix) :]
+    # The PREFIXED form: the mode marker leads and the state word follows it
+    # (design round 1, N2), so the word is the middle run. The marker is THIS
+    # row's, asked of the same function that built the summary -- the first
+    # version enumerated ``quiet`` and therefore missed the ``now`` marker a
+    # steer with ``wake=false`` carries, which painted the word in the summary's
+    # ink AND the ``Partial`` fallback beside it (agent review round 2, MINOR-1).
+    marker_prefix = f"{marker} · {prefix}" if marker else ""
+    if marker_prefix and summary.startswith(marker_prefix):
+        return f"{marker} · ", prefix, summary[len(marker_prefix) :]
     return "", "", summary
 
 
@@ -2122,6 +2164,19 @@ class ToolCard(ExpandableActionBlock):
         #: it from the structured payload is what keeps the card from parsing the
         #: result prose.
         self._delivery_failed_reason = ""
+        #: The stable outcome tokens the send row's summary leads with (see
+        #: :func:`_send_outcome_codes`): ``details.delivery.state`` and
+        #: ``details.outcome``, ``""`` when that arm put no word on the row.
+        self._send_delivery_code = ""
+        self._send_switch_code = ""
+        #: What the settled send summary was composed FROM, the summary it
+        #: produced and the language it was produced in. The summary carries
+        #: keyed words, so a language change recomposes it from these inputs
+        #: (:meth:`_refresh_localized_summary`) -- the summary twin of
+        #: :meth:`_refresh_localized_output` (review round 1, R1).
+        self._send_summary_details: object = None
+        self._send_summary_built = ""
+        self._send_summary_locale = ""
         #: True when the result came back from a call that ran on a FRESH kernel
         #: after a reset (``details["kernel_reset"]``, set by ``tools/eval.py``
         #: only for a call that really ran). Read by the COLLAPSED row the way
@@ -3380,13 +3435,8 @@ class ToolCard(ExpandableActionBlock):
             # delivery word wins over the model-switch one: one result cannot be
             # both, and reading the nested delivery state first is what keeps a
             # future switch arm from claiming a send row.
-            self._summary = _delivery_outcome_summary(
-                _switch_outcome_summary(
-                    _strip_control_sequences(_summary_from_args("send", self._args)), details
-                ),
-                self._args,
-                details,
-            )
+            self._send_summary_details = details
+            self._compose_send_summary()
         # Reset per result, with the fetch flags below and for the same reason: a
         # card is written once, but a rebuilt card must never inherit the previous
         # body's partial state.
@@ -3540,6 +3590,33 @@ class ToolCard(ExpandableActionBlock):
             (result_text, details) if (search_output or fetch_output) else None
         )
         self._output_locale = active_locale()
+
+    def _compose_send_summary(self) -> None:
+        """Build the settled send row's summary, in the active language."""
+        details = self._send_summary_details
+        base = _strip_control_sequences(_summary_from_args("send", self._args))
+        self._summary = _delivery_outcome_summary(
+            _switch_outcome_summary(base, details), self._args, details
+        )
+        self._send_delivery_code, self._send_switch_code = _send_outcome_codes(
+            base, self._args, details
+        )
+        self._send_summary_built = self._summary
+        self._send_summary_locale = active_locale()
+
+    def _refresh_localized_summary(self) -> None:
+        """Recompose a settled send summary when the language changed since.
+
+        Only the summary THIS card composed: a later writer (a bridge or
+        compose path rewriting ``_summary``) owns its own text and is left as is.
+        """
+        if (
+            self._is_send
+            and self._send_summary_built
+            and self._summary == self._send_summary_built
+            and self._send_summary_locale != active_locale()
+        ):
+            self._compose_send_summary()
 
     def _refresh_localized_output(self) -> None:
         """Recompose structured result rows when the language changed since."""
@@ -4596,6 +4673,10 @@ class ToolCard(ExpandableActionBlock):
         """
         if self.tool_name.lower() != "send":
             return False
+        # Classified by the stored tokens, not by matching the summary against
+        # the active language's words (review round 1, R1).
+        if self._is_send and self._send_summary_built and self._summary == self._send_summary_built:
+            return bool(self._send_delivery_code or self._send_switch_code)
         delivery_words = delivery_outcome_words().values()
         words = (*switch_outcome_words().values(), *delivery_words)
         prefixes = [f"{word} · " for word in words]
@@ -4608,9 +4689,7 @@ class ToolCard(ExpandableActionBlock):
         # ``wake=false`` reads ``now · delivery unconfirmed · …`` (agent review
         # round 2, MINOR-1).
         if self._send_mode_marker:
-            prefixes += [
-                f"{self._send_mode_marker} · {word} · " for word in delivery_words
-            ]
+            prefixes += [f"{self._send_mode_marker} · {word} · " for word in delivery_words]
         return self._summary.startswith(tuple(prefixes))
 
     def _error_text(self) -> str:
@@ -5427,6 +5506,9 @@ class ToolCard(ExpandableActionBlock):
 
     def _build_row(self, width: int) -> Text:
         """The single summary row — the ONE-LINE guarantee lives here."""
+        # Before any read of `_summary` this frame: a settled send row composed
+        # in another language repaints in the active one (review round 1, R1).
+        self._refresh_localized_summary()
         dim = bindings.style("tool.row.dim")
         # See `bindings.BY_ELEMENT["tool.row.name_running"].note` for the
         # two-step fade this implements. `queued` is live but not executing, and
@@ -5671,11 +5753,13 @@ class ToolCard(ExpandableActionBlock):
             row.append(row_chip, style=bindings.style(chip_element))
         # The state word leads the summary and takes the amber ink on its own run
         # (design round 1, D4); every other summary is one run.
+        state_word = (
+            delivery_outcome_words().get(self._send_delivery_code, "")
+            if self._partial and self._is_send and self._send_delivery_code
+            else ""
+        )
         before, word_run, rest = _delivery_word_run(
-            summary,
-            partial=self._partial,
-            is_send=self._is_send,
-            marker=self._send_mode_marker,
+            summary, word=state_word, marker=self._send_mode_marker
         )
         if word_run:
             if before:
