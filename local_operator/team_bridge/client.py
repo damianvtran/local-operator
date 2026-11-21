@@ -4164,7 +4164,9 @@ class TeamBridgeClient:
 
         Same authority as archive (the conversation owner or, on a channel, an
         organization owner/admin) and the server decides it, along with every
-        other rule: name validation (``400 field=name``, same as create),
+        other rule: name sanitizing (trim, collapse space runs, at most 64 code
+        points; ``400 invalid_request`` with ``details.field=name`` and a
+        ``rule`` such as ``empty``/``too_long``/``control_character``),
         uniqueness (``409 conversation_name_taken``), archived, built-in or dm
         (``409 conversation_archived`` / ``invalid_transition``), and the opaque
         404 for a non-member. Those refusals surface unchanged as
@@ -4173,6 +4175,8 @@ class TeamBridgeClient:
         The name is trimmed here only because a whitespace-only name can never
         succeed, and refusing it before I/O keeps a blank submit from becoming a
         round trip. Renaming to the current name is a server-side 200 no-op.
+        The answer carries the server's CANONICAL name, which can differ from
+        what was typed; the renderer displays that one.
         Human acts only: no ``actor_endpoint_id`` (an agent act is a server
         ``400 not_allowed`` in v1).
         """

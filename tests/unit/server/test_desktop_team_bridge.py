@@ -4935,7 +4935,11 @@ async def test_rename_answers_the_updated_conversation(api):
         (409, "conversation_archived", None),
         (409, "invalid_transition", {"rule": "dm"}),
         (409, "invalid_transition", {"rule": "builtin"}),
-        (400, "invalid_request", {"field": "name"}),
+        (400, "invalid_request", {"field": "name", "rule": "empty"}),
+        (400, "invalid_request", {"field": "name", "rule": "too_long"}),
+        (400, "invalid_request", {"field": "name", "rule": "control_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "invisible_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "unsupported_space"}),
         (400, "not_allowed", None),
         (403, "forbidden", None),
         (404, "conversation_not_found", None),
@@ -4962,3 +4966,14 @@ async def test_rename_refuses_a_malformed_body_before_io(api, body):
     response = await client.post(RENAME, json=body)
     assert response.status_code == 422, response.text
     assert FakeClient.calls == calls
+
+
+async def test_rename_forwards_a_name_over_the_server_limit(api):
+    """65 code points is the server's ``too_long`` to refuse, with its rule;
+    the daemon must not pre-empt it with a rule-less 422."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": "é" * 65})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == "é" * 65

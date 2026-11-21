@@ -2030,8 +2030,10 @@ class ConversationRenameIn(ConversationOwnerIn):
     """A rename carries a body, so its owner receipt rides in the body (as create
     and send do) rather than the query the bodyless archive/unarchive use.
 
-    ``max_length`` matches ``ConversationCreateIn.name`` so a name create accepts
-    is never refused here; the server owns the real grammar (``400 field=name``).
+    ``max_length`` is a loose transport bound (create's 128), deliberately NOT
+    the server's 64-code-point limit: a name over 64 must reach the server so the
+    renderer gets its ``400 invalid_request`` with ``details.rule=too_long``
+    (and the other sanitizing rules) rather than a local 422 with no rule.
     """
 
     name: str = Field(min_length=1, max_length=128)
