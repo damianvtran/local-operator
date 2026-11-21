@@ -1018,7 +1018,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "a key name and never used as a bare session entry",
     ),
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
-    "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
+    "local_operator/secrets/protocol.py": (
+        4,
+        "the secret broker's socket and lock, plus the roll's temp socket "
+        "(``broker.next``) and sentinel (``broker.rolling``) beside them (PR #4389)",
+    ),
     "local_operator/session/cleanup.py": (
         7,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "

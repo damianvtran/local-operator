@@ -24,13 +24,16 @@ _SUPPORTED = sys.platform == "darwin" or sys.platform.startswith("linux")
 
 
 @pytest.mark.skipif(not _SUPPORTED, reason="the production broker only spawns on macOS and Linux")
-def test_a_unit_store_read_cannot_start_a_broker(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("budget", [{"timeout": 0.0}, {"deadline": 0.0}])
+def test_a_unit_store_read_cannot_start_a_broker(tmp_path, monkeypatch, budget) -> None:
     spawned: list[object] = []
     # The gate short-circuits before this is reached; if the gate is gone, the
     # real ``ensure_broker`` calls this and the assertion below names the leak.
     monkeypatch.setattr(client, "_spawn_broker", lambda base: spawned.append(base))
 
-    assert client.ensure_broker(tmp_path, timeout=0.0) is False
+    # Both the historical timeout and the shared-deadline access path must
+    # select the same no-spawn fallback, even when the budget is exhausted.
+    assert client.ensure_broker(tmp_path, **budget) is False
     assert spawned == [], (
         "a unit test started the production secret broker. The autouse "
         "refuse_real_secret_broker_spawn fixture is missing or was bypassed; a "

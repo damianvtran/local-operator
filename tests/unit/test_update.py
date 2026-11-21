@@ -2732,7 +2732,7 @@ class TestServiceDaemonRefresh:
 
         written: dict[str, str] = {}
         buffer = io.StringIO()
-        barrier = threading.Barrier(5)
+        barrier = threading.Barrier(6)
         breached: list[bool] = []
 
         def repair_for(name: str):
@@ -2760,6 +2760,9 @@ class TestServiceDaemonRefresh:
             (connector_install, "bridge connector"),
         ):
             monkeypatch.setattr(module, "refresh_plist_if_stale", repair_for(name))
+        # The secret broker's roll step (2026-11-21) runs in the same concurrent
+        # walk; stubbed so no broker is touched.
+        monkeypatch.setattr(update_mod, "_refresh_secret_broker", repair_for("secret broker"))
 
         with redirect_stdout(buffer):
             assert update_mod.daemons_refresh_command() == 0
@@ -2772,6 +2775,7 @@ class TestServiceDaemonRefresh:
             "wakes supervisor",
             "network relay",
             "bridge connector",
+            "secret broker",
         )
         assert sorted(written) == sorted(names), "every daemon was repaired"
         assert len(breached) == len(names), "every repair reached the barrier"
@@ -3078,6 +3082,13 @@ class TestServiceDaemonRefresh:
                 stack.enter_context(
                     patch.object(module, "refresh_plist_if_stale", return_value=outcome)
                 )
+            stack.enter_context(
+                patch.object(
+                    update_mod,
+                    "_refresh_secret_broker",
+                    return_value=launchd.PlistRefresh("secret broker", "current"),
+                )
+            )
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
         steps = update_mod._refresh_steps()
@@ -3091,6 +3102,7 @@ class TestServiceDaemonRefresh:
             update_mod._daemon_report_line("wakes supervisor", "refreshed"),
             update_mod._daemon_report_line("network relay", "already"),
             update_mod._daemon_report_line("bridge connector", "already"),
+            update_mod._daemon_report_line("secret broker", "already"),
         }
         assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]
 
