@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "relay.transcript",
-  "history_sha256": "e272b97ea4a9124df2b037d92787b18fd3769041ec52039a3f93701b23cf7757",
+  "history_sha256": "b626267f61292565212003ef1ff5eaed1fd63f91fab3592f006978ba9de6998d",
   "entries": [
     {
       "locale": "ur",
@@ -112,6 +112,30 @@
       },
       "status": "pending",
       "note": "Translation-only scoped pass; independent audit required. i18n/receipts/bridge-card-reread-translator-ur-e896d2db9139.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "265d59af23c03c1ebf4dc6f887d83df590a22babfdd1ba07c427d4e119c5edc2",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer)",
+        "session": "9af46213ad99",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota before audit",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Scoped bridge-card delta independently passed; untouched values retain prior audits. Evidence: i18n/receipts/bridge-card-copy-audit-9af46213ad99.json"
     }
   ]
 }
