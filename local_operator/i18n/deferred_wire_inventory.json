@@ -573,6 +573,19 @@
         "sdk.py": 16,
         "session/spec.py": 28
       }
+    },
+    "wire.team_integrations": {
+      "reason": "Team Integrations consent-card copy rendered in-process by team_bridge/integrations.py::ask_question; the integrations tool files the finished question and option labels as plain strings, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/team_bridge/integrations.py",
+          "symbol": "ask_question",
+          "note": "tr renders every key before constructing the plain question and option labels/descriptions; integrations_tool._consent files those finished strings and retains affirm/decline as text"
+        }
+      ],
+      "references": {
+        "team_bridge/integrations.py": 2
+      }
     }
   }
 }
