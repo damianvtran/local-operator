@@ -6473,7 +6473,9 @@ def dead_grant_reason(auth: Any, provider: str) -> tuple[bool, str | None]:
     return True, (reasons.pop() if len(reasons) == 1 else None)
 
 
-def sign_in_required_text(provider: str, reason: str | None, *, locale: str) -> str:
+def sign_in_required_text(
+    provider: str, reason: str | None, *, locale: str, display: bool = False
+) -> str:
     """The keyed "sign in again" sentence for ``provider``, rendered in ``locale``.
 
     One rendering for the failover error (English: it is persisted and can reach
@@ -6481,9 +6483,22 @@ def sign_in_required_text(provider: str, reason: str | None, *, locale: str) -> 
     the two cannot drift. ``reason`` selects the Google Workspace session-policy
     wording, which is the only cause worth naming: it explains why a sign-in that
     worked this morning stopped working with nothing revoked.
+
+    ``display=True`` is for the notice a person reads, never the error text.
+    That notice reaches every host as finished prose that is painted as-is
+    (the TUI's ``NoticeBlock`` applies no bidi projection of its own), so in an
+    Urdu paragraph the leading ``/`` of ``/login`` -- a neutral character --
+    resolved to the RTL side and displayed detached from ``login`` (translation
+    audit, 2026-11-20). The two remedies are therefore declared as WHOLE
+    technical islands, the way the welcome screen's ``/login {provider}`` is;
+    one island per command, because separate word islands re-order against each
+    other. :func:`isolated_status_text` is a no-op unless the copy actually
+    rendered in Urdu (an English fallback stays byte-identical), and the error
+    path keeps ``display=False`` so no isolate control reaches the model.
     """
+    from local_operator.i18n.display import TechnicalSpan, isolated_status_text
     from local_operator.i18n.keys import wire_providers_reauth
-    from local_operator.i18n.messages import render
+    from local_operator.i18n.messages import render_record
     from local_operator.providers.login_catalog import picker_label
     from local_operator.providers.oauth.callback_server import (
         REAUTH_REASON_SESSION_POLICY,
@@ -6492,11 +6507,29 @@ def sign_in_required_text(provider: str, reason: str | None, *, locale: str) -> 
     # The short product name the login picker shows ("Vertex AI"), not the
     # registry's long descriptive name, so the sentence reads naturally.
     label = picker_label(provider, provider)
-    if reason == REAUTH_REASON_SESSION_POLICY:
-        message = wire_providers_reauth.session_policy(label=label, provider=provider)
-    else:
-        message = wire_providers_reauth.sign_in_expired(label=label, provider=provider)
-    return render(message.code, dict(message.params), locale=locale)
+    # The key is SELECTED by reference and rendered here, in-process: the
+    # namespace is deferred from the eager client bundle (catalogues.
+    # DEFERRED_NAMESPACES), so only finished text may leave this function.
+    key = (
+        wire_providers_reauth.session_policy
+        if reason == REAUTH_REASON_SESSION_POLICY
+        else wire_providers_reauth.sign_in_expired
+    )
+    message = key(label=label, provider=provider)
+    record = render_record(message.code, dict(message.params), locale=locale)
+    # Only Urdu-source copy is projected. The span validator also runs for
+    # other locales and refuses a command glued to prose, which is correct
+    # Chinese typography (`使用/login …，`), so it must not see that copy.
+    if not display or record.source_locale != "ur":
+        return record.text
+    spans: list[TechnicalSpan] = []
+    for command in (f"/login {provider}", f"lop login {provider}"):
+        start = record.text.find(command)
+        # A translation that dropped a command is the auditor's to catch; the
+        # notice must still paint, so a missing one is simply not isolated.
+        if start >= 0:
+            spans.append(TechnicalSpan(start, start + len(command), command))
+    return isolated_status_text(record, spans)
 
 
 def _dead_grant_error(auth: Any, provider: str) -> ProviderError | None:

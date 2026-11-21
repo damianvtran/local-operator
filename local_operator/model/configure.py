@@ -5819,7 +5819,9 @@ class SessionStreamFn:
             # The CONFIGURED language, not ``text.active_locale``: only the TUI
             # moves the process locale live, and this also runs in `serve` and
             # `lop exec` (see ``messages.render_resolved``).
-            text = sign_in_required_text(provider, cause, locale=resolve_language())
+            # ``display=True``: this is the copy a person reads, so the two
+            # commands are kept whole in an RTL (Urdu) paragraph.
+            text = sign_in_required_text(provider, cause, locale=resolve_language(), display=True)
             await self._announce_quota_change(primary, "auth:sign-in-required", text)
         except Exception as exc:  # noqa: BLE001 - a notice must never fail the turn
             logger.debug("sign-in notice failed (%s)", type(exc).__name__)

@@ -25,6 +25,7 @@ from local_operator.providers.failover import (
     ProviderError,
     dead_grant_reason,
     settle_reason_for_target,
+    sign_in_required_text,
     stream_with_failover,
 )
 from local_operator.providers.oauth import vertex
@@ -310,3 +311,54 @@ async def test_refresh_with_a_custom_client_and_no_secret_sends_nothing(
                 http_client=http,
             )
     assert seen == []
+
+
+#: Unicode isolate controls the display projection inserts (LRI/RLI ... PDI).
+_LRI, _RLI, _PDI = "\u2066", "\u2067", "\u2069"
+
+
+@pytest.mark.parametrize("reason", [REAUTH_REASON_SESSION_POLICY, None])
+def test_the_urdu_notice_keeps_each_command_one_ltr_island(reason: str | None) -> None:
+    """Translation-audit code MINOR (2026-11-20): in an RTL paragraph the
+    leading ``/`` of ``/login`` displayed detached. Each command must be ONE
+    LTR island, whole; the error text (``display=False``) stays control-free.
+    """
+    shown = sign_in_required_text("google-vertex", reason, locale="ur", display=True)
+    assert shown.startswith(_RLI) and shown.endswith(_PDI)
+    assert f"{_LRI}/login google-vertex{_PDI}" in shown
+    assert f"{_LRI}lop login google-vertex{_PDI}" in shown
+    assert shown.count(_LRI) == 2
+
+    raw = sign_in_required_text("google-vertex", reason, locale="ur")
+    assert not set(raw) & {_LRI, _RLI, _PDI}
+    # The projection only adds controls: stripping them restores the raw copy.
+    assert shown.translate({ord(c): None for c in (_LRI, _RLI, _PDI)}) == raw
+
+
+@pytest.mark.parametrize("locale", ["en", "es", "fr", "hi", "ru", "vi", "zh-CN"])
+def test_non_urdu_notices_are_painted_byte_identical(locale: str) -> None:
+    """Only Urdu-source copy is projected. zh-CN glues the command to prose
+    (``使用/login …，``), which the span validator would refuse, so it must
+    never be asked to validate that copy."""
+    for reason in (REAUTH_REASON_SESSION_POLICY, None):
+        shown = sign_in_required_text("google-vertex", reason, locale=locale, display=True)
+        assert shown == sign_in_required_text("google-vertex", reason, locale=locale)
+        assert "/login google-vertex" in shown
+
+
+def test_the_deferred_reauth_copy_still_renders_translated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``wire.providers.reauth`` is out of the eager client bundle; both render
+    points read the catalogue in-process, so the user still gets their language."""
+    from local_operator.i18n import catalogues, resolve
+    from local_operator.providers.auth_cli import _sign_in_required_state
+
+    assert "wire.providers.reauth" in catalogues.DEFERRED_NAMESPACES
+    assert "wire.providers.reauth" not in catalogues.wire_bundle("es")["namespaces"]
+    text = sign_in_required_text("google-vertex", None, locale="es", display=True)
+    assert text.startswith("Tu inicio de sesión en ")
+    monkeypatch.setattr(resolve, "resolve_language", lambda: "es")
+    assert _sign_in_required_state(REAUTH_REASON_SESSION_POLICY) == (
+        "requiere iniciar sesión (política de Workspace)"
+    )

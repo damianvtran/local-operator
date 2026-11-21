@@ -1,5 +1,5 @@
 {
-  "wire.providers.reauth.sign_in_expired": "你的{label}登录已过期，且无法自动续期。请重新登录：在应用中使用/login {provider}，或在终端中运行lop login {provider}。",
+  "wire.providers.reauth.sign_in_expired": "{label}登录已过期，且无法自动续期。请重新登录：在应用中使用/login {provider}，或在终端中运行lop login {provider}。",
   "wire.providers.reauth.session_policy": "你所在的Google Workspace组织要求重新登录{label}（Google Cloud会话控制），因此登录无法自动续期。请重新登录：在应用中使用/login {provider}，或在终端中运行lop login {provider}。",
   "wire.providers.reauth.status_sign_in_required": "需重新登录",
   "wire.providers.reauth.status_session_policy": "需重新登录（Workspace政策）"
