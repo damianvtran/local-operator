@@ -96,6 +96,11 @@ _AMBIENT_VARS = (
     # exit early, changing what the serve cells assert. Scrubbed; deadline
     # cells set their own.
     "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS",
+    # A suite launched from a leased command (a `pytest -n 8` through the bash
+    # tool) inherits the operator's slot marker; it names the REAL lease dir, so
+    # it can only fail verification here, but a cell asserting the queue must
+    # not depend on that. Scrubbed; the re-entrancy cells set their own.
+    "LOCAL_OPERATOR_HEAVY_LEASE",
     # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
     # disable the sensor in every cell, silently waiving what the sensor cells
     # assert. Scrubbed; the sensor-specific cells set it explicitly via

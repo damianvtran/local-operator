@@ -2837,7 +2837,7 @@ async def _acquire_heavy_lease(
     on_update: Callable[[AgentToolUpdate], None] | None,
     heavy: heavy_lease.HeavyClass | None,
     memory_budget: memory_guard.Budget,
-) -> heavy_lease.Lease | ToolResult | None:
+) -> heavy_lease.Lease | heavy_lease.InheritedLease | ToolResult | None:
     """Queue a heavy command for the machine-wide slot; None for everything else.
 
     Why: the 2026-11-16 node-2 OOM (parallel esbuild/node/chrome builds from
@@ -2865,6 +2865,12 @@ async def _acquire_heavy_lease(
     command's run and starts at spawn, so queueing never eats into it (PR
     #4104 K2: capping the queue at the 120 s default timeout refused a build
     queued behind an ordinary 5-10 minute one).
+
+    Re-entrant: a runtime that itself runs inside a leased command (a ``lop
+    exec`` or nested lop launched from one) gets a
+    :class:`heavy_lease.InheritedLease` back from ``acquire`` once the lock it
+    inherited is verified, and runs under its ancestor's slot instead of
+    queueing behind it (the 2026-11-20 self-deadlock).
     """
     if heavy is None or not heavy_lease.supported():
         return None
@@ -2925,7 +2931,20 @@ async def _acquire_heavy_lease(
         memory_mb=None if memory_budget.source == "disabled" else memory_budget.ceiling_mb,
         on_wait=_on_wait,
         aborted=(lambda: signal is not None and signal.aborted),
+        # The segment that made the line heavy, not its first word: the
+        # 2026-11-20 holder of the only slot read `rm` for a `go test -race`.
+        label=heavy.label(preview),
     )
+    if isinstance(result, heavy_lease.InheritedLease):
+        if on_update is not None:
+            line = heavy_lease.nested_line(result) + cap_off
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
+        return result
     if isinstance(result, heavy_lease.Lease):
         if cap_off and on_update is not None:
             # Only when the cap is off: an ordinary acquisition stays silent,
@@ -2949,7 +2968,9 @@ async def _acquire_heavy_lease(
     )
 
 
-def _release_heavy_lease_on_exit(process: Any, lease: heavy_lease.Lease) -> None:
+def _release_heavy_lease_on_exit(
+    process: Any, lease: heavy_lease.Lease | heavy_lease.InheritedLease
+) -> None:
     """Release ``lease`` when ``process`` exits, however the tool call ends.
 
     Tied to the PROCESS, not the tool call, so one rule covers a foreground
@@ -5105,16 +5126,23 @@ async def execute_bash(
     )
     if isinstance(heavy, ToolResult):
         return heavy
-    heavy_slot: heavy_lease.Lease | None = heavy
+    heavy_slot: heavy_lease.Lease | heavy_lease.InheritedLease | None = heavy
     spawn_options: dict[str, Any] = dict(detached_popen_kwargs())
     lease_fd = heavy_slot.fileno() if heavy_slot is not None else None
-    if lease_fd is not None and os.name == "posix":
+    passed_lease = heavy_slot if lease_fd is not None and os.name == "posix" else None
+    if passed_lease is not None:
         # The command inherits the lease descriptor, so the flock lives until
         # BOTH this harness and the command are gone: a harness SIGKILLed or
         # OOM-killed mid-build no longer frees the slot beside its still
         # running, detached build (PR #4104 QA Q1). A normal end still frees
         # it at once: Lease.release() unlocks the shared description.
         spawn_options["pass_fds"] = (lease_fd,)
+    # ...and the marker naming that descriptor, so a `lop services heavy run`
+    # (or nested lop) INSIDE this command runs under its slot instead of
+    # queueing behind its own ancestor: on 2026-11-20 one did, for its whole
+    # 3300 s timeout, while every other heavy command was refused at 900 s.
+    # Without a passed fd any inherited marker is cleared instead.
+    heavy_lease.export_marker(env, passed_lease)
     # Filesystem clock, not monotonic or wall: compared with the mtime of a
     # lock git writes during this call (guardrails/interrupted_worktree_add.py).
     spawned_at = interrupted_worktree_add.spawn_stamp(params.command)
