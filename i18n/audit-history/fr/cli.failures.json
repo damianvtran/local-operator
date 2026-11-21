@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "cli.failures",
-  "history_sha256": "8468bf09cd2a0170c0abbbf179be6479a222b0b1c7ab8905b4ad3657943d2218",
+  "history_sha256": "4c03a1a6511a2e31d79dd812679b965cf65d74c5c8d131649469d08bb2942590",
   "entries": [
     {
       "locale": "fr",
@@ -38,6 +38,34 @@
         {
           "path": "i18n/audits/evidence/fr/cli.failures/gbt2/audit.log",
           "sha256": "5c84c144f33f4ef294b0814a7b4d2ec6288f154229eff105c438c1568067bfbf"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.failures",
+      "source_sha256": "10452313f2d9c33a17496fabefb90870ef27631c1ac446972d7457b8000ce54c",
+      "translator": {
+        "agent": "coder (PR #4364 implementer)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "f3778867a369",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "fr cli.failures goo1: independent audit of new key github_owner_offline (PR #4364); FAIL→corrected (U+0020 → U+202F before ';'); prior 5 keys byte-identical to base. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/fr/cli.failures/goo1/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.failures/goo1/report.md",
+          "sha256": "524f69d2be9e580f01e5ffb59b4e5f1d608b0b0dfde0b892c0df17993a522f8a"
         }
       ]
     }

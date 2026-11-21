@@ -4,5 +4,5 @@
   "cli.failures.invalid_choice": "argument {argument} : choix invalide : {value} (choisir parmi {choices})",
   "cli.failures.invalid_command": "Commande {group} invalide : {command}",
  "cli.failures.github_borrow_timeout": "L’identifiant GitHub de {owner} n’a pas été reçu dans les {seconds} s ; relancer la commande",
- "cli.failures.github_owner_offline": "La connexion GitHub est prêtée par {owner}, qui est hors ligne ; cette session n’a aucun accès enregistré à utiliser en attendant"
+ "cli.failures.github_owner_offline": "La connexion GitHub est prêtée par {owner}, qui est hors ligne ; cette session n’a aucun accès enregistré à utiliser en attendant"
 }
