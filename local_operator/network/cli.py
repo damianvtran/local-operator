@@ -5064,6 +5064,14 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             timed_out=int(live.get("timed_out") or 0),
             unacknowledged=int(live.get("unacknowledged") or 0),
         )
+        # G9: what it was LENT, beside what was copied to it (``lends.py``).
+        endings += messages_mod.render_removal_lends(
+            _member_name(record, device_id) or str(live.get("removed") or device_id),
+            revoked=int(live.get("lends_revoked") or 0),
+            open_lends=list(live.get("lends_open") or []),
+            told=int(live.get("lends_told") or 0),
+            renewal_ended=int(live.get("lends_renewal_ended") or 0),
+        )
         return _emit(
             args,
             {"ok": True, **live},
@@ -5084,6 +5092,11 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # what the ledger shows, or a removal with live copies reads as a clean sweep.
     copies, unacknowledged = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
+    # G9, relay-less: nothing can tell the member (no link) and no broker runs to
+    # DELETE an App token, so every unexpired lend is reported as left usable.
+    from local_operator.network.credentials.lends import removal_lends
+
+    lends = removal_lends(None, record.network_id, device_id, told=False, revokes_at_issuer=False)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
             continue
@@ -5120,6 +5133,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "wiped": 0,
             "timed_out": 0,
             "unacknowledged": unacknowledged,
+            **lends,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
@@ -5129,6 +5143,13 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
                 copies=copies,
                 wiped=0,
                 unacknowledged=unacknowledged,
+            ),
+            *messages_mod.render_removal_lends(
+                _member_name(record, device_id) or args.device,
+                revoked=int(lends["lends_revoked"]),
+                open_lends=list(lends["lends_open"]),
+                told=0,
+                renewal_ended=int(lends["lends_renewal_ended"]),
             ),
         ],
     )

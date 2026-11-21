@@ -1219,6 +1219,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "a credential and who may borrow it — a store file beside ``sessions/``, never an "
         "entry a session directory holds",
     ),
+    "local_operator/network/credentials/lends.py": (
+        1,
+        "``LENDS_FILENAME`` (``lends.json``) under ``network/credentials/<network_id>/``: "
+        "the OWNER's ids-only record of what it lent to which member and until when "
+        "(G9), read by ``member rm``'s receipt — DEVICE-LOCAL and never copied to a "
+        "peer: it describes this owner's lends, and ``copy_set``/``content_trees`` "
+        "walk only ``sessions/<id>/``, so no sync path reaches it",
+    ),
     "local_operator/network/credentials/lifecycle.py": (
         3,
         "``lifecycle.json``, ``.lifecycle.lock`` and ``.lifecycle-restriction-overflow.json`` "

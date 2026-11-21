@@ -14224,7 +14224,7 @@ class RelayServer:
 
     def _broadcast_epoch(
         self, record: NetworkRecord, state: SecretState, *, reason: str, removed: list[str]
-    ) -> None:
+    ) -> set[str]:
         """Send ``net_epoch`` to every live link, and QUEUE it for the offline ones.
 
         The frame is built PER RECIPIENT by :func:`epoch_frame`, which withholds the
@@ -14258,6 +14258,10 @@ class RelayServer:
             if member.device_id in delivered or member.device_id == record.self_device_id:
                 continue
             self._queue_epoch_for(member.device_id, record, state, reason=reason)
+        # The devices a live, verified link ACCEPTED the frame for. ``member rm`` reads
+        # it (G9): a removed device in this set was told over its link, and its client
+        # drops every borrowed grant on that news; one outside it never learns.
+        return delivered
 
     def _queue_epoch_for(
         self, device_id: str, record: NetworkRecord, state: SecretState, *, reason: str
@@ -15148,11 +15152,31 @@ class RelayServer:
                     },
                 )
             )
-        self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
+        told = self._broadcast_epoch(
+            record, state, reason="member_removed", removed=outcome.removed
+        )
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        from local_operator.network.credentials import owner as owner_mod
+        from local_operator.network.credentials.lends import removal_lends
+
+        # Read BEFORE the off-thread revoke below starts, while the lender still
+        # holds the token: an App lend counts as "revocation requested" only if
+        # that DELETE will actually be attempted (review R1-1; ``lends.py``).
+        network_id = record.network_id
+        lends = removal_lends(
+            self.root,
+            network_id,
+            device_id,
+            told=device_id in told,
+            revoke_tracked=lambda key, holder: owner_mod.lent_token_tracked(
+                self, network_id, key, holder
+            ),
+            audit=self.audit,
+        )
         # The owner half of "membership loss ends a held GitHub token" (#3947 M2).
         self._revoke_lent_on_removal(record.network_id, [device_id])
         return {
+            **lends,
             "network_id": record.network_id,
             "removed": device_id,
             "epoch": outcome.epoch,
