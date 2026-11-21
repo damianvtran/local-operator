@@ -1745,3 +1745,103 @@ def test_a_decision_naming_another_conversation_is_never_actionable(api) -> None
     # And it is genuinely unsettleable, which is why it must not be counted.
     out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_body())
     assert out.json()["detail"]["code"] == "snapshot_stale"
+
+
+# --- #4371 follow-ups: a locally settled hold is not "held" anywhere --------
+
+
+def _settle_locally(config_dir: Path, owner: OwnerSnapshot, call) -> dict[str, Any]:
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    assert out.status_code == 200 and out.json()["result"]["outcome"] == LOCAL_TERMINAL
+    return item
+
+
+def test_a_locally_settled_hold_leaves_the_long_hold_count(api, monkeypatch) -> None:
+    # #4371 QA Q1: the long-hold alert rollup counted it 1 -> 1 across the
+    # local terminal. A refused notice keeps a work-scope hold in the count
+    # (``notified_at`` NULL), which is exactly the case that kept nagging.
+    from local_operator.notifications import store as nstore
+
+    def refuse(self, *a, **k):
+        raise nstore.NotifyRefused("rate_limited", "refused")
+
+    monkeypatch.setattr(nstore.NotificationStore, "notify", refuse)
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 1
+    (item,) = _listed(call)
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    assert out.json()["result"]["outcome"] == LOCAL_TERMINAL
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 0
+
+
+def test_a_pending_discard_still_counts_as_a_long_hold(api, monkeypatch) -> None:
+    # Negative control for Q1: only the LOCAL terminal leaves the rollup; a
+    # signed-but-unconfirmed (``pending``) Discard has not settled anything.
+    from local_operator.notifications import store as nstore
+
+    def refuse(self, *a, **k):
+        raise nstore.NotifyRefused("rate_limited", "refused")
+
+    monkeypatch.setattr(nstore.NotificationStore, "notify", refuse)
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_body())
+    assert out.json()["result"]["outcome"] == "pending"
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 1
+
+
+def test_the_holds_cli_neither_lists_nor_counts_a_locally_settled_hold(api) -> None:
+    # #4371 review m2: ``lop team-bridge holds`` said "1 held message(s)",
+    # ``discard=yes`` and "Deliver or discard them…" for a settled row.
+    from local_operator.team_bridge import holds_cli
+
+    config_dir, _store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    before = holds_cli.collect(config_dir, audit=False)
+    assert before["count"] == 1 and before["items"][0]["can_discard"] is True
+    assert "Deliver or discard them" in holds_cli.render(before)
+    (item,) = _listed(call)
+    call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    # The desktop list still shows the row, with its settled outcome.
+    assert _listed(call)[0]["decision"]["outcome"] == LOCAL_TERMINAL
+    answer = holds_cli.collect(config_dir, audit=False)
+    assert answer["count"] == 0 and answer["items"] == []
+    text = holds_cli.render(answer)
+    assert text == "Nothing is held on this machine."
+    assert "Deliver or discard" not in text and MESSAGE_ID not in text
+
+
+def test_re_recording_a_local_terminal_is_a_typed_refusal_not_an_integrity_error(api) -> None:
+    # #4371 security review S-2: ``drop_review_decision`` removes the release
+    # row but never its audit row, so a second local terminal for the same
+    # message hit the audit table's primary key and raised a raw
+    # ``sqlite3.IntegrityError`` (a 500 at the route). It must be a
+    # ``StoreRefused``, roll the release row back, and keep the audit row.
+    from local_operator.team_bridge.store import StoreRefused
+
+    config_dir, store, owner, call = api
+    _settle_locally(config_dir, owner, call)
+    release = store.owner_release(owner, MESSAGE_ID)
+    (audit,) = _local_terminals(config_dir)
+    store.drop_review_decision(owner, MESSAGE_ID)
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    with pytest.raises(StoreRefused) as refused:
+        store.record_owner_release_local_terminal(
+            owner,
+            release,
+            outcome=LOCAL_TERMINAL,
+            reason="hub_unconfirmed_after_deliver_window",
+            deliver_until=audit["deliver_until"],
+            now=time.time(),
+        )
+    assert refused.value.code == "state_unavailable"
+    # Atomic: no release row without its own receipt; the audit row survives.
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    assert _local_terminals(config_dir) == [audit]

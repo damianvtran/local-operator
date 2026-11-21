@@ -3609,13 +3609,33 @@ class Store:
             except sqlite3.OperationalError:
                 noticed = set()  # a store that predates B4b has no such notice
                 reviewed = set()
+            # #4371 QA Q1: a hold whose owner release is SETTLED LOCALLY
+            # (``OWNER_RELEASE_LOCAL_TERMINAL``) is something the person already
+            # answered and nothing else will move, so alerting "long-held" for
+            # it nags about a decision already taken. Keyed exactly as the
+            # holds list keys ``actionable`` (``owner_releases`` by owner and
+            # bare message id). Only that outcome leaves: a ``pending`` or
+            # refused release keeps counting, since that hold has not settled.
+            # Its own try so a store without the table (created lazily with the
+            # first work-scope write) keeps the two exemptions read above.
+            try:
+                settled = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM owner_releases WHERE owner_key = ? "
+                        "AND outcome = ?",
+                        (_owner_key(owner), OWNER_RELEASE_LOCAL_TERMINAL),
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                settled = set()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
             if row["hold_code"] in excluded:
                 continue
             bare = screening_hold_message_id(str(row["message_id"]))
-            if bare in noticed:
+            if bare in noticed or bare in settled:
                 continue
             if not is_conversation_message_id(bare):
                 continue
@@ -10296,8 +10316,10 @@ class Store:
     ) -> dict[str, Any]:
         """Write a signed Discard ALREADY SETTLED locally, plus its audit row, atomically.
 
-        WHY (follow-on to PR #4358). A Discard the person signs for a hold whose
-        body can no longer be loaded, past its Deliver window, is consumed by
+        WHY (follow-on to PR #4358). A Discard the person signs with a hold
+        receipt instead of a body hash (no body was presented, so no hub
+        confirmation was obtained — the server does not verify why), past its
+        Deliver window, is consumed by
         the connector only when the hub serves the envelope again; a message
         the hub no longer serves therefore sat ``pending`` forever. This
         records the person's decision as the terminal ``outcome`` (a LOCAL
@@ -10323,25 +10345,58 @@ class Store:
             written = self._insert_owner_release(
                 conn, owner, row, outcome=outcome, outcome_at=float(now)
             )
-            conn.execute(
-                "INSERT INTO owner_release_local_terminals (owner_key, message_id, "
-                "conversation_id, creator_generation, outcome, reason, key_id, account_id, "
-                "decided_at, deliver_until, at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    _owner_key(owner),
-                    row["message_id"],
-                    row["conversation_id"],
-                    owner.enrollment_generation,
-                    outcome[:64],
-                    reason[:64],
-                    row["key_id"],
-                    row["account_id"],
-                    float(row["decided_at"]),
-                    float(deliver_until),
-                    float(now),
-                ),
-            )
+            # #4371 security review S-2: ``drop_review_decision`` deletes the
+            # ``owner_releases`` row but never its audit row (audit rows are
+            # never deleted), so a second local terminal for the same message
+            # would collide on this table's primary key. That must be a typed
+            # refusal the route maps to 409, never a raw IntegrityError (a 500).
+            # Raising inside ``with conn`` rolls back the release row above
+            # too, so a settled row never exists without its own receipt.
+            try:
+                self._insert_local_terminal_audit(
+                    conn,
+                    owner,
+                    row,
+                    outcome=outcome,
+                    reason=reason,
+                    deliver_until=deliver_until,
+                    now=now,
+                )
+            except sqlite3.IntegrityError as error:
+                raise StoreRefused(
+                    "state_unavailable", "local terminal audit row already recorded"
+                ) from error
             return written
+
+    def _insert_local_terminal_audit(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        row: Mapping[str, Any],
+        *,
+        outcome: str,
+        reason: str,
+        deliver_until: float,
+        now: float,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO owner_release_local_terminals (owner_key, message_id, "
+            "conversation_id, creator_generation, outcome, reason, key_id, account_id, "
+            "decided_at, deliver_until, at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _owner_key(owner),
+                row["message_id"],
+                row["conversation_id"],
+                owner.enrollment_generation,
+                outcome[:64],
+                reason[:64],
+                row["key_id"],
+                row["account_id"],
+                float(row["decided_at"]),
+                float(deliver_until),
+                float(now),
+            ),
+        )
 
     def owner_release_local_terminal(
         self, owner: OwnerSnapshot, message_id: str
