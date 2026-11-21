@@ -154,6 +154,34 @@ ACCEPT_DIGEST_LABEL = b"lop-mesh-accept-v1\x00"
 ACCEPT_SIG_LABEL = b"lop-mesh-accept-sig-v1\x00"
 ACCEPT_MAC_LABEL = b"lop-mesh-accept-mac-v1\x00"
 
+#: THE "MEMBERSHIP ENDED" NOTICE (G9-B). A member removed while it was OFFLINE
+#: never receives the rotation frame that names it, and every later handshake it
+#: makes is refused SILENTLY (the no-oracle rule below), which it cannot tell from
+#: an owner that is asleep — so it kept serving borrowed bearers from its offline
+#: hold for up to the hold's length. The notice ends that, under four bounds:
+#:
+#: * it is sent ONLY to a dialer that has just signed THIS handshake's transcript
+#:   with the exact key stored on its tombstoned row (``Handshake.removal_proven``);
+#:   every other dialer gets the same silent close as before, on the same code
+#:   path (see ``Handshake._probe_tombstone``);
+#: * it is bound to that transcript (both nonces), the network id, the removed
+#:   device's id and the listener's epoch, and signed by the listener's device key
+#:   under its own labels — so it never verifies on another handshake and can never
+#:   be reflected as an auth or welcome signature (nor they as it);
+#: * its content is fixed: no reason, no remover, no member list;
+#: * the dialer acts on it only when the signer is a CURRENT member in its own
+#:   record (``Handshake.verify_removal_notice``), and acting only ever REMOVES
+#:   authority on the dialer.
+#:
+#: There is no MAC: the dialer no longer shares the rotated epoch secret, which is
+#: the point of a removal, so the stored device key is the only proof available.
+REMOVED_DIGEST_LABEL = b"lop-mesh-removed-v1\x00"
+REMOVED_SIG_LABEL = b"lop-mesh-removed-sig-v1\x00"
+#: The dialer's refusal code once a notice VERIFIED. Never on the wire.
+REASON_MEMBERSHIP_ENDED = "membership_ended"
+#: The notice's exact field set; anything more or less is not a notice.
+REMOVAL_NOTICE_FIELDS = frozenset({"net", "v", "epoch", "sig"})
+
 
 def lp(chunk: bytes) -> bytes:
     """Length-prefix one transcript field: ``len(x).to_bytes(4, "big") + x``.
@@ -223,6 +251,61 @@ def accept_digest(transcript_bytes: bytes, welcome: dict[str, Any]) -> bytes:
     return sha256(
         ACCEPT_DIGEST_LABEL + lp(transcript_bytes) + lp(canonical_json(welcome_core(welcome)))
     )
+
+
+def removal_digest(
+    transcript_bytes: bytes, *, network_id: str, removed_device_id: str, epoch: int
+) -> bytes:
+    """What the "membership ended" notice signs: transcript + network + device + epoch.
+
+    ``T`` carries both sides' fresh nonces and ephemerals, so a notice recorded from
+    one handshake never verifies on another (replay); ``network_id`` and the removed
+    device's id pin it to the one membership it ends. The digest label keeps the
+    input disjoint from ``accept_digest`` even though both start from ``T``.
+    """
+    return sha256(
+        REMOVED_DIGEST_LABEL
+        + lp(transcript_bytes)
+        + lp(network_id.encode("utf-8"))
+        + lp(removed_device_id.encode("utf-8"))
+        + lp(str(int(epoch)).encode("ascii"))
+    )
+
+
+class MembershipEnded(HandshakeRefusal):
+    """The dialer VERIFIED a listener's "membership ended" notice for this device.
+
+    A refusal (the dial does not link) carrying the one fact the notice states: the
+    listener's epoch at the time it answered. Raised only by
+    :meth:`Handshake.verify_removal_notice` after every check passed; the relay's
+    dial path turns it into the local, authority-reducing apply.
+    """
+
+    def __init__(self, sentence: str, *, epoch: int, signer: str) -> None:
+        super().__init__(REASON_MEMBERSHIP_ENDED, sentence)
+        self.epoch = epoch
+        self.signer = signer
+
+
+_DUMMY_PUBLIC_KEY: str = ""
+
+
+def _dummy_public_key() -> str:
+    """A real Ed25519 public key whose private half was discarded at creation.
+
+    Used by ``Handshake._probe_tombstone`` when no notice-eligible tombstone
+    matches, so an unknown id, a never-member and a tombstoned id with a random key
+    all run one signature verification and all fail it. Nobody holds the private
+    key (it is minted per process and dropped), so this can never verify.
+    """
+    global _DUMMY_PUBLIC_KEY
+    if not _DUMMY_PUBLIC_KEY:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        raw = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        _DUMMY_PUBLIC_KEY = b64u(raw)
+    return _DUMMY_PUBLIC_KEY
 
 
 def welcome_proof(
@@ -454,6 +537,8 @@ class StaticPolicy:
     networks: dict[str, bool] = field(default_factory=dict)  # network_id -> trust active
     epoch_keys: dict[tuple[str, int], bytes] = field(default_factory=dict)
     members: dict[tuple[str, str], str] = field(default_factory=dict)  # (net, device) -> pubkey
+    #: Notice-eligible tombstones, (net, device) -> stored pubkey (G9-B).
+    removed: dict[tuple[str, str], str] = field(default_factory=dict)
 
     @property
     def current_epoch(self) -> int:
@@ -474,6 +559,9 @@ class StaticPolicy:
 
     def active_member_public_key(self, network_id: str, device_id: str) -> str | None:
         return self.members.get((network_id, device_id))
+
+    def removed_member_public_key(self, network_id: str, device_id: str) -> str | None:
+        return self.removed.get((network_id, device_id))
 
 
 @dataclass(frozen=True)
@@ -574,6 +662,12 @@ class Handshake:
     #: proof must verify under) and by ``RelayServer.dial`` (which applies the hop
     #: through ``apply_device_rotation``, the ``net_identity_rotate`` code path).
     peer_rotation: dict[str, Any] = field(default_factory=dict)
+    #: LISTENER (G9-B): True only when the refused dialer's auth signature verified
+    #: against the key stored on its TOMBSTONED row (``_probe_tombstone``). It does
+    #: NOT make the dialer a member — ``auth_verified`` stays False and the refusal
+    #: is raised exactly as before — it only licenses the relay to answer with the
+    #: fixed "membership ended" notice instead of silence.
+    removal_proven: bool = False
 
     # -- construction -------------------------------------------------------
 
@@ -684,8 +778,85 @@ class Handshake:
         a new call site would quietly reopen G1.
         """
         frame = reader.read_line(deadline)
+        if frame.get("net") == "removed":
+            # Never returns: a verified notice raises ``MembershipEnded``, anything
+            # else a plain refusal; both stop the dial before ``establish``.
+            self.verify_removal_notice(frame, expect)
         self.verify_welcome(frame, expect)
         return frame
+
+    def verify_removal_notice(self, frame: dict[str, Any], expect: DialerExpectation) -> None:
+        """Verify a listener's "membership ended" notice; raise ``MembershipEnded`` if real.
+
+        A forged notice is an attack on THIS device's authority (it would make it
+        drop its borrowed credentials), so the notice is believed only when it is
+        exactly what an honest current member would send on THIS handshake:
+
+        1. member mode, after our auth frame (the transcript must be complete);
+        2. exactly the fixed field set and a well-formed 64-byte signature;
+        3. the speaker is the device this dial meant to reach — no rotation hop is
+           followed for a notice, because a hop is itself a claim to verify;
+        4. that device is an ACTIVE member in this device's own record
+           (``expect.public_key_for``): a removed or unknown signer has no key here;
+        5. the signature verifies under that stored key over ``removal_digest``,
+           which binds both nonces, the network, this device's id and the epoch —
+           so a notice replayed from another handshake fails here;
+        6. the epoch is NEWER than the one this device holds: a removal cannot
+           predate the epoch at which this device last knew itself a member.
+
+        Any failure is an ordinary ``HandshakeRefusal`` (the dial ends exactly as a
+        silent refusal would, nothing is dropped).
+        """
+        if self.mode != "member" or self.credential is None or not self.auth_core:
+            raise HandshakeRefusal(
+                REASON_FRAME, "a removal notice arrived outside a member handshake"
+            )
+        sig_bytes = b""
+        if set(frame) == REMOVAL_NOTICE_FIELDS:
+            try:
+                sig_bytes = unb64u(str(frame.get("sig") or ""))
+            except ValueError:
+                sig_bytes = b""
+        epoch = frame.get("epoch")
+        if len(sig_bytes) != 64 or not isinstance(epoch, int) or isinstance(epoch, bool):
+            raise HandshakeRefusal(REASON_FRAME, "the removal notice is malformed")
+        claimed = str(self.challenge.get("device_id") or "")
+        if not claimed or claimed != expect.device_id or claimed == self.self_device_id:
+            raise HandshakeRefusal(
+                REASON_PEER_IDENTITY,
+                "the removal notice came from a device this dial did not mean to reach",
+            )
+        stored = expect.public_key_for(claimed) if expect.public_key_for else None
+        if not stored:
+            raise HandshakeRefusal(
+                REASON_MEMBER,
+                "the removal notice came from a device that is not an active member here",
+            )
+        digest = removal_digest(
+            self.transcript_bytes,
+            network_id=self.network_id,
+            removed_device_id=self.self_device_id,
+            epoch=epoch,
+        )
+        _verify_signature(
+            stored,
+            b64u(sig_bytes),
+            digest,
+            label=REMOVED_SIG_LABEL,
+            sentence=(
+                "the removal notice's signature does not verify against the public key "
+                "on the sender's member record"
+            ),
+        )
+        if epoch <= self.epoch:
+            raise HandshakeRefusal(
+                REASON_EPOCH, "the removal notice names an epoch this device already holds"
+            )
+        raise MembershipEnded(
+            f"{claimed} says this device was removed from the network",
+            epoch=epoch,
+            signer=claimed,
+        )
 
     def refuse_unexpected_peer(self, expect: DialerExpectation) -> None:
         """Refuse BEFORE ``send_auth`` when the challenge names another device.
@@ -1067,6 +1238,11 @@ class Handshake:
         if self.mode == "member":
             public_key = policy.active_member_public_key(self.network_id, self.peer_device_id)
             if public_key is None:
+                # Every non-member walks this ONE path: one signature check (against
+                # the tombstone's stored key, or a key nobody holds), then the same
+                # refusal as before. Only its outcome flag differs, and the relay
+                # reads that flag after the refusal (G9-B).
+                self._probe_tombstone(policy, str(signature))
                 raise HandshakeRefusal(
                     REASON_MEMBER, "the other device is not a member of this network"
                 )
@@ -1131,6 +1307,59 @@ class Handshake:
         self.credential = matched
         self.establish()
         return frame
+
+    def _probe_tombstone(self, policy: ListenerPolicy, signature: str) -> None:
+        """Set ``removal_proven`` iff the dialer signed with its tombstoned row's key.
+
+        NO-ORACLE, KEPT: until the signature verifies, a tombstoned id, an unknown
+        id and a never-member are indistinguishable — each costs one lookup and one
+        Ed25519 verification (a discarded key stands in when no tombstone matches)
+        and each ends in the same ``not_a_member`` refusal with nothing sent. Only a
+        dialer that holds the exact stored key learns anything, and it learns only
+        what it already knew it might be: removed.
+
+        ``removed_member_public_key`` is optional on a policy: a policy without it
+        (an older test double, a doctor probe) simply never proves a removal.
+        """
+        lookup = getattr(policy, "removed_member_public_key", None)
+        tombstone = lookup(self.network_id, self.peer_device_id) if callable(lookup) else None
+        key = str(tombstone) if tombstone else _dummy_public_key()
+        digest = transcript_digest(transcript(self.hello, self.challenge, self.auth_core))
+        try:
+            _verify_signature(key, signature, digest)
+        except HandshakeRefusal:
+            return
+        self.removal_proven = bool(tombstone)
+
+    def removal_notice(self, epoch: int) -> dict[str, Any]:
+        """The listener's fixed "membership ended" frame, or ``{}`` when not licensed.
+
+        Only after ``_probe_tombstone`` proved the dialer's key. Fixed content: the
+        frame kind, the link version, this device's epoch and the signature — no
+        reason, no remover, no member list (the dialer already knows whom it dialled).
+        """
+        if self.role != "listener" or not self.removal_proven or self.mode != "member":
+            return {}
+        digest = removal_digest(
+            self.transcript_bytes,
+            network_id=self.network_id,
+            removed_device_id=self.peer_device_id,
+            epoch=epoch,
+        )
+        return {
+            "net": "removed",
+            "v": LINK_VERSION,
+            "epoch": int(epoch),
+            "sig": b64u(self.identity.sign(REMOVED_SIG_LABEL + digest)),
+        }
+
+    def send_removal_notice(self, sock: socket.socket, epoch: int) -> bool:
+        """Send :meth:`removal_notice` if licensed; whether a frame was written."""
+        frame = self.removal_notice(epoch)
+        if not frame:
+            return False
+        _send_frame(sock, frame)
+        return True
 
     # -- shared -------------------------------------------------------------
 

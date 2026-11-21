@@ -3945,6 +3945,17 @@ class MeshCredentialClient:
             dropped.append(key)
         return dropped
 
+    def invalidate_membership(self) -> None:
+        """Run the membership-loss drop NOW, for a caller that has just learned of it.
+
+        The relay calls this when a current member proved on a live handshake that
+        this device was removed while offline (G9-B): the same persistent deny,
+        borrowed-cache drop, GitHub revoke and held-row retirement every serve path
+        runs lazily once ``_self_membership_active`` reads False, so the offline hold
+        ends at once instead of at its expiry. Only reduces authority.
+        """
+        self._invalidate_membership_scope("")
+
     def self_membership_active(self) -> bool:
         """Public read of :meth:`_self_membership_active`, for the owner-wait hint."""
         return self._self_membership_active()
