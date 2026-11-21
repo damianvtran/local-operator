@@ -1356,3 +1356,22 @@ def test_the_picker_filters_on_the_listings_human_name() -> None:
     # ADDITION to the matcher, not a matcher that now matches anything.
     picker.set_query("gpt 6 luna")
     assert picker.suggestions() == []
+
+
+def test_a_dead_stored_sign_in_is_named_with_its_login_command() -> None:
+    """``reauth_required`` is a stored sign-in the provider refused for good.
+
+    Unlike ``unauthenticated`` its rows are NOT hidden (a stored credential still
+    counts as usable), so the access note counts nothing for it: without this
+    clause the picker showed the bundled rows with no hint they would fail. It
+    leads the status clauses, uses the welcome screen's audited words, and
+    fits the 39-cell budget at the reference width.
+    """
+    from local_operator.tui.app import _catalogue_status
+
+    clause = _catalogue_status({"google-vertex": "reauth_required", "anthropic": "ok"})
+    assert clause == "not logged in — /login google-vertex"
+    assert cell_len(clause) <= 39, clause
+    assert _catalogue_status({"google-vertex": "reauth_required", "xai": "stale"}) == (
+        "not logged in — /login google-vertex · stale list: xai"
+    )

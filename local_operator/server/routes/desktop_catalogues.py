@@ -117,6 +117,13 @@ class Catalogue(BaseModel):
     #: not be read -- nothing was withheld in either case. It is what a picker's
     #: "Show all (N need sign-in)" toggle prints without a second request.
     hidden: int = 0
+    #: Provider id -> ``{"status", "name"}`` for a listing state the user must
+    #: act on, from ``ProviderController.provider_notices`` -- the SAME map the
+    #: phone relay's ``/api/models`` publishes. Today only ``reauth_required``:
+    #: a stored sign-in whose grant the provider refused for good, whose rows
+    #: are therefore published with ``connected: false``. Only a live read can
+    #: know it, so the ``initial`` frame always carries ``{}``.
+    provider_status: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class UsageReports(BaseModel):
@@ -174,6 +181,7 @@ async def models(
     controller = auth.controller()
     try:
         failures: dict[str, str] = {}
+        provider_status: dict[str, dict[str, str]] = {}
         if live:
             # THE PICKER'S OWN CADENCE, never discovery's 24 h default. This read
             # is the user pressing "Refresh from providers": they are asking NOW,
@@ -215,6 +223,7 @@ async def models(
             # exceptions can carry response bodies or credential URLs, so an
             # unvetted reason string must never reach the wire here.
             failures = controller.catalogue_failures(entries, statuses)
+            provider_status = controller.provider_notices(statuses)
         else:
             # NOT `asyncio.to_thread`, and the reason is CORRECTNESS rather than
             # cost: the AuthStore's sqlite connection is created on the event-loop
@@ -285,6 +294,7 @@ async def models(
                 "credentials_known": credentials_known,
                 "scope": scope,
                 "hidden": hidden,
+                "provider_status": provider_status,
             }
         )
     finally:
