@@ -61,6 +61,11 @@ DEFERRED_MAX_BYTES = 160 * 1024
 #: Raised 72 -> 76 KiB (77,824 B) when wire.voice was translated: wire.voice
 #: (37 keys, ~7 KB in hi) is eager and cannot be deferred (envelope-identity
 #: ratchet); hi is the largest locale by UTF-8 bytes and measured 77,139 B.
+#:
+#: NOT raised for wire.errors.sdk_spec (PR #4349): its new key put hi at
+#: 77,924 B, 100 B over, and the namespace meets the deferral criterion (SDK
+#: refusals are finished strings rendered in the embedding process), so it was
+#: deferred instead, returning hi to 72,321 B.
 EAGER_TOTAL_MAX_BYTES = 76 * 1024
 
 
@@ -116,6 +121,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.github",
         "wire.errors.bedrock",
         "wire.login.bedrock",
+        "wire.errors.sdk_spec",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "
         "namespace. Adding one requires updating this assertion, recording its "
