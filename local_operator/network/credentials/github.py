@@ -2808,14 +2808,27 @@ def apply_grant_narrowing(outcome: Any, *, client: Any, root: Path | None = None
         return {"changed": False, "repositories": [], "error": exc.__class__.__name__}
 
 
+#: The owner-outage refusals that, with no saved access, leave a bash child with no
+#: GitHub login: ``borrowed_git_env`` reports them through ``on_refusal``. A deny,
+#: a withdrawn share or a panic is not an outage and keeps its existing copy.
+OUTAGE_REFUSALS: frozenset[str] = frozenset({"owner_offline", "owner_unreachable", "owner_busy"})
+
+
 def borrowed_git_env(
     *,
     root: Path | None = None,
     session_id: str = "",
     client: Any = None,
     on_timeout: Callable[[Any], object] | None = None,
+    on_refusal: Callable[[Any], object] | None = None,
+    hold_fallback_session_ids: tuple[str, ...] = (),
 ) -> tuple[dict[str, str], str]:
     """Fetch-on-use: ``(env, token)`` for one child, or ``({}, "")``. Never raises.
+
+    ``hold_fallback_session_ids`` are the session's ancestors in the harness's
+    task tree; while the owner is away a subagent may serve its ancestor's held
+    grant (``MeshCredentialClient._bridge_ancestor_hold``). ``on_refusal`` hears
+    an owner-outage refusal that left nothing to inject (:data:`OUTAGE_REFUSALS`).
 
     ``{}`` is every not-now answer on purpose — this runs on the bash tool's
     spawn path, and a command must never fail because a borrow could not: the
@@ -2832,18 +2845,36 @@ def borrowed_git_env(
             return {}, ""
         if not client.should_borrow(GITHUB_KEY):
             return {}, ""
-        outcome = client.request_grant_sync(GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY)
+        # Only when there are ancestors, so a caller (or test double) without any
+        # keeps the exact call it always made.
+        bridge: dict[str, Any] = (
+            {"hold_fallback_session_ids": tuple(hold_fallback_session_ids)}
+            if hold_fallback_session_ids
+            else {}
+        )
+        outcome = client.request_grant_sync(
+            GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY, **bridge
+        )
     except Exception:  # noqa: BLE001 — see the docstring
         return {}, ""
     token = str(getattr(outcome, "access_token", "") or "")
     if not token:
         from .types import BorrowTimeout
 
-        if isinstance(outcome, BorrowTimeout) and on_timeout is not None:
-            # A local diagnostic only. Denials, missing sinks and policy answers
-            # do not become timeouts, and nothing enters the child's environment.
+        if isinstance(outcome, BorrowTimeout):
+            if on_timeout is not None:
+                # A local diagnostic only. Denials, missing sinks and policy answers
+                # do not become timeouts, and nothing enters the child's environment.
+                try:
+                    on_timeout(outcome)
+                except Exception:  # noqa: BLE001 — diagnostics cannot break a command
+                    pass
+        elif on_refusal is not None and getattr(outcome, "code", "") in OUTAGE_REFUSALS:
+            # WHY: an outage with no saved access used to return silently, and
+            # ``gh`` then said only "set the GH_TOKEN environment variable" (remote
+            # review/QA subagents, 2026-11-21). Codes and the owner label only.
             try:
-                on_timeout(outcome)
+                on_refusal(outcome)
             except Exception:  # noqa: BLE001 — diagnostics cannot break a command
                 pass
         return {}, ""
@@ -2876,7 +2907,7 @@ def borrowed_git_env(
                 if grants is not None:
                     grants.drop(GITHUB_KEY)
                 fresh = client.request_grant_sync(
-                    GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY
+                    GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY, **bridge
                 )
                 fresh_token = str(getattr(fresh, "access_token", "") or "")
                 if fresh_token:
@@ -2916,6 +2947,8 @@ def lent_github_env(
     register: Callable[[str], object] | None,
     client: Any = None,
     on_timeout: Callable[[Any], object] | None = None,
+    on_refusal: Callable[[Any], object] | None = None,
+    hold_fallback_session_ids: tuple[str, ...] = (),
 ) -> tuple[dict[str, str], str]:
     """The ONE door a mesh-lent github bearer takes into a local consumer.
 
@@ -2957,6 +2990,10 @@ def lent_github_env(
         # Only when asked for: a caller (or test double) that never passes it keeps
         # the exact call it always made.
         extra: dict[str, Any] = {"on_timeout": on_timeout} if on_timeout is not None else {}
+        if on_refusal is not None:
+            extra["on_refusal"] = on_refusal
+        if hold_fallback_session_ids:
+            extra["hold_fallback_session_ids"] = tuple(hold_fallback_session_ids)
         env, token = borrowed_git_env(session_id=session_id, client=client, **extra)
     except Exception:  # noqa: BLE001 — borrowed_git_env never raises; belt and braces
         return {}, ""

@@ -551,6 +551,18 @@ class FakeClient:
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
 
+    async def conversation_rename(
+        self,
+        conversation_id: str,
+        name: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_rename"] = (conversation_id, name, tenant_id)
+        return self._answer("conversation_rename")
+
     async def conversation_delete(
         self,
         conversation_id: str,
@@ -3444,6 +3456,7 @@ async def test_every_desktop_write_refuses_a_scope(api):
         ("post", "/v1/desktop/team-bridge/conversations?scope=account", {"kind": "dm"}),
         ("post", f"{base}/archive?scope=account", None),
         ("post", f"{base}/unarchive?scope=account", None),
+        ("post", f"{base}/rename?scope=account", {"name": "Renamed"}),
         ("delete", f"{base}?scope=account", None),
         (
             "post",
@@ -3517,6 +3530,7 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
         ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/rename", {"name": "Renamed"}),
         ("delete", "/v1/desktop/team-bridge/conversations/nope", None),
         (
             "post",
@@ -4896,3 +4910,83 @@ def test_trip_from_a_helper_thread_is_named_in_the_audit_message() -> None:
     assert "leaky-helper-thread" in msg
     assert "a DIFFERENT thread" in msg
     assert "test_desktop_team_bridge.py" in msg and "worker" in msg
+
+
+RENAME = "/v1/desktop/team-bridge/conversations/bcv_abc12345/rename"
+
+
+async def test_rename_answers_the_updated_conversation(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {
+        "conversation_id": "bcv_abc12345",
+        "kind": "channel",
+        "name": "Renamed",
+    }
+    response = await client.post(RENAME, json={"name": "Renamed", "tenant_id": "tnt_1"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["name"] == "Renamed"
+    assert FakeClient.behavior["last_rename"] == ("bcv_abc12345", "Renamed", "tnt_1")
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "conversation_name_taken", {"conversation_id": "bcv_other123", "name": "x"}),
+        (409, "conversation_archived", None),
+        (409, "invalid_transition", {"rule": "dm"}),
+        (409, "invalid_transition", {"rule": "builtin"}),
+        (400, "invalid_request", {"field": "name", "rule": "empty"}),
+        (400, "invalid_request", {"field": "name", "rule": "too_long"}),
+        (400, "invalid_request", {"field": "name", "rule": "control_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "invisible_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "unsupported_space"}),
+        (400, "not_allowed", None),
+        (403, "forbidden", None),
+        (404, "conversation_not_found", None),
+        (503, "messaging_unavailable", None),
+    ],
+)
+async def test_rename_refusals_pass_through_untouched(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.post(RENAME, json={"name": "x"})
+    assert response.status_code == status
+    expected = {"code": code, "message": "refused"}
+    if details:
+        expected["details"] = details
+    assert response.json()["detail"] == expected
+
+
+@pytest.mark.parametrize("body", [{}, {"name": "x", "topic": "nope"}, {"name": "x" * 129}])
+async def test_rename_refuses_a_malformed_body_before_io(api, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.post(RENAME, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+async def test_rename_forwards_a_name_over_the_server_limit(api):
+    """65 code points is the server's ``too_long`` to refuse, with its rule;
+    the daemon must not pre-empt it with a rule-less 422."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": "é" * 65})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == "é" * 65
+
+
+@pytest.mark.parametrize("name", ["", "   "], ids=["empty", "blank"])
+async def test_rename_forwards_an_empty_name_for_the_server_rule(api, name):
+    """The server is the authority on name rules: an empty name is not a local
+    422 (no ``min_length``), so ``""`` reaches it and its ``rule=empty`` refusal
+    is what the renderer shows, exactly as for a whitespace-only name."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": name})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == name

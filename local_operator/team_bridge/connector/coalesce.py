@@ -327,43 +327,65 @@ class WakeCoalescer:
                     }
                 )
                 continue
-            metadata = merge_metadata([item.metadata for item in group.items])
-            try:
-                detail = await deliver(
-                    group.owner,
-                    metadata,
-                    session_id=group.session_id,
-                    config_dir=group.config_dir,
+            # ONE CARD PER PERSISTED HAND-OFF IDENTITY (PR #3478 QA r1). A replay
+            # can re-group differently from the original flush (A+B went out,
+            # B's marker failed, the retry buffers B with a new C). Re-merging
+            # B+C under B's bound id would let the receiver swallow C as a
+            # duplicate (a lost wake); a fresh id for B+C would post B twice.
+            # So the group is split by the binding stored on each reservation:
+            # members bound to one id re-send under it, unbound members get
+            # their own new card. One partition in the ordinary case, so a
+            # normal burst is still exactly one card.
+            delivered_items: list[_Pending] = []
+            failed_items: list[_Pending] = []
+            for part in _handoff_partitions(group):
+                metadata = merge_metadata([item.metadata for item in part])
+                try:
+                    detail = await deliver(
+                        group.owner,
+                        metadata,
+                        session_id=group.session_id,
+                        config_dir=group.config_dir,
+                    )
+                except Exception:  # noqa: BLE001 — closed code, never content
+                    logger.warning("bridge: coalesced wake failed code=delivery_failed")
+                    failed_items.extend(part)
+                    outcomes.append({"action": "hold", "messages": len(part)})
+                    continue
+                except BaseException:
+                    # A stop or an interrupt is NOT a failed delivery to retry in
+                    # place: this process is going away and the buffer with it.
+                    # The group's holds (written at enqueue) are refreshed past
+                    # the grace period and the exception propagates, so the next
+                    # start's ordinary hold retry re-drives every message in the
+                    # group. Swallowing it here would strand the group in memory
+                    # that is about to be discarded. Partitions already handed
+                    # off are settled first so their markers are not lost too.
+                    if delivered_items:
+                        _settle(replace(group, items=delivered_items), now=now)
+                        group.items = [i for i in group.items if i not in delivered_items]
+                    _persist_holds(group, retry_at=time.time() + _HOLD_GRACE_S)
+                    raise
+                delivered_items.extend(part)
+                outcomes.append(
+                    {
+                        "action": "delivered",
+                        "conversation_id": metadata.conversation_id,
+                        "message_ids": [item.metadata.message_id for item in part],
+                        "detail": detail,
+                    }
                 )
-            except Exception:  # noqa: BLE001 — closed code, never content
-                logger.warning("bridge: coalesced wake failed code=delivery_failed")
+            if delivered_items:
+                _settle(replace(group, items=delivered_items), now=now)
+                self._last_wake[key] = now
+                if len(self._last_wake) > _LAST_WAKE_CAP:
+                    self._last_wake.clear()
+            if failed_items:
+                group.items = failed_items
                 group.due_at = now + max(self.window_s, 1.0)
                 _persist_holds(group, retry_at=group.due_at + _HOLD_GRACE_S)
-                outcomes.append({"action": "hold", "messages": len(group.items)})
                 continue
-            except BaseException:
-                # A stop or an interrupt is NOT a failed delivery to retry in
-                # place: this process is going away and the buffer with it. The
-                # group's holds (written at enqueue) are refreshed past the
-                # grace period and the exception propagates, so the next start's
-                # ordinary hold retry re-drives every message in the group.
-                # Swallowing it here would strand the group in memory that is
-                # about to be discarded.
-                _persist_holds(group, retry_at=time.time() + _HOLD_GRACE_S)
-                raise
             del self._groups[key]
-            self._last_wake[key] = now
-            if len(self._last_wake) > _LAST_WAKE_CAP:
-                self._last_wake.clear()
-            _settle(group, now=now)
-            outcomes.append(
-                {
-                    "action": "delivered",
-                    "conversation_id": metadata.conversation_id,
-                    "message_ids": [item.metadata.message_id for item in group.items],
-                    "detail": detail,
-                }
-            )
         return outcomes
 
     def persist_pending_holds(self, *, config_dir: Path | None = None) -> None:
@@ -452,6 +474,42 @@ def _still_owed(group: _Group) -> list[_Pending]:
             continue
         kept.append(item)
     return kept
+
+
+def _handoff_partitions(group: _Group) -> list[list[_Pending]]:
+    """Split a group by each reservation's persisted card hand-off identity.
+
+    Keys: the bound ``peer-`` id (members of ONE earlier card), ``''`` (never
+    handed off: they share one new card), and the store's sentinels for a
+    legacy or unreserved row, each kept apart so ``_deliver_card`` can hold or
+    pass them without contaminating another partition. Order follows the
+    group's own ``conversation_seq`` order. A store that cannot answer keeps
+    the whole group as ONE partition, i.e. exactly the pre-change behaviour,
+    and the bind inside the hand-off then refuses or proceeds on its own read.
+    """
+
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    by_conversation: dict[str, list[str]] = {}
+    for item in group.items:
+        by_conversation.setdefault(item.metadata.conversation_id, []).append(
+            item.metadata.message_id
+        )
+    bindings: dict[tuple[str, str], str | None] = {}
+    try:
+        store = Store(group.config_dir)
+        for conversation_id, ids in by_conversation.items():
+            for mid, value in store.card_handoff_bindings(
+                group.owner, conversation_id, ids
+            ).items():
+                bindings[(conversation_id, mid)] = value
+    except StoreRefused:
+        return [list(group.items)]
+    parts: dict[str | None, list[_Pending]] = {}
+    for item in group.items:
+        key = bindings.get((item.metadata.conversation_id, item.metadata.message_id))
+        parts.setdefault(key, []).append(item)
+    return list(parts.values())
 
 
 def _persist_hold(owner: Any, ref_key: str, config_dir: Path, *, retry_at: float) -> None:
