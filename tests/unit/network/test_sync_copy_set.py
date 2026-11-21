@@ -370,6 +370,30 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "and a copy would hand another device a second refresher, which is the one thing "
         "the design's Fence 1 forbids.",
     ),
+    "local_operator/remote_compute/records.py": (
+        2,
+        "``RECORD_FILENAME`` ('runs.jsonl') is this DEVICE's record of the remote runs "
+        "it submitted, under <config>/remote-compute/ (the directory beside it, "
+        "``RECORD_SUBDIRECTORY``) -- machine state outside the session "
+        "directories, never an entry of one. It must not travel with a session: the "
+        "file answers 'what did this device send, and where is it now', and a copy "
+        "would let the destination report another machine's runs as its own. "
+        "``LOCK_FILENAME`` ('.runs.lock') is the side file the record's cross-process "
+        "flock is taken on -- beside that same file, machine-local by construction "
+        "and meaningless on another device.",
+    ),
+    "local_operator/remote_compute/repo.py": (
+        1,
+        "``REMOTE_NAME`` ('origin') is a GIT REMOTE's name -- a key in .git/config, "
+        "not a file or directory this product writes. Nothing under it is ever an "
+        "entry of a session directory.",
+    ),
+    "local_operator/remote_compute/errors.py": (
+        1,
+        "``ATTESTATION_CODE_PREFIX`` ('attestation_') is the prefix the server's "
+        "refusal CODES share, matched against a ``code`` field of a JSON answer -- a "
+        "vocabulary, not a path. Nothing is written under it, here or anywhere.",
+    ),
     "local_operator/guardrails/provenance.py": (
         3,
         "LEDGER_DIRNAME ('guardrails'), LEDGER_FILENAME ('created.sqlite') and "

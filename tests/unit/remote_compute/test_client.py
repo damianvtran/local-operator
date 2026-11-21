@@ -14,6 +14,8 @@ ever escapes the mock — a test that quietly called Radient would otherwise
 from __future__ import annotations
 
 import asyncio
+import datetime
+import email.utils
 import json
 import traceback
 from collections.abc import Iterator
@@ -49,7 +51,9 @@ from local_operator.remote_compute.client import (
 )
 from local_operator.remote_compute.config import ENV_VAR
 from local_operator.remote_compute.errors import (
+    RETRY_AFTER_MAX_S,
     CapacityUnavailable,
+    Conflict,
     IdempotencyConflict,
     InsufficientCredit,
     InvalidApiOverride,
@@ -58,7 +62,9 @@ from local_operator.remote_compute.errors import (
     NetworkMismatch,
     PreviewNotEnabled,
     RemoteComputeError,
+    RunBusy,
     RunIdentityMismatch,
+    RunLimitReached,
     RunNotFound,
     Unreachable,
     UnreadableEnvelope,
@@ -579,7 +585,14 @@ SECRET_BODY = "sk-live-SECRET-account-42-balance-9.99"
         (402, InsufficientCredit),
         (403, PreviewNotEnabled),
         (404, RunNotFound),
-        (409, IdempotencyConflict),
+        # A CODELESS 409 IS NO LONGER AN IDEMPOTENCY CONFLICT. The server answers
+        # 409 for a run limit, a busy lease, a claimed name and an idempotency
+        # conflict alike, so the status alone cannot pick one; the generic
+        # conflict is what a server that names no code can honestly be reported
+        # as. The idempotency reading is recovered from the message — see
+        # ``test_a_codeless_conflict_that_names_idempotency_is_one``.
+        (409, Conflict),
+        (429, CapacityUnavailable),
         (503, CapacityUnavailable),
         (500, RemoteComputeError),
         (418, RemoteComputeError),
@@ -1013,3 +1026,204 @@ def test_bind_pairs_the_body_with_the_resolved_network(mesh_root: Path) -> None:
     request = RunSpec(**_fields()).bind(resolve_network("home", mesh_root))
     assert request.network_id == record.network_id
     assert request.to_json()["network_id"] == record.network_id
+
+
+# ---------------------------------------------------------------------------
+# Refusals are read by CODE first (M3a), and only then by status
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_coded_conflict_is_read_by_its_code_not_its_status(
+    credential: int, request_for: Any
+) -> None:
+    """409 is four refusals at once; the code says which one this was.
+
+    The bug this replaces: a run at the account's concurrent limit was reported
+    as an idempotency conflict, so the operator was told to change a key when the
+    remedy was to wait.
+    """
+    body = {"msg": "no", "error": {"code": "run_limit", "message": SECRET_BODY}}
+    origin = _Origin(httpx.Response(409, json=body))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RunLimitReached) as caught:
+            await client.create_run(request_for(), idempotency_key="k")
+    assert caught.value.code == "run_limit"
+    assert caught.value.status == 409
+    assert SECRET_BODY not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_a_busy_lease_is_its_own_class(credential: int) -> None:
+    origin = _Origin(httpx.Response(409, json={"code": "workload_busy"}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RunBusy) as caught:
+            await client.cancel_run("run_1")
+    assert caught.value.code == "workload_busy"
+
+
+@pytest.mark.asyncio
+async def test_the_code_wins_even_when_the_status_would_say_another_class(
+    credential: int,
+) -> None:
+    """A 409 whose code says ``not_found`` is a not-found, not a conflict."""
+    origin = _Origin(httpx.Response(409, json={"code": "not_found"}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RunNotFound):
+            await client.get_run("run_1")
+
+
+@pytest.mark.asyncio
+async def test_a_codeless_conflict_that_names_idempotency_is_one(
+    credential: int, request_for: Any
+) -> None:
+    """Today's servers send no code; the message is the only precise signal left."""
+    message = "This idempotency key was already used with a different request body."
+    origin = _Origin(httpx.Response(409, json={"msg": message}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(IdempotencyConflict):
+            await client.create_run(request_for(), idempotency_key="k")
+
+
+@pytest.mark.asyncio
+async def test_a_codeless_conflict_that_names_nothing_is_generic(
+    credential: int, request_for: Any
+) -> None:
+    origin = _Origin(httpx.Response(409, json={"msg": "conflict"}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(Conflict):
+            await client.create_run(request_for(), idempotency_key="k")
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_code_is_dropped_rather_than_carried(
+    credential: int, request_for: Any
+) -> None:
+    """A body cannot put a string of its own choosing on an error."""
+    origin = _Origin(httpx.Response(403, json={"code": SECRET_BODY}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(PreviewNotEnabled) as caught:
+            await client.create_run(request_for(), idempotency_key="k")
+    assert caught.value.code is None
+    assert SECRET_BODY not in _residual_text(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_exposed_as_seconds(credential: int, request_for: Any) -> None:
+    origin = _Origin(httpx.Response(429, headers={"Retry-After": "17"}, json={}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError) as caught:
+            await client.create_run(request_for(), idempotency_key="k")
+    assert caught.value.status == 429
+    assert caught.value.retry_after == 17.0
+
+
+@pytest.mark.asyncio
+async def test_retry_after_accepts_an_http_date(credential: int, request_for: Any) -> None:
+    moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=90)
+    origin = _Origin(
+        httpx.Response(
+            429, headers={"Retry-After": email.utils.format_datetime(moment, usegmt=True)}, json={}
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError) as caught:
+            await client.create_run(request_for(), idempotency_key="k")
+    assert caught.value.retry_after is not None
+    assert 60 <= caught.value.retry_after <= 120
+
+
+# ---------------------------------------------------------------------------
+# Delete, and the status filter on the listing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_sends_delete_to_the_run_path(credential: int) -> None:
+    origin = _Origin(httpx.Response(204))
+    client, http = _client(origin, credential)
+    async with http:
+        assert await client.delete_run("run_1") == {}
+    assert origin.requests[0].method == "DELETE"
+    assert origin.requests[0].url.path == RUNS_PATH + "/run_1"
+
+
+@pytest.mark.asyncio
+async def test_a_delete_answering_for_another_run_is_refused(credential: int) -> None:
+    origin = _Origin(httpx.Response(200, json=_read(_run(run_id_value="run_2"))))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RunIdentityMismatch):
+            await client.delete_run("run_1")
+
+
+@pytest.mark.asyncio
+async def test_a_delete_id_cannot_escape_its_path_segment(credential: int) -> None:
+    """A slash in the id is QUOTED, so the request stays under the runs path."""
+    origin = _Origin(httpx.Response(204))
+    client, http = _client(origin, credential)
+    async with http:
+        await client.delete_run("../runs")
+    # ``raw_path`` keeps the quoting: ``path`` decodes it and would hide it.
+    assert origin.requests[0].url.raw_path.decode() == RUNS_PATH + "/..%2Fruns"
+
+
+@pytest.mark.asyncio
+async def test_a_blank_delete_id_is_refused_before_it_is_sent(credential: int) -> None:
+    origin = _Origin()
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(ValueError):
+            await client.delete_run("  ")
+    assert origin.requests == []
+
+
+@pytest.mark.asyncio
+async def test_list_runs_sends_the_status_filter(credential: int) -> None:
+    page = {"runs": [], "limit": 5, "offset": 0}
+    origin = _Origin(httpx.Response(200, json={"msg": "Runs", "result": page}))
+    client, http = _client(origin, credential)
+    async with http:
+        await client.list_runs(status="running", limit=5)
+    assert origin.requests[0].url.params["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_status_filter_is_refused_before_it_is_sent(credential: int) -> None:
+    origin = _Origin()
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(ValueError):
+            await client.list_runs(status="  ")
+    assert origin.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "header",
+    [
+        # A legal 400-digit delta: converted straight to float it raised
+        # OverflowError at parse time, i.e. a header alone escaped as a
+        # non-RemoteComputeError from inside _request.
+        "9" * 400,
+        # The other unbounded branch: an HTTP-date ~8000 years out.
+        "Fri, 31 Dec 9999 23:59:59 GMT",
+    ],
+)
+async def test_a_hostile_retry_after_is_capped_on_the_error(
+    credential: int, request_for: Any, header: str
+) -> None:
+    origin = _Origin(httpx.Response(429, headers={"Retry-After": header}, json={"msg": "busy"}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(CapacityUnavailable) as caught:
+            await client.create_run(request_for(), idempotency_key="k")
+    assert caught.value.retry_after == RETRY_AFTER_MAX_S
