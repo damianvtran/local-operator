@@ -282,6 +282,48 @@ DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES = 30
 #: a privacy switch must not reopen on a value it cannot parse.
 DEFAULT_TEAM_BRIDGE_SHARE_TYPING = True
 
+#: ``team_bridge.ambient_wake_dwell_seconds`` — how long a NON-urgent woken channel
+#: message (today: a reply in a thread this agent follows) waits for neighbours before
+#: its card goes out, so a burst becomes ONE turn (operator, 2026-11-21: "see if there
+#: are multiple messages arriving at a time or in close proximity, if we can batch
+#: those"; chosen window 15-20 s). Measured baseline for that choice: 50.4% of channel
+#: messages land <=30 s after the previous one. A DM, a mention, a directly addressed
+#: or owner-sent message never waits (and pulls a waiting group forward). ``0`` is the
+#: pre-dwell behaviour. Whole seconds 0..60; anything else reads as the default.
+#:
+#: No ``/settings`` row for the same i18n-ledger reason as ``hold_alert_after_minutes``:
+#: a hand edit of the config file works, and the connector reads it per message.
+DEFAULT_AMBIENT_WAKE_DWELL_SECONDS = 15
+AMBIENT_WAKE_DWELL_MAX_SECONDS = 60
+
+#: ``team_bridge.ambient_triage`` — the deterministic channel-wake triage
+#: (``connector/conversation.py:classify_wake``). ``on`` defers unaddressed channel
+#: traffic instead of waking a turn per message (measured: 80.4% of channel messages
+#: are unaddressed, ~420 ambient turns/day for the CoS); ``shadow`` computes and LOGS
+#: the class it would choose but behaves exactly as ``off``; ``off`` is the pre-triage
+#: behaviour (every admitted message wakes). Anything else reads as ``on``. Config-file
+#: only, like the dwell above. Quoting is NOT required: YAML 1.1 reads a bare ``off`` /
+#: ``on`` as a boolean, so ``false`` means ``off`` and ``true`` means ``on`` (review r1
+#: R4: the rollback switch must not fail toward ``on``).
+AMBIENT_TRIAGE_MODES = ("on", "shadow", "off")
+DEFAULT_AMBIENT_TRIAGE = "on"
+
+#: ``team_bridge.urgent_failover_seconds`` — for an URGENT ambient message (a human's
+#: channel post, ``@everyone``, a question) one agent wakes at once and the others
+#: stand by: the agent ranked ``k`` for that message wakes ``k`` x this many seconds
+#: later, and only if nobody else has replied in the thread by then; every rank >= 3
+#: shares the last delay (3 x this), so a non-receiving member holding a slot costs
+#: latency, never the message (the operator: a lost urgent message is worse than a
+#: duplicate answer). MEASURED BEFORE CAPPED (2026-11-21, this machine, read-only): the first
+#: channel post after each card in the same conversation (``reply_guard.posts`` vs
+#: ``body_reservations.card_posted_at``, ~24 h, cutoff 1800 s) had n=181, p50 25.3 s,
+#: p90 312.0 s, max 1753.6 s (censored by the cutoff); 89.5% answered within 300 s.
+#: The default sits just above that p90 so a failover agent rarely wakes while the
+#: first one is still mid-turn. Whole seconds 0..600 (0 = every ranked agent wakes
+#: together); anything else reads as the default.
+DEFAULT_URGENT_FAILOVER_SECONDS = 330
+URGENT_FAILOVER_MAX_SECONDS = 600
+
 #: ``team_bridge.screening.*`` — the rolling-hour ceilings on SCREENING SPEND,
 #: now CONFIGURABLE. They were fixed class constants on ``Store`` (40/30/35/20,
 #: "the frozen §8 budget"); these are the 10x replacements and the shipped
@@ -329,6 +371,9 @@ ONBOARDING_PATH = ("team_bridge", "onboarding")
 DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
+AMBIENT_WAKE_DWELL_PATH = ("team_bridge", "ambient_wake_dwell_seconds")
+AMBIENT_TRIAGE_PATH = ("team_bridge", "ambient_triage")
+URGENT_FAILOVER_PATH = ("team_bridge", "urgent_failover_seconds")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
 REVIEW_HELD_PATH = ("team_bridge", "review_held")
 SCREENING_HOLD_REVIEW_AFTER_PATH = ("team_bridge", "screening_hold_review_after_minutes")
@@ -572,6 +617,33 @@ def _hold_alert_after_minutes(value: Any) -> int:
     return value
 
 
+def _bounded_whole_seconds(value: Any, *, default: int, maximum: int) -> int:
+    """Whole seconds in ``0..maximum``, else ``default`` (same rule as the alert).
+
+    A bool is an ``int`` to Python, so ``true`` is refused by name; a float, a
+    string or an out-of-range number reads as the default rather than being
+    coerced into a timing nobody wrote.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value if 0 <= value <= maximum else default
+
+
+def _ambient_triage(value: Any) -> str:
+    """One of :data:`AMBIENT_TRIAGE_MODES`; anything else is the default (``on``).
+
+    A YAML boolean is the unquoted spelling of a mode (``off`` → ``False``), so it
+    maps back to that mode rather than to the default.
+    """
+
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, str) and value.strip().lower() in AMBIENT_TRIAGE_MODES:
+        return value.strip().lower()
+    return DEFAULT_AMBIENT_TRIAGE
+
+
 def _screening_hold_review_after_minutes(value: Any) -> int:
     """Whole minutes in 0..10080, else the default (same rule as the alert)."""
 
@@ -805,6 +877,10 @@ class TeamBridgeSettings:
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
     #: B4b owner release (``hold_release.py``); ON unless a real ``false``.
     hold_release: bool = DEFAULT_HOLD_RELEASE
+    #: Channel-wake triage and batching (see the ``DEFAULT_*`` docs above).
+    ambient_wake_dwell_seconds: int = DEFAULT_AMBIENT_WAKE_DWELL_SECONDS
+    ambient_triage: str = DEFAULT_AMBIENT_TRIAGE
+    urgent_failover_seconds: int = DEFAULT_URGENT_FAILOVER_SECONDS
     #: The stored "Screening model" preference as a ``(provider, model_id)``
     #: pair, or ``None`` for "no preference" (the shipped default). Shape-parsed
     #: by :func:`_screening_model`; the evaluated-table check happens in
@@ -876,6 +952,17 @@ class TeamBridgeSettings:
                 get(HOLD_ALERT_AFTER_PATH, DEFAULT_HOLD_ALERT_AFTER_MINUTES)
             ),
             hold_release=_hold_release(get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE)),
+            ambient_wake_dwell_seconds=_bounded_whole_seconds(
+                get(AMBIENT_WAKE_DWELL_PATH, DEFAULT_AMBIENT_WAKE_DWELL_SECONDS),
+                default=DEFAULT_AMBIENT_WAKE_DWELL_SECONDS,
+                maximum=AMBIENT_WAKE_DWELL_MAX_SECONDS,
+            ),
+            ambient_triage=_ambient_triage(get(AMBIENT_TRIAGE_PATH, DEFAULT_AMBIENT_TRIAGE)),
+            urgent_failover_seconds=_bounded_whole_seconds(
+                get(URGENT_FAILOVER_PATH, DEFAULT_URGENT_FAILOVER_SECONDS),
+                default=DEFAULT_URGENT_FAILOVER_SECONDS,
+                maximum=URGENT_FAILOVER_MAX_SECONDS,
+            ),
             screening_model=_screening_model(
                 get(SCREENING_MODEL_PATH, DEFAULT_TEAM_BRIDGE_SCREENING_MODEL)
             ),

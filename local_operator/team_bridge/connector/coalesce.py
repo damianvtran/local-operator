@@ -103,6 +103,9 @@ class _Pending:
     metadata: Any  # ConversationCardMetadata
     ref_key: str
     mention: bool
+    #: An urgent-failover standby (``conversation.classify_wake``): its row is still
+    #: ``deferred`` and the flush must ask ``promote`` before it can wake anyone.
+    staggered: bool = False
 
 
 @dataclass
@@ -215,8 +218,22 @@ class WakeCoalescer:
         config_dir: Path,
         now: float | None = None,
         min_interval_s: float | None = None,
+        dwell_s: float | None = None,
+        staggered_delay_s: float | None = None,
     ) -> None:
         """Buffer one admitted message's card. Idempotent per message id.
+
+        ``dwell_s`` (channel-wake triage, operator 2026-11-21: batch messages that
+        arrive close together) turns the rate into a short DELAY for a non-urgent
+        wake: a new group is due ``dwell_s`` from now (still never before the rate
+        window), so neighbours arriving meanwhile share its one card. ``0`` marks an
+        IMMEDIATE wake (DM, mention, direct, owner): it pulls a dwelling group's due
+        time back to the rate floor, so a mention is never held behind ambient
+        chatter. ``None`` is the pre-dwell behaviour.
+
+        ``staggered_delay_s`` buffers an urgent-failover standby in its OWN group
+        (so an unrelated wake in the thread cannot flush it early), due after its
+        slot's delay; the flush's ``promote`` hook decides whether it wakes at all.
 
         ``min_interval_s`` raises the gap after this destination's last wake
         above the ordinary window: the per-destination gate for ROUTED groups
@@ -232,19 +249,34 @@ class WakeCoalescer:
         """
 
         now = time.time() if now is None else now
-        key = _group_key(config_dir, owner, metadata, session_id)
+        staggered = staggered_delay_s is not None
+        key = _group_key(config_dir, owner, metadata, session_id, staggered=staggered)
         group = self._groups.get(key)
+        last = self._last_wake.get(key)
+        # Rate, not delay: a quiet conversation is due NOW (flushed at the end of
+        # this iteration); a recently woken one waits out the window.
+        gap = self.window_s if min_interval_s is None else max(self.window_s, min_interval_s)
+        floor = now if last is None else max(now, last + gap)
         if group is None:
-            last = self._last_wake.get(key)
-            # Rate, not delay: a quiet conversation is due NOW (flushed at the
-            # end of this iteration); a recently woken one waits out the window.
-            gap = self.window_s if min_interval_s is None else max(self.window_s, min_interval_s)
-            due = now if last is None else max(now, last + gap)
+            due = floor
+            if staggered:
+                due = max(floor, now + max(0.0, float(staggered_delay_s or 0.0)))
+            elif dwell_s:
+                due = max(floor, now + max(0.0, float(dwell_s)))
             group = _Group(owner=owner, config_dir=config_dir, session_id=session_id, due_at=due)
             self._groups[key] = group
+        elif dwell_s is not None and dwell_s <= 0 and not staggered:
+            group.due_at = min(group.due_at, floor)
         if any(item.metadata.message_id == metadata.message_id for item in group.items):
             return
-        group.items.append(_Pending(metadata=metadata, ref_key=ref_key, mention=metadata.mention))
+        group.items.append(
+            _Pending(
+                metadata=metadata,
+                ref_key=ref_key,
+                mention=metadata.mention,
+                staggered=staggered,
+            )
+        )
         group.items.sort(key=lambda item: item.metadata.conversation_seq)
         if len(group.items) >= MAX_COALESCED_MESSAGES:
             group.due_at = min(group.due_at, now)
@@ -272,6 +304,7 @@ class WakeCoalescer:
         now: float | None = None,
         owner_filter: Any = None,
         config_dir: Path | None = None,
+        promote: Callable[..., Awaitable[bool]] | None = None,
     ) -> list[dict[str, Any]]:
         """Deliver every due group: ONE ``deliver`` call per group.
 
@@ -299,6 +332,21 @@ class WakeCoalescer:
             # cancelled by a stop leaves it buffered while a replay or a body
             # turn settles the reservation. An item whose card is already
             # posted, or whose reservation is settled, must not wake anyone.
+            #
+            # An urgent-failover standby is still ``deferred`` here (settled), so
+            # it is offered to ``promote`` FIRST: unanswered → its row becomes
+            # ``pending`` and the owed check below keeps it; answered (or no hook)
+            # → it stays deferred and the owed check drops it with no card.
+            for item in group.items:
+                if not item.staggered:
+                    continue
+                item.staggered = False
+                if promote is None:
+                    continue
+                try:
+                    await promote(group.owner, item.metadata, config_dir=group.config_dir)
+                except Exception:  # noqa: BLE001 — closed code; the row stays deferred
+                    logger.warning("bridge: staggered wake check failed code=promote_failed")
             group.items = _still_owed(group)
             if not group.items:
                 # NOT a silent drop. Every item was already POSTED or SETTLED
@@ -413,13 +461,21 @@ class _Scope:
             _ACTIVE.reset(self._token)
 
 
-def _group_key(config_dir: Path, owner: Any, metadata: Any, session_id: str) -> GroupKey:
+def _group_key(
+    config_dir: Path, owner: Any, metadata: Any, session_id: str, *, staggered: bool = False
+) -> GroupKey:
     # session_id last: ``flush_due`` reads ``key[2]`` as the conversation id.
+    # A staggered standby keys apart from the thread's ordinary group (a suffix
+    # no thread id can carry) so it keeps its own due time and rate memory — and
+    # PER MESSAGE (review r1 m2): ``due`` is set only when a group is created, so
+    # a second urgent message in the same thread with another slot would inherit
+    # the first one's due time and be checked early (a duplicate) or late.
+    thread = metadata.thread_root_id or ""
     return (
         str(config_dir),
         str(getattr(owner, "endpoint_id", "") or ""),
         metadata.conversation_id,
-        metadata.thread_root_id or "",
+        f"{thread}\x1fstaggered\x1f{metadata.message_id}" if staggered else thread,
         session_id,
     )
 
