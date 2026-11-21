@@ -46,9 +46,14 @@ def _status(card: ToolCard, cap: int = 0) -> list[str]:
     return [run for run, _style in card._status_runs(cap)]
 
 
-def _surfaces() -> dict[str, object]:
-    """Every keyed status surface, read from what the card actually paints."""
-    out: dict[str, object] = {}
+def _surfaces() -> dict[str, str | list[str]]:
+    """Every keyed status surface, read from what the card actually paints.
+
+    Status-slot surfaces are the painted runs (``list[str]``); whole-row
+    surfaces are the row's plain text (``str``). Both support the ``in``
+    membership the assertions use, which ``object`` would not type-check.
+    """
+    out: dict[str, str | list[str]] = {}
 
     running = ToolCard("r", "wait", {"job_id": "7a73c97ffc54"})
     running.restore(state="running")  # no start known -> the word, not a clock

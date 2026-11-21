@@ -96,7 +96,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -6162,7 +6162,7 @@ class ToolCard(ExpandableActionBlock):
 #: ``from tool_card import EXPAND_HINT`` gets the active language rather than
 #: the English captured at import. A module-level import still freezes the value
 #: of the moment it ran — prefer the functions in new code.
-_LEGACY_COPY: dict[str, Callable[[], object]] = {
+_LEGACY_COPY: dict[str, Callable[[], str | dict[str, str]]] = {
     "EXPAND_HINT": expand_hint,
     "COLLAPSE_HINT": collapse_hint,
     "IMAGE_INTERRUPT_HINT": image_interrupt_hint,
@@ -6180,7 +6180,30 @@ _LEGACY_COPY: dict[str, Callable[[], object]] = {
 }
 
 
-def __getattr__(name: str) -> object:
+# Type checkers resolve a module's missing attribute through `__getattr__`'s
+# return type, so a single union (str for the labels, dict for the two outcome
+# maps) would make every `EXPAND_HINT` read `str | dict` and break callers that
+# measure it with `cell_len`. Declaring each legacy name with its exact type
+# here gives importers the precise type; the bare annotations bind nothing at
+# runtime (and sit under TYPE_CHECKING besides), so PEP 562 still resolves the
+# live, active-language value on every access. Keep this list in step with
+# `_LEGACY_COPY`.
+if TYPE_CHECKING:
+    EXPAND_HINT: str
+    COLLAPSE_HINT: str
+    IMAGE_INTERRUPT_HINT: str
+    LIVE_HEADER_RUNNING: str
+    LIVE_HEADER_PENDING: str
+    RUNNING_LABEL: str
+    QUEUED_LABEL: str
+    _PARTIAL_LABEL: str
+    _RESET_LABEL: str
+    SEND_NOT_DELIVERED_WORD: str
+    DELIVERY_OUTCOME_WORDS: dict[str, str]
+    SWITCH_OUTCOME_WORDS: dict[str, str]
+
+
+def __getattr__(name: str) -> str | dict[str, str]:
     try:
         return _LEGACY_COPY[name]()
     except KeyError:
