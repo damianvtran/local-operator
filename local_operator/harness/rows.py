@@ -2213,6 +2213,7 @@ def _bridge_target(
     if op in (
         "channel_post",
         "channel_create",
+        "channel_rename",
         "channel_history",
         "channel_thread",
         "react",
@@ -2347,6 +2348,7 @@ BRIDGE_KNOWN_OPS = frozenset(
         "dm",
         "shared_conversations",
         "shared_history",
+        "channel_rename",
     }
 )
 

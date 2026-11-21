@@ -788,9 +788,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "desktop's conversation, so both people see it and the "
                     "recipient's connector delivers it to their chief of staff. "
                     "The reply arrives there: read it with "
-                    "`channel_history(channel_id=<its conversation_id>)`. Asked "
-                    "to pass something to someone's agent, use `dm` - never "
-                    "'forward this thread'."
+                    "`channel_history(channel_id=<its conversation_id>)`."
+                    # "use dm, never 'forward this thread'" is NOT restated here:
+                    # the wire description above (Purpose) already carries it
+                    # every turn, and dropping the copy paid for channel_rename
+                    # under the 8 KiB soft cap.
                 ),
             ),
             ToolDocOp(
@@ -823,6 +825,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "agents are one call. A taken name answers `channel_exists` + "
                     "its id."
                 ),
+            ),
+            ToolDocOp(
+                op="channel_rename",
+                # Kept to one line: this doc sits at its 8 KiB soft cap. The
+                # full rule (who may ask, the audit file) is guide://team-bridge.
+                blurb="Rename a room AS your owner; operator-typed asks only.",
             ),
             ToolDocOp(
                 op="channel_post",
