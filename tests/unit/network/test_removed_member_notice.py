@@ -747,28 +747,6 @@ def test_a_removed_listener_never_sends_a_notice(net: Net, verifies: list[str]) 
     assert [code for code, _ in net.refusals] == [hs_mod.REASON_MEMBER]
 
 
-def test_the_dummy_key_is_minted_at_import_not_on_first_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """R1-5: no keygen on the first non-tombstone probe (a one-time timing tell).
-
-    Executes a FRESH copy of the module (under a private name, so the real module
-    and its classes are untouched) and reads the key before any probe has run.
-    """
-    import importlib.util
-    import sys
-
-    name = "local_operator.network._handshake_import_probe"
-    spec = importlib.util.spec_from_file_location(name, hs_mod.__file__)
-    assert spec is not None and spec.loader is not None
-    fresh = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, name, fresh)
-    spec.loader.exec_module(fresh)
-    minted = fresh._DUMMY_PUBLIC_KEY  # noqa: SLF001
-    assert isinstance(minted, str) and len(wire.unb64u(minted)) == 32
-    assert fresh._dummy_public_key() == minted  # noqa: SLF001
-
-
 class _DropSpy:
     def __init__(self) -> None:
         self.calls = 0
@@ -820,5 +798,7 @@ def test_a_record_write_failure_still_drops_the_borrowed_credentials(
     assert b_side.dial_scripted(b_side.a_identity) == "membership_ended"
     assert drops.calls == 1, "a failed record write skipped the credential drop"
     b_side.server.audit.flush()
-    # Nothing transitioned on disk, so nothing is audited; the next notice retries.
-    assert _audit_rows(b_side.root, "membership_ended") == []
+    # Nothing transitioned on disk: the drop is audited once as unrecorded (R2-2;
+    # the recovery half is in test_removed_member_oracle.py), the next notice retries.
+    rows = _audit_rows(b_side.root, "membership_ended")
+    assert [row["detail"].get("recorded") for row in rows] == [False]

@@ -4284,10 +4284,10 @@ def _audit_cause(code: str) -> str:
     """The closed ``audit.CAUSES`` word for a refusal that reached the borrower.
 
     A busy owner is ``busy`` (its remedy is time), an absent one ``owner_offline``;
-    any other code returns ``""`` rather than a guess. ``AuditLog.record`` writes
-    any cause outside ``audit.CAUSES`` (``""`` included) as ``"internal"``, so
-    those rows READ ``cause: internal``: the row's ``code`` detail, not the cause,
-    is the authoritative reason for them.
+    any other code returns ``""`` rather than a guess. ``""`` is itself a member of
+    ``audit.CAUSES``, so ``AuditLog.record`` writes it unchanged (only a word
+    outside ``CAUSES`` becomes ``"internal"``): those rows READ ``cause: ""``, and
+    the row's ``code`` detail, not the cause, is the authoritative reason for them.
     """
     if code in _BUSY_REFUSALS:
         return "busy"
