@@ -390,15 +390,21 @@ def decide(
         word=word,
         decided_at=now,
     )
-    # THE LOCAL TERMINAL (follow-on to PR #4358). A receipt-bound Discard is the
-    # renderer saying "I could not load this body" (the hub did not confirm the
-    # record); past the EXISTING Deliver window nothing else can ever settle it,
+    # THE LOCAL TERMINAL (follow-on to PR #4358). A receipt-bound Discard means
+    # the renderer sent a hold receipt instead of a body hash: no body was
+    # presented, so no hub confirmation of the record was obtained. That is the
+    # ONLY signal. This server does not verify that the hub failed to serve the
+    # body; any renderer holding the desktop bearer may choose the receipt
+    # binding (#4371 security review S-1). That is safe because it is the
+    # owner's own signed Discard, past the window, still honoured at the hub if
+    # the envelope is ever served again. Past the EXISTING Deliver window
+    # nothing else can ever settle such a row,
     # because the connector consumes a Discard only from an envelope the hub
     # serves. So that one case settles HERE, locally and atomically with an
     # audit row, instead of sitting ``pending`` forever. Deliberately narrow:
     # no new absence threshold (the decision time plus ``DELIVER_WINDOW_S`` is
-    # the whole test), never a body-bound Discard (a body on screen means the
-    # hub confirmed the record, so the ordinary path applies), never inferred
+    # the whole test), never a body-bound Discard (a presented body hash takes
+    # the ordinary connector path), never inferred
     # from a missing record or a 404, and no hub call, delivery or sender
     # notice. Every owner/generation/decision/conversation check above runs
     # first, and the row is still signed like any Discard.
@@ -436,6 +442,10 @@ def decide(
                 owner,
                 release_row,
                 outcome=OWNER_RELEASE_LOCAL_TERMINAL,
+                # A persisted audit word (``owner_release_local_terminals.reason``,
+                # shipped in #4371), so it is kept as written. Read it as "no hub
+                # confirmation was obtained", never "the hub was verified to have
+                # failed" (S-1 above).
                 reason="hub_unconfirmed_after_deliver_window",
                 deliver_until=deliver_until,
                 now=now,
