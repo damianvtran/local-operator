@@ -85,15 +85,28 @@ def _secrets(rig: Any) -> list[str]:
 def test_an_unreachable_member_rm_names_each_lend_left_usable(
     held: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """RED on main: the receipt carried only copy counts while B kept serving the MCP hold."""
+    """The receipt names each lend a member unreachable at removal can still use.
+
+    What the receipt describes is the residual WHILE B stays unreachable: nothing
+    the owner does reaches it, so its MCP hold stays servable until the named end.
+    Once B dials back in, #4394's verified removal notice ends that early — so the
+    reconnected B below is refused, which is the receipt's "until" being an upper
+    bound, never a promise that B keeps serving (the two PRs landed separately,
+    and this cell first asserted the pre-#4394 "B never learns" behaviour).
+    """
     net = held.mesh
     receipt, server = _remove_while_offline(held, monkeypatch)
     try:
-        # THE RESIDUAL THE RECEIPT MUST NAME (unchanged by this PR, by design): B
-        # never learns, so it serves the MCP bearer from its hold past the window.
         _past_window(held.mcp)
         served = held.client.request_grant_sync(MCP_KEY, provider="mcp-oauth")
-        assert isinstance(served, Grant) and served.held_offline, served
+        # B came back and dialled A: the authenticated notice dropped its borrowed
+        # authority, so nothing is served from the hold any more.
+        assert net_fixtures.wait_for(
+            lambda: not isinstance(
+                held.client.request_grant_sync(MCP_KEY, provider="mcp-oauth"), Grant
+            ),
+            timeout_s=10.0,
+        ), served
     finally:
         server.stop()
     assert "lends_open" in receipt, f"the removal receipt is silent about lends: {receipt}"
