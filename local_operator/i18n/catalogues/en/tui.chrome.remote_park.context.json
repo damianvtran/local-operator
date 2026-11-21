@@ -77,5 +77,10 @@
     "role": "Floor rung of the ask card's hint row",
     "tone": "terse lowercase fragment",
     "note": "EN-only context sidecar. The locality fact alone. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.ask_agent_started": {
+    "role": "Body line of an inbox/notification row for a question forwarded from a session on ANOTHER device that an AGENT (not the operator) started",
+    "tone": "plain state sentence, no full stop",
+    "note": "EN-only context sidecar. Replaces the 'runs on {device}' body only for asks from agent-started sessions, so the operator knows who started the session asking. {agent_device} is the human name of the device whose agent started the session; {device} is the human name of the device the session runs on (both proper names: keep verbatim, never translate). 'agent' is the AI agent (glossary term), not a person; no agent or session name is available, so the sentence names the agent only by its device."
   }
 }

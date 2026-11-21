@@ -535,6 +535,20 @@ def remote_session_location(device: str) -> str:
     return _t_park(_rp.ask_hint_floor(device=device))
 
 
+def remote_agent_ask_location(agent_device: str, device: str) -> str:
+    """ "Asked by a session that an agent on <agent_device> started on <device>".
+
+    The body of a FORWARDED ASK from a session an AGENT started on ``device``
+    (``remote_attention.signed_card_target``'s leg). "runs on <device>" alone
+    left the operator unable to tell an agent's worker from a session they
+    opened themselves. The agent is named by its DEVICE only: a peer create
+    carries no starter session id or agent name (``relay`` stamps
+    ``source_session_id: ""``), and the device label is resolved by the
+    receiving device from its own catalogue, never from peer-supplied text.
+    """
+    return _t_park(_rp.ask_agent_started(agent_device=agent_device, device=device))
+
+
 def background_digest_title(total: int) -> str:
     """``total`` sessions finished, as the DIGEST banner's title.
 

@@ -817,6 +817,22 @@ def _location(device_label: str) -> str:
     return remote_session_location(device_label)
 
 
+def _ask_body(device_label: str, key: str, started_by_agent_on: str) -> str:
+    """A forwarded row's body: who started an agent child's ASK, else :func:`_location`.
+
+    Only a forwarded ask (``remote-ask:``) from a row the receiving device
+    labelled as agent-started (``peer_rows._agent_starter_label``) gets the
+    "Asked by a session that an agent on <X> started on <device>" line; every
+    other row keeps the plain "runs on <device>" body byte for byte.
+    Display-only: nothing here decides where a row goes.
+    """
+    if started_by_agent_on and key.startswith(ASK_NOTICE_PREFIX):
+        from local_operator.tui.notify import remote_agent_ask_location
+
+        return remote_agent_ask_location(started_by_agent_on, device_label)
+    return _location(device_label)
+
+
 def settle_done_item(root: Path, *, session_id: str, device_id: str, token: str) -> bool:
     """Mark the done row READ when its completion was acknowledged on the owner.
 
@@ -1010,8 +1026,12 @@ def raise_notice_item(
     name: str = "",
     deliver: bool = True,
     at_ms: int = 0,
+    started_by_agent_on: str = "",
 ) -> str | None:
     """Mirror one owner ``notify`` item onto the origin's inbox.
+
+    ``started_by_agent_on`` (display-only, :func:`_ask_body`): the name of the
+    device whose agent started the session, which labels a forwarded ask.
 
     The title is the agent's own (already redacted by the owner's ``notify``
     before it was stored there); the body says where it ran. ``priority`` passes
@@ -1029,6 +1049,7 @@ def raise_notice_item(
         if priority not in PRIORITIES:
             priority = "normal"
         label = device_name or device_id
+        body = _ask_body(label, key, started_by_agent_on)
         store = NotificationStore(root)
         row_key = notice_key(device_id, session_id, key)
         existing = store.get_by_key(session_id, row_key)
@@ -1044,7 +1065,7 @@ def raise_notice_item(
         result = store.notify(
             session_id=session_id,
             title=title,
-            body_md=_location(label),
+            body_md=body,
             priority=priority,
             key=row_key,
             anchor_id=f"rev:{int(revision)}",
@@ -1060,7 +1081,7 @@ def raise_notice_item(
         # not be harder to set aside than a local one. An escalation revives it
         # through the store itself.
         if deliver and priority == "high":
-            _deliver_async(root, result, session_id=session_id, title=title, body=_location(label))
+            _deliver_async(root, result, session_id=session_id, title=title, body=body)
         return str(result.action)
     except Exception:  # noqa: BLE001
         logger.warning("remote attention: could not raise notice for %s", session_id, exc_info=True)
@@ -1208,6 +1229,7 @@ class RemoteAttentionWatcher:
                     device_name=notice.device_name,
                     name=notice.name,
                     at_ms=notice.at_ms,
+                    started_by_agent_on=notice.started_by_agent_on,
                 )
         except Exception:  # noqa: BLE001 — a poll that cannot forward is still a poll
             logger.debug("remote attention watch failed", exc_info=True)

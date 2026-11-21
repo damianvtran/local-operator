@@ -13,5 +13,6 @@
   "tui.chrome.remote_park.approval_hint_there": "{device} پر چل رہا ہے — وہاں اجازت دیں؛ یہاں سے انکار کر سکتے ہیں",
   "tui.chrome.remote_park.approval_hint_floor": "{device} پر چل رہا ہے",
   "tui.chrome.remote_park.ask_hint_answer": "{device} پر چل رہا ہے — جواب یہیں سے دیں",
-  "tui.chrome.remote_park.ask_hint_floor": "{device} پر چل رہا ہے"
+  "tui.chrome.remote_park.ask_hint_floor": "{device} پر چل رہا ہے",
+  "tui.chrome.remote_park.ask_agent_started": "{agent_device} پر ایک ایجنٹ کے ذریعے {device} پر شروع کیے گئے سیشن کا سوال"
 }

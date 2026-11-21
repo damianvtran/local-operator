@@ -13,5 +13,6 @@
   "tui.chrome.remote_park.approval_hint_there": "se ejecuta en {device} — permite allí; aquí puedes denegar",
   "tui.chrome.remote_park.approval_hint_floor": "se ejecuta en {device}",
   "tui.chrome.remote_park.ask_hint_answer": "se ejecuta en {device} — responde desde aquí",
-  "tui.chrome.remote_park.ask_hint_floor": "se ejecuta en {device}"
+  "tui.chrome.remote_park.ask_hint_floor": "se ejecuta en {device}",
+  "tui.chrome.remote_park.ask_agent_started": "Pregunta de una sesión que un agente en {agent_device} inició en {device}"
 }

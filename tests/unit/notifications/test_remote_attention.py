@@ -1997,3 +1997,113 @@ def test_an_unreadable_ask_log_on_an_agent_child_says_unknown(tmp_path: Path) ->
     row = _wire(node, origin, HEAD, operator_viewer=True)
     assert row.get("asks_unknown") is True and "notices" not in row
     assert "asks_unknown" not in _wire(node, origin, HEAD, operator_viewer=False)
+
+
+# ---------------------------------------------------------------------------
+# Who started an agent child: the forwarded ask's label (PR #4372 "Label")
+# ---------------------------------------------------------------------------
+
+MAC = "d_mac"
+ASK_KEY = f"{ra.ASK_NOTICE_PREFIX}a-e9c5"
+AGENT_BODY = "Asked by a session that an agent on damian-mac started on lop-remote-node-2"
+
+
+def _labelled_rows(origins: dict[str, Any]) -> dict[str, SessionRow]:
+    """One listing whose rows carry ``origins`` (session id -> stamp origin)."""
+
+    class _Peer:
+        def __init__(self, device_id: str, name: str) -> None:
+            self.device_id, self.name = device_id, name
+            self.network_id, self.reachable, self.reason = "n_test", True, ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer(NODE, "lop-remote-node-2"), _Peer(MAC, "damian-mac")]
+
+        def rows(self) -> list[Any]:
+            return [
+                PeerRow.from_json(
+                    {"session_id": sid, "state": "live", "origin": origin}, device_id=NODE
+                )
+                for sid, origin in origins.items()
+            ]
+
+    rows = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+    return {row.id: row for row in rows}
+
+
+def test_label_names_the_device_whose_agent_started_the_row() -> None:
+    by_id = _labelled_rows(
+        {
+            "a" * 12: {"kind": ra.AGENT_ORIGIN_KIND, "source_device": MAC},
+            "b" * 12: {"kind": "user", "source_device": MAC, "started_by": "operator"},
+            "c" * 12: {"kind": ra.AGENT_ORIGIN_KIND, "source_device": "d_unknown"},
+            "d" * 12: {"kind": ra.AGENT_ORIGIN_KIND},
+            "e" * 12: {},
+        }
+    )
+    assert by_id["a" * 12].remote_started_by_agent_on == "damian-mac"
+    # Not an agent child: no label, whatever the source.
+    assert by_id["b" * 12].remote_started_by_agent_on == ""
+    # A source this device cannot name, or none at all: no label (never an id).
+    assert by_id["c" * 12].remote_started_by_agent_on == ""
+    assert by_id["d" * 12].remote_started_by_agent_on == ""
+    assert by_id["e" * 12].remote_started_by_agent_on == ""
+
+
+def test_label_tolerates_a_malformed_origin() -> None:
+    assert peer_rows._agent_starter_label("agent", {MAC: "damian-mac"}) == ""
+    assert peer_rows._agent_starter_label(None, {MAC: "damian-mac"}) == ""
+    assert peer_rows._agent_starter_label({"kind": ["agent"], "source_device": MAC}, {}) == ""
+
+
+def test_label_names_this_device_from_its_own_identity(tmp_path: Path) -> None:
+    from local_operator.network import identity
+
+    mine = identity.mint(tmp_path, name="damian-mac")
+    names = peer_rows._device_names(tmp_path, {})
+    assert names == {mine.device_id: "damian-mac"}
+    # No identity at all: the peers' names only, no crash.
+    assert peer_rows._device_names(tmp_path / "empty", {}) == {}
+
+
+def _ask_row(started_by: str, key: str = ASK_KEY) -> SessionRow:
+    return _row(notice=(key, 1, "normal", "Which branch should I use?"))._replace(
+        remote_started_by_agent_on=started_by
+    )
+
+
+def test_an_agent_childs_forwarded_ask_says_who_started_it(root: Path) -> None:
+    ra.RemoteAttentionWatcher(root).observe([_ask_row("damian-mac")])
+    [item] = _items(root)
+    assert item["title"] == "Which branch should I use?"
+    assert item["body_md"] == AGENT_BODY
+
+
+def test_an_unlabelled_forwarded_ask_keeps_the_plain_body(root: Path) -> None:
+    ra.RemoteAttentionWatcher(root).observe([_ask_row("")])
+    [item] = _items(root)
+    assert item["body_md"] == "runs on lop-remote-node-2"
+
+
+def test_a_labelled_rows_notify_item_keeps_the_plain_body(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """The label says "Asked by": only an ask carries it, never a notify item."""
+    row = _row(notice=("k", 1, "high", "Deploy finished"))._replace(
+        remote_started_by_agent_on="damian-mac"
+    )
+    ra.RemoteAttentionWatcher(root).observe([row])
+    [item] = _items(root)
+    assert item["body_md"] == "runs on lop-remote-node-2"
+    assert [call["body"] for call in _no_banner_threads] == ["runs on lop-remote-node-2"]
+
+
+def test_a_high_agent_child_ask_banners_with_the_label(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    row = _row(notice=(ASK_KEY, 1, "high", "Approve the deploy?"))._replace(
+        remote_started_by_agent_on="damian-mac"
+    )
+    ra.RemoteAttentionWatcher(root).observe([row])
+    assert [call["body"] for call in _no_banner_threads] == [AGENT_BODY]

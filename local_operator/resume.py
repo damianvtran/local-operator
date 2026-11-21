@@ -2830,6 +2830,12 @@ class SessionRow(NamedTuple):
     #: The owner could not read this session's ask log (``PeerRow.asks_unknown``),
     #: so the origin retires no forwarded ask on this row (PR #3934 R1-2).
     remote_asks_unknown: bool = False
+    #: The human name of the device whose AGENT started this remote session, or
+    #: ``""``. Set only when the row's stamp ``origin.kind`` is ``agent`` AND this
+    #: device can name ``origin.source_device`` from its own identity or peer
+    #: catalogue (``peer_rows._agent_starter_label``); display-only — it labels a
+    #: forwarded ask's body and decides no routing. Appended last and defaulted.
+    remote_started_by_agent_on: str = ""
 
     @property
     def is_remote(self) -> bool:
