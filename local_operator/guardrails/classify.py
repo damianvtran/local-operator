@@ -73,6 +73,9 @@ FORCED_REMOVAL_REASON = (
 )
 # Spelled here rather than imported: ``provenance`` imports this module.
 _LEDGER_DIRNAME = "guardrails"
+#: ``team_bridge.responders.policy.policy_path`` relative to a state root. Spelled
+#: here rather than imported so the guard's import graph stays free of team_bridge.
+_RESPONDER_POLICY_PARTS = ("team_bridge", "responders.yaml")
 _LEDGER_FILENAME = "created.sqlite"
 
 
@@ -367,6 +370,12 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
     for state in prot.state_roots:
         if _under(path, os.path.join(state, _LEDGER_DIRNAME)):
             return "the guardrail's own records"
+        if path == os.path.join(state, *_RESPONDER_POLICY_PARTS):
+            # Team Integrations RFC §7.1 (S-34/S-40): the owner's alert-responder policy
+            # is the ONLY thing that authorizes work from an inbound alert, so the agent
+            # it authorizes must never be able to write, move or delete it — by the file
+            # tools or by bash. Evidence class = CRITICAL for every op, no ask can lift it.
+            return "the owner's alert responder policy"
         sessions = os.path.join(state, _SESSIONS_DIRNAME)
         if not _under(path, sessions) or path == sessions:
             continue
