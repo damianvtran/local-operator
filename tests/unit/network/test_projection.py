@@ -93,7 +93,16 @@ def _listen(server: relay.RelayServer) -> tuple[str, int]:
 
 
 def _dial_to(server: relay.RelayServer, record: Any, host: str, port: int) -> relay.PeerLink:
-    link, reason = server.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    # The dialer names whom it meant to reach (mesh-listener-auth): the one other
+    # active member of this two-device record, read from the dialer's OWN record.
+    (peer,) = [
+        m.device_id
+        for m in store.load(record.network_id, server.root).active_members()
+        if m.device_id != server.identity.device_id
+    ]
+    link, reason = server.dial(
+        record.network_id, host=f"{host}:{port}", epoch=record.epoch, expected_device=peer
+    )
     assert link is not None, reason
     return link
 

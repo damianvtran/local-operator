@@ -327,7 +327,10 @@ def test_older_peer_is_refused_before_an_unknown_op_can_be_sent(
     _grant(server_a, record, server_b.identity.device_id)
     calls = _restart_calls(monkeypatch)
     link, reason = server_b.dial(
-        record.network_id, host=f"{devices[2]}:{devices[3]}", epoch=record.epoch
+        record.network_id,
+        host=f"{devices[2]}:{devices[3]}",
+        epoch=record.epoch,
+        expected_device=devices[0].identity.device_id,
     )
     assert link is not None, reason
     link.capabilities = frozenset(

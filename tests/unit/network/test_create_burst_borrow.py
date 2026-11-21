@@ -76,7 +76,9 @@ def test_a_borrow_during_a_burst_of_slow_creates_is_served(
     monkeypatch.setattr(relay, "FIRST_TURN_WAIT_S", _WAIT_S)
     monkeypatch.setattr(plane, "_Handle", _LongTurn)
     served = plane._serve(monkeypatch, rig.a.root)  # noqa: SLF001
-    link, reason = rig.b.dial(rig.network_id, host=f"{host}:{port}")
+    link, reason = rig.b.dial(
+        rig.network_id, host=f"{host}:{port}", expected_device=rig.a.identity.device_id
+    )
     assert link is not None, reason
     hop = relay.engage_hop_bound_s()
     replies: dict[int, Any] = {}

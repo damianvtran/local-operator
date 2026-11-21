@@ -258,7 +258,10 @@ def _restart(setup: Path, expect: dict[str, Any]) -> tuple[Any, Any, str, int]:
     server_a.start()
     server_b.start()
     link, reason = server_b.dial(
-        str(expect["network_id"]), host=f"{host}:{port}", epoch=int(expect["epoch"])
+        str(expect["network_id"]),
+        host=f"{host}:{port}",
+        epoch=int(expect["epoch"]),
+        expected_device=server_a.identity.device_id,
     )
     assert link is not None, f"the restarted devices could not reach each other: {reason}"
     del setup
