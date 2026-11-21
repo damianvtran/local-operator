@@ -23,7 +23,9 @@ tells the operator nothing is the failure mode this module exists to prevent.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
@@ -34,7 +36,9 @@ from local_operator.network.credentials.types import (
     CAUSE_UNREACHABLE,
     GITHUB_RENDERED_REASONS,
     BrokerError,
+    is_mcp_key,
     is_secret_key,
+    mcp_url_from_key,
     secret_name_from_key,
 )
 
@@ -768,6 +772,88 @@ def render_copy_revoke_notice(
         f"a wipe notice for '{name}' is queued for {peer_name}: the copy is deleted on "
         "its next contact",
     ]
+
+
+def render_lend_label(key: str) -> str:
+    """The name a removal receipt shows for a lent credential (G9 review R1-3).
+
+    PROSE, not an identifier (:func:`render_key_name`'s split): an ``mcp:<url>``
+    key shows only the server's host (``MCP server mcp.example.com``), because the
+    full URL is an internal spelling and may carry a query string the operator
+    never typed and should not see echoed. Everything else reads as
+    :func:`render_key_name` renders it. ``--json`` keeps the raw ``key``.
+    """
+    if is_mcp_key(key):
+        try:
+            host = urlsplit(mcp_url_from_key(key)).hostname or ""
+        except ValueError:
+            host = ""
+        return f"MCP server {host}" if host else "an MCP server"
+    return render_key_name(key)
+
+
+def render_removal_lends(
+    peer_name: str,
+    *,
+    revoked: int,
+    open_lends: list[dict[str, Any]],
+    told: int,
+    renewal_ended: int = 0,
+    now_ms: int | None = None,
+) -> list[str]:
+    """What a ``member rm`` receipt says about the credentials it LENT that member (G9).
+
+    The copies sentence covers stored secrets; this one covers lends — bearers the
+    member borrowed and may hold in memory. Four classes, never merged:
+
+    - revocation requested at the source: GitHub App tokens the live broker still
+      tracks. The DELETE runs off-thread after this receipt and retries while the
+      relay runs, so this never says "revoked" (review R1-1 / S1 / QA-F1);
+    - renewal handed back: this device renews that login itself again. Nothing on
+      the member is revoked by it, so it is never counted with the above (R1-2);
+    - told: the member was reachable, so the removal reached it over its link and
+      its own client drops what it borrowed — told, not confirmed;
+    - left usable: the member was NOT reachable, so it keeps serving each from its
+      offline hold until the named moment. A removed member is never contacted
+      again, so nothing will shorten that from here; the only remedy is the
+      copies' one — rotate at the source. That sentence is said ONCE, then the
+      credentials are listed (R1-5).
+
+    Display labels and absolute UTC moments only (:func:`render_lend_label`): no
+    token, no account label, no raw key.
+    """
+    lines: list[str] = []
+    if revoked > 0:
+        noun = "lend" if revoked == 1 else "lends"
+        lines.append(
+            f"revocation requested at the source for {revoked} GitHub App {noun} to "
+            f"{peer_name} (retried while this relay runs; each token expires within its hour)"
+        )
+    if renewal_ended > 0:
+        noun, pronoun = ("login", "it") if renewal_ended == 1 else ("logins", "them")
+        lines.append(
+            f"this device stopped waiting on {peer_name} for {renewal_ended} lent {noun} "
+            f"and renews {pronoun} itself again (this ends no token {peer_name} already holds)"
+        )
+    if told > 0:
+        noun = "lend" if told == 1 else "lends"
+        lines.append(
+            f"{peer_name} was told over its live link to drop {told} borrowed {noun} "
+            "(its own client ends them; this device cannot confirm it)"
+        )
+    now = time.time() * 1000 if now_ms is None else now_ms
+    still = [lend for lend in open_lends if int(lend.get("until_ms") or 0) > now]
+    if still:
+        lines.append(
+            f"{peer_name} was not reachable, so these stay usable there until the time "
+            "shown; nothing can revoke them from here and a removed member is never "
+            "contacted again — rotate each at its source to end it sooner:"
+        )
+        for lend in still:
+            until_ms = int(lend.get("until_ms") or 0)
+            until = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(until_ms / 1000))
+            lines.append(f"  {render_lend_label(str(lend.get('key') or ''))} until {until}")
+    return lines
 
 
 def render_removal_endings(

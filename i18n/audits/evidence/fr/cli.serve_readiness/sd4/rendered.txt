@@ -1,0 +1,367 @@
+# sd4 current catalogue renders — fr
+UTC 2026-11-16T05:18:32.631978+00:00; raw logical-order text, not terminal screenshots.
+
+## cli.serve_readiness.unproven | count=1 | CLDR=n/a
+
+enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé)
+
+## cli.serve_readiness.not_reporting | count=1 | CLDR=n/a
+
+enregistrement présent, mais aucune réponse (plus de signal de vie)
+
+## cli.serve_readiness.not_this_daemon | count=1 | CLDR=n/a
+
+enregistrement présent, mais PID désormais détenu par un autre processus
+
+## cli.serve_readiness.unknown_state | count=1 | CLDR=n/a
+
+enregistrement présent avec un état inconnu
+
+## cli.serve_readiness.install_unknown | count=1 | CLDR=n/a
+
+utilise un build qui ne peut pas être comparé à l’installation
+
+## cli.serve_readiness.cgroup_unknown | count=1 | CLDR=n/a
+
+s’exécute dans un cgroup que cette vérification ne peut pas situer
+
+## cli.serve_readiness.recorded_gap | count=1 | CLDR=n/a
+
+l’enregistrement indique le build v0.99.0+recorded ; le build v0.99.2+installed est installé
+
+## cli.serve_readiness.unknown | count=0 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+
+## cli.serve_readiness.unknown | count=1 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+
+## cli.serve_readiness.unknown | count=2 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=3 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=4 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=5 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=11 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=21 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=22 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=25 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=1.5 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+
+## cli.serve_readiness.unknown | count=1000000 | CLDR=many
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.unknown | count=1500000 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 — DIAGS-opaque-ß ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+
+## cli.serve_readiness.stale | count=0 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 (4101, 4102) utilise v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’il héberge utilisent cet autre build
+
+## cli.serve_readiness.stale | count=1 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 (4101, 4102) utilise v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’il héberge utilisent cet autre build
+
+## cli.serve_readiness.stale | count=2 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=3 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=4 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=5 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=11 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=21 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=22 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=25 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=1.5 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 (4101, 4102) utilise v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’il héberge utilisent cet autre build
+
+## cli.serve_readiness.stale | count=1000000 | CLDR=many
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.stale | count=1500000 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 (4101, 4102) utilisent v0.99.1+running, mais l’installation est v0.99.2+installed : les sessions distantes qu’ils hébergent utilisent ces autres builds
+
+## cli.serve_readiness.other_unit | count=0 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 est rattaché à un autre service (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=1 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 est rattaché à un autre service (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=2 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=3 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=4 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=5 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=11 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=21 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=22 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=25 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=1.5 | CLDR=one
+
+le daemon `lop serve` sur host-sd4 est rattaché à un autre service (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=1000000 | CLDR=many
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.other_unit | count=1500000 | CLDR=other
+
+les daemons `lop serve` sur host-sd4 sont rattachés à d’autres services (worker.service), et non à une unité lop serve
+
+## cli.serve_readiness.identity_restart | count=1 | CLDR=n/a
+
+sur host-sd4, lancez `lop services restart` pour faire passer le daemon enregistré au build installé ; le redémarrage vérifie chaque daemon avant toute action
+
+## cli.serve_readiness.pid_reason | count=0 | CLDR=one
+
+identifiant de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1 | CLDR=one
+
+identifiant de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=2 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=3 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=4 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=5 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=11 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=21 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=22 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=25 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1.5 | CLDR=one
+
+identifiant de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1000000 | CLDR=many
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1500000 | CLDR=other
+
+identifiants de processus 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.and_more | count=0 | CLDR=one
+
+et 0 de plus
+
+## cli.serve_readiness.and_more | count=1 | CLDR=one
+
+et 1 de plus
+
+## cli.serve_readiness.and_more | count=2 | CLDR=other
+
+et 2 de plus
+
+## cli.serve_readiness.and_more | count=3 | CLDR=other
+
+et 3 de plus
+
+## cli.serve_readiness.and_more | count=4 | CLDR=other
+
+et 4 de plus
+
+## cli.serve_readiness.and_more | count=5 | CLDR=other
+
+et 5 de plus
+
+## cli.serve_readiness.and_more | count=11 | CLDR=other
+
+et 11 de plus
+
+## cli.serve_readiness.and_more | count=21 | CLDR=other
+
+et 21 de plus
+
+## cli.serve_readiness.and_more | count=22 | CLDR=other
+
+et 22 de plus
+
+## cli.serve_readiness.and_more | count=25 | CLDR=other
+
+et 25 de plus
+
+## cli.serve_readiness.and_more | count=1.5 | CLDR=one
+
+et 1,5 de plus
+
+## cli.serve_readiness.and_more | count=1000000 | CLDR=many
+
+et 1 000 000 de plus
+
+## cli.serve_readiness.and_more | count=1500000 | CLDR=other
+
+et 1 500 000 de plus
+
+## cli.serve_readiness.identity_no_action | count=0 | CLDR=one
+
+l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=1 | CLDR=one
+
+l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=2 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=3 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=4 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=5 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=11 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=21 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=22 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=25 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=1.5 | CLDR=one
+
+l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=1000000 | CLDR=many
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_no_action | count=1500000 | CLDR=other
+
+les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## cli.serve_readiness.identity_restart_manual | count=1 | CLDR=n/a
+
+sur host-sd4, redémarrez `lop serve` manuellement pour faire passer le daemon enregistré au build installé ; il ne peut pas se recharger lui-même en cours d’exécution
+
+## COMPOSED current unproven record / non-required no-action
+
+le daemon `lop serve` sur host-sd4 — identifiant de processus 4101 — enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé) ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé; l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+
+## COMPOSED grouped recorded gap / reloadable remedy
+
+les daemons `lop serve` sur host-sd4 — identifiants de processus 4101, 4102 — enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé); l’enregistrement indique le build v0.99.0+recorded ; le build v0.99.2+installed est installé ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés; sur host-sd4, lancez `lop services restart` pour faire passer le daemon enregistré au build installé ; le redémarrage vérifie chaque daemon avant toute action
+
+## COMPOSED grouped recorded gap / manual remedy
+
+les daemons `lop serve` sur host-sd4 — identifiants de processus 4101, 4102 — enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé); l’enregistrement indique le build v0.99.0+recorded ; le build v0.99.2+installed est installé ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés; sur host-sd4, redémarrez `lop serve` manuellement pour faire passer le daemon enregistré au build installé ; il ne peut pas se recharger lui-même en cours d’exécution
+
+## COMPOSED mixed PID groups and keyed overflow
+
+les daemons `lop serve` sur host-sd4 — identifiant de processus 4101 — enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé); identifiants de processus 4102, 4103 — enregistrement présent, mais PID désormais détenu par un autre processus et 22 de plus ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+

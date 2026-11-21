@@ -1,0 +1,6 @@
+{
+  "wire.providers.reauth.sign_in_expired": "آپ کے {label} سائن اِن کی میعاد ختم ہو چکی ہے اور اس کی خودکار تجدید ممکن نہیں۔ دوبارہ سائن اِن کریں: ایپ میں /login {provider} یا ٹرمینل میں lop login {provider} چلائیں۔",
+  "wire.providers.reauth.session_policy": "آپ کی Google Workspace تنظیم {label} میں دوبارہ سائن اِن لازمی قرار دیتی ہے (Google Cloud session control)، اس لیے سائن اِن کی خودکار تجدید ممکن نہیں۔ دوبارہ سائن اِن کریں: ایپ میں /login {provider} یا ٹرمینل میں lop login {provider} چلائیں۔",
+  "wire.providers.reauth.status_sign_in_required": "دوبارہ سائن اِن درکار",
+  "wire.providers.reauth.status_session_policy": "دوبارہ سائن اِن درکار (Workspace پالیسی)"
+}

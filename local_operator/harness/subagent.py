@@ -128,7 +128,16 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Mapping
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterable,
+    Literal,
+    Mapping,
+    cast,
+)
 
 from local_operator.agent_profiles import (
     READ_ONLY_NETWORK_TOOLS,
@@ -439,6 +448,15 @@ def read_effort_tier_targets(root: Path | None = None) -> dict[str, tuple[Any, s
     return targets
 
 
+MemberModelUnavailableKind = Literal[
+    "config_unreadable",
+    "tier_invalid_value",
+    "tier_invalid_mapping",
+    "tier_unconfigured",
+    "tier_invalid_selector",
+]
+
+
 @dataclass(frozen=True)
 class MemberModelResolution:
     """Which model and reasoning depth ONE roster slot resolves to (design §4).
@@ -483,6 +501,9 @@ class MemberModelResolution:
     #: honoured -- and the launch receipt has to name that difference, because
     #: "your tier was ignored" is only honest when something ignored it.
     role_pins_inherit: bool = False
+    #: Presentation classification only: shared launch/model diagnostics above
+    #: stay English. The desktop wire boundary localizes without parsing prose.
+    unavailable_kind: MemberModelUnavailableKind | None = None
 
     @property
     def decided_by_team(self) -> bool:
@@ -585,6 +606,7 @@ def resolve_member_model(
     tier_effort: str | None = None
     unavailable = ""
     unavailable_quiet = False
+    unavailable_kind: MemberModelUnavailableKind | None = None
 
     def _effort_of(
         tier_level: str | None,
@@ -619,19 +641,25 @@ def resolve_member_model(
                 effort=effort,
                 effort_source=effort_source,
                 unavailable=f"config could not be read ({exc})",
+                unavailable_kind="config_unreadable",
             )
         raw_selector, tier_effort = targets.get(tier, (None, None))
         if raw_selector is not None and not isinstance(raw_selector, str):
             unavailable = malformed_tier_reason(tier, raw_selector)
+            unavailable_kind = (
+                "tier_invalid_mapping" if isinstance(raw_selector, dict) else "tier_invalid_value"
+            )
         elif is_inherit_tier_sentinel(raw_selector):
             selector = INHERIT_TIER_SENTINEL
         elif not raw_selector:
             unavailable = f"no model configured at subagents.models.{tier}"
             unavailable_quiet = True
+            unavailable_kind = "tier_unconfigured"
         else:
             provider, _, model_id = str(raw_selector).partition("/")
             if not provider or not model_id:
                 unavailable = f"subagents.models.{tier}={raw_selector!r} lacks provider/model"
+                unavailable_kind = "tier_invalid_selector"
             else:
                 selector = str(raw_selector)
 
@@ -649,6 +677,7 @@ def resolve_member_model(
         unavailable=unavailable,
         unavailable_quiet=unavailable_quiet,
         role_pins_inherit=role_pins_inherit,
+        unavailable_kind=unavailable_kind,
     )
 
 
@@ -2858,6 +2887,7 @@ def _make_runner(
                 # that no longer exists.
                 comms.detach(job_id)
             if child is not None:
+                browser_error = ""
                 try:
                     # Disposal owns cancellation settlement for every running
                     # descendant. Await it before detaching the ledger so a
@@ -2865,6 +2895,24 @@ def _make_runner(
                     # manager accumulator even when retention evicts its row.
                     await _dispose_child(child)
                     await _hand_up_late_browser_surfaces(child, parent_session)
+
+                    def close_allowed() -> bool:
+                        # Pause can land during disposal or recovery.
+                        record = comms._record(job_id) if comms is not None else None
+                        return record is None or not record.paused
+
+                    # Dispose releases the child's claim so exact cleanup can
+                    # take the lease; no close is admitted after a pause lands.
+                    try:
+                        browser_error = await _retry_stranded_child_browser(
+                            child, close_allowed=close_allowed
+                        )
+                    except asyncio.CancelledError:
+                        # The exact cleanup has already unwound its lease. A
+                        # cancelled request does not prove the surface closed.
+                        # i18n: ignore structured eval-harness cleanup verdict (no product UI)
+                        browser_error = "browser cleanup retry cancelled; closure unverified"
+                        raise
                 finally:
                     # Record the child's cleanup VERDICT on its owning ancestor
                     # BEFORE detaching the job edge (review round 2,
@@ -2875,6 +2923,8 @@ def _make_runner(
                     # child's verdict is itself recursive, so a grandchild's
                     # failure reaches the root the same way.
                     verdict = child._cleanup_verdict_errors()
+                    if browser_error:
+                        verdict = (*verdict, browser_error)
                     if verdict:
                         parent_session._record_descendant_cleanup_failures(
                             child.session_id, verdict
@@ -3038,11 +3088,15 @@ async def _finish_child_browser(
         hand_off,
         public_surface_label,
     )
+    from local_operator.browser_bridge.resources import cleanup_disposition
 
     if child is None:
         return []
     record = comms._record(job_id) if comms is not None else None
-    resource = getattr(getattr(child, "_browser", None), "resource", None)
+    browser = getattr(child, "_browser", None)
+    if browser is not None:
+        browser.terminal_cleanup_generation = ""
+    resource = getattr(browser, "resource", None)
     if record is not None and record.paused and resource is not None:
         if resource.generation or resource.path.exists():
             try:
@@ -3089,6 +3143,16 @@ async def _finish_child_browser(
     )
     if result.state not in ("closed", "retained"):
         logger.warning("child browser cleanup %s: %s", result.state, result.detail)
+        value = resource.record
+        generation = value.get("generation")
+        if (
+            surface
+            and isinstance(generation, str)
+            and generation
+            and not value.get("handed_to")
+            and cleanup_disposition(value)[0]
+        ):
+            browser.terminal_cleanup_generation = generation
     if surface:
         label = public_surface_label(surface)
         if result.state == "closed":
@@ -3106,6 +3170,62 @@ async def _finish_child_browser(
                 f"Browser: could not close {label} ({result.state}{detail}); it may still be open"
             )
     return fates
+
+
+async def _retry_stranded_child_browser(
+    child: "Session", *, close_allowed: Callable[[], bool] | None = None
+) -> str:
+    """Retry one exact failed close; never search session history for a target."""
+    from local_operator.browser_bridge.resources import cleanup_exact
+    from local_operator.session_lease import SessionLeaseHeldError
+
+    browser = getattr(child, "_browser", None)
+    if browser is None:
+        return ""
+    generation = getattr(browser, "terminal_cleanup_generation", "")
+    if not generation:
+        return ""
+    browser.terminal_cleanup_generation = ""
+    resource = browser.resource
+    value = resource.record
+    if (
+        (close_allowed is not None and not close_allowed())
+        or resource.directory != child._transcript.directory
+        or value.get("generation") != generation
+        or value.get("state") in ("closed", "retained")
+        or not value.get("terminal")
+        or value.get("retention")
+        or value.get("handed_to")
+        or browser.handed_to
+    ):
+        # Dispose may already have closed it; a successor or human hold is
+        # not ours to settle, even when the earlier close failed.
+        return ""
+    try:
+        # cleanup_exact owns the deadline and releases its lease in finally.
+        # Await inline so cancellation cannot leave cleanup running after
+        # the job settles and an in-process resume becomes possible.
+        root = config_dir()
+        result = await cleanup_exact(
+            resource.directory,
+            generation,
+            config_dir=root if resource.directory.parent == root / "sessions" else None,
+            close_allowed=close_allowed,
+        )
+    except SessionLeaseHeldError:
+        # i18n: ignore structured eval-harness cleanup verdict (no product UI)
+        return "browser cleanup retry refused: child execution lease is held"
+    except Exception:
+        # i18n: ignore structured eval-harness cleanup verdict (no product UI)
+        return "browser cleanup retry failed; closure unverified"
+    # Bridge details and arbitrary state strings are not safe receipt text.
+    if result.admission_skipped or result.state in ("closed", "retained"):
+        return ""
+    if result.state == "pending":
+        # i18n: ignore structured eval-harness cleanup verdict (no product UI)
+        return "browser cleanup still pending after exact retry"
+    # i18n: ignore structured eval-harness cleanup verdict (no product UI)
+    return "browser cleanup unresolved after exact retry"
 
 
 async def _hand_up_late_browser_surfaces(child: "Session", parent_session: Any) -> None:
@@ -4769,8 +4889,19 @@ async def _construct_child_session(
             if store is not None and hasattr(store, "credential_names")
             else []
         )
+        # The CHILD's live tool set once its Session installed the probe (see
+        # ``session_tool_membership`` below), else the construction list. The
+        # closure's ``tools`` is a construction snapshot: anything the child
+        # Session rebinds afterwards (``refresh_tools``, an ask hook, a host
+        # narrowing) never reaches it, so block zero's tool-gated prose
+        # (``TOOL_GATED_PROSE_FLAGS``) described tools the child did not hold.
+        # Same probe the top-level factory provider got in #4318 (review R2).
+        live_probe = getattr(system_blocks_provider, "live_tools", None)
+        current_tools: list[AgentTool] = (
+            list(cast("Iterable[AgentTool]", live_probe())) if callable(live_probe) else tools
+        )
         return build_system_blocks(
-            tools,
+            current_tools,
             "\n\n".join(
                 filter(None, (knowledge, mcp.catalogue(prompt) if mcp is not None else ""))
             ),
@@ -4783,7 +4914,10 @@ async def _construct_child_session(
             # commonest session shape the one that cannot tell itself apart from
             # a peer, and the listing marker would be the only half of the fix it
             # ever saw.
-            _env_details(cwd, transcript.directory.name),
+            # Gated on the child's live membership like the parent's head
+            # (``_env_details``): a child without ``sessions``/``send``/``tags``
+            # has no use for its id, nor one without file/shell tools for cwd.
+            _env_details(cwd, transcript.directory.name, [tool.name for tool in current_tools]),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
             # ...and its LIFECYCLE STATE, so a goal the parent has already
@@ -4827,6 +4961,8 @@ async def _construct_child_session(
         )
 
     setattr(system_blocks_provider, "append_only_state", True)
+    # Asks the child Session to install ``live_tools`` (read in the provider).
+    setattr(system_blocks_provider, "session_tool_membership", True)
     setattr(system_blocks_provider, "repo_guidance", repo_guidance)
     setattr(system_blocks_provider, "injected_guidance", injected_guidance)
     setattr(system_blocks_provider, "knowledge_hooks", parent_hooks)
@@ -5159,6 +5295,12 @@ async def _construct_child_session(
     # false one hop down. Read the same way, and ``None`` for a parent that
     # declared no scope means "every op", exactly as it does on the parent.
     declared = getattr(parent_session, "_declared_tools", None)
+    # Stamped UNCONDITIONALLY and BEFORE ``set_tool_inventory`` below: this
+    # child's MCP reach is whatever ``_child_mcp_wiring`` built from the parent,
+    # so neither its declaration's grant step nor the first-turn readiness gate
+    # may add to it (see ``Session._mcp_reach_inherited``). Before the stamp the
+    # gate's grant handed a child its parent's ``ownTurnOnly`` episode tool.
+    child._mcp_reach_inherited = True
     if surface is not None:
         # The harness bound narrows (never widens) whatever the parent declared,
         # and is this child's FIRST declaration, so ``set_tool_inventory``'s

@@ -1,0 +1,138 @@
+from pathlib import Path
+import datetime, hashlib, json, os, re, subprocess, sys, unicodedata
+ROOT=Path('/Users/damian/local-operator/.worktrees/feat-google-vertex-provider')
+sys.path.insert(0,str(ROOT))
+from local_operator.i18n import runtime
+from rich.cells import cell_len
+NS='providers.vertex_prompts'
+LOCALES=['fr','es','zh-CN','ru','vi','ur','hi']
+AUDIT_ID='vp1-02e2'
+SESSION='02e2a562a33a'
+DATE=datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+BASE=ROOT/'local_operator/i18n/catalogues'
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+en_path=BASE/'en'/f'{NS}.json'
+ctx_path=BASE/'en'/f'{NS}.context.json'
+assert sha(en_path)=='27eea2d21975bd655a616bb412364c855c753c8256eed8a1fa42cc83869d10ae'
+assert sha(ctx_path)=='3cd3aea2a7d54c979bfd3bdbbaa46da061c4a5a99ad02c3075ce8ca23cfdf916'
+en=json.loads(en_path.read_text());ctx=json.loads(ctx_path.read_text())
+secondary_path=Path('/Users/damian/.local-operator/sessions/03178f8c9cba/scratchpad/vertex-i18n-secondary/secondary-report.json')
+assert sha(secondary_path)=='523ad23652a88c9d6f382e335ed93e3a4f69914188106bf6da7f1da5849061e0'
+secondary=json.loads(secondary_path.read_text())
+assert secondary['auditor']['session']=='03178f8c9cba'
+assert secondary['auditor']['session'] not in [SESSION,'541740ac0ac6']
+assert secondary['current_report_verdict']['status']=='passed'
+for name,info in secondary['input_hashes'].items():
+    assert sha(ROOT/info['path'])==info['sha256'],name
+for item in secondary['artifacts']:
+    assert sha(Path(item['path']))==item['sha256'],item['path']
+py=ROOT/'.venv/bin/python'
+env={k:v for k,v in os.environ.items() if not k.startswith('CMUX_')}
+cmd=[str(py),'scripts/i18n/check.py','--catalogues-only']
+v=subprocess.run(cmd,cwd=ROOT,env=env,text=True,capture_output=True)
+assert v.returncode==0,(v.stdout,v.stderr)
+validator='$ .venv/bin/python scripts/i18n/check.py --catalogues-only\n'+v.stdout+v.stderr+f'exit={v.returncode}\n'
+notes={
+'fr':[
+'ID du projet Google Cloud preserves the project identifier, rather than a project name; Google Cloud remains intact.',
+'JSON du compte de service ou chemin du fichier JSON correctly distinguishes pasted service-account JSON from its file path; not an API key.',
+'Enter pour envoyer; Enter à vide ou Esc pour annuler la connexion accurately states submission and whole-login cancellation; the actual U+202F before the semicolon follows house French typography.',
+'Saisir {field} uses the house infinitive action register; laisser vide pour annuler conveys cancellation, not optional skip. U+202F precedes the colon and trailing input-separator space is retained.'
+],
+'es':[
+'ID del proyecto de Google Cloud is natural neutral Spanish and preserves the technical ID.',
+'JSON de la cuenta de servicio o ruta del archivo JSON is accurate; archivo follows the neutral-Spanish guide rather than region-marked fichero.',
+'Enter para enviar; Enter sin texto o Esc para cancelar el inicio de sesión preserves the login cancellation consequence rather than optional skip.',
+'Introduce {field} (deja vacío para cancelar) addresses the user in the required tú register; this is a field instruction, not an infinitive button label. Placeholder and trailing space remain intact.'
+],
+'zh-CN':[
+'Google Cloud项目ID preserves the product name and technical ID; adjacent Latin and Han runs follow the explicit no-added-space policy.',
+'服务账号JSON或JSON文件路径 accurately distinguishes a service account JSON value from a file path; JSON stays Latin.',
+'按Enter提交；留空按Enter或按Esc取消登录。 accurately distinguishes nonempty submit and empty/Esc login cancellation. Full-width semicolon and Chinese full stop are appropriate. This is a terse key-binding hint describing controls, not an error/validation next-step body requiring 请.',
+'请输入{field}（留空取消）： uses the required 请-led field instruction, full-width parentheses/colon, unchanged placeholder and preserved final separator space.'
+],
+'ru':[
+'Идентификатор проекта Google Cloud is accurate and naturally inflects проект in the genitive.',
+'JSON сервисного аккаунта или путь к JSON-файлу is idiomatic developer Russian; JSON and Google Cloud stay unmodified.',
+'Enter — отправить; Enter без ввода или Esc — отменить вход uses natural infinitive key-action glosses and accurately names login cancellation.',
+'Введите {field} (оставьте пустым для отмены) is the required polite plural imperative, not ты; the project-label nominative is acceptable as a technical field label after Введите. Final separator space retained.'
+],
+'vi':[
+'ID dự án Google Cloud is a natural compact project-ID label and preserves the product name.',
+'JSON của tài khoản dịch vụ hoặc đường dẫn tệp JSON accurately identifies the service-account JSON or file path; tệp follows the glossary.',
+'Enter để gửi; để trống rồi nhấn Enter hoặc nhấn Esc để hủy đăng nhập explicitly preserves empty-input/login cancellation. hủy matches the first-vowel tone-mark policy.',
+'Nhập {field} (để trống để hủy) uses a natural pronoun-free instruction, consistent with bạn register without redundant politeness; placeholder and trailing space preserved.'
+],
+'ur':[
+'Google Cloud پروجیکٹ ID accurately labels a Google Cloud project ID in logical storage order; both Latin islands remain intact.',
+'سروس اکاؤنٹ کا JSON یا JSON فائل کا پاتھ accurately describes service-account JSON or a JSON file path. پاتھ is an intelligible technical loan, not an API-key substitution.',
+'بھیجنے کے لیے Enter دبائیں؛ خالی چھوڑ کر Enter یا Esc دبانے سے لاگ ان منسوخ ہو جائے گا۔ uses respectful دبائیں and explicitly states login cancellation; Urdu semicolon/full stop are correct. The coordination describes empty submission/Esc cancellation and does not claim optional skip.',
+'{field} درج کریں (منسوخ کرنے کے لیے خالی چھوڑیں): follows native object-before-verb order and respectful imperatives. The field placeholder starts the logical string, ASCII parentheses/colon remain appropriate for this input prompt. No hand-authored bidi controls; no arrows to mirror. Latin-island placement still requires the renderer and bidi-capable terminal to display correctly.'
+],
+'hi':[
+'Google Cloud प्रोजेक्ट ID accurately preserves the product and technical ID using familiar Hindi developer vocabulary.',
+'सेवा खाते का JSON या JSON फ़ाइल का पाथ accurately distinguishes service-account JSON and JSON file path; खाते is the required inflection, फ़ाइल retains nukta, and पाथ is an intelligible developer loan.',
+'भेजने के लिए Enter दबाएँ; खाली छोड़कर Enter या Esc दबाने से लॉगिन रद्द हो जाएगा। uses polite imperative and explicitly names login cancellation; Latin keys and the final danda follow the guide.',
+'{field} दर्ज करें (रद्द करने के लिए खाली छोड़ें) is natural object-before-verb Hindi in आप register, with unchanged placeholder and preserved separator space.'
+]}
+auditor={'agent':'i18n-auditor','session':SESSION,'model':'openai/gpt-6.1-sol','independent_from_translator_session':'541740ac0ac6','actual_model_source':'Host model-switch event: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota','fallback':{'from':'anthropic/claude-opus-5-5','to':'openai/gpt-6.1-sol','reason':'provider failure: quota'}}
+summary=[]
+for locale in LOCALES:
+    target=BASE/locale/f'{NS}.json'
+    # Reject duplicate keys as well as syntax/key-set defects.
+    def unique(pairs):
+        out={}
+        for k,value in pairs:
+            assert k not in out, ('duplicate JSON key',locale,k)
+            out[k]=value
+        return out
+    data=json.loads(target.read_text(),object_pairs_hook=unique)
+    assert set(data)==set(en) and len(data)==4
+    log=validator+'\nIndependent direct checks executed by vertex-primary-audit.py:\n'
+    widths={}
+    for key,source in en.items():
+        text=data[key]
+        assert runtime.message_arguments(source)==runtime.message_arguments(text)
+        assert not runtime.plural_selectors(text) # No count/select keys in this namespace.
+        assert runtime.message_arguments(text)==((('field','simple'),) if key.endswith('prompt.field') else ())
+        assert not any(unicodedata.bidirectional(c) in {'LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI'} or c in '\u200e\u200f\u061c' for c in text)
+        assert re.findall(r'`[^`]*`|</?\w+[^>]*>',source)==re.findall(r'`[^`]*`|</?\w+[^>]*>',text)
+        tokens = ['Google Cloud','JSON'] + (['Enter','Esc'] if key.endswith('hint.required') else [])
+        for token in tokens:
+            assert source.count(token)==text.count(token),(locale,key,token)
+        if locale=='vi': assert unicodedata.normalize('NFC',text)==text
+        assert not any('\u0660'<=c<='\u0669' or '\u06f0'<=c<='\u06f9' or '\u0966'<=c<='\u096f' for c in text)
+        widths[key]={'chars':len(text),'cells':cell_len(text)}
+        log+=f'PASS {locale} {key}: parity, ICU argument kinds, literals, markup, bidi-controls, digits; chars={len(text)} cells={cell_len(text)}\n'
+        if key.endswith('prompt.field'):
+            assert text.endswith(' ')
+            for label_key in [f'{NS}.field.project_id',f'{NS}.field.service_account']:
+                result=runtime.render_message(text,{'field':data[label_key]},locale)
+                assert data[label_key] in result and '{field}' not in result and result.endswith(' ')
+                log+=f'FORMAT {label_key}: {result!r}; cells={cell_len(result)}\n'
+    assert not any('maxCells' in c or 'maxChars' in c for c in ctx.values())
+    log+='PASS no declared maxCells/maxChars budgets; hint explicitly truncates to current content width. Long strings require rendered QA; no visual-fit/native-bidi completion claimed.\nPASS plurals/selects N/A: all four messages are literal/simple-field interpolation.\n'
+    rel=Path('i18n/audits/evidence')/locale/NS/AUDIT_ID
+    directory=ROOT/rel
+    assert not directory.exists(),directory
+    directory.mkdir(parents=True)
+    (directory/'audit.log').write_text(log)
+    report=f'# Primary independent audit: {locale}/{NS}\n\nAudit date: {DATE}. Auditor: i18n-auditor / {SESSION} / openai/gpt-6.1-sol (quota fallback from anthropic/claude-opus-5-5). Translator identity and completion time supplied by manager: i18n-translator / 541740ac0ac6 / openai/gpt-6.1-sol, 2026-11-19 16:19:22Z. Different agent sessions; no translation/MT service used.\n\n## Verdict\n\nPassed primary semantic/mechanical audit: all 4 keys read; 0 unresolved BLOCKER/MAJOR, 0 minor/nit findings. This is one audit, not proof the mandatory second audit has completed.\n\n## Every-key semantic review (audit_notes_not_execution_log)\n\n'
+    for (key,_),note in zip(en.items(),notes[locale]):
+        report+=f'- `{key}`\n  - Current: {data[key]}\n  - Judgment: {note}\n'
+    report+='\n## Fit / RTL / pseudo applicability\n\nNo maxCells/maxChars budget is declared. audit.log records actual rich.cells.cell_len measurements and direct ICU expansion with both field labels. Runtime formatting is execution, not a rendered terminal frame. The longest hints and service-account labels may truncate in narrow terminals (the context explicitly permits hint truncation). No copy shortening is required absent a concrete budget/rendered failure. CJK wide glyphs and Hindi combining marks require cell rather than code-point measurement; Vietnamese NFC checked. Urdu logical order and absence of manual controls checked; glyph shaping, bidi-capable terminal display, and full UI mirroring were not visually validated here. Pseudo-localization/live rendered fit/fallback/cancel behavior belongs to the PR QA/design lanes; this receipt is not those lanes\' evidence. No plural/select branches exist, so locale CLDR categories are not applicable.\n'
+    (directory/'report.md').write_text(report)
+    (directory/'secondary-report.json').write_bytes(secondary_path.read_bytes())
+    for item in secondary['artifacts']:
+        original=Path(item['path'])
+        (directory/('secondary-'+original.name)).write_bytes(original.read_bytes())
+    artifact_names=['audit.log','report.md','secondary-report.json','secondary-validator.log','secondary-mechanical-and-render.log']
+    artifacts={name:{'path':str(rel/name),'sha256':sha(directory/name)} for name in artifact_names}
+    record={'locale':locale,'namespace':NS,'audit_date':DATE,'key_count':4,'audit_kind':'primary-independent-translation-audit','auditor':auditor,'translator':{'agent':'i18n-translator','session':'541740ac0ac6','model':'openai/gpt-6.1-sol','date':'2026-11-19','identity_source':'manager task brief; completed 16:19:22Z'},'source_audit_revision':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),'working_tree_inputs':True,'input_hashes':{name:{'path':str(path.relative_to(ROOT)),'sha256':sha(path)} for name,path in [('en',en_path),('context',ctx_path),(locale,target)]},'artifacts':artifacts,'measurements':widths,'current_report_verdict':{'status':'passed','unresolved_blocker_major_count':0,'finding_ids':[]},'audit_notes_not_execution_log':str(rel/'report.md'),'execution_log':str(rel/'audit.log'),'second_audit':{'source':'secondary-report.json (byte-identical retained report)','auditor':secondary['auditor'],'status':'passed','source_sha256':secondary['input_hashes']['en']['sha256'],'all_target_hashes_verified':True,'report_sha256':sha(secondary_path)},'rendered_evidence_claimed':False}
+    (directory/'record.json').write_text(json.dumps(record,ensure_ascii=False,indent=2)+'\n')
+    row={'locale':locale,'namespace':NS,'source_sha256':sha(en_path),'translator':record['translator'],'auditor':dict(auditor,date=DATE,result='passed',findings=0),'status':'passed','note':f'{rel}/record.json; R2 i18n-auditor/03178f8c9cba openai/gpt-6.1-sol PASS; en={sha(en_path)}'}
+    assert len(row['note'])<=280,len(row['note'])
+    receipt_path=directory/'receipt.json'
+    receipt_path.write_text(json.dumps(row,ensure_ascii=False,indent=2)+'\n')
+    summary.append({'locale':locale,'receipt':str(receipt_path.relative_to(ROOT)),'record':str(rel/'record.json'),'widths':widths})
+print(json.dumps(summary,ensure_ascii=False,indent=2))

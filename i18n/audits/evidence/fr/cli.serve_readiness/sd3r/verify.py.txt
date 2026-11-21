@@ -1,0 +1,32 @@
+import json,hashlib
+from pathlib import Path
+from local_operator.i18n.runtime import render_message
+root=Path.cwd(); old=root/'i18n/audits/evidence/fr/cli.serve_readiness/sd3'
+prior=json.loads((old/'record.json').read_text()); digest=lambda x:hashlib.sha256(x).hexdigest()
+k='cli.serve_readiness.not_this_daemon'
+frp=root/prior['input_hashes']['fr']['path']; enp=root/prior['input_hashes']['en']['path']; cp=root/prior['input_hashes']['context']['path']
+fr=json.loads(frp.read_bytes()); en=json.loads(enp.read_bytes());ctx=json.loads(cp.read_bytes())
+assert en[k]=='recorded, but PID reuse was detected'
+assert fr[k]=='enregistrement présent, mais réutilisation de PID détectée'
+oldfr='enregistrement présent, mais PID désormais détenu par un autre processus'
+assert frp.read_bytes().count(fr[k].encode())==1
+assert digest(frp.read_bytes().replace(fr[k].encode(),oldfr.encode(),1))==prior['input_hashes']['fr']['sha256']
+assert digest(enp.read_bytes().replace(en[k].encode(),b'recorded, but another process now holds that PID',1))==prior['input_hashes']['en']['sha256']
+# The old not_this_daemon sidecar note matched the unproven note; prove sole-note change.
+newnote=ctx[k]['note'];oldnote=ctx['cli.serve_readiness.unproven']['note']
+newlit=json.dumps(newnote,ensure_ascii=False).encode();oldlit=json.dumps(oldnote,ensure_ascii=False).encode()
+assert cp.read_bytes().count(newlit)==1
+assert digest(cp.read_bytes().replace(newlit,oldlit,1))==prior['input_hashes']['context']['sha256']
+print('DELTA PASS: exact one French value, one English value and one context note changed; other 14 target values and all remaining file formatting bytes unchanged')
+prev=old/'verify.py.txt'
+assert digest(prev.read_bytes())==next(a['sha256'] for a in prior['artifacts'] if a['path'].endswith('/verify.py.txt'))
+exec(compile(prev.read_text(),str(prev),'exec'))
+tr=lambda key,**kw:render_message(fr['cli.serve_readiness.'+key],kw,'fr')
+for count,pids in [(1,'1001'),(2,'1001, 1002'),(1000000,'1001, 1002')]:
+    reason=tr('not_this_daemon')
+    group=tr('pid_reason',count=count,pids=pids,reason=reason)
+    text=tr('unknown',count=count,device='node-a:22',reasons=group)
+    assert text.count(reason)==1 and text.count(pids)==1 and '::' not in text
+    assert 'ce PID' not in reason and 'cet identifiant' not in reason
+    print('PID REUSE GROUP count='+str(count),text)
+print('SUMMARY: number-neutral French PID-reuse diagnosis integrates with single/plural/many groups; no live-build assertion; 15-key current mechanics and retained semantic coverage')

@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "вопр.: {count}",
+  "tui.session_sidebar.footer.hub_note": "связи: {count}",
+  "tui.session_sidebar.footer.opening": "Открытие…",
+  "tui.session_sidebar.footer.refresh_failed": "Не удалось обновить",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, one {+{shown} закреплённая — прокрутите} few {+{shown} закреплённые — прокрутите} many {+{shown} закреплённых — прокрутите} other {+{shown} закреплённой — прокрутите}}",
+  "tui.session_sidebar.row.untitled": "Беседа без названия",
+  "tui.session_sidebar.section.active": "Активные сессии",
+  "tui.session_sidebar.section.pinned": "Закреплённые",
+  "tui.session_sidebar.section.previous": "Прошлые сессии",
+  "tui.session_sidebar.section.subagent": "Запуски субагентов",
+  "tui.session_sidebar.state.empty": "Бесед пока нет",
+  "tui.session_sidebar.state.error": "Не удалось загрузить беседы",
+  "tui.session_sidebar.state.loading": "Загрузка бесед…",
+  "tui.session_sidebar.title": "Сессии",
+  "tui.session_sidebar.tooltip.location": "устройство: {device}",
+  "tui.session_sidebar.tooltip.location_network": "устройство: {device} · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "устройство: {device} · {network} (последнее известное состояние)",
+  "tui.session_sidebar.tooltip.location_stale": "устройство: {device} (последнее известное состояние)",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · если сессия и дальше молчит — {command}",
+  "tui.session_sidebar.tooltip.unnamed_device": "без имени",
+  "tui.session_sidebar.tooltip.unreachable": "недоступно · {reason}"
+}

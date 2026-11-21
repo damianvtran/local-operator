@@ -1,0 +1,506 @@
+[
+  {
+    "key": "wire.session_status.retired_label",
+    "params": {
+      "base": "Gián đoạn"
+    },
+    "text": "Gián đoạn — đã ngừng để cập nhật",
+    "cells": 32,
+    "chars": 32
+  },
+  {
+    "key": "wire.session_status.interrupted",
+    "params": {},
+    "text": "Gián đoạn",
+    "cells": 9,
+    "chars": 9
+  },
+  {
+    "key": "wire.session_status.unseen_interruption",
+    "params": {},
+    "text": "Gián đoạn — chưa đọc",
+    "cells": 20,
+    "chars": 20
+  },
+  {
+    "key": "wire.session_status.retired",
+    "params": {},
+    "text": "Gián đoạn — đã ngừng để cập nhật",
+    "cells": 32,
+    "chars": 32
+  },
+  {
+    "key": "wire.session_status.unseen_retirement",
+    "params": {},
+    "text": "Gián đoạn — chưa đọc — đã ngừng để cập nhật",
+    "cells": 43,
+    "chars": 43
+  },
+  {
+    "key": "wire.session_status.signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — đã dừng bằng tín hiệu",
+    "cells": 33,
+    "chars": 33
+  },
+  {
+    "key": "wire.session_status.signal_stop",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Gián đoạn — đã dừng bằng tín hiệu qua /stop --all",
+    "cells": 49,
+    "chars": 49
+  },
+  {
+    "key": "wire.session_status.signal_stop",
+    "params": {
+      "command": "lop sessions stop synthetic-123"
+    },
+    "text": "Gián đoạn — đã dừng bằng tín hiệu qua lop sessions stop synthetic-123",
+    "cells": 69,
+    "chars": 69
+  },
+  {
+    "key": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu",
+    "cells": 44,
+    "chars": 44
+  },
+  {
+    "key": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua /stop --all",
+    "cells": 60,
+    "chars": 60
+  },
+  {
+    "key": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "lop sessions stop synthetic-123"
+    },
+    "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua lop sessions stop synthetic-123",
+    "cells": 80,
+    "chars": 80
+  },
+  {
+    "key": "wire.session_status.forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — bị buộc kết thúc",
+    "cells": 28,
+    "chars": 28
+  },
+  {
+    "key": "wire.session_status.forced_kill",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Gián đoạn — bị buộc kết thúc qua /stop --all",
+    "cells": 44,
+    "chars": 44
+  },
+  {
+    "key": "wire.session_status.forced_kill",
+    "params": {
+      "command": "lop sessions stop synthetic-123"
+    },
+    "text": "Gián đoạn — bị buộc kết thúc qua lop sessions stop synthetic-123",
+    "cells": 64,
+    "chars": 64
+  },
+  {
+    "key": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — chưa đọc — bị buộc kết thúc",
+    "cells": 39,
+    "chars": 39
+  },
+  {
+    "key": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "/stop --all"
+    },
+    "text": "Gián đoạn — chưa đọc — bị buộc kết thúc qua /stop --all",
+    "cells": 55,
+    "chars": 55
+  },
+  {
+    "key": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "lop sessions stop synthetic-123"
+    },
+    "text": "Gián đoạn — chưa đọc — bị buộc kết thúc qua lop sessions stop synthetic-123",
+    "cells": 75,
+    "chars": 75
+  },
+  {
+    "key": "wire.session_status.complete",
+    "params": {},
+    "text": "Hoàn tất",
+    "cells": 8,
+    "chars": 8
+  },
+  {
+    "key": "wire.session_status.unseen_completion",
+    "params": {},
+    "text": "Hoàn tất — chưa đọc",
+    "cells": 19,
+    "chars": 19
+  },
+  {
+    "key": "wire.session_status.recent",
+    "params": {},
+    "text": "Gần đây",
+    "cells": 7,
+    "chars": 7
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 0
+    },
+    "text": "Đã dừng (0 lượt thức dậy tạm ngưng)",
+    "cells": 35,
+    "chars": 35
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 1
+    },
+    "text": "Đã dừng (1 lượt thức dậy tạm ngưng)",
+    "cells": 35,
+    "chars": 35
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 2
+    },
+    "text": "Đã dừng (2 lượt thức dậy tạm ngưng)",
+    "cells": 35,
+    "chars": 35
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 5
+    },
+    "text": "Đã dừng (5 lượt thức dậy tạm ngưng)",
+    "cells": 35,
+    "chars": 35
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 21
+    },
+    "text": "Đã dừng (21 lượt thức dậy tạm ngưng)",
+    "cells": 36,
+    "chars": 36
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 55
+    },
+    "text": "Đã dừng (55 lượt thức dậy tạm ngưng)",
+    "cells": 36,
+    "chars": 36
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 1000000
+    },
+    "text": "Đã dừng (1.000.000 lượt thức dậy tạm ngưng)",
+    "cells": 43,
+    "chars": 43
+  },
+  {
+    "key": "wire.session_status.dormant",
+    "params": {
+      "count": 1.5
+    },
+    "text": "Đã dừng (1,5 lượt thức dậy tạm ngưng)",
+    "cells": 37,
+    "chars": 37
+  },
+  {
+    "key": "wire.session_status.error",
+    "params": {},
+    "text": "Lỗi",
+    "cells": 3,
+    "chars": 3
+  },
+  {
+    "key": "wire.session_status.unseen_error",
+    "params": {},
+    "text": "Lỗi — chưa đọc",
+    "cells": 14,
+    "chars": 14
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "Lỗi — người dùng đã dừng",
+    "cells": 24,
+    "chars": 24
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "Lỗi — runtime tự kết thúc khi chạm ngưỡng đình trệ",
+    "cells": 50,
+    "chars": 50
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "continuation_limit"
+    },
+    "text": "Lỗi — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ",
+    "cells": 61,
+    "chars": 61
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "output_limit"
+    },
+    "text": "Lỗi — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục",
+    "cells": 61,
+    "chars": 61
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "Lỗi — đã ngừng để cập nhật",
+    "cells": 26,
+    "chars": 26
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "Lỗi — runtime bị kết thúc trong lượt",
+    "cells": 36,
+    "chars": 36
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "Lỗi — runtime rời đi để cập nhật sau ngưỡng tiến triển",
+    "cells": 54,
+    "chars": 54
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "Lỗi — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp",
+    "cells": 59,
+    "chars": 59
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "Lỗi — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng",
+    "cells": 70,
+    "chars": 70
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "install_mid_update"
+    },
+    "text": "Lỗi — bản cài đặt bị thay thế trong lượt",
+    "cells": 40,
+    "chars": 40
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "owner_lost"
+    },
+    "text": "Lỗi — runtime ngừng phản hồi trong lượt",
+    "cells": 39,
+    "chars": 39
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "disposed"
+    },
+    "text": "Lỗi — phiên bị giải phóng trong lượt",
+    "cells": 36,
+    "chars": 36
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "Lỗi",
+    "cells": 3,
+    "chars": 3
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "unknown_external_synthetic"
+    },
+    "text": "Lỗi",
+    "cells": 3,
+    "chars": 3
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "Lỗi — chưa đọc — người dùng đã dừng",
+    "cells": 35,
+    "chars": 35
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "Lỗi — chưa đọc — runtime tự kết thúc khi chạm ngưỡng đình trệ",
+    "cells": 61,
+    "chars": 61
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "continuation_limit"
+    },
+    "text": "Lỗi — chưa đọc — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ",
+    "cells": 72,
+    "chars": 72
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "output_limit"
+    },
+    "text": "Lỗi — chưa đọc — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục",
+    "cells": 72,
+    "chars": 72
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "Lỗi — chưa đọc — đã ngừng để cập nhật",
+    "cells": 37,
+    "chars": 37
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "Lỗi — chưa đọc — runtime bị kết thúc trong lượt",
+    "cells": 47,
+    "chars": 47
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "Lỗi — chưa đọc — runtime rời đi để cập nhật sau ngưỡng tiến triển",
+    "cells": 65,
+    "chars": 65
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "Lỗi — chưa đọc — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp",
+    "cells": 70,
+    "chars": 70
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "Lỗi — chưa đọc — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng",
+    "cells": 81,
+    "chars": 81
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "install_mid_update"
+    },
+    "text": "Lỗi — chưa đọc — bản cài đặt bị thay thế trong lượt",
+    "cells": 51,
+    "chars": 51
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "owner_lost"
+    },
+    "text": "Lỗi — chưa đọc — runtime ngừng phản hồi trong lượt",
+    "cells": 50,
+    "chars": 50
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "disposed"
+    },
+    "text": "Lỗi — chưa đọc — phiên bị giải phóng trong lượt",
+    "cells": 47,
+    "chars": 47
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "Lỗi — chưa đọc",
+    "cells": 14,
+    "chars": 14
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "unknown_external_synthetic"
+    },
+    "text": "Lỗi — chưa đọc",
+    "cells": 14,
+    "chars": 14
+  }
+]

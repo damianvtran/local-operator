@@ -1,0 +1,32 @@
+{
+  "locale": "es",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "auditor": {
+    "agent": "i18n-auditor (terminal-status-es-audit; first independent pass)",
+    "session": "f9eeb42530ec",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "b39246e0d986",
+    "actual_model_source": "developer session-state Model field: openai/gpt-6.1-sol",
+    "fallback": "none observed",
+    "date": "2026-11-19"
+  },
+  "record_reference": {
+    "path": "record.json",
+    "sha256": "0bfd56772aa519f899fdbe484f3a463e2c1e631a6bd62a6a8c473fbf24f9907d"
+  },
+  "expected_history_sha256_at_dry_run": "133d29bbc8992b2b92758d4b6ff78407c6fb5ab3b732c863d35b07e0ffe3d27c",
+  "intended_tracked_directory": "i18n/audits/evidence/es/wire.session_status/ts1",
+  "files": {
+    "audit.log": "ca1fb2f630e949e5f188737190146b18d037ce04dca179b1f241979d888b35fe",
+    "mechanical.json": "97e70ef2ffa018c12f14c5211033e5b562b15e93b7686ea25fd041969632ffa4",
+    "receipt-dryrun.log": "4e5ae445a16f08aef7d844dd73535f76c6920aecb6de96e72dbe82bf06d4c783",
+    "receipt.json": "1c1fe357ffe269869169355b49b9127c4e9f1ec838df2ea930fea0f61e1e295c",
+    "record.json": "0bfd56772aa519f899fdbe484f3a463e2c1e631a6bd62a6a8c473fbf24f9907d",
+    "report.json": "17cab507db5e2e676e433dd0352387da9f6f310e4f565790a3daefad3e50994e",
+    "samples.json": "39ad3370ca92cc05f4d077c80501e85f58d5d8a5c6901fb98ae1a10ddccfc1c9",
+    "validate.py": "01b07454fb68b5bc2a7fe755d9f04425995ef4985920c2a0c3650eb65f3387f9"
+  },
+  "retention_state": "scratch handoff only; coordinator must retain exact bundle under canonical tracked root",
+  "companion_provenance": "All companion files were created by this auditor session. receipt-dryrun.log is actual normal ledger.append(apply=False) output; audit.log retains both failed initial control assumption and corrected rerun. report.json is reasoning notes, not execution output."
+}

@@ -1,0 +1,186 @@
+UTC: 2026-11-16T05:16:53.935381+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:16:53.937130+00:00
+$ git rev-parse HEAD
+1fc11dab96954dcc4c31abcc695c696baf2ead8c
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:16:53.995322+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python -c 'import json,hashlib,re,subprocess,unicodedata
+from pathlib import Path
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+root=Path.cwd(); ns='"'"'cli.serve_readiness'"'"'; base=root/'"'"'local_operator/i18n/catalogues'"'"'
+def pairs(items):
+    out={}
+    for k,v in items:
+        assert k not in out,k
+        out[k]=v
+    return out
+def parse(b): return json.loads(b,object_pairs_hook=pairs)
+en=parse((base/'"'"'en'"'"'/f'"'"'{ns}.json'"'"').read_bytes()); hi=parse((base/'"'"'hi'"'"'/f'"'"'{ns}.json'"'"').read_bytes()); ctx=parse((base/'"'"'en'"'"'/f'"'"'{ns}.context.json'"'"').read_bytes())
+oldbytes=subprocess.check_output(['"'"'git'"'"','"'"'show'"'"',f'"'"'HEAD:local_operator/i18n/catalogues/hi/{ns}.json'"'"'])
+old=parse(oldbytes)
+previous=parse((root/'"'"'i18n/audits/evidence/hi/cli.serve_readiness/sd1r/record.json'"'"').read_bytes())
+assert hashlib.sha256(oldbytes).hexdigest()==previous['"'"'input_hashes'"'"']['"'"'hi'"'"']['"'"'sha256'"'"'],'"'"'HEAD target not same as prior coverage'"'"'
+unchanged=sorted(k for k in old if old[k]==hi[k]); changed=sorted(k for k in old if old[k]!=hi[k]); new=sorted(set(hi)-set(old))
+assert len(unchanged)==4 and len(changed)==7 and len(new)==4
+assert {k.rsplit('"'"'.'"'"',1)[-1] for k in unchanged}=={'"'"'install_unknown'"'"','"'"'cgroup_unknown'"'"','"'"'stale'"'"','"'"'other_unit'"'"'}
+# Verify exact raw JSON entry bytes, not just equivalent decoded strings.
+for key in unchanged:
+    pattern=rb'"'"'^  '"'"'+re.escape(json.dumps(key).encode())+rb'"'"': .*?,?$'"'"'
+    assert re.search(pattern,oldbytes,re.M).group()==re.search(pattern,(base/'"'"'hi'"'"'/f'"'"'{ns}.json'"'"').read_bytes(),re.M).group(),key
+print('"'"'UNCHANGED_4_EXACT_ENTRY_BYTES'"'"',unchanged)
+print('"'"'CHANGED_7'"'"',changed); print('"'"'NEW_4'"'"',new)
+assert hi.keys()==en.keys()==ctx.keys() and len(hi)==15
+cats=set(parse((root/'"'"'local_operator/i18n/data/plural_rules.json'"'"').read_bytes())['"'"'locales'"'"']['"'"'hi'"'"']['"'"'categories'"'"'])
+def structure(nodes): return [(n.name,n.kind,n.skeleton,[(s,structure(body)) for s,body in n.parts]) for n in nodes if isinstance(n,rt._Arg)]
+params={'"'"'device'"'"':'"'"'node-a'"'"','"'"'pids'"'"':'"'"'21, 22'"'"','"'"'builds'"'"':'"'"'v0.90.0'"'"','"'"'install'"'"':'"'"'v0.91.0'"'"','"'"'recorded'"'"':'"'"'v0.89.0'"'"','"'"'holders'"'"':'"'"'example.service'"'"','"'"'reason'"'"':'"'"'निदान'"'"','"'"'reasons'"'"':'"'"'निदान'"'"'}
+for key,text in hi.items():
+    assert structure(rt.parse_message(text))==structure(rt.parse_message(en[key])),key
+    assert rt.message_arguments(text)==rt.message_arguments(en[key]),key
+    assert re.findall(r'"'"'`[^`]*`'"'"',text)==re.findall(r'"'"'`[^`]*`'"'"',en[key]),key
+    assert re.findall(r'"'"'</?[A-Za-z][^>]*>'"'"',text)==re.findall(r'"'"'</?[A-Za-z][^>]*>'"'"',en[key]),key
+    assert not any(unicodedata.bidirectional(c) in ('"'"'RLE'"'"','"'"'RLO'"'"','"'"'LRE'"'"','"'"'LRO'"'"','"'"'PDF'"'"','"'"'RLI'"'"','"'"'LRI'"'"','"'"'FSI'"'"','"'"'PDI'"'"') for c in text),key
+    assert not re.search('"'"'[०-९\u200c\u200d]'"'"',text),key
+    for selectors in rt.plural_selectors(text): assert set(selectors)==cats,key
+    print('"'"'MECHANICAL_PASS'"'"',key,rt.message_arguments(text),'"'"'hints='"'"',{k:v for k,v in ctx[key].items() if k in ('"'"'maxChars'"'"','"'"'maxCells'"'"')})
+    for count in ((0,1,2,5,21) if rt.plural_selectors(text) else (1,)):
+        rendered=rt.render_message(text,dict(params,count=count),'"'"'hi'"'"')
+        print('"'"'RENDER'"'"',key,'"'"'count='"'"',count,'"'"'chars='"'"',len(rendered),'"'"'cells='"'"',cell_len(rendered),rendered)
+print('"'"'PASS: all 15 keys; exact argument/type/branch structure; complete Hindi one/other; exact code/tags; no bidi controls/native digits/join controls.'"'"')
+# Opaque literal probes: strings containing formatting-like bytes must survive exactly once, never reparsed.
+for key,text in hi.items():
+    p={name:('"'"'[probe:'"'"'+name+'"'"'] {count, plural, one {X} other {Y}} --flag /a:b [red] 123'"'"') for name,kind in rt.message_arguments(text) if kind=='"'"'simple'"'"'}
+    for count in ((1,2) if rt.plural_selectors(text) else (1,)):
+        rendered=rt.render_message(text,dict(p,count=count),'"'"'hi'"'"')
+        for name,value in p.items(): assert rendered.count(value)==1,(key,name)
+print('"'"'PASS: opaque string parameters preserved exactly once in every applicable singular/plural branch; no recursive formatting.'"'"')
+T=lambda suffix,**p:rt.render_message(hi[ns+'"'"'.'"'"'+suffix],p,'"'"'hi'"'"')
+reason=T('"'"'unproven'"'"')+'"'"'; '"'"'+T('"'"'recorded_gap'"'"',recorded='"'"'v0.89.0'"'"',install='"'"'v0.91.0'"'"')
+group=T('"'"'pid_reason'"'"',count=2,pids='"'"'21, 22'"'"',reason=reason)
+composed=T('"'"'unknown'"'"',count=5,device='"'"'node-a'"'"',reasons=group+'"'"' '"'"'+T('"'"'and_more'"'"',count=3))
+assert composed.count(T('"'"'unproven'"'"'))==1
+assert composed.count(T('"'"'recorded_gap'"'"',recorded='"'"'v0.89.0'"'"',install='"'"'v0.91.0'"'"'))==1
+assert '"'"':'"'"' not in composed # Actual sample values lack colons; grouping has no duplicate colon scaffold.
+print('"'"'COMPOSED_GROUPED_DIAGNOSIS'"'"',composed)
+for suffix in ('"'"'identity_no_action'"'"','"'"'identity_restart'"'"','"'"'identity_restart_manual'"'"'):
+    p={'"'"'count'"'"':2} if suffix=='"'"'identity_no_action'"'"' else {'"'"'device'"'"':'"'"'node-a'"'"'}
+    print('"'"'REMEDY'"'"',suffix,T(suffix,**p))
+print('"'"'NOTE: text-only catalogue renders; source selection reviewed read-only, NOT executed. No services/tests/providers/frame capture.'"'"')
+for rel in ['"'"'local_operator/i18n/catalogues/en/cli.serve_readiness.json'"'"','"'"'local_operator/i18n/catalogues/en/cli.serve_readiness.context.json'"'"','"'"'local_operator/i18n/catalogues/hi/cli.serve_readiness.json'"'"']:
+    print('"'"'INPUT_SHA256'"'"',rel,hashlib.sha256((root/rel).read_bytes()).hexdigest())
+'
+UNCHANGED_4_EXACT_ENTRY_BYTES ['cli.serve_readiness.cgroup_unknown', 'cli.serve_readiness.install_unknown', 'cli.serve_readiness.other_unit', 'cli.serve_readiness.stale']
+CHANGED_7 ['cli.serve_readiness.identity_restart', 'cli.serve_readiness.not_reporting', 'cli.serve_readiness.not_this_daemon', 'cli.serve_readiness.recorded_gap', 'cli.serve_readiness.unknown', 'cli.serve_readiness.unknown_state', 'cli.serve_readiness.unproven']
+NEW_4 ['cli.serve_readiness.and_more', 'cli.serve_readiness.identity_no_action', 'cli.serve_readiness.identity_restart_manual', 'cli.serve_readiness.pid_reason']
+MECHANICAL_PASS cli.serve_readiness.unproven () hints= {}
+RENDER cli.serve_readiness.unproven count= 1 chars= 130 cells= 88 रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)
+MECHANICAL_PASS cli.serve_readiness.not_reporting () hints= {}
+RENDER cli.serve_readiness.not_reporting count= 1 chars= 66 cells= 47 रिकॉर्ड मौजूद है, लेकिन कोई जवाब नहीं मिल रहा (हार्टबीट रुक गई है)
+MECHANICAL_PASS cli.serve_readiness.not_this_daemon () hints= {}
+RENDER cli.serve_readiness.not_this_daemon count= 1 chars= 72 cells= 53 रिकॉर्ड मौजूद है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है
+MECHANICAL_PASS cli.serve_readiness.unknown_state () hints= {}
+RENDER cli.serve_readiness.unknown_state count= 1 chars= 26 cells= 16 अज्ञात स्थिति वाला रिकॉर्ड
+MECHANICAL_PASS cli.serve_readiness.install_unknown () hints= {}
+RENDER cli.serve_readiness.install_unknown count= 1 chars= 72 cells= 51 ऐसे बिल्ड पर चलता है जिसकी तुलना इंस्टॉल किए गए बिल्ड से नहीं की जा सकती
+MECHANICAL_PASS cli.serve_readiness.cgroup_unknown () hints= {}
+RENDER cli.serve_readiness.cgroup_unknown count= 1 chars= 68 cells= 49 ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है
+MECHANICAL_PASS cli.serve_readiness.recorded_gap (('recorded', 'simple'), ('install', 'simple')) hints= {}
+RENDER cli.serve_readiness.recorded_gap count= 1 chars= 68 cells= 50 रिकॉर्ड में बिल्ड v0.89.0 दर्ज है; इंस्टॉल किया गया बिल्ड v0.91.0 है
+MECHANICAL_PASS cli.serve_readiness.unknown (('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) hints= {}
+RENDER cli.serve_readiness.unknown count= 0 chars= 122 cells= 96 node-a पर `lop serve` डेमन — निदान, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+RENDER cli.serve_readiness.unknown count= 1 chars= 122 cells= 96 node-a पर `lop serve` डेमन — निदान, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+RENDER cli.serve_readiness.unknown count= 2 chars= 124 cells= 95 node-a पर `lop serve` डेमन — निदान, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+RENDER cli.serve_readiness.unknown count= 5 chars= 124 cells= 95 node-a पर `lop serve` डेमन — निदान, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+RENDER cli.serve_readiness.unknown count= 21 chars= 124 cells= 95 node-a पर `lop serve` डेमन — निदान, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+MECHANICAL_PASS cli.serve_readiness.stale (('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) hints= {}
+RENDER cli.serve_readiness.stale count= 0 chars= 150 cells= 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+RENDER cli.serve_readiness.stale count= 1 chars= 150 cells= 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+RENDER cli.serve_readiness.stale count= 2 chars= 153 cells= 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+RENDER cli.serve_readiness.stale count= 5 chars= 153 cells= 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+RENDER cli.serve_readiness.stale count= 21 chars= 153 cells= 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+MECHANICAL_PASS cli.serve_readiness.other_unit (('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) hints= {}
+RENDER cli.serve_readiness.other_unit count= 0 chars= 96 cells= 81 node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count= 1 chars= 96 cells= 81 node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count= 2 chars= 94 cells= 79 node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count= 5 chars= 94 cells= 79 node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count= 21 chars= 94 cells= 79 node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+MECHANICAL_PASS cli.serve_readiness.identity_restart (('device', 'simple'),) hints= {}
+RENDER cli.serve_readiness.identity_restart count= 1 chars= 149 cells= 115 node-a पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है
+MECHANICAL_PASS cli.serve_readiness.pid_reason (('count', 'plural'), ('pids', 'simple'), ('reason', 'simple')) hints= {}
+RENDER cli.serve_readiness.pid_reason count= 0 chars= 27 cells= 21 प्रक्रिया ID 21, 22 — निदान
+RENDER cli.serve_readiness.pid_reason count= 1 chars= 27 cells= 21 प्रक्रिया ID 21, 22 — निदान
+RENDER cli.serve_readiness.pid_reason count= 2 chars= 32 cells= 24 प्रक्रियाओं के ID 21, 22 — निदान
+RENDER cli.serve_readiness.pid_reason count= 5 chars= 32 cells= 24 प्रक्रियाओं के ID 21, 22 — निदान
+RENDER cli.serve_readiness.pid_reason count= 21 chars= 32 cells= 24 प्रक्रियाओं के ID 21, 22 — निदान
+MECHANICAL_PASS cli.serve_readiness.and_more (('count', 'plural'),) hints= {}
+RENDER cli.serve_readiness.and_more count= 0 chars= 9 cells= 8 और 0 अन्य
+RENDER cli.serve_readiness.and_more count= 1 chars= 9 cells= 8 और 1 अन्य
+RENDER cli.serve_readiness.and_more count= 2 chars= 9 cells= 8 और 2 अन्य
+RENDER cli.serve_readiness.and_more count= 5 chars= 9 cells= 8 और 5 अन्य
+RENDER cli.serve_readiness.and_more count= 21 chars= 10 cells= 9 और 21 अन्य
+MECHANICAL_PASS cli.serve_readiness.identity_no_action (('count', 'plural'),) hints= {}
+RENDER cli.serve_readiness.identity_no_action count= 0 chars= 156 cells= 107 जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count= 1 chars= 156 cells= 107 जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count= 2 chars= 159 cells= 107 जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count= 5 chars= 159 cells= 107 जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count= 21 chars= 159 cells= 107 जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+MECHANICAL_PASS cli.serve_readiness.identity_restart_manual (('device', 'simple'),) hints= {}
+RENDER cli.serve_readiness.identity_restart_manual count= 1 chars= 160 cells= 119 node-a पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop serve` को मैन्युअल रूप से फिर शुरू करें; यह मौजूदा प्रक्रिया में खुद को फिर से लोड नहीं कर सकता
+PASS: all 15 keys; exact argument/type/branch structure; complete Hindi one/other; exact code/tags; no bidi controls/native digits/join controls.
+PASS: opaque string parameters preserved exactly once in every applicable singular/plural branch; no recursive formatting.
+COMPOSED_GROUPED_DIAGNOSIS node-a पर `lop serve` डेमन — प्रक्रियाओं के ID 21, 22 — रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी); रिकॉर्ड में बिल्ड v0.89.0 दर्ज है; इंस्टॉल किया गया बिल्ड v0.91.0 है और 3 अन्य, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+REMEDY identity_no_action जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+REMEDY identity_restart node-a पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है
+REMEDY identity_restart_manual node-a पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop serve` को मैन्युअल रूप से फिर शुरू करें; यह मौजूदा प्रक्रिया में खुद को फिर से लोड नहीं कर सकता
+NOTE: text-only catalogue renders; source selection reviewed read-only, NOT executed. No services/tests/providers/frame capture.
+INPUT_SHA256 local_operator/i18n/catalogues/en/cli.serve_readiness.json c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10
+INPUT_SHA256 local_operator/i18n/catalogues/en/cli.serve_readiness.context.json 40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428
+INPUT_SHA256 local_operator/i18n/catalogues/hi/cli.serve_readiness.json 40a11e844ff0eb3761b4bcfb50842970cc9469fef38b0f18cc23fec493405f47
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:19:07.138671+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --help
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:19:07.402096+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace cli.serve_readiness
+035dad33e63cd7aee747a3dace81bc175470cff6cb435fc7df954eb7b7100513
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:19:07.719907+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/hi/cli.serve_readiness/sd3/ledger-receipt.json --expected-history-sha 035dad33e63cd7aee747a3dace81bc175470cff6cb435fc7df954eb7b7100513 --dry-run
+i18n/audit-history/hi/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE: 0
+

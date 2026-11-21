@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original paths/provenance/verdicts remain unchanged. Integration-only retention mapping, not an audit. No eligibility or history promotion in Phase A.",
+  "locale": "zh-CN",
+  "namespace": "wire.session_status",
+  "round": "first_audits",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649",
+  "original_receipt": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/ledger-receipt.json",
+  "original_receipt_sha256": "7a183235838e3412c3b5afed13098a69c5c1ce188638bc6c5131f431e9e1ba12",
+  "original_record": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/record.json",
+  "original_record_sha256": "838cb32d583e80a5670a1e991e5d46eb3d15b3611b2e7ea8959dd73e1e4ad7bc",
+  "original_status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e9c45b5505eb",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session context Model: openai/gpt-6.1-sol",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "ba2da228c32c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session context Model: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_from_translator_session": "e9c45b5505eb",
+    "independent_from_translator": true,
+    "date": "2026-11-19T20:54:08.494255+00:00",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "scope": "FIRST independent full 17-key safety-copy audit; all ICU select arms and count 0/1/2/55"
+  },
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/record.json",
+      "sha256": "838cb32d583e80a5670a1e991e5d46eb3d15b3611b2e7ea8959dd73e1e4ad7bc"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/ledger-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/ledger-receipt.json",
+      "sha256": "7a183235838e3412c3b5afed13098a69c5c1ce188638bc6c5131f431e9e1ba12"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/input-hashes.json",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/input-hashes.json",
+      "sha256": "3b46ad4e37d06c4e129cd3ecdc63b564d8a0bfafba50adf12e2017b33fba9076"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/translator-receipt.json",
+      "sha256": "8c8583ce1b467365cf3ac4fcdde0042d454cb2bf55c635af77600716b8c85d0d"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/runner.py.txt",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/runner.py.txt",
+      "sha256": "80efe810d5234eab8e43c6a46e186e5d68682aa74f5b7696f82fa8844414d879"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/report.md",
+      "sha256": "4aeb54bcff0642864234b814cc96c4ba56af010de596ebdf3524daa4d11ab5ca"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/candidate.json",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/candidate.json",
+      "sha256": "6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/samples.json",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/samples.json",
+      "sha256": "40c55c55bde9264ee2a0528da087384acd6167cba22bed545f31c29013af4d31"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/initial-failed-audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/initial-failed-audit.log",
+      "sha256": "26d9cc8fb1928825107a5dc202e3b37e5ac2e414d8faf978a965d0d1d267b366"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/audit.log",
+      "sha256": "416691e5b8f7c2114297ce167b7469e408a96bafd73ebc90b620fd2b94030333"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/ledger-dry-run.log",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/ledger-dry-run.log",
+      "sha256": "7f8a9b076380998672a38877dd242ba933746715889a5680eac3f2b5ec10c6c2"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/ba2da228c32c/scratchpad/zhts1ba2/receipt.json",
+      "sha256": "c34cf8d87550a831c57f060f12bb7212d29af4bdac67659254c2e2e084887640"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/translator/zh-status-checks.log",
+      "original_path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/zh-status-checks.log",
+      "sha256": "ddb859e9042635df2a19c62c993930709159eb2e29a14a3a3d4dbf0a0db33697"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/translator/check_zh_status.py",
+      "original_path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/check_zh_status.py",
+      "sha256": "0bb4a38470529c19bb6cba94719a65ed4a9d6039b8af95303b4e5aebbfba63b1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/translator/zh-status-samples.json",
+      "original_path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/zh-status-samples.json",
+      "sha256": "f29e4bed9f4ee444e22125f9a90bd6aa1c8206288191901a4ac299e01bc95dde"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.session_status/zhts1ba2/translator/zh-status-translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/zh-status-translator-receipt.json",
+      "sha256": "8c8583ce1b467365cf3ac4fcdde0042d454cb2bf55c635af77600716b8c85d0d"
+    }
+  ]
+}

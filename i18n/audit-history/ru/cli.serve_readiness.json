@@ -1,0 +1,202 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "history_sha256": "3da099a069863c09be5f1068c3d22b8c525f544efe42edcad7079b0edda4435f",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+      "status": "changes_requested",
+      "translator": {
+        "agent": "acf0a84cd992",
+        "session": "acf0a84cd992",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Manager task instruction"
+      },
+      "auditor": {
+        "agent": "independent-ru-auditor",
+        "session": "b8c027b19533",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "acf0a84cd992",
+        "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol; no fallback observed",
+        "fallback": null
+      },
+      "audit_date": "2026-11-16",
+      "unresolved_blocker_major_count": 2,
+      "finding_ids": [
+        "RU-SD1-01",
+        "RU-SD1-02",
+        "RU-SD1-03"
+      ],
+      "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/record.json; 11 keys; 0 blocker, 2 major, 1 minor; independent ru audit sd1, actual openai/gpt-6.1-sol. History append delegated to parent."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+      "status": "passed",
+      "translator": {
+        "agent": "acf0a84cd992",
+        "session": "acf0a84cd992",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Manager task instruction"
+      },
+      "auditor": {
+        "agent": "independent-ru-auditor",
+        "session": "b8c027b19533",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "acf0a84cd992",
+        "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol; no fallback observed",
+        "fallback": null
+      },
+      "audit_date": "2026-11-16",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "fixed_finding_ids": [
+        "RU-SD1-01",
+        "RU-SD1-02",
+        "RU-SD1-03"
+      ],
+      "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd1r/record.json; sd1 remediation: RU-SD1-01/02/03 fixed; 11-key coverage retained, 3 changed keys re-audited; 0 unresolved blocker/major."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+      "status": "changes_requested",
+      "translator": {
+        "agent": "170903662c6e",
+        "session": "170903662c6e",
+        "model": null,
+        "actual_model_source": "Current translation job identified by manager; actual model for this job not supplied",
+        "prior_translator_session": "acf0a84cd992",
+        "prior_model": "openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "independent-ru-auditor",
+        "session": "b8c027b19533",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "170903662c6e",
+        "actual_model_source": "Current session runtime declaration: openai/gpt-6.1-sol; no fallback observed",
+        "fallback": null
+      },
+      "audit_date": "2026-11-16",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "RU-SD3-01"
+      ],
+      "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/record.json; sd3: RU-SD3-01 major, singular deictic after grouped PIDs; 11 changed/new audited, 4 unchanged byte-proven; 15-key mechanics passed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+      "status": "passed",
+      "translator": {
+        "agent": "7f2b030d2636",
+        "session": "7f2b030d2636",
+        "model": null,
+        "actual_model_source": "Remediation job identified by manager; its actual model was not supplied"
+      },
+      "auditor": {
+        "agent": "independent-ru-auditor",
+        "session": "b8c027b19533",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "7f2b030d2636",
+        "actual_model_source": "Session runtime declaration; no fallback event observed/reported",
+        "fallback": null,
+        "fallback_observation": "No alternate model event is visible in this audit session; no model identity inferred"
+      },
+      "audit_date": "2026-11-16",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "fixed_finding_ids": [
+        "RU-SD3-01"
+      ],
+      "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/record.json; sd3r: RU-SD3-01 fixed; 14 unchanged keys byte-proven; all 15 mechanically rechecked; 0 unresolved blocker/major."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+      "status": "passed",
+      "audit_date": "2026-11-16",
+      "auditor": {
+        "agent": "Local Operator independent SECOND i18n auditor sd4r",
+        "session": "85af124f4a9f",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Host session runtime declaration, same resumed independent auditor session.",
+        "fallback": {
+          "observed": false,
+          "reported": false,
+          "statement": "No fallback observed or reported; not inferred from another agent."
+        },
+        "independent_from_translator_session": true,
+        "translator_session": "7f2b030d2636",
+        "independence": "No translation or source authorship; current seven replacements independently inspected. No first-auditor remediation reports consulted; original accepted finding ID supplied by parent."
+      },
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "7f2b030d2636",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "none per parent-provided provenance; not independently inferred",
+        "provenance_source": "Current requesting parent message."
+      },
+      "key_count": 15,
+      "key_coverage": [
+        "cli.serve_readiness.unproven",
+        "cli.serve_readiness.not_reporting",
+        "cli.serve_readiness.not_this_daemon",
+        "cli.serve_readiness.unknown_state",
+        "cli.serve_readiness.install_unknown",
+        "cli.serve_readiness.cgroup_unknown",
+        "cli.serve_readiness.recorded_gap",
+        "cli.serve_readiness.unknown",
+        "cli.serve_readiness.stale",
+        "cli.serve_readiness.other_unit",
+        "cli.serve_readiness.identity_restart",
+        "cli.serve_readiness.pid_reason",
+        "cli.serve_readiness.and_more",
+        "cli.serve_readiness.identity_no_action",
+        "cli.serve_readiness.identity_restart_manual"
+      ],
+      "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd4r/record.json; sd4r SECOND: PID-reuse fixed; 14 exact retained; 15-key checked; N1 deferred",
+      "record_reference": "i18n/audits/evidence/ru/cli.serve_readiness/sd4r/record.json",
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [],
+        "open_finding_ids": [],
+        "findings_report": "i18n/audits/evidence/ru/cli.serve_readiness/sd4r/report.md"
+      },
+      "bundle_companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd4r/report.md",
+          "sha256": "ce42cb0c59a3ee476c455133378196a33b6f183cd0466322a4525ae1e3f702b0"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd4r/rendered.txt",
+          "sha256": "ee17acee3426506255e4095d6399f1b76de6a4e1dd63eedcba5ff700167b6c24"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd4r/delta.json",
+          "sha256": "cb767f2e3bb706b911269269a03fd4cbd083e7704d168ba5f7d78cf1d5d4eb94"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/audit.log",
+          "sha256": "22d0c52041490b641e8344b1b62cf856a2907752d144204685f80a5396741266"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/input-manifest.json",
+          "sha256": "e48d1546f2642e53c6562f9847fa034e7b72435e59eb158b1a6214e72140c731"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/verify.py.txt",
+          "sha256": "43ad159523eacbcd35ab868b31e475d4f374679e8875d4ca64c603d4d9f6ba2f"
+        }
+      ]
+    }
+  ]
+}

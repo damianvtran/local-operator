@@ -457,7 +457,7 @@ def test_a_stale_broker_refuses_rather_than_serving_unnotified(
         # Actionable, not merely fatal: the operator is told what to run, and
         # the pid is present because `status` cannot answer through the same
         # version gate.
-        assert "lop secret broker restart" in str(refusal.value)
+        assert "lop secret broker stop" in str(refusal.value)
         assert isinstance(refusal.value.pid, int)
 
         # The distinction that carries the safety property: an unreachable

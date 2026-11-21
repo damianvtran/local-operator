@@ -1,0 +1,11 @@
+{
+  "receipt-dry-run.log": "4ffe3ef79bb2e9d283d1226c8a160f030f6602995b92624774ea446f23e2cee6",
+  "record.json": "cd65055ba5d941c6fe726232bf64286943be1f95e3a96166985aba26902c742f",
+  "audit.py": "091ffb58cf1fab734c06f132cd9c7e4c9b866270bc50a268c67989f8ea1b2a17",
+  "report.md": "2f8ddb0babf0fbde172e9d87e3a8f1e3f6e37cf8d6cfbf9e33d1d8ef4804c6dc",
+  "mechanical.json": "66f74918814c209204f1fe769af59466ce9061ea8f362ded79ae679bb92c31db",
+  "setup-control-mistake.log": "3d96719e2c4a8897a1f9a60d470fca2839ad67c01881cf71159ec5adc82f08f2",
+  "audit.log": "740ced7bdb1f2b5372f7bd3cb4aab3c7a0f33d1b7cf0b5f475bef7fef987532f",
+  "expected-history-sha.txt": "dfa8fcb3b52220f8cf4833fe7b4e0113c029af4269ad5c8bb42f9be00b216c46",
+  "receipt.json": "a0ac1fc7dee593ba2eaa3156b0e6fa1752c4d10d6f2749ae37cc8c5df0f06c81"
+}

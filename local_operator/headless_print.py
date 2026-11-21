@@ -431,7 +431,10 @@ class PrintRenderer:
             # Pre-existing on the `✗ <name> failed` line this replaced; fixed
             # here rather than deferred because the notice is now the only
             # report an operator gets.
-            text = sanitize_prompt_line(event.text)
+            # `keep_isolates`: a notice's balanced LRI…PDI pairs (the Urdu
+            # sign-in notice keeps each command whole with them) pass through;
+            # every other format character is still escaped (see the helper).
+            text = sanitize_prompt_line(event.text, keep_isolates=True)
             self.console.print(f"{glyph}{text}", style=style, highlight=False, markup=False)
         elif isinstance(event, OutputValidationEvent):
             # One dim stderr line per REJECTED attempt, and nothing on success

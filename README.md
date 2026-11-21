@@ -251,6 +251,7 @@ chain. `/usage` shows quota windows and spend, `/failovers` the cascade.
 | --- | --- |
 | ChatGPT / OpenAI | `lop login openai` (Plus/Pro; `openai-device` headless), or `OPENAI_API_KEY` |
 | Claude / Anthropic | `lop login anthropic` (Pro/Max), or `ANTHROPIC_API_KEY` |
+| Claude on Amazon Bedrock | `lop login bedrock` (Bedrock API key), `AWS_BEARER_TOKEN_BEDROCK`, or an AWS role ([guide](docs/providers/BEDROCK.md)) |
 | Kimi (Moonshot) | `lop login kimi` / `kimi-wechat`, or `KIMI_API_KEY` |
 | Grok / xAI | `lop login xai-oauth`, or `XAI_API_KEY` |
 | Z.AI (GLM) | `lop login zai-oauth` (GLM Coding Plan), or `ZAI_API_KEY` |
@@ -374,6 +375,11 @@ projects; thank you to their authors and contributors:
 [awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills) (VoltAgent).
 What each one informed, and a note on reuse and credit:
 [credits in full](docs/guide/credits.md).
+
+Session voice credits [qwen-audio-agent](https://github.com/QwenAudio/qwen-audio-agent) (QwenAudio),
+[speech-to-speech](https://github.com/huggingface/speech-to-speech) (Hugging Face), the Qwen3-TTS, Parakeet and
+Smart Turn models, and [Silero VAD](https://github.com/snakers4/silero-vad) (Silero Team); not reviewed or endorsed
+by them. Speech runs through Radient or your own ElevenLabs key; see [credits in full](docs/guide/credits.md#session-voice).
 
 Core contributor: Damian Tran &lt;[damian@gominerva.com](mailto:damian@gominerva.com)&gt;.
 

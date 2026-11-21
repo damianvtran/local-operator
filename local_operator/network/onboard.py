@@ -1089,6 +1089,10 @@ class OnboardRun:
         self.root = root
         self.facts: dict[str, str] = {}
         self.invite_id = ""
+        #: Wall-clock expiry of the minted invite, so the pre-approval dies with it.
+        self.invite_expires_at = 0.0
+        #: The joiner a :class:`PairPreApproval` was written for ("" = none yet).
+        self.pre_approved_joiner = ""
         self.invite_path: Path | None = None
         #: The network the invite joins, from the mint's own payload — carried
         #: so the join-failure copy can compare it against what a serving relay
@@ -1164,31 +1168,94 @@ class OnboardRun:
                 False, "the invite was minted but its token file was not written; nothing ran"
             )
         self.invite_path = Path(path)
-        from local_operator.network import store as network_store
-        from local_operator.network.types import PairDecision
-
-        network_store.save_pair_decision(
-            PairDecision(
-                invite_id=self.invite_id,
-                decision="admit",
-                matched=True,
-                reason="",
-                answered_by=f"approval:{self.approval_id}",
-                shares=[],
-            )
-        )
+        try:
+            self.invite_expires_at = time.time() + float(payload.get("expires_in_s") or 0)
+        except (TypeError, ValueError):
+            self.invite_expires_at = 0.0
+        # THE PRE-APPROVAL NAMES ITS JOINER (security review round 2, S-R2-1). When the
+        # card carries the node's mesh id the invite is bound to it above and the
+        # pre-approval is written now; otherwise it waits for the join step, which
+        # reads the node's own identity first. Never written unbound.
+        pre_answered = bool(device_id) and self._write_pre_approval(device_id)
         return _StepOutcome(
             True,
             f"invite {self.invite_id} minted for role {role}"
             + (f" bound to {device_id}" if device_id else "")
-            + "; the approval pre-answered the pairing confirm",
+            + (
+                "; the approval pre-answered the pairing confirm"
+                if pre_answered
+                # Q-R3-2: a fresh host has no identity, so nothing gets bound at
+                # the join step either; the summary must not promise a binding.
+                else "; the approval will be bound at the join step if the node already "
+                "has a mesh identity"
+            ),
             {
                 "invite_id": self.invite_id,
                 "role": role,
                 "device_bound": device_id,
                 "expires_in_s": payload.get("expires_in_s"),
-                "pre_answered": True,
+                "pre_answered": pre_answered,
             },
+        )
+
+    def _write_pre_approval(self, joiner_device_id: str) -> bool:
+        """Pre-answer the inviter's confirm for THIS invite and THIS joiner only.
+
+        WHY NOT A GENERIC DECISION (security review round 2, S-R2-1): the relay's
+        stage-2 flip now clears every generic decision for the invite, because an
+        unstamped one cannot prove who wrote it. A :class:`PairPreApproval` is the
+        one record it accepts in place of a person, and only when the authenticated
+        joiner is ``joiner_device_id``; it is consumed once, under the flip's lock,
+        and expires with the invite. The wire code compare still runs first.
+        """
+        if not (self.invite_id and joiner_device_id):
+            return False
+        from local_operator.network import store as network_store
+        from local_operator.network.types import PairPreApproval
+
+        expires_at = self.invite_expires_at
+        if expires_at <= time.time():
+            # The minting CLI did not say how long the invite lives: an approval that
+            # outlived its invite would be read by nothing, so it lives no longer
+            # than the longest a ceremony can park.
+            from local_operator.network.handshake import PAIR_PARK_CEILING_S
+
+            expires_at = time.time() + PAIR_PARK_CEILING_S
+        network_store.save_pre_approval(
+            PairPreApproval(
+                invite_id=self.invite_id,
+                network_id=self.invite_network_id,
+                joiner_device_id=joiner_device_id,
+                answered_by=f"approval:{self.approval_id}",
+                expires_at=expires_at,
+            )
+        )
+        self.pre_approved_joiner = joiner_device_id
+        return True
+
+    def _awaiting_card_sentence(self) -> str:
+        """What the operator is told when the join must wait for a person.
+
+        A brand-new host has no mesh identity until ``lop network join`` mints one,
+        so no pre-approval can name it and its ceremony parks a pairing card on this
+        device instead (fail closed). Saying so is what keeps the join step from
+        looking hung. Where this device can answer cards (the signed app's
+        attestation listener is up) the sentence names Mesh approvals and no
+        command; only a device that cannot answer cards is pointed at the terminal.
+        """
+        from local_operator.network import pairing_attest
+
+        name = str(self.view.device.get("name") or "the new device")
+        if pairing_attest.cards_answerable_here(self.root):
+            return (
+                f"{name} has no mesh identity yet, so it is waiting for approval: open "
+                "Mesh approvals in the Local Operator app on this Mac and confirm its "
+                "pairing card"
+            )
+        return (
+            f"{name} has no mesh identity yet, so it is waiting for approval: this "
+            "device cannot answer pairing cards, so confirm it here with "
+            "`lop network confirm`"
         )
 
     def step_pre_read(self) -> _StepOutcome:
@@ -1503,6 +1570,15 @@ class OnboardRun:
         satisfied = self._join_already_active(identity_before)
         if satisfied is not None:
             return satisfied
+        # BIND THE PRE-APPROVAL NOW if the card could not (S-R2-1): the node's own
+        # id, read before the join, is the identity the ceremony will authenticate.
+        # A node naming another device's id only makes the approval match nothing,
+        # so the ceremony falls back to a pairing card. No identity at all (a fresh
+        # host) writes none: the join parks a card, and the operator is told where.
+        awaiting_card = ""
+        if not self.pre_approved_joiner and not self._write_pre_approval(identity_before):
+            awaiting_card = self._awaiting_card_sentence()
+            print(awaiting_card, file=sys.stderr, flush=True)
         remote_token = f"/tmp/lop-invite-{self.invite_id}.invite"
         pushed = self.transport.copy(self.invite_path, remote_token)
         if pushed.rc != 0:
@@ -1719,6 +1795,15 @@ class OnboardRun:
                     data["relay_state"] = str(status.get("relay_state") or "")
                 else:
                     detail = f"the join did not complete ({embedded})"
+                if awaiting_card:
+                    data["awaiting_card"] = True
+                    # The join waited on a pairing card: the failure names where the
+                    # approval was waiting — unless a person already answered it with
+                    # a decline (Q-R3-2), where "waiting … confirm it" would tell the
+                    # operator to act on a card that is closed. ``declined_remote`` is
+                    # the joiner's own code for that answer (``handshake``).
+                    if refusal != "declined_remote":
+                        detail = f"{detail}; {awaiting_card}"
                 # The token file is removed by the ``finally`` below — one place.
                 return _StepOutcome(False, detail, data)
             after = self._node_json("lop network identity show", timeout=60.0)
@@ -1729,7 +1814,8 @@ class OnboardRun:
                 True,
                 f"joined {payload.get('name') or 'the network'} as {device_id}"
                 + (" (identity minted)" if not identity_before else "")
-                + "; the code compare passed on the inviting side",
+                + "; the code compare passed on the inviting side"
+                + ("; approved on its pairing card" if awaiting_card else ""),
                 {
                     "invite_id": self.invite_id,
                     "device_id": device_id,
@@ -1744,6 +1830,7 @@ class OnboardRun:
                     # the compare saw.
                     "sas": payload.get("sas"),
                     "identity_minted": not identity_before,
+                    "awaiting_card": bool(awaiting_card),
                 },
             )
         finally:
@@ -3251,6 +3338,9 @@ def _release_invite_decision(run: OnboardRun) -> None:
 
     try:
         network_store.clear_pair_decision(run.invite_id)
+        # The pre-approval is THIS run's record (S-R2-1): a run that ends without a
+        # ceremony consuming it removes it, so it cannot answer a later parking.
+        network_store.clear_pre_approval(run.invite_id)
     except MeshRefusal:
         pass
 

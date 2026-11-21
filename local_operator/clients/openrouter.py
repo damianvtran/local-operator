@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 import requests
 from pydantic import BaseModel, SecretStr
 
-from local_operator.clients._http import response_body
+from local_operator.clients._http import MODEL_LIST_TIMEOUT, response_body
 
 
 class OpenRouterModelPricing(BaseModel):
@@ -104,7 +104,9 @@ class OpenRouterClient:
         }
 
         try:
-            response = requests.get(url, headers=headers)
+            # Bounded for the same reason as RadientClient.list_models: see
+            # MODEL_LIST_TIMEOUT for the measurement behind the values.
+            response = requests.get(url, headers=headers, timeout=MODEL_LIST_TIMEOUT)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
             data = response.json()
             return OpenRouterListModelsResponse.model_validate(data)

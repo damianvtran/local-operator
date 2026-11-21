@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.extra.compose.composed": "已生成{size}",
+  "tui.tool_card.extra.compose.composing": "生成中……{facts}",
+  "tui.tool_card.extra.compose.never_sent": "未发送 · {facts}",
+  "tui.tool_card.extra.compose.nothing_composed": "未生成内容",
+  "tui.tool_card.extra.fetch.attempts": "{count, plural, other {尝试{shown}次}}",
+  "tui.tool_card.extra.fetch.attempts_profiles": "{count, plural, other {尝试{shown}次（{profiles}）}}",
+  "tui.tool_card.extra.fetch.lines": "{count, plural, other {{shown}行}}",
+  "tui.tool_card.extra.search.provider": "提供商：{provider}",
+  "tui.tool_card.extra.search.provider_auth": "提供商：{provider}（{auth_mode}）",
+  "tui.tool_card.extra.search.sources": "来源：",
+  "tui.tool_card.extra.search.untitled": "无标题结果",
+  "tui.tool_card.extra.send.failed_reason": "{word}：{cause}",
+  "tui.tool_card.extra.send.mode.now": "引导",
+  "tui.tool_card.extra.send.mode.quiet": "静默",
+  "tui.tool_card.extra.send.mode.wake": "唤醒",
+  "tui.tool_card.extra.send.model": "模型"
+}

@@ -245,7 +245,10 @@ def test_an_agent_started_node_session_keeps_notify_here_but_its_ask_travels(
     row = _listing(rig, rig.mac_id, origin=stamp_origin)
     keys = [n["key"] for n in row.get("notices") or ()]
     if stamp_origin is not None and stamp_origin.get("kind") == "agent":
-        # An agent's child reports to that agent: nothing at all on the wire.
+        # A ``kind: agent`` stamp the operator's own device did not place (here:
+        # started on the node, no source): the narrow gate (security review P1,
+        # ``ra.agent_child_forwards_ordinary_asks``) keeps its ordinary ask here,
+        # exactly as before; only an operator-placed agent child's asks travel.
         assert keys == [], keys
     else:
         assert keys and all(k.startswith(ra.ASK_NOTICE_PREFIX) for k in keys), keys
@@ -632,7 +635,10 @@ def test_agent_children_and_co_member_placed_rows_are_unchanged(rig: Rig) -> Non
     _bind(rig)
     agent = {"kind": ra.AGENT_ORIGIN_KIND, "source_device": NODE, "source_session_id": "s_p"}
     _node_started_session(rig.node, origin=agent)
+    # Started on the node (source NODE, not the operator's device): the narrow
+    # gate (security review P1) keeps its ordinary ask here, as before.
     assert "notices" not in _listing(rig, rig.mac_id, origin=agent)
+    assert "notices" not in _listing(rig, CO, origin=agent)
     assert ra.notice_forwarding(rig.node, SID)[0] == ra.LOCAL_ONLY
     placed = {"kind": "user", "source_device": CO, "source_session_id": ""}
     assert "notices" not in _listing(rig, rig.mac_id, origin=placed)
@@ -675,7 +681,40 @@ def test_an_agent_childs_site_card_rides_the_verified_binding_only(
     assert "notices" not in _listing(rig, rig.mac_id, origin=agent)
     _bind(rig)
     keys = [n["key"] for n in _listing(rig, rig.mac_id, origin=agent)["notices"]]
-    assert keys == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    if placed_by == "mac":
+        # Operator-placed: the site card, after the child's ordinary ask (oldest
+        # first, one list).
+        assert keys == [f"{ra.ASK_NOTICE_PREFIX}ask_site_card", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    else:
+        # Not operator-placed: the signed-only leg, the site card alone (as base).
+        assert keys == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    assert "notices" not in _listing(rig, CO, origin=agent)
+    assert ra.notice_forwarding(rig.node, SID)[0] == ra.LOCAL_ONLY
+
+
+@pytest.mark.parametrize("placed_by", ["mac", "node", "co"])
+def test_an_agent_childs_ordinary_ask_reaches_the_verified_operator_only(
+    rig: Rig, placed_by: str
+) -> None:
+    """Remote parity (2026-11-21; live repro d83f5525a563's a-e9c5): an agent-started
+    node session the OPERATOR'S OWN device placed sends its ORDINARY ask to the
+    bound Mac like a local agent child's reaches the local inbox — over
+    ``is_operator_link`` only: never before binding, never to a co-member, and
+    never its notify item. Placed by anyone else (security review P1: a co-member
+    picks ``origin.kind`` itself), the ordinary ask reaches nobody."""
+    source = {"mac": rig.mac_id, "node": NODE, "co": CO}[placed_by]
+    agent = {"kind": ra.AGENT_ORIGIN_KIND, "source_device": source, "source_session_id": "s_p"}
+    _node_started_session(rig.node, origin=agent)
+    # No verified operator binding yet: nothing for anyone.
+    assert "notices" not in _listing(rig, rig.mac_id, origin=agent)
+    assert "notices" not in _listing(rig, CO, origin=agent)
+    _bind(rig)
+    row = _listing(rig, rig.mac_id, origin=agent)
+    if placed_by == "mac":
+        keys = [n["key"] for n in row["notices"]]
+        assert keys == [f"{ra.ASK_NOTICE_PREFIX}ask_site_card"]  # the ordinary ask, no "build"
+    else:
+        assert "notices" not in row
     assert "notices" not in _listing(rig, CO, origin=agent)
     assert ra.notice_forwarding(rig.node, SID)[0] == ra.LOCAL_ONLY
 

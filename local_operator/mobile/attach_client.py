@@ -40,7 +40,7 @@ import logging
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple, Sequence
 
 from local_operator.profile_actions import ProfileActionReply
 from local_operator.session.runtime.types import JOURNAL_ORDER_CAPABILITY
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     # on its own side, and the annotation is a string either way (PEP 563).
     from local_operator.session.runtime.launch import Errand
 
+from local_operator.asks.surfaces import StampedReceipt
 from local_operator.harness.approval import (
     ASK_ANSWER_OPS,
     frame_authority,
@@ -322,6 +323,19 @@ def _reset_reason(announced: str) -> str:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _stamped_receipt(reply: Mapping[str, Any]) -> StampedReceipt:
+    """An answer ack's sentence plus the label the runtime STAMPED (F2).
+
+    ``surface`` is absent from a runtime that predates it, which reads ``None``
+    (unknown), never as consent. Still a ``str``, so callers that only want the
+    sentence are unchanged.
+    """
+    surface = reply.get("surface")
+    return StampedReceipt(
+        str(reply.get("detail", "")), str(surface) if isinstance(surface, str) else None
+    )
 
 
 class _OversizedFrame(Exception):
@@ -3003,7 +3017,9 @@ class AttachClient:
             fields["images"] = list(images)
         if operator_ask:
             fields["_operator_ask"] = True
-        return await self._request("ask_respond", **fields)
+        reply = await self._request_frame("ask_respond", **fields)
+        self._raise_for_reply_error(reply)
+        return _stamped_receipt(reply)
 
     async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> str:
         """Decide an AGENT-MESSAGES request from its card (TB-02 wiring).
@@ -3044,7 +3060,9 @@ class AttachClient:
             fields["by"] = by
         if operator_ask:
             fields["_operator_ask"] = True
-        return await self._request("ask_revise", **fields)
+        reply = await self._request_frame("ask_revise", **fields)
+        self._raise_for_reply_error(reply)
+        return _stamped_receipt(reply)
 
     async def ask_decline(self, ask_id: str, *, by: str = "", operator_ask: bool = False) -> str:
         """Decline a queued ask: explicit "no answer, decide yourself"."""

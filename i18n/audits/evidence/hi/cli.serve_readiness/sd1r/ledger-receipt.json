@@ -1,0 +1,31 @@
+{
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+  "status": "passed",
+  "translator": {
+    "agent": "task acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Task assignment from requesting session; auditor did not independently inspect translator runtime."
+  },
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Current host session-state names openai/gpt-6.1-sol; same auditor session resumed for delta audit; no provider fallback indicated.",
+    "fallback": {
+      "observed": false,
+      "requested_model": null,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "audit_date": "2026-11-16",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "fixed_finding_ids": [
+    "HI-SD1-01"
+  ],
+  "note": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/record.json; HI-SD1-01 fixed; cgroup classification wording verified; sd1 unchanged 10-key coverage retained; 0 open blocker/major."
+}

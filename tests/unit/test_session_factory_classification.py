@@ -1603,29 +1603,40 @@ async def test_the_provider_probe_is_inside_the_wait_budget() -> None:
 
     ``resolve_vendor`` can refresh an expired Radient OAuth grant over the network, so a
     probe awaited BEFORE the budgeted task would put that I/O outside the one bound the
-    layer promises (review round 1, R1-4). Here the probe alone takes 200x the wait.
-    """
+    layer promises (review round 1, R1-4). Here the probe cannot answer at all until
+    the test lets it, so a selection that returns has, by construction, not awaited it.
 
-    class _SlowProbe(_FakeClassifier):
+    That ordering replaces `elapsed < 0.2` against a 0.5 s probe, a ceiling a loaded
+    runner crosses with the probe correctly inside the budget
+    (docs/TEST_TIME_ASSERTIONS.md). The hang bound is not a latency figure: it only
+    turns a mutant that awaits the probe first (which would wait forever) into a
+    failure instead of a stuck test.
+    """
+    probe_gate = asyncio.Event()
+
+    class _GatedProbe(_FakeClassifier):
         async def provider_available(self) -> bool:
-            await asyncio.sleep(0.5)
+            await probe_gate.wait()
             self.events.append("probe-done")
             return True
 
-    classifier = _SlowProbe(_slack_recommendation())
+    classifier = _GatedProbe(_slack_recommendation())
     hooks = _hooks(_FakeIndex(picked=[]), classifier=classifier)
     hooks.classification_wait_s = 0.05
 
-    started = time.monotonic()
-    block = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 0.2, f"the probe must be bounded by the wait (took {elapsed:.2f}s)"
-    assert block == ""
-    assert len(hooks.classification_outstanding) == 1, "and it is still running, harvestable"
-    await asyncio.sleep(0.6)
-    for call in hooks.classification_outstanding:
-        call.task.cancel()
+    try:
+        block = await asyncio.wait_for(
+            session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1"),
+            timeout=10.0,
+        )
+        assert "probe-done" not in classifier.events, "the probe must be bounded by the wait"
+        assert block == ""
+        assert len(hooks.classification_outstanding) == 1, "and it is still running, harvestable"
+        assert not hooks.classification_outstanding[0].task.done()
+    finally:
+        probe_gate.set()
+        for call in hooks.classification_outstanding:
+            call.task.cancel()
 
 
 @pytest.mark.asyncio

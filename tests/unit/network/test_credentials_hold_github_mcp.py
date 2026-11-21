@@ -844,3 +844,207 @@ def test_the_revoke_op_reports_the_hold_it_lent(
         {"credential_key": github_mod.GITHUB_KEY, "holder": "d_" + "7" * 32}
     )
     assert other["lent_hold_until_ms"] == 0
+
+
+# ---------------------------------------------------------------------------
+# A subagent bridges the owner outage on its ANCESTOR's held GitHub grant
+# (2026-11-21). WHY: the grant cache is keyed per (key, session id), so a
+# review/QA subagent spawned on a remote node while the lender was offline had
+# an empty slot, got ``owner_offline`` and ran ``gh`` with no login, though the
+# parent session held an admitted grant with most of its hold left. GitHub
+# lending is device-scoped; the session id is attribution and cache keying.
+# ---------------------------------------------------------------------------
+
+
+def _ask(client: Any, session_id: str, *, key: str = "", fallback: tuple[str, ...] = ()) -> Any:
+    key = key or github_mod.GITHUB_KEY
+    provider = key if key == github_mod.GITHUB_KEY else "mcp-oauth"
+    extra: dict[str, Any] = {"hold_fallback_session_ids": fallback} if fallback else {}
+    return client.request_grant_sync(key, session_id=session_id, provider=provider, **extra)
+
+
+def _bridged_rows(root: Any) -> list[dict[str, Any]]:
+    return [row for row in _hold_records(root) if row.get("event") == "credential.held_bridged"]
+
+
+def _parent_holds(held: Any) -> Grant:
+    """The parent session borrows its own grant while the owner is still up."""
+    parent = _ask(held.client, "parent")
+    assert isinstance(parent, Grant) and parent.access_token.startswith("ghs_"), parent
+    return parent
+
+
+def test_a_child_session_bridges_the_outage_on_its_parents_held_github_grant(held: Any) -> None:
+    """RED on 981a699bc: the child's own slot was empty, so it got ``owner_offline``."""
+    client, net = held.client, held.mesh
+    parent = _parent_holds(held)
+    _stop_owner(net)
+    _past_window(parent)
+    parent_held = _ask(client, "parent")
+    assert isinstance(parent_held, Grant) and parent_held.held_offline, parent_held
+
+    child = _ask(client, "child", fallback=("parent",))
+    assert isinstance(child, Grant), f"the subagent lost GitHub with its parent held: {child!r}"
+    assert child.held_offline is True
+    assert child.grant_id == parent.grant_id and child.access_token == parent.access_token
+    # THE HOLD NEVER EXTENDS: the copy keeps the parent's receipt clocks.
+    assert 0 < child.held_until_ms <= parent_held.held_until_ms
+    copied = client.grants.peek(github_mod.GITHUB_KEY, "child")
+    assert copied is not None and copied.received_wall == parent.received_wall
+
+    # HONEST AUDIT (condition b): the child is the consumer, the parent the source.
+    rows = _bridged_rows(net.b.root)
+    assert len(rows) == 1, rows
+    detail = rows[0]["detail"]
+    assert detail["consumer"] == "child" and detail["bridged_from"] == "parent", detail
+    assert detail["grant_id"] == parent.grant_id
+    assert parent.access_token not in json.dumps(rows), "a receipt carried the token"
+
+    # The ONE door registers the bridged bearer with the child's scrubber before return.
+    registered: list[str] = []
+    gh_env, token = github_mod.lent_github_env(
+        session_id="child2",
+        register=registered.append,
+        client=client,
+        hold_fallback_session_ids=("parent",),
+    )
+    assert token == parent.access_token and gh_env["GH_TOKEN"] == token
+    assert registered and registered[0] == token
+    # No scrubber, no bearer (condition e), ancestors or not.
+    assert github_mod.lent_github_env(
+        session_id="child3", register=None, client=client, hold_fallback_session_ids=("parent",)
+    ) == ({}, "")
+    assert client.grants.peek(github_mod.GITHUB_KEY, "child3") is None
+
+
+def test_a_child_with_no_harness_ancestors_bridges_nothing(
+    held: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Condition (a): only ``ToolContext.ancestor_session_ids`` reaches the bridge.
+
+    A forged parent id in the environment or in the bash tool's arguments is not
+    read by anything, so the child stays refused and is told why, without a token.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+    from local_operator.variables import VariableStore
+
+    client, net = held.client, held.mesh
+    parent = _parent_holds(held)
+    _stop_owner(net)
+    _past_window(parent)
+    monkeypatch.setattr(github_mod, "_client_for", lambda *a: client)
+    for name in ("LOCAL_OPERATOR_PARENT_SESSION_ID", "LOP_PARENT_SESSION_ID", "PARENT_SESSION_ID"):
+        monkeypatch.setenv(name, "parent")
+    ledger = VariableStore(cwd=str(net.b.root))
+    forged = ToolContext(cwd=str(net.b.root), variables=ledger, session_id="forger")
+    notes: list[str] = []
+    gh_env = asyncio.run(builtin._github_git_injections(forged, notes))  # noqa: SLF001
+    assert gh_env == {}
+    assert len(notes) == 1 and "isn't answering" in notes[0] and parent.access_token not in notes[0]
+
+    async def run() -> Any:
+        return await builtin.execute_bash(
+            "forged",
+            {"command": "echo ${GH_TOKEN:-none}", "ancestor_session_ids": ["parent"]},
+            None,
+            None,
+            forged,
+        )
+
+    text = asyncio.run(run()).text
+    assert parent.access_token not in text
+    assert client.grants.peek(github_mod.GITHUB_KEY, "forger") is None
+    assert _bridged_rows(net.b.root) == []
+
+    # The SAME context built by the harness with its real ancestry does bridge.
+    child = forged.model_copy(update={"session_id": "child", "ancestor_session_ids": ("parent",)})
+    notes = []
+    gh_env = asyncio.run(builtin._github_git_injections(child, notes))  # noqa: SLF001
+    assert gh_env.get("GH_TOKEN") == parent.access_token and notes == []
+    assert parent.access_token not in ledger.redact(f"x {parent.access_token} y")
+
+
+def test_mcp_and_provider_keys_never_bridge(held: Any) -> None:
+    """Condition (c): GitHub keys only."""
+    client, net = held.client, held.mesh
+    mcp_parent = _ask(client, "parent", key=MCP_KEY)
+    assert isinstance(mcp_parent, Grant), mcp_parent
+    _stop_owner(net)
+    _past_window(mcp_parent)
+    assert isinstance(_ask(client, "parent", key=MCP_KEY), Grant), "precondition: parent held"
+    refused = _ask(client, "child", key=MCP_KEY, fallback=("parent",))
+    assert isinstance(refused, BrokerError) and refused.code == "owner_offline", refused
+    assert client.grants.peek(MCP_KEY, "child") is None
+    # A provider (model) key in an ancestor slot: the bridge refuses before it looks.
+    client.grants.put("anthropic", "parent", dataclasses.replace(held.gh))
+    assert client._bridge_ancestor_hold("anthropic", "child", ("parent",)) == ""  # noqa: SLF001
+    assert client.grants.peek("anthropic", "child") is None
+    assert _bridged_rows(net.b.root) == []
+
+
+def test_a_bridge_is_refused_past_the_hold_end(held: Any) -> None:
+    client, net = held.client, held.mesh
+    parent = _parent_holds(held)
+    _stop_owner(net)
+    _past_window(parent)
+    parent_held = _ask(client, "parent")
+    assert isinstance(parent_held, Grant)
+    assert net_fixtures.wait_for(
+        lambda: time.time() * 1000 > parent_held.held_until_ms + 200, timeout_s=HOLD_S + 5
+    )
+    refused = _ask(client, "child", fallback=("parent",))
+    assert isinstance(refused, BrokerError) and refused.code == "owner_offline", refused
+    assert client.grants.peek(github_mod.GITHUB_KEY, "child") is None
+    assert _bridged_rows(net.b.root) == []
+
+
+def test_a_withdrawn_share_refuses_the_bridge(held: Any) -> None:
+    client, net = held.client, held.mesh
+    parent = _parent_holds(held)
+    _stop_owner(net)
+    _past_window(parent)
+    assert isinstance(_ask(client, "child", fallback=("parent",)), Grant), "precondition"
+    document = placement_mod.PlacementDocument.load(
+        net.network_id, net.b.root, self_device=net.borrower
+    )
+    document.revoke(github_mod.GITHUB_KEY, net.borrower, by=net.owner)
+    document.save()
+    refused = _ask(client, "child2", fallback=("parent",))
+    assert isinstance(refused, BrokerError) and refused.code == "not_a_holder", refused
+    for sid in ("parent", "child", "child2"):
+        assert client.grants.peek(github_mod.GITHUB_KEY, sid) is None, sid
+
+
+def test_a_panic_refuses_the_bridge(held: Any) -> None:
+    client, net = held.client, held.mesh
+    parent = _parent_holds(held)
+    _stop_owner(net)
+    _past_window(parent)
+    with store.mutate(net.network_id, net.b.root) as copy:
+        copy.trust = "untrusted"
+        store.save(copy, net.b.root)
+    refused = _ask(client, "child", fallback=("parent",))
+    assert isinstance(refused, BrokerError), "a panicked node bridged a held GitHub token"
+    assert client.grants.peek(github_mod.GITHUB_KEY, "child") is None
+    assert _bridged_rows(net.b.root) == []
+
+
+def test_a_busy_owner_bridges_the_parents_current_lease(
+    held: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``owner_busy`` with an UNEXPIRED parent lease: the child takes it as the plain lease."""
+    client, net = held.client, held.mesh
+    parent = _parent_holds(held)
+    busy = BrokerError(code="owner_busy", key=github_mod.GITHUB_KEY, owner_device=net.owner)
+    monkeypatch.setattr(client, "_request_grant_once", lambda *a, **k: busy)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    assert _ask(client, "orphan") is busy
+    child = _ask(client, "child", fallback=("parent",))
+    assert isinstance(child, Grant), child
+    assert child.grant_id == parent.grant_id and not child.held_offline
+    rows = _bridged_rows(net.b.root)
+    assert [(r["detail"]["consumer"], r["detail"]["bridged_from"]) for r in rows] == [
+        ("child", "parent")
+    ], rows
+    assert rows[0]["cause"] == "busy", rows

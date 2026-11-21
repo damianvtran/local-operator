@@ -42,6 +42,33 @@ from local_operator.redaction_shapes import scrub_values
 NO_RESPONSE_BODY = "No response body"
 """Stand-in used in error messages when a failed request has no readable body."""
 
+MODEL_LIST_TIMEOUT: Tuple[float, float] = (10.0, 30.0)
+"""``(connect, read)`` seconds for a provider's ``GET /models`` catalogue listing.
+
+WHY IT EXISTS: ``requests`` has no default timeout, so a connection that is accepted
+and then never answered (a TLS-inspecting proxy or antivirus, a captive portal, a
+half-dead network) waited for the OS to drop the socket -- minutes. ``/v1/models`` is
+refreshed right after sign-in and on every credentials change, and while it waited the
+desktop app reported "Server is offline". The route now also runs the call off the
+event loop; this bound is what frees the worker thread and answers the request.
+
+HOW THE VALUES WERE CHOSEN (measured 2026-11-17 from a macOS host on a wired
+connection, ``curl -w``, 20 sequential calls per endpoint):
+
+* Radient ``GET https://api.radienthq.com/v1/models`` (authenticated, 305 KB): connect
+  incl. TLS median 0.047 s / max 0.166 s; first byte median 0.170 s / max 0.366 s;
+  total median 0.256 s / max 0.421 s.
+* OpenRouter ``GET https://openrouter.ai/api/v1/models`` (914 KB): connect incl. TLS
+  median 0.023 s / max 0.106 s; first byte median 0.054 s / max 0.133 s; total median
+  0.141 s / max 0.303 s.
+
+Desktop users sit behind slower links and inspecting proxies that this host does not
+have, so the bounds keep two orders of magnitude of headroom over the observed max:
+10 s to connect (60x the 0.166 s max) and 30 s per socket read (80x the 0.366 s
+max first byte). ``requests``' read timeout is the gap BETWEEN bytes, not the whole
+download, so a slow-but-progressing 1 MB body is never cut off by it.
+"""
+
 
 def response_body(exc: RequestException) -> str:
     """Extract the response body from a failed ``requests`` call.

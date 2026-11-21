@@ -1,0 +1,29 @@
+{
+  "locale": "fr",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "34a8703ccbff",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19T18:43:22.329429+00:00",
+    "actual_model_source": "First-auditor receipt provenance (hash-verified); translator runtime not independently observed by this auditor",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "89b8acddcc7c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_from_translator_session": "34a8703ccbff",
+    "independent_from_first_auditor_session": "32077ea6da37",
+    "date": "2026-11-19T19:18:30.602556+00:00",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Second independent audit: 9/9, 0 B/M. Scratch record: /Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/record.fr.json. Runtime/pseudo/fallback/mixed-direction/HTTP/UI evidence pending.",
+  "record_sha256": "571e580019b15014a2e732d0ec137964962430f84ca633a8a64baf0a87fc2894",
+  "record_reference": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/record.fr.json"
+}

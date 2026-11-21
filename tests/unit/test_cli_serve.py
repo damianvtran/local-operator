@@ -434,3 +434,238 @@ def test_a_serve_started_without_the_markers_is_unchanged(
     assert serve_command("127.0.0.1", 0, False) == 0
     assert os.environ.get("SERVE_ORDINARY") == "1"
     assert AGENT_SHELL_ENV not in os.environ
+
+
+# --- adopted-listener boot deadline (node2 incident) ---------------------------
+#
+# A reload execs serve with the bound socket as ``--listener-fd``; a boot that then
+# wedges keeps the port in LISTEN with nothing accepting, forever. These pin the
+# deadline that ends that: fires only on the adopt path, closes every handle on the
+# port, exits with the distinct status, and never trips a boot that became ready.
+
+
+def _listening_socket() -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(8)
+    return sock
+
+
+def _connect_refused(port: int) -> bool:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(2)
+    try:
+        probe.connect(("127.0.0.1", port))
+    except ConnectionRefusedError:
+        return True
+    finally:
+        probe.close()
+    return False
+
+
+@pytest.fixture
+def boot_exit(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Replace the ``os._exit`` seam with a recorder (the test process must live)."""
+    import threading
+
+    seen: dict[str, object] = {"event": threading.Event()}
+
+    def record(code: int) -> None:
+        seen["code"] = code
+        cast("threading.Event", seen["event"]).set()
+
+    monkeypatch.setattr(cli, "_exit_missed_adopt_boot", record)
+    return seen
+
+
+def test_a_boot_that_never_becomes_ready_closes_the_listener_and_exits(
+    boot_exit: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    import threading
+
+    listener = _listening_socket()
+    port = listener.getsockname()[1]
+    assert not _connect_refused(port)  # control: the port is held before the deadline
+    cli.arm_adopted_boot_deadline(
+        fd=7,
+        port=port,
+        is_ready=lambda: False,
+        sockets=lambda: [listener],
+        deadline_s=0.2,
+        poll_s=0.02,
+    )
+    assert cast(threading.Event, boot_exit["event"]).wait(5)
+    assert boot_exit["code"] == cli.SERVE_ADOPT_BOOT_DEADLINE_EXIT == 69
+    assert listener.fileno() == -1
+    assert _connect_refused(port)
+    err = capsys.readouterr().err
+    assert f"adopted listener fd 7 on port {port} not serving after" in err
+    assert "exiting 69" in err
+
+
+def test_a_boot_ready_in_time_never_exits(boot_exit: dict[str, object]) -> None:
+    import threading
+
+    listener = _listening_socket()
+    try:
+        cli.arm_adopted_boot_deadline(
+            fd=7,
+            port=listener.getsockname()[1],
+            is_ready=lambda: True,
+            sockets=lambda: [listener],
+            deadline_s=0.1,
+            poll_s=0.02,
+        )
+        assert not cast(threading.Event, boot_exit["event"]).wait(0.5)
+        assert listener.fileno() != -1
+    finally:
+        listener.close()
+
+
+def test_a_finished_serve_disarms_the_deadline(boot_exit: dict[str, object]) -> None:
+    import threading
+
+    listener = _listening_socket()
+    try:
+        done = cli.arm_adopted_boot_deadline(
+            fd=7,
+            port=listener.getsockname()[1],
+            is_ready=lambda: False,
+            sockets=lambda: [listener],
+            deadline_s=0.2,
+            poll_s=0.02,
+        )
+        done.set()
+        assert not cast(threading.Event, boot_exit["event"]).wait(0.6)
+        assert listener.fileno() != -1
+    finally:
+        listener.close()
+
+
+def test_serve_with_a_wedged_adopted_boot_exits_and_frees_the_port(
+    monkeypatch: pytest.MonkeyPatch, boot_exit: dict[str, object]
+) -> None:
+    """Through ``serve_command``: uvicorn's run never reaches ``started`` (a
+    lifespan that never completes); the deadline must close BOTH the adopted
+    listener and the handoff owner's dup, or the port stays in LISTEN."""
+    import threading
+
+    import uvicorn
+
+    listener = _listening_socket()
+    port = listener.getsockname()[1]
+    monkeypatch.setenv(cli.SERVE_ADOPT_BOOT_DEADLINE_ENV, "0.3")
+    owner_sockets: list[socket.socket] = []
+
+    def wedged_run(server: object, sockets: list[socket.socket] | None = None) -> None:
+        owner_sockets.append(asgi_app.state.listener_owner.socket)
+        # Stands in for a lifespan startup that never returns; released by the exit.
+        assert cast(threading.Event, boot_exit["event"]).wait(10)
+
+    monkeypatch.setattr(uvicorn.Server, "run", wedged_run)
+    with patch.object(cli, "adopt_serve_socket", return_value=listener):
+        assert serve_command("127.0.0.1", 0, False, listener_fd=9) == 0
+    assert boot_exit["code"] == cli.SERVE_ADOPT_BOOT_DEADLINE_EXIT
+    assert listener.fileno() == -1
+    assert owner_sockets and owner_sockets[0].fileno() == -1
+    assert _connect_refused(port)
+
+
+def test_serve_whose_adopted_boot_is_ready_in_time_keeps_serving(
+    monkeypatch: pytest.MonkeyPatch, boot_exit: dict[str, object]
+) -> None:
+    import threading
+    import time as _time
+
+    import uvicorn
+
+    listener = _listening_socket()
+    monkeypatch.setenv(cli.SERVE_ADOPT_BOOT_DEADLINE_ENV, "0.3")
+
+    def ready_run(server: object, sockets: list[socket.socket] | None = None) -> None:
+        server.started = True  # type: ignore[attr-defined]
+        _time.sleep(0.8)  # serving well past the deadline
+
+    monkeypatch.setattr(uvicorn.Server, "run", ready_run)
+    try:
+        with patch.object(cli, "adopt_serve_socket", return_value=listener):
+            assert serve_command("127.0.0.1", 0, False, listener_fd=9) == 0
+        assert not cast(threading.Event, boot_exit["event"]).is_set()
+        assert listener.fileno() != -1
+    finally:
+        listener.close()
+
+
+def test_a_fresh_bind_never_arms_the_deadline(captured_server: dict[str, object]) -> None:
+    with patch.object(cli, "arm_adopted_boot_deadline") as mock_arm:
+        assert serve_command("127.0.0.1", 0, False) == 0
+    mock_arm.assert_not_called()
+    sockets = cast("list[socket.socket]", captured_server["sockets"])
+    sockets[0].close()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 90.0),
+        ("", 90.0),
+        ("5m", 90.0),
+        ("0", 90.0),
+        ("-3", 90.0),
+        ("nan", 90.0),
+        ("2.5", 2.5),
+        ("300", 300.0),
+    ],
+)
+def test_the_boot_deadline_env_override(
+    monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: float
+) -> None:
+    if raw is None:
+        monkeypatch.delenv(cli.SERVE_ADOPT_BOOT_DEADLINE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(cli.SERVE_ADOPT_BOOT_DEADLINE_ENV, raw)
+    assert cli.resolve_adopt_boot_deadline_seconds() == expected
+
+
+def test_served_in_process_listener_uses_the_peer_uid_gated_protocol(
+    captured_server: dict[str, object],
+) -> None:
+    """``http=`` IS the whole same-OS-user wiring (follow-up D).
+
+    A refactor that rebuilds the ``uvicorn.Config`` without it would silently
+    reopen the cross-user hole (other local accounts reading files through
+    ``/v1/static``), so the real ``serve_command`` path is pinned here.
+    """
+    from uvicorn.protocols.http.auto import AutoHTTPProtocol
+
+    from local_operator.server import peer_check
+
+    assert serve_command("127.0.0.1", 0, False) == 0
+    config = captured_server["config"]
+    sockets = captured_server["sockets"]
+    try:
+        assert config.http is peer_check.gated_protocol_class()  # type: ignore[attr-defined]
+        assert issubclass(config.http, AutoHTTPProtocol)  # type: ignore[attr-defined]
+        config.load()  # type: ignore[attr-defined]
+        loaded = config.http_protocol_class  # type: ignore[attr-defined]
+        assert loaded is peer_check.gated_protocol_class()
+    finally:
+        for listener in cast(list[socket.socket], sockets):
+            listener.close()
+
+
+def test_reload_path_passes_the_gated_protocol_import_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``--reload`` child re-imports the protocol, so it gets a string."""
+    import uvicorn
+    from uvicorn.importer import import_from_string
+
+    from local_operator.server import peer_check
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs, app=app))
+
+    assert serve_command("127.0.0.1", 0, True) == 0
+    assert captured["http"] == peer_check.PROTOCOL_IMPORT_STRING
+    assert import_from_string(cast(str, captured["http"])) is peer_check.gated_protocol_class()

@@ -1,0 +1,57 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.teams.effective",
+  "status": "translated",
+  "key_count": 9,
+  "translation_date": "2026-11-19T18:41:24.794825+00:00",
+  "frozen_revision": "e70bc818b8553dca1fad007705257817be49ee37",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "effective-reasons-zh-CN",
+    "session": "530f154495de",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session host model declaration",
+    "fallback_used": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    }
+  },
+  "output": {
+    "path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json",
+    "sha256": "6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454"
+  },
+  "existing_target": "Absent: git ls-files found no zh-CN wire.teams.effective namespace; related terminology checked in tui.authoring, wire.settings, relay.chrome.",
+  "contextual_choices": [
+    "注册表 follows tui.authoring; 推理强度 follows wire.settings and relay.chrome.",
+    "模型映射对象 makes explicit that mapping is a configuration object, not a model conversion.",
+    "provider/model, subagents.models.{tier}, model and effort remain exact configuration syntax; all surrounding reasons and remedies are Chinese.",
+    "Optional effort is stated separately from required model. Each directive uses 请 at its clause head.",
+    "无法解析 describes lookup failure without exposing raw exceptions or implying a launch attempt."
+  ],
+  "glossary_proposals": {
+    "registry": "注册表 (existing catalogue term)",
+    "model selector": "模型选择器",
+    "model mapping": "模型映射对象",
+    "reasoning effort": "推理强度 (existing catalogue term)"
+  },
+  "cldr_rtl": {
+    "plural_categories": "other only for zh-CN; no plural/select expressions in these nine messages",
+    "direction": "ltr",
+    "bidi_controls_added": false,
+    "width": "No fixed maxCells/maxChars in source sidecar; natural wrapping required; rendered fit not tested"
+  },
+  "validation": {
+    "mechanical_only": "JSON round-trip, all nine keys in source order and exact simple-placeholder parity verified in this session. This is not an audit.",
+    "catalogue_validator": "NOT RUN: task explicitly forbids test/build execution and repository edits; scratch-only translation not integrated. Manager/auditor must run repository validation after integration.",
+    "independent_audit": "NOT PERFORMED; independent auditor follows",
+    "translation_method": "Direct LLM translation; no translation API, SDK, MT service or website used"
+  },
+  "constraints": "No source, generated, ledger or repository edits; no commits, installs, servers, PRs or pushes."
+}

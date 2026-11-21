@@ -1,0 +1,13 @@
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+
+Independent direct checks executed by vertex-primary-audit.py:
+PASS es providers.vertex_prompts.field.project_id: parity, ICU argument kinds, literals, markup, bidi-controls, digits; chars=31 cells=31
+PASS es providers.vertex_prompts.field.service_account: parity, ICU argument kinds, literals, markup, bidi-controls, digits; chars=53 cells=53
+PASS es providers.vertex_prompts.hint.required: parity, ICU argument kinds, literals, markup, bidi-controls, digits; chars=75 cells=75
+PASS es providers.vertex_prompts.prompt.field: parity, ICU argument kinds, literals, markup, bidi-controls, digits; chars=46 cells=46
+FORMAT providers.vertex_prompts.field.project_id: 'Introduce ID del proyecto de Google Cloud (deja vacío para cancelar): '; cells=70
+FORMAT providers.vertex_prompts.field.service_account: 'Introduce JSON de la cuenta de servicio o ruta del archivo JSON (deja vacío para cancelar): '; cells=92
+PASS no declared maxCells/maxChars budgets; hint explicitly truncates to current content width. Long strings require rendered QA; no visual-fit/native-bidi completion claimed.
+PASS plurals/selects N/A: all four messages are literal/simple-field interpolation.

@@ -39,6 +39,48 @@ _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: Suffix distinguishing the en-only context sidecar from a namespace file.
 CONTEXT_SUFFIX = ".context.json"
 
+#: The EXACT English context-sidecar vocabulary shared by every writer (core,
+#: desktop, mobile) and by the ``read_public_copy`` reader. Operator decision
+#: 2026-11-17 (ask a-82fb, "Extend the reader with exact typed fields"): the
+#: reader serves these sidecars outside the redaction path, so it must accept a
+#: closed, typed schema rather than arbitrary metadata, and writers must fail at
+#: authoring time on anything else. ``width``/``length`` are the free-text width
+#: hints core and desktop already author; ``placeholders`` maps an ICU argument
+#: name to a one-line description (``{}`` is a valid "no arguments" record).
+#: Adding a field is a reviewed change here, never a per-repo extension.
+CONTEXT_STRING_FIELDS = frozenset({"role", "tone", "note", "width", "length"})
+CONTEXT_FIELDS = CONTEXT_STRING_FIELDS | {"maxCells", "placeholders"}
+
+
+def context_entry_problem(entry: object) -> tuple[str, str | None] | None:
+    """Why one sidecar entry breaks the shared schema, or ``None`` when it fits.
+
+    Returns ``(kind, field)`` with ``kind`` one of ``"not-object"``,
+    ``"unsupported-field"`` or ``"invalid-type"``. Callers word their own
+    message: the authoring check may name the field (committed source), while
+    the reader keeps fixed refusals that never echo file content, because an
+    invalid file is exactly the one that may carry stray data. Never a value.
+    """
+    if not isinstance(entry, dict):
+        return ("not-object", None)
+    for field, value in entry.items():
+        if field not in CONTEXT_FIELDS:
+            return ("unsupported-field", str(field))
+        if field in CONTEXT_STRING_FIELDS:
+            valid = isinstance(value, str)
+        elif field == "maxCells":
+            # bool is an int subclass, but is not a documented width value.
+            valid = type(value) is int
+        else:  # placeholders: flat str -> str, no nesting and no empty name
+            valid = isinstance(value, dict) and all(
+                isinstance(name, str) and name and isinstance(text, str)
+                for name, text in value.items()
+            )
+        if not valid:
+            return ("invalid-type", field)
+    return None
+
+
 #: Backend-owned namespaces a client is allowed to fetch. RFC §2.1: `wire.*`
 #: is core-owned and served; every client-owned namespace (`ui.*`, `tui.*`,
 #: `relay.*`, ...) bundles with its own client, so serving it here would create
@@ -183,6 +225,55 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         'tr("wire.github") by network/cli.py, network/readiness.py, '
         "network/credentials/messages.py and network/credentials/github.py; "
         "the wire and stderr carry finished text, never a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4266, merge
+    # gate run 44521486072): the Amazon Bedrock remedies (4,166 B in hi) took
+    # hi's eager total to 74,237 B, past EAGER_TOTAL_MAX_BYTES, yet no client
+    # resolves one of its keys. providers/bedrock/errors.py and check.py render
+    # every key in-process through ``_text`` (``render_resolved``) and hand on a
+    # FINISHED sentence as ProviderError / KeyCheck text.
+    "wire.errors.bedrock": (
+        "Amazon Bedrock error remedies and connection-check results rendered "
+        "in-process by providers/bedrock/errors.py and providers/bedrock/check.py "
+        "(_text = render_resolved), and server/routes/auth.py renders refusal "
+        "envelopes with machine-category codes; all carry finished text, never "
+        "a catalogue key"
+    ),
+    # Login copy is composed before callbacks: CLI/TUI pickers and desktop
+    # operation snapshots receive strings, not keys for a client to resolve.
+    # Keep it out of the eager bundle rather than raising the total ceiling.
+    "wire.login.bedrock": (
+        "Amazon Bedrock login copy rendered in-process through render_resolved "
+        "by providers/bedrock/login.py, providers/bedrock/sso_login.py, "
+        "providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; "
+        "callbacks and operation snapshots carry finished text, never a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4356): with
+    # these four keys hi's eager total reached 78,943 B against
+    # EAGER_TOTAL_MAX_BYTES (77,824 B), and no client resolves one of them.
+    # The failover notice is rendered by ``sign_in_required_text`` and handed
+    # to every host as a finished NoticeEvent ``text`` (no ``code``); the
+    # ``lop login-status`` / ``/login status`` state word is rendered by
+    # ``_sign_in_required_state`` into a plain line.
+    "wire.providers.reauth": (
+        "Google sign-in recovery notice and login-status state words rendered "
+        "in-process: providers/failover.py::sign_in_required_text (render_record) "
+        "and providers/auth_cli.py::_sign_in_required_state (render_resolved); "
+        "the session notice and the login-status line carry finished text, never "
+        "a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4349, merge gate
+    # run 44849201008): adding mcp_ready_timeout_invalid took hi's eager total to
+    # 77,924 B, 100 B past EAGER_TOTAL_MAX_BYTES (77,824 B); this namespace alone
+    # is 5,603 B in hi. No client resolves one of its keys: the SDK refusals are
+    # rendered in the EMBEDDING process by ``spec_refusal_text`` (active locale)
+    # and raised as a one-string SessionSpecError with no code attribute, so
+    # nothing a desktop/phone client loads at startup ever needs this copy.
+    "wire.errors.sdk_spec": (
+        "SDK specification refusals rendered in-process by session/spec.py and "
+        "sdk.py through spec_refusal_text (active locale) and raised as a "
+        "one-string SessionSpecError; the exception carries finished text, never "
+        "a catalogue key"
     ),
 }
 

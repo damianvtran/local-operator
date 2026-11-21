@@ -1980,6 +1980,12 @@ def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
     # reading (the peer answered, refused, and said WHICH way this device is wrong),
     # so it keeps its table entry; the assertion below it covers that.
     refused -= {"not_a_member"}
+    # The DIALER's refusals of a listener (mesh-listener-auth) are the same kind of
+    # exception: the far device answered and failed to prove it is the member this
+    # device meant to reach, so "the link was refused" would be the wrong claim. Each
+    # carries its own table reading; the assertion after the loop pins it.
+    listener_refusals = {handshake.REASON_LISTENER_UNPROVEN, handshake.REASON_PEER_IDENTITY}
+    refused -= listener_refusals
     refused |= {
         relay.handshake_refused_reason(exc)
         for exc in (TimeoutError(), ConnectionResetError("the peer closed it"))
@@ -1988,6 +1994,9 @@ def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
     for reason in sorted(refused):
         assert resume.peer_reason_words(reason) == resume._BARE_CODE_WORDS, reason  # noqa: SLF001
     assert resume.peer_reason_words("not_a_member") == resume.PEER_REASON_WORDS["not_a_member"]
+    for code in sorted(listener_refusals):
+        assert resume.peer_reason_words(code) == resume.PEER_REASON_WORDS[code], code
+        assert resume.peer_reason_words(code) != resume._BARE_CODE_WORDS, code  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

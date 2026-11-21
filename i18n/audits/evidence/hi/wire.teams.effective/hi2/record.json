@@ -1,0 +1,91 @@
+{
+  "locale": "hi",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2851856c6680",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "47e37aebb87c",
+    "independent_from_first_auditor_session": "1a6e70595b8d",
+    "actual_model_source": "Host session model declaration: openai/gpt-6.1-sol",
+    "fallback": "none used"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "hi": {
+      "path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/hi/wire.teams.effective.json",
+      "sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "frozen_core": "e70bc818b8553dca1fad007705257817be49ee37",
+  "audit_kind": "second_independent_pass",
+  "source_audit_revision": "e70bc818b8553dca1fad007705257817be49ee37",
+  "intended_tracked_record": "i18n/audits/evidence/hi/wire.teams.effective/hi2/record.json",
+  "retention_state": "scratch-staged per explicit brief; not tracked, committed, applied, or on main",
+  "audit_notes_not_execution_log": true,
+  "report_path": "report.json",
+  "artifacts": [
+    {
+      "path": "report.json",
+      "sha256": "9c71f5787a8afd516d8d50b3653414e2caf66a31814af164425f435259b33136",
+      "kind": "audit_notes_not_execution_log",
+      "provenance_reference": "record.json"
+    },
+    {
+      "path": "receipt.json",
+      "sha256": "ea8acbb67fe399fc0448f9027f27709fea20ea4e5451f2d600b1cbffac360e0f",
+      "kind": "audit_data_or_reproduction_source",
+      "provenance_reference": "record.json"
+    },
+    {
+      "path": "check.py",
+      "sha256": "d24bcb1fd252414561d29215936f099da308c7285d48246042c238b5f349d220",
+      "kind": "audit_data_or_reproduction_source",
+      "provenance_reference": "record.json"
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "ae36d79ac3f96bd07c9fb27a2e84df472859361292fb8eb7da12ff160426325b",
+      "kind": "audit_data_or_reproduction_source",
+      "provenance_reference": "record.json"
+    },
+    {
+      "path": "mechanical.log",
+      "sha256": "8e745e561b1f6a741ec453daf448dd1d10ecd9999ac0266e166b54e177f43890",
+      "kind": "actual_execution_log",
+      "provenance_reference": "record.json"
+    },
+    {
+      "path": "mechanical-success.log",
+      "sha256": "ae36d79ac3f96bd07c9fb27a2e84df472859361292fb8eb7da12ff160426325b",
+      "kind": "actual_execution_log",
+      "provenance_reference": "record.json"
+    },
+    {
+      "path": "admission.log",
+      "sha256": "ce3d34f6548fa87ef16fff2bc43bc0971fb760bd60407782593e35fb06a302f2",
+      "kind": "actual_execution_log",
+      "provenance_reference": "record.json"
+    },
+    {
+      "path": "post-verdict-comparison.json",
+      "sha256": "bb18ae1ebd444829115e671b77b0d79bdb015a1ce9e3f1e599a31585d89e895e",
+      "kind": "audit_notes_not_execution_log",
+      "provenance_reference": "record.json"
+    }
+  ]
+}

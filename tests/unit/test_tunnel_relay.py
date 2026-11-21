@@ -723,9 +723,16 @@ async def _stop(task: asyncio.Task[int]) -> int:
 
 
 @pytest.mark.asyncio
-async def test_relay_offered_without_cloudflared_runs_relay_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize("token_present", [False, True])
+async def test_relay_offered_without_cloudflared_runs_relay_only(
+    tmp_path, monkeypatch, token_present
+):
     async with FakeRelay({}) as relay:
         service, served, _, children = _relay_service(tmp_path, monkeypatch, relay, binary=False)
+        if not token_present:
+            # Relay-only servers no longer allocate a Cloudflare credential. The
+            # actual service/gateway must boot, not merely accept the JSON shape.
+            served.pop("cloudflared_token")
         task = asyncio.create_task(service.run())
         health = await _health(served["gateway_port"])
         assert health["transport"] == "relay" and health["cloudflared"] is False

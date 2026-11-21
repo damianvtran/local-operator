@@ -136,6 +136,24 @@ MAX_SLEEP_S = 3600.0
 #: within one hour.
 SLICE_S = 10.0
 
+#: How long a REFUSED move onto a newer build waits before it is re-tried.
+#:
+#: WHY THE SUPERVISOR MOVES ITSELF AT ALL (update-parity item 4, 2026-11-18):
+#: ``lop update`` restarts the wakes unit only while no wake-started conversation
+#: runs, because the supervisor's stop forwards SIGTERM to them
+#: (``update._UNIT_CHILD_CENSUS``). Nothing re-checked once they ended, so on
+#: node2 one supervisor ran 0.102.2 code for five days while the report said it
+#: "moves when they end". :class:`_BuildMove` is what makes that sentence true.
+#:
+#: WHY 60 s: a refused attempt costs one ``ps`` census (``count_owned``). A
+#: parked approval can keep a wake runtime alive for a day, and a census every
+#: slice (10 s) for that day is ~8,600 forks for nothing; at 60 s it is ~1,400.
+#: The price is latency: a refusal made just before the last owned conversation
+#: ends holds for this whole back-off and the next attempt waits for its slice,
+#: so the move follows that end by up to about 70 s (MOVE_RETRY_S + SLICE_S).
+#: Only consulted while a newer settled build is on disk.
+MOVE_RETRY_S = 60.0
+
 #: Never sleep less than this. A schedule due in the past, or a clock that
 #: jumped backwards, must not turn the loop into a spin — the floor is what
 #: bounds a pathological index to one pass per second rather than thousands.
@@ -3024,7 +3042,7 @@ async def _should_retire(config_dir: Path) -> bool:
     )
 
 
-async def serve(config_dir: Path, *, once: bool = False) -> int:
+async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | None" = None) -> int:
     """Run the supervisor loop. Returns the process exit code.
 
     Exits **0** when there is nothing fireable left, which is what lets the
@@ -3045,6 +3063,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     before the state load, so a record it writes is engaged within the same
     pass or the next one (≤ ``SLICE_S``). ``--once`` awaits the pass inline for
     the same reason.
+
+    **``move`` re-execs this process onto a newer build once it owns nothing**
+    (:class:`_BuildMove`). Opt-in, and only the unit's own entry (:func:`main`)
+    passes one: ``lop wake serve`` runs this loop inside a CLI process whose argv
+    is not the supervisor's, and an in-place exec of THAT process would replace a
+    command the operator is watching. ``--once`` never moves either.
     """
     from local_operator.wakes.owned_runtimes import (
         OWNER_ENV,
@@ -3103,6 +3127,21 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     try:
         while True:
             sweeper.raise_if_failed()
+            if move is not None and not once:
+                # AT THE TOP, AFTER THE SLEEP: the previous pass's seats have had
+                # the whole sleep to finish, so "idle" is the common reading here,
+                # and nothing of THIS pass has started yet. Returns only when the
+                # move was not taken; a taken move replaces the process.
+                move.attempt(
+                    (
+                        sweeper,
+                        triggers_seat,
+                        residency,
+                        memory_sweep,
+                        store_maintenance,
+                        rescue_seat,
+                    )
+                )
             if once:
                 await triggers_seat.run_once()
             else:
@@ -3264,7 +3303,13 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)
             await _sleep_in_slices(
-                config_dir, delay, upcoming, failure_check=sweeper.raise_if_failed
+                config_dir,
+                delay,
+                upcoming,
+                failure_check=sweeper.raise_if_failed,
+                # A sleep sized for a wake hours out must not also be how long a
+                # supervisor that could move stays on the old build.
+                interrupt=move.due if move is not None else None,
             )
     except BaseException as exc:
         primary_error = exc
@@ -3309,8 +3354,14 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
         # stop's meaning — "wake delivery for this store is going away" — and
         # each such runtime drains its turn and denies its parked gate exactly as
         # on a stop; the surviving supervisor re-engages any wake still due.
-        if stop_requested:
+        if stop_requested and not _stop_is_build_restart():
             sweep(config_dir, any_owner=True, why="supervisor stop")
+        elif stop_requested:
+            logger.info(
+                "wake supervisor: stopped for a build restart (the install pointer "
+                "names a newer generation); owned runtimes are left to retire through "
+                "their own build-replaced drain"
+            )
         for stop_signal in stop_signals:
             try:
                 loop.remove_signal_handler(stop_signal)
@@ -3320,6 +3371,47 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             if primary_error is not None:
                 cleanup_errors.insert(0, primary_error)
             raise BaseExceptionGroup("supervisor cleanup failures", cleanup_errors)
+
+
+def _stop_is_build_restart() -> bool:
+    """Was this SIGTERM an upgrade bouncing the supervisor, not the unit going away?
+
+    WHY THIS EXISTS (incident 2026-11-20, session e6883d17d1a3). ``lop-update``
+    flips ``~/.local/share/lop/current`` to the new generation and then restarts
+    every supervised daemon still on an older one — for this unit that is
+    ``launchd.restart_if_build_moved``'s ``kickstart -k``, which launchd delivers
+    as SIGTERM. The stop handler could not tell that apart from a real unit stop,
+    so every upgrade swept every wake-owned runtime: the supervisor log shows
+    eight to twelve ``supervisor stop; SIGTERM to owned runtime`` lines at each of
+    six installs that day (00:30, 04:19, 07:55, 09:37, 12:13, 14:11), each
+    followed within seconds by ``wake supervisor pid … is running build <new>``.
+    One of those runtimes was mid-turn with a subagent running; its signal drain
+    then refused the operator's prompts for ~7 minutes. That contradicts the
+    upgrade path's own contract (``update.py``: session runtimes DETACH so a
+    supervisor bounce does not end them, and each one retires through its own
+    build-replaced drain at its first idle instant).
+
+    THE DISCRIMINATOR IS THE ONE THE RESTART ITSELF ACTS ON: this process's own
+    generation is provably not the one ``current`` names
+    (``update.stale_generation_of_process``). A real stop of an up-to-date unit
+    answers ``None`` there and still sweeps. Every way the comparison can fail to
+    be made (no generation layout, unreadable pointer, a probe error) also answers
+    "not a restart", so the uncertain direction keeps the pre-existing sweep — a
+    missed skip costs a drain, a wrong skip would orphan runtimes on a stop.
+
+    RESIDUAL, stated: a deliberate stop of a supervisor that happens to be on a
+    stale generation (an upgrade landed and nothing restarted it yet) also skips
+    the sweep. Its runtimes are detached and still idle-retire on their own
+    residency rules and build drain, which is the same end state a supervisor
+    retirement already leaves.
+    """
+    try:
+        from local_operator.update import stale_generation_of_process
+
+        return stale_generation_of_process(os.getpid()) is not None
+    except Exception:  # noqa: BLE001 — an instrument fault must not skip a real stop
+        logger.debug("could not compare this supervisor's build to current", exc_info=True)
+        return False
 
 
 def _install_stop_handlers(
@@ -3347,8 +3439,13 @@ async def _sleep_in_slices(
     upcoming: int | None,
     *,
     failure_check: Callable[[], None] | None = None,
+    interrupt: Callable[[], bool] | None = None,
 ) -> None:
     """Sleep up to ``delay`` seconds, returning early if the index changes.
+
+    ``interrupt`` (checked once per slice) also ends the sleep when it answers
+    True: the supervisor's build move (:meth:`_BuildMove.due`) uses it so a
+    move is attempted within a slice of becoming possible.
 
     Re-reads the index once per :data:`SLICE_S` and returns as soon as a wake
     earlier than the one we were waiting for appears (or the index empties),
@@ -3363,6 +3460,8 @@ async def _sleep_in_slices(
         await asyncio.sleep(min(SLICE_S, remaining))
         if failure_check is not None:
             failure_check()
+        if interrupt is not None and interrupt():
+            return
         remaining -= SLICE_S
         if remaining <= 0:
             return
@@ -3387,6 +3486,240 @@ async def _sleep_in_slices(
                 max(remaining, 0.0),
             )
             return
+
+
+def _seat_busy(seat: Any) -> bool:
+    """Is this loop seat doing work right now (an engagement or a pass in flight)?
+
+    Read through ``getattr`` because the seats are not one class: the engage and
+    rescue seats count their in-flight tasks (``in_flight``), the periodic passes
+    hold one ``_task``. Either shape that is still running means an exec would
+    abandon work half-done — an engagement mid-spawn, a reclaim between its
+    sanction and its signal — so it is busy.
+    """
+    if getattr(seat, "in_flight", 0):
+        return True
+    task = getattr(seat, "_task", None)
+    return task is not None and not task.done()
+
+
+def _exec_supervisor(image: Path, argv: list[str]) -> None:
+    """Replace this process image with ``argv`` run by ``image``; return only on failure.
+
+    ``os.execv`` keeps the PID, so a systemd unit (``Type=simple``) or a
+    LaunchAgent sees the same main process and no restart: nothing about the
+    unit changes, only the code the process runs.
+
+    FD HYGIENE, the same contract as ``server/reload.py``'s ``_exec`` from the
+    other side: that exec has ONE descriptor it must hand over (the listener) and
+    makes it inheritable; this one has NONE, so every non-stdio descriptor is made
+    non-inheritable for the exec — an inherited wakeup socketpair, a log file or a
+    pipe opened by a library with ``inheritable=True`` would otherwise leak into
+    the successor and every runtime it later spawns, for the life of the unit.
+    PEP 446 makes Python's own descriptors non-inheritable already (an inotify fd
+    is opened ``IN_CLOEXEC`` by the libraries that use one), so in practice this
+    only catches strays; it is cheap and it is the difference between "usually"
+    and "by construction". If the exec FAILS the exact flags are restored,
+    because this process keeps serving and a descriptor it relied on handing to a
+    child must still be handed.
+
+    stdio is flushed first: the log line saying WHY the process is about to
+    change would otherwise die in a userspace buffer with the old image.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 — a closed stream must not block the move
+            pass
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    restored: list[int] = []
+    fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    try:
+        names = os.listdir(fd_dir)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.isdigit() or int(name) <= 2:
+            continue
+        fd = int(name)
+        try:
+            if os.get_inheritable(fd):
+                os.set_inheritable(fd, False)
+                restored.append(fd)
+        except OSError:
+            continue  # the listing's own descriptor, already closed
+    try:
+        os.execv(str(image), argv)
+    finally:
+        # Reached only when the exec FAILED; a successful one never returns.
+        for fd in restored:
+            try:
+                os.set_inheritable(fd, True)
+            except OSError:
+                pass
+
+
+class _BuildMove:
+    """Move this supervisor onto the current build — only while it owns nothing.
+
+    THE INVARIANT: NEVER EXEC WHILE OWNING A CONVERSATION. An exec sends no
+    signal and runs no ``finally``: the stop sweep in :func:`serve` never runs,
+    in-flight engagement tasks vanish mid-spawn, and a wake runtime this process
+    forked is left with a parent that no longer knows it. So the move happens
+    only when ALL of these hold, and any unknown answer means "do not move":
+
+    * a NEWER settled build is on disk — :func:`buildwatch.build_changed`
+      (settle window, and :func:`buildwatch.is_older` refusing a lagging
+      pointer, so the fleet never walks backwards). An unreadable stamp or an
+      unproven move is ``None`` there, which is no move here;
+    * no seat is busy (:func:`_seat_busy`) — no engagement, rescue, trigger,
+      residency or memory pass in flight;
+    * ``owned_runtimes.count_owned(config_dir) == 0``. ``None`` (the process
+      table could not be read) is NOT zero. Scoped to THIS store, unlike the
+      updater's ``count_owned(None)``: the updater cannot tell which root the
+      unit serves, this process can, and its stop sweep reaches exactly this
+      root (``sweep(config_dir, any_owner=True)``). Widening it would let an
+      unrelated root's conversations pin this supervisor forever;
+    * a STABLE image to exec through — :func:`procname.supervised_image`, the
+      shim that resolves ``current`` at exec time (the same path the unit names).
+      ``None`` (no generation layout, a source checkout, Windows) is no move:
+      the running interpreter's own tree is the old build by definition, and a
+      checkout must never repoint itself.
+
+    FAIL SAFE: a refused or failed attempt logs, keeps serving, and is re-tried
+    after :data:`MOVE_RETRY_S`. A move this process cannot prove is never taken.
+    So the move trails the last owned conversation's end by up to about 70 s:
+    the 60 s back-off of the refusal that saw it running, plus one
+    :data:`SLICE_S` before the sleep notices the retry is due.
+
+    Collaborators are injected so the gate is testable without forking ``ps`` or
+    replacing the test process; production passes none.
+    """
+
+    def __init__(
+        self,
+        config_dir: Path,
+        *,
+        boot: Any = None,
+        sample_boot: bool = True,
+        changed: Callable[[Any], Any] | None = None,
+        census: Callable[[Path], int | None] | None = None,
+        image: Callable[[], Path | None] | None = None,
+        exec_fn: Callable[[Path, list[str]], None] | None = None,
+        argv_tail: list[str] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._config_dir = config_dir
+        if boot is None and sample_boot:
+            from local_operator import buildwatch
+
+            boot = buildwatch.boot_build()
+            # One line per process image: after a move this is how the log (and
+            # an operator reading it) sees the same pid come back on new code.
+            logger.info(
+                "wake supervisor pid %d is running build %s",
+                os.getpid(),
+                boot.label() if boot is not None else "unknown (no build stamp; never moves)",
+            )
+        self.boot = boot
+        self._changed = changed
+        self._census = census
+        self._image = image
+        self._exec = exec_fn or _exec_supervisor
+        # The SAME arguments this process was started with, so the successor is
+        # the same supervisor (store, flags) on new code. Under ``-m``,
+        # ``sys.argv[0]`` is this file's path; the module is re-named explicitly.
+        self._argv_tail = list(sys.argv[1:] if argv_tail is None else argv_tail)
+        self._clock = clock
+        self._next_attempt = 0.0
+
+    def _target(self) -> Any:
+        if self.boot is None:
+            return None  # no baseline: this process can never prove a move
+        if self._changed is not None:
+            return self._changed(self.boot)
+        from local_operator import buildwatch
+
+        return buildwatch.build_changed(self.boot)
+
+    def due(self) -> bool:
+        """Cheap: may an attempt run now? Used to end a sleep early. Never raises."""
+        if os.name != "posix" or self._clock() < self._next_attempt:
+            return False
+        try:
+            return self._target() is not None
+        except Exception:  # noqa: BLE001 — a watcher that raises must not kill the loop
+            logger.debug("build move check failed", exc_info=True)
+            return False
+
+    def _refuse(self, why: str, *args: Any) -> bool:
+        self._next_attempt = self._clock() + MOVE_RETRY_S
+        logger.info("a newer build is installed; staying on this one for now: " + why, *args)
+        return False
+
+    def attempt(self, seats: tuple[Any, ...]) -> bool:
+        """Exec onto the current build if every gate holds; ``False`` otherwise.
+
+        Returns only when the move was not taken (or the exec failed); a taken
+        move does not return at all.
+        """
+        if not self.due():
+            return False
+        target = self._target()
+        if target is None:
+            return False
+        if any(_seat_busy(seat) for seat in seats):
+            # Not logged at info: a busy seat is the common, seconds-long case,
+            # and the next slice re-decides.
+            self._next_attempt = self._clock() + SLICE_S
+            return False
+        try:
+            if self._census is not None:
+                owned = self._census(self._config_dir)
+            else:
+                from local_operator.wakes.owned_runtimes import count_owned
+
+                owned = count_owned(self._config_dir)
+        except Exception:  # noqa: BLE001 — unknown is not zero
+            logger.debug("wake-owned runtime census failed", exc_info=True)
+            owned = None
+        if owned is None:
+            return self._refuse("the wake-started conversations could not be counted")
+        if owned:
+            return self._refuse(
+                "%d wake-started conversation(s) still running; moving once they end", owned
+            )
+        try:
+            if self._image is not None:
+                image = self._image()
+            else:
+                from local_operator import procname
+
+                image = procname.supervised_image()
+        except Exception:  # noqa: BLE001
+            image = None
+        if image is None or not os.access(image, os.X_OK):
+            return self._refuse("no stable launcher to move through (%s)", image)
+        argv = [str(image), "-m", "local_operator.wakes.supervisor", *self._argv_tail]
+        # Worded as an ATTEMPT: the exec can still fail after this line (the
+        # refusal below then says so), and a past-tense "moved" would read as
+        # done in a log where the old build keeps serving.
+        logger.info(
+            "exec'ing the wake supervisor onto build %s (from %s) in place, pid %d: "
+            "it owns no wake-started conversations",
+            getattr(target, "label", lambda: target)(),
+            getattr(self.boot, "label", lambda: self.boot)(),
+            os.getpid(),
+        )
+        try:
+            self._exec(image, argv)
+        except Exception as exc:  # noqa: BLE001 — a failed exec keeps this process serving
+            return self._refuse("the exec failed (%s); still serving", exc)
+        return False  # an injected exec that returned: nothing moved
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3438,7 +3771,14 @@ def main(argv: list[str] | None = None) -> int:
     from local_operator.paths import config_dir
 
     try:
-        return asyncio.run(serve(config_dir(), once=args.once))
+        # The unit entry is the one caller that may move in place (see serve()).
+        # ``argv`` is re-passed verbatim so the successor parses the same flags.
+        move = (
+            None
+            if args.once
+            else _BuildMove(config_dir(), argv_tail=list(sys.argv[1:] if argv is None else argv))
+        )
+        return asyncio.run(serve(config_dir(), once=args.once, move=move))
     except KeyboardInterrupt:
         return 130
     except asyncio.CancelledError:

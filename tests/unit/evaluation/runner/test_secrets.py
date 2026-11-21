@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -714,3 +715,167 @@ async def test_synthetic_model_yields_to_more_severe_labels(
     )
     outcome = await runner.run()
     assert outcome.reportability_label == "cleanup_incomplete"
+
+
+# ---- the episode owns the lifetime of a broker it started --------------------
+
+
+class _FakeBrokerClient:
+    """``secrets.client`` as ``owned_broker_scope`` uses it, with a fake daemon.
+
+    ``attach`` models a broker that was ALREADY listening (the operator's own,
+    or another episode's): resolving through it spawns nothing, so the spawn
+    registry stays empty and the scope has nothing it may stop.
+    """
+
+    def __init__(self, *, attach: bool) -> None:
+        self.attach = attach
+        self.spawned: dict[str, Any] = {}
+        self.stopped: list[Any] = []
+        #: The ``owned_pids`` claim each stop was handed, in call order.
+        self.claims: list[tuple[int, ...]] = []
+        self.broker_alive = attach
+        #: The pid the daemon holding the socket reports; ``None`` = the
+        #: record's own (the ordinary one-spawn case).
+        self.live_pid: int | None = None
+
+    def resolve_through_the_broker(self, base: Path, *, pid: int = 5150) -> None:
+        """What ``CredentialStoreResolver.resolve`` causes: a lazy start."""
+        if self.broker_alive:
+            return
+        self.broker_alive = True
+        self.respawn(base, pid=pid)
+
+    def respawn(self, base: Path, *, pid: int) -> None:
+        """A spawn recorded the way the client records it: history extended."""
+        key = str(base / "broker.sock")
+        earlier = self.spawned.get(key)
+        history = earlier.pids if earlier is not None else ()
+        self.spawned[key] = SimpleNamespace(pid=pid, base=base, pids=(*history, pid))
+
+    def spawned_brokers(self) -> dict[str, Any]:
+        return dict(self.spawned)
+
+    def settle_spawned_broker(self, base: Path | None = None, **kwargs: Any) -> Any:
+        self.claims.append(tuple(kwargs.get("owned_pids") or ()))
+        self.stopped.append(base)
+        self.broker_alive = False
+        [entry] = self.spawned.values()
+        self.spawned.clear()
+        return SimpleNamespace(outcome="stopped", pid=self.live_pid or entry.pid)
+
+
+def test_the_scope_stops_the_broker_the_episode_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One orphaned ``secrets.brokerd`` per episode was the measured leak."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+        assert fake.broker_alive is True  # alive for the whole episode
+    assert fake.stopped == [tmp_path]
+    assert fake.broker_alive is False
+    assert scope.outcomes == [(5150, "stopped")]
+
+
+def test_the_scope_never_touches_a_broker_it_merely_attached_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=True)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+    assert fake.stopped == []
+    assert fake.broker_alive is True
+    assert scope.outcomes == []
+
+
+def test_the_scope_leaves_a_broker_started_before_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Started by this PROCESS but not by this EPISODE: an outer owner's."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    fake.resolve_through_the_broker(tmp_path)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+    assert fake.stopped == []
+    assert scope.outcomes == []
+
+
+def test_the_scope_stops_the_broker_when_the_episode_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with pytest.raises(RuntimeError, match="episode failed"):
+        with host_secrets.owned_broker_scope():
+            fake.resolve_through_the_broker(tmp_path)
+            raise RuntimeError("episode failed")
+    assert fake.stopped == [tmp_path]
+
+
+def test_a_failing_stop_never_replaces_the_episode_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teardown hygiene must not turn a scored episode into a crash."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+
+    def exploding(base: Path | None = None, **kwargs: Any) -> Any:
+        raise OSError("synthetic stop failure")
+
+    fake.settle_spawned_broker = exploding  # type: ignore[method-assign]
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+    assert scope.outcomes == [(5150, "error: OSError")]
+
+
+def test_the_scope_owns_every_spawn_and_names_the_daemon_that_won_the_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4236 QA Q1: a daemon slower to listen than the client waits makes
+    the next resolve spawn again, and the FIRST usually binds. The scope owned
+    only the last pid, so the outcome read ``replaced`` and the warning named
+    a daemon that had already exited, while the first one outlived the run."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path, pid=5150)  # slow: wins later
+        fake.respawn(tmp_path, pid=5151)  # the retry, which loses the bind
+        fake.live_pid = 5150
+    assert fake.claims == [(5150, 5151)]
+    assert scope.outcomes == [(5150, "stopped")]
+
+
+def test_the_scope_claims_only_the_spawns_made_inside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-spawn inside the scope for a store an OUTER owner already spawned
+    for: the scope may stop its own daemon, never the one that predates it."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    fake.resolve_through_the_broker(tmp_path, pid=5150)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope():
+        fake.respawn(tmp_path, pid=5151)
+    assert fake.claims == [(5151,)]

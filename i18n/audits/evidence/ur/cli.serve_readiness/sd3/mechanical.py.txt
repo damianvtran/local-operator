@@ -1,0 +1,68 @@
+import json, re, subprocess, hashlib, unicodedata
+from pathlib import Path
+from local_operator.i18n import runtime
+from rich.cells import cell_len
+ns = 'cli.serve_readiness'
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        assert key not in result, key
+        result[key] = value
+    return result
+paths = {name: Path('local_operator/i18n/catalogues') / loc / (ns + suffix) for name, loc, suffix in [('en', 'en', '.json'), ('context', 'en', '.context.json'), ('ur', 'ur', '.json')]}
+maps = {name: json.loads(path.read_text(), object_pairs_hook=unique) for name, path in paths.items()}
+assert len(maps['en']) == len(maps['ur']) == len(maps['context']) == 15
+assert maps['en'].keys() == maps['ur'].keys() == maps['context'].keys()
+for name, path in paths.items(): print('INPUT_SHA256', name, str(path), hashlib.sha256(path.read_bytes()).hexdigest())
+head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+print('HEAD', head)
+assert head == '1fc11dab96954dcc4c31abcc695c696baf2ead8c'
+unchanged = {'install_unknown', 'cgroup_unknown', 'stale', 'other_unit'}
+for locale in ('en', 'ur'):
+    old_bytes = subprocess.check_output(['git', 'show', 'HEAD:local_operator/i18n/catalogues/' + locale + '/' + ns + '.json'])
+    old = json.loads(old_bytes)
+    target = maps[locale]
+    assert {key.rsplit('.', 1)[-1] for key in old if old[key] == target.get(key)} == unchanged
+    for suffix in sorted(unchanged):
+        key = ns + '.' + suffix
+        assert old[key].encode('utf-8') == target[key].encode('utf-8')
+        print('UNCHANGED_VALUE_BYTES', locale, key, hashlib.sha256(target[key].encode('utf-8')).hexdigest())
+    print('DELTA', locale, 'updated', len([key for key in old if old[key] != target[key]]), 'new', len(target.keys() - old.keys()), 'old_catalogue_sha256', hashlib.sha256(old_bytes).hexdigest())
+controls = {'LRE', 'RLE', 'LRO', 'RLO', 'PDF', 'LRI', 'RLI', 'FSI', 'PDI'}
+plural_count = 0
+for key, en in maps['en'].items():
+    ur = maps['ur'][key]
+    assert runtime.message_arguments(en) == runtime.message_arguments(ur), key
+    assert runtime.plural_selectors(en) == runtime.plural_selectors(ur), key
+    for selectors in runtime.plural_selectors(ur):
+        assert set(selectors) == {'one', 'other'}, key
+        plural_count += 1
+    assert re.findall(r'`[^`]*`', en) == re.findall(r'`[^`]*`', ur), key
+    assert re.findall(r'</?[A-Za-z][^>]*>', en) == re.findall(r'</?[A-Za-z][^>]*>', ur), key
+    assert not any(unicodedata.bidirectional(c) in controls or ord(c) in (0x200e, 0x200f, 0x061c) for c in ur), key
+    assert not re.search('[\u0660-\u0669\u06f0-\u06f9]', ur), key
+    hints = {k: v for k, v in maps['context'][key].items() if k in ('maxCells', 'maxChars')}
+    params = {'device': 'node-2', 'pids': '123, 456', 'holders': 'pid 123 under external.service', 'builds': 'v0.104.0', 'recorded': 'v0.104.0', 'install': 'v0.105.3', 'reason': maps['ur'][ns + '.unproven'], 'reasons': maps['ur'][ns + '.unproven']}
+    print('KEY_PASS', key, 'args', runtime.message_arguments(ur), 'hints', hints)
+    for count in ([0, 1, 2, 12] if runtime.plural_selectors(ur) else [None]):
+        params['count'] = count
+        out = runtime.render_message(ur, params, 'ur')
+        for name, kind in runtime.message_arguments(ur):
+            if kind == 'simple': assert params[name] in out, (key, name)
+        print('RENDER', key, 'count', count, 'cells', cell_len(out), 'chars', len(out), out)
+    opaque = {name: '{opaque_' + name + '}::/a-b[raw]@1.2' for name, kind in runtime.message_arguments(ur) if kind == 'simple'}
+    opaque['count'] = 2
+    out = runtime.render_message(ur, opaque, 'ur')
+    for name, kind in runtime.message_arguments(ur):
+        if kind == 'simple': assert opaque[name] in out, (key, name)
+    print('OPAQUE_PARAM_PASS', key)
+assert plural_count == 6
+# Exercise the new grouped-diagnosis composition with current Urdu copy only.
+for count in (1, 2, 12):
+    diagnosis = maps['ur'][ns + '.unproven'] + '; ' + runtime.render_message(maps['ur'][ns + '.recorded_gap'], {'recorded': 'v0.104.0', 'install': 'v0.105.3'}, 'ur')
+    reason = runtime.render_message(maps['ur'][ns + '.pid_reason'], {'count': count, 'pids': '123' if count == 1 else '123, 456', 'reason': diagnosis}, 'ur')
+    if count == 12: reason += ' ' + runtime.render_message(maps['ur'][ns + '.and_more'], {'count': 10}, 'ur')
+    out = runtime.render_message(maps['ur'][ns + '.unknown'], {'count': count, 'device': 'node-2', 'reasons': reason}, 'ur')
+    assert ':' not in out and out.count('شناخت ثابت نہیں') == 1
+    print('GROUPED_DIAGNOSIS count', count, out)
+print('PASS: 15 keys, six Urdu one/other plurals, exact four unchanged values per en/ur, opaque parameter preservation, grouped reason/no duplicate colon or identity parenthesis. Raw rendering and cells only; not terminal RTL or live remedy execution evidence.')

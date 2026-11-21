@@ -1,0 +1,11 @@
+{
+  "locale": "es",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd2",
+  "sha256": {
+    "audit.log": "3a094a13d27871dd065ed156b8d5a2bae9e092b07e7bef4607edc58c5c463f25",
+    "report.md": "4246336fb8d188ca310a81c7b3628ad96c290871f55d8e616f528a01288cda41",
+    "rendered.txt": "3d3d12551d064ef8688c2b3ae13f2ff4090db21b30370ffebd9e3e74782444ff",
+    "record.json": "a8b914b5d55f6b8b7990a70cbbf01241faa940b536262dce0ded313b90e7c98a"
+  }
+}

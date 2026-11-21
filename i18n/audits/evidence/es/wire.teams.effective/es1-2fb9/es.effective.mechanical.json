@@ -1,0 +1,117 @@
+{
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    },
+    "provenance": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.translator-provenance.json",
+      "sha256": "ce95251a453698bb6421eff617e1711c529222a091d11945a6b39751e666be75"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "key_count": 9,
+  "json_duplicate_keys": "none",
+  "key_order_parity": true,
+  "validator": {
+    "executed": true,
+    "entrypoint": "scripts.i18n.check.check_catalogues",
+    "scope": "Only assigned namespace; in-memory enumeration/load adapters for scratch candidate, no repository catalogue mutation; not the full check.py CLI",
+    "problems": [],
+    "negative_control": {
+      "mutation": "In-memory removal of {role}, candidate file untouched",
+      "actual_problems": [
+        "es/wire.teams.effective: wire.teams.effective.team_missing: arguments () != en's (('role', 'simple'),): en has 1 argument(s), translation has 0"
+      ],
+      "result": "detected"
+    }
+  },
+  "cldr_categories": [
+    "many",
+    "one",
+    "other"
+  ],
+  "plural_select_count": 0,
+  "technical_tokens": "PASS; config model/effort identities checked contextually (English effort prose legitimately becomes esfuerzo)",
+  "bidi_controls": "none",
+  "rows": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "arguments": "(('role', 'simple'),)",
+      "characters": 44,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "arguments": "()",
+      "characters": 100,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "arguments": "()",
+      "characters": 90,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "arguments": "(('tier', 'simple'),)",
+      "characters": 120,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "arguments": "(('tier', 'simple'),)",
+      "characters": 174,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "arguments": "(('tier', 'simple'),)",
+      "characters": 60,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "arguments": "(('tier', 'simple'),)",
+      "characters": 93,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "arguments": "(('selector', 'simple'),)",
+      "characters": 104,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "arguments": "()",
+      "characters": 104,
+      "combining_codepoints": [],
+      "mechanical": "PASS"
+    }
+  ]
+}

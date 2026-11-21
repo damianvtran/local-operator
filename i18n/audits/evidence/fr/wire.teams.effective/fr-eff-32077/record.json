@@ -1,0 +1,99 @@
+{
+  "locale": "fr",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19T18:57:26.539314+00:00",
+  "key_count": 9,
+  "audit_id": "fr-eff-32077",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "32077ea6da37",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "34a8703ccbff",
+    "actual_model_source": "Host Model field in developer session context",
+    "fallback_used": false,
+    "date": "2026-11-19T18:57:26.539314+00:00",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "34a8703ccbff",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19T18:43:22.329429+00:00",
+    "actual_model_source": "Translator receipt, independently hash-verified; not an auditor-observed translator runtime",
+    "fallback_used": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/wire.teams.effective.fr.json",
+      "sha256": "9c7ffd5f52a5ad10267d739074e19c56c90f532b6c79b15314e2256655038226"
+    },
+    "translator_receipt": {
+      "path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/translator-receipt.fr.json",
+      "sha256": "23c5bab253b77d5f858781da77afcfa84a12db532bd1c2d3c6fb9ae1f1933dff"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit-report.fr.md",
+      "sha256": "1c11984112468ace0c4f2c8e6688af2298cdb6476aa98dfcde54187671cdbfef"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit.fr.log",
+      "sha256": "c3ea2254181863a2da60a58c6b47e2f4a0ab9ebebd73bfbbfa0d7e4e0de3417f"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/mechanical-results.fr.json",
+      "sha256": "6c3e0d1e9eeb2d4f72eda9b546323baeea522ce9eee6c48f87ca51cdb8022191"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit_fr.py",
+      "sha256": "dda1af57b17880bb328851b4c09f1e97a0481a679656c34544dc5d37fc076ac0"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/receipt-validation.fr.log",
+      "sha256": "3589ccecf65b6ced4094a0e402fcb916a422b96e242905cb8b475d0145bcd97e",
+      "kind": "actual_execution_log",
+      "command": "ledger.py history-sha --locale fr --namespace wire.teams.effective; ledger.py append --receipt <receipt.fr.json> --expected-history-sha <observed> --dry-run",
+      "exit_code": 0
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit-report.fr.md",
+  "execution_logs": [
+    "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit.fr.log",
+    "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/receipt-validation.fr.log"
+  ],
+  "high_visibility_second_independent_audit": {
+    "required": true,
+    "satisfied_by_this_record": false,
+    "note": "This is one independent pass only; second auditor must be distinct."
+  },
+  "gaps": [
+    "Full checker CLI/generation checks unrun",
+    "Rendered desktop and pseudo fit checks unrun",
+    "Second independent high-visibility audit not evidenced here",
+    "No tracked evidence bundle or ledger mutation authorized"
+  ],
+  "retention": "Task-authorized scratch only; manager must preserve originals and integrate canonical tracked evidence before completion"
+}

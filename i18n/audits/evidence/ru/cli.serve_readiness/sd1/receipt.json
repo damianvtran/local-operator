@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "record_reference": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/record.json",
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "audit_date": "2026-11-16",
+  "auditor": {
+    "agent": "independent-ru-auditor",
+    "session": "b8c027b19533",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "kind": "bundle_companion_hash_manifest_not_ledger_append_receipt",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/record.json",
+      "sha256": "d343ea72946fdbde94c640e69565f3ee65d02de6224c4014b1aacd811ceb5a6e"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/report.md",
+      "sha256": "3636b414411c5e86078c74713312db079571e5a5f020341d68413e9cf778109f"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/audit.log",
+      "sha256": "a66946f19e2c037273d36aa3be790b4509aaf06ede27a534778efcd40e9d5710"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/mechanical.py.txt",
+      "sha256": "a9484a6c1216e6531a954b756b6f63569a7f9b8603c36466389b99453b415aae"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/ledger-receipt.json",
+      "sha256": "121f8cebdcf2ee3cbe93c89265480cd6b40b2725d09a735f6a211be953194fe7"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/append-validation.log",
+      "sha256": "3c96942a210c0333a0c3e63633b072f0808b5633089d8fab88039f3018621af1"
+    }
+  ],
+  "self_hash_omitted": "Avoid circular manifest hashing; record hashes companions, this receipt hashes record and companions."
+}

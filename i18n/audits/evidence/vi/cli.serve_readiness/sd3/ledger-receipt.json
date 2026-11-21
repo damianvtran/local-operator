@@ -1,0 +1,26 @@
+{
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "170903662c6e",
+    "model": "openai/gpt-6.1-sol",
+    "provenance_source": "Requester identifies job 170903662c6e as the same original translator (earlier supplied actual model openai/gpt-6.1-sol); new job runtime was not independently inspected.",
+    "previous_translator_session": "acf0a84cd992"
+  },
+  "auditor": {
+    "agent": "Audit daemon Vietnamese",
+    "session": "77442ce206e1",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session declares openai/gpt-6.1-sol; same independent auditor session resumed; no provider/model fallback incident observed.",
+    "fallback": null,
+    "independent_from_translator_session": true,
+    "translator_session": "170903662c6e",
+    "date": "2026-11-16",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "i18n/audits/evidence/vi/cli.serve_readiness/sd3/record.json; FIRST audit of 7 changed + 4 new keys; 4 retained byte-identical; 15/15 mechanics; 0 open findings."
+}

@@ -408,9 +408,13 @@ def test_membership_converges_over_links_that_were_already_up(
         assert _join(joiner, inviter=c, monkeypatch=monkeypatch)["device_id"] == joiner.device_id
 
     # THE LINKS THAT WILL STILL EXIST WHEN THE LATE MEMBER ARRIVES: A–C and B–C.
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
-    link, reason = b.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     # A CONTACT ON A LINK THAT ALREADY EXISTS ESTABLISHES NOTHING, which is the
     # mechanism round 2's fix rested on and the reason it could never run again: it
@@ -560,7 +564,9 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
     record = _init_network(c.server)
     assert _join(b, inviter=c, monkeypatch=monkeypatch)["device_id"] == b.device_id
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
 
     rows = a.server._ctl_ls({})  # noqa: SLF001 — the CLI's own control op
@@ -627,7 +633,9 @@ def test_the_removal_frame_is_applied_by_the_device_it_removes(
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
 
     # A live link, so the rotation has somewhere to be delivered.
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     before = store.load_secrets(record.network_id, b.root).secret
@@ -700,6 +708,15 @@ def test_a_silently_refused_handshake_is_named_locally(
     a.server._ctl_member_rm(  # noqa: SLF001 — the CLI's own control op
         {"network": record.network_id, "device_id": b.device_id}
     )
+    # SILENCE IS STILL THE ANSWER PAST THE NOTICE WINDOW (G9-B). Inside
+    # ``relay.REMOVAL_NOTICE_WINDOW_S`` a removed device that proves its own key is
+    # told "membership ended" instead (test_removed_member_notice.py); this cell pins
+    # the silent path, so the removal is aged past that window first.
+    with store.mutate(record.network_id, a.root) as aged:
+        tomb = aged.member(b.device_id)
+        assert tomb is not None and tomb.removed_at is not None
+        tomb.removed_at -= relay.REMOVAL_NOTICE_WINDOW_S + 60
+        store.save(aged, a.root)
     # ...AND IT COMES BACK: a fresh relay on the existing root — the durable state is
     # on disk, the process is not (the process that paired is not the process that
     # later dials). Dial-only, per the rule the fresh-relay helper in
@@ -716,7 +733,9 @@ def test_a_silently_refused_handshake_is_named_locally(
     refused.stale = ""
     store.save(refused, b.root)
 
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is None
     assert reason.startswith("handshake_refused:"), reason
 
@@ -853,7 +872,9 @@ def test_a_frame_queued_immediately_before_a_close_reaches_the_peer(
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     # WATCHED ON THE RECEIVING LINK'S OWN DISPATCH, not on a class attribute: the
@@ -983,7 +1004,9 @@ def test_a_pulled_rotation_table_leaves_one_row_for_the_rotated_device(
     new_id = rotated.self_device_id
     assert new_id != old_id, "the verb did not rotate the device id"
 
-    link, reason = peer.server.dial(record.network_id, host=f"{hub.host}:{hub.port}", epoch=1)
+    link, reason = peer.server.dial(
+        record.network_id, host=f"{hub.host}:{hub.port}", epoch=1, expected_device=hub.device_id
+    )
     assert link is not None, reason
     assert peer.server._pull_members(link) == ""  # noqa: SLF001
     view = store.load(record.network_id, peer.root)
@@ -999,6 +1022,62 @@ def test_a_pulled_rotation_table_leaves_one_row_for_the_rotated_device(
     surviving = view.member(new_id)
     assert surviving is not None
     assert surviving.rotation_proof.get("sig_old")
+
+
+def test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G1D-1 / PR #4179 S-1: a rotation must not split the mesh.
+
+    The cell above passes only because the hub's RUNNING relay still holds its
+    pre-rotation identity in memory. Here the relay runs under the NEW identity (the
+    state after a relay-path rotate or a restart), and the peer still holds the OLD
+    row and never saw the queued ``net_identity_rotate``. The hub's challenge carries
+    its rotation statement; the peer verifies it against the stored old key, the
+    welcome proof under the new key, applies the hop, and links.
+
+    RED before round 1: ``peer->hub None peer_identity_mismatch``, the hub's only
+    address removed from the peer's row, and ``hub->peer`` refused (the security
+    review's repro, verbatim setup).
+    """
+    hub = _make(devices, "hub")
+    peer = _make(devices, "peer")
+    record = _init_network(hub.server)
+    _join(peer, inviter=hub, monkeypatch=monkeypatch)
+    old_id = hub.device_id
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(hub.root))
+    monkeypatch.setattr(relay, "health", lambda *args, **kwargs: None)
+    assert net_cli._cmd_identity_rotate(Namespace(json=True)) == 0  # noqa: SLF001
+    new_id = store.load(record.network_id, hub.root).self_device_id
+    assert new_id != old_id
+    hub.server.identity = identity.load_or_mint(hub.root)
+    assert hub.server.identity.device_id == new_id
+    held = store.load(record.network_id, peer.root).member(old_id)
+    assert held is not None
+    before = list(held.endpoints)
+    assert before, "the rig gave the peer no address for the hub"
+
+    link, reason = peer.server.dial(
+        record.network_id, host=before[0], epoch=1, expected_device=old_id
+    )
+    assert link is not None, f"peer->hub {reason}"
+    assert link.device_id == new_id and link.peer_verified
+    view = store.load(record.network_id, peer.root)
+    row = view.member(new_id)
+    assert row is not None and view.member(old_id) is row
+    assert row.endpoints, "the rotated hub's address was demoted"
+    assert set(before) <= set(row.endpoints)
+    assert [r.device_id for r in view.active_members() if r.device_id != peer.device_id] == [new_id]
+    assert "device_rotated" in _events(peer), "the hop applied by the dial was not audited"
+
+    # The other half: with the hop applied, the hub's NEW id is a member on the peer.
+    back, back_reason = hub.server.dial(
+        record.network_id,
+        host=f"{peer.host}:{peer.port}",
+        epoch=1,
+        expected_device=peer.device_id,
+    )
+    assert back is not None, f"hub->peer {back_reason}"
 
 
 def test_the_announced_rotation_carries_its_statement_on_the_row(
@@ -1350,7 +1429,9 @@ def test_a_status_read_asks_for_the_pass_it_reports(
     record = _init_network(a.server)
     admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     def _row(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1431,7 +1512,9 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     # the dial.
     admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
@@ -1550,7 +1633,9 @@ def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
     record = _init_network(a.server)
     admit_seq = a.server._membership_seq  # noqa: SLF001
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
     a_link = a.server._link_for(b.device_id)  # noqa: SLF001
     assert a_link is not None
@@ -1714,7 +1799,9 @@ def _status_pair_after_admit(
     record = _init_network(a.server)
     admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     # The ambient root is what `health()` scans for the relay's record; a's own
@@ -2229,7 +2316,9 @@ def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
     c = _make(devices, "c", mode=HUB)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     assert wire.MEMBER_LIST_DIGEST_V1 in link.capabilities
 
@@ -2279,7 +2368,9 @@ def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
         for item in list(server.links.values()):  # noqa: SLF001
             item.close()
     count = len(seen)
-    relinked, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    relinked, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert relinked is not None, reason
     assert net_fixtures.wait_for(
         lambda: any(r["asker"] == a.device_id and r["server"] == c.device_id for r in seen[count:])
@@ -2317,7 +2408,9 @@ def test_a_share_to_a_drive_device_still_settles_to_unchanged(
     record = _init_network(c.server)
     joined = _join(a, inviter=c, monkeypatch=monkeypatch, role="drive")
     assert joined["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
 
     with store.mutate(record.network_id, c.root) as copy:
@@ -2432,7 +2525,9 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     monkeypatch.setattr(relay.PeerLink, "send", record_send)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     assert net_fixtures.wait_for(lambda: c.server._link_for(a.device_id) is not None)
     reverse = c.server._link_for(a.device_id)
@@ -2500,7 +2595,9 @@ def _settled_pair(devices: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, A
     c = _make(devices, "c", mode=HUB)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     return a, c, record.network_id, link
 
@@ -2738,7 +2835,9 @@ def test_a_peer_without_the_digest_capability_never_backs_off(
     record = _init_network(c.server)
     network_id = record.network_id
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     assert wire.MEMBER_LIST_DIGEST_V1 not in link.capabilities
     assert net_fixtures.wait_for(

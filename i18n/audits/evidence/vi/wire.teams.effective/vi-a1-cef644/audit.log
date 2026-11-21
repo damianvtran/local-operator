@@ -1,0 +1,15 @@
+HASH PASS /Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501
+HASH PASS /Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json 01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417
+HASH PASS /Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/wire.teams.effective.json 4d510633cda89708fa842a0812dc9fff2836383e93e1322c6a6d532cf52cc057
+HASH PASS /Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/translator-receipt.json ff505f4a6c875eba2bd2a75eeab0e1f64001790bdbddaae62866329e7beca6fd
+check.py: catalogue checks: 0 problem(s)
+KEY PASS {"key": "wire.teams.effective.team_missing", "arguments": [["role", "simple"]], "placeholder_sequence": ["{role}"], "characters": 34, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.registry_unreadable", "arguments": [], "placeholder_sequence": [], "characters": 78, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.config_unreadable", "arguments": [], "placeholder_sequence": [], "characters": 62, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.tier_invalid_value", "arguments": [["tier", "simple"]], "placeholder_sequence": ["{tier}"], "characters": 128, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.tier_invalid_mapping", "arguments": [["tier", "simple"]], "placeholder_sequence": ["{tier}"], "characters": 168, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.tier_unconfigured", "arguments": [["tier", "simple"]], "placeholder_sequence": ["{tier}"], "characters": 50, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.tier_invalid_selector", "arguments": [["tier", "simple"]], "placeholder_sequence": ["{tier}"], "characters": 96, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.model_unresolvable", "arguments": [["selector", "simple"]], "placeholder_sequence": ["{selector}"], "characters": 98, "NFC": true, "mechanical": "passed"}
+KEY PASS {"key": "wire.teams.effective.unavailable", "arguments": [], "placeholder_sequence": [], "characters": 109, "NFC": true, "mechanical": "passed"}
+PASS 9/9; no fixed width hints. Runtime/pseudo/fallback/bidi/visual NOT RUN.

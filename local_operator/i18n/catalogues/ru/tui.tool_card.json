@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.chip.you": "вы:",
+  "tui.tool_card.fetch.cache": "кэш: {state}",
+  "tui.tool_card.fetch.fetched": "Загружено: {url}",
+  "tui.tool_card.fetch.final": "(итог: {url})",
+  "tui.tool_card.hint.collapse": "свернуть",
+  "tui.tool_card.hint.expand": "развернуть",
+  "tui.tool_card.hint.interrupt": "{chord} прервать",
+  "tui.tool_card.imagegen.requests_ahead": "{count, plural, one {впереди {shown} запрос} few {впереди {shown} запроса} many {впереди {shown} запросов} other {впереди {shown} запроса}}",
+  "tui.tool_card.live.earlier_lines": "{count, plural, one {{shown} строка выше} few {{shown} строки выше} many {{shown} строк выше} other {{shown} строки выше}}",
+  "tui.tool_card.live.earlier_output_hidden": "предыдущий вывод скрыт",
+  "tui.tool_card.live.no_output_yet": "вывода пока нет",
+  "tui.tool_card.live.running": "выполняется",
+  "tui.tool_card.more.diff_lines": "{count, plural, one {ещё {shown} строка изменений} few {ещё {shown} строки изменений} many {ещё {shown} строк изменений} other {ещё {shown} строки изменений}}",
+  "tui.tool_card.more.lines": "{count, plural, one {ещё {shown} строка} few {ещё {shown} строки} many {ещё {shown} строк} other {ещё {shown} строки}}",
+  "tui.tool_card.more.search_lines": "{count, plural, one {ещё {shown} найденная строка} few {ещё {shown} найденные строки} many {ещё {shown} найденных строк} other {ещё {shown} найденной строки}}",
+  "tui.tool_card.status.stop_unconfirmed": "стоп под вопросом"
+}

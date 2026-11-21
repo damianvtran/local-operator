@@ -1,0 +1,542 @@
+{
+  "cli.sessions_move_workset.warning_sends": {
+    "role": "CLI/TUI heading line of the move confirmation (shown before the user approves moving a conversation to another device)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{session} is a conversation id (hex), {device} a device name; keep both verbatim. 'working files' = the git worktrees and uncommitted/unpushed work the conversation used. 'mid-conversation' = while the conversation is still going."
+  },
+  "cli.sessions_move_workset.warning_stays": {
+    "role": "CLI/TUI heading line of the move confirmation when this version cannot transfer the files",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{session} conversation id, {device} device name: keep verbatim. Must say clearly that the files do NOT travel and remain on the current device. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
+  },
+  "cli.sessions_move_workset.brings_summary": {
+    "role": "one summary line of counts under the warning",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plurals: keep the three plural blocks and '#'. {size} is an already formatted byte size like '3.2 MB'. The middle dots are separators; keep them."
+  },
+  "cli.sessions_move_workset.worktree_line": {
+    "role": "one indented line per git worktree",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is a ~/ path, {branch} a git branch name: verbatim. The four numbers are counts of unpushed commits and staged/unstaged/untracked files; 'staged', 'unstaged', 'untracked' are git states: translate idiomatically or keep the git term the locale uses."
+  },
+  "cli.sessions_move_workset.worktree_left": {
+    "role": "one indented line per worktree that does not travel",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim; {reason} is one of the reason.* phrases (lower-case clause)."
+  },
+  "cli.sessions_move_workset.withheld_secret": {
+    "role": "list line: a file excluded because it looks like a credential",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim."
+  },
+  "cli.sessions_move_workset.withheld_history": {
+    "role": "list line: a worktree withheld because its unpushed commits look like they contain a credential",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim."
+  },
+  "cli.sessions_move_workset.leaves_behind": {
+    "role": "list line: a dependency folder that is never copied",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim (e.g. node_modules); {command} is a shell command, verbatim."
+  },
+  "cli.sessions_move_workset.advice_sends": {
+    "role": "closing advice before the yes/no prompt",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} device name verbatim."
+  },
+  "cli.sessions_move_workset.advice_stays": {
+    "role": "closing advice before the yes/no prompt (files stay here)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} device name verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
+  },
+  "cli.sessions_move_workset.prompt_sends": {
+    "role": "interactive yes/no prompt",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep '[y/N] ' exactly, including the trailing space: the user types y."
+  },
+  "cli.sessions_move_workset.prompt_stays": {
+    "role": "interactive yes/no prompt (files stay)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep '[y/N] ' exactly, including the trailing space. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
+  },
+  "cli.sessions_move_workset.aborted": {
+    "role": "CLI result after the user declined",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "cli.sessions_move_workset.needs_confirmation": {
+    "role": "CLI error when a script moved a conversation with working files without confirming",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --dry-run, --confirm-working-set, --without-working-set verbatim; {digest} is a sha256: token, verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on. --yes is deliberately NOT offered here: it can now refuse (it only confirms a plan that sends the files, and never from an agent's shell), so the line names the explicit digest instead."
+  },
+  "cli.sessions_move_workset.changed": {
+    "role": "CLI notice: the list changed between showing and confirming",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "cli.sessions_move_workset.unknown": {
+    "role": "CLI error: the git state could not be read, so the move was refused",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{step} is a machine word (e.g. status), {repo} a ~/ path: verbatim. Keep --without-working-set verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
+  },
+  "cli.sessions_move_workset.unsupported": {
+    "role": "CLI error: the other device is too old",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim; keep --without-working-set verbatim."
+  },
+  "cli.sessions_move_workset.none": {
+    "role": "CLI --dry-run result when there is nothing to confirm",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "cli.sessions_move_workset.receipt_not_transferred": {
+    "role": "CLI line after a confirmed move: what did not travel",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {device} is the device the files stayed on."
+  },
+  "cli.sessions_move_workset.receipt_without": {
+    "role": "CLI line after a move with --without-working-set",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim."
+  },
+  "cli.sessions_move_workset.receipt_keep": {
+    "role": "CLI line after a --keep copy",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} = where the copy now is; verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
+  },
+  "cli.sessions_move_workset.help_dry_run": {
+    "role": "argparse help for --dry-run",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case start, no final period (argparse help style)."
+  },
+  "cli.sessions_move_workset.help_confirm": {
+    "role": "argparse help for --confirm-working-set",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --dry-run and working_set.scope_digest verbatim; lower-case start, no period."
+  },
+  "cli.sessions_move_workset.help_without": {
+    "role": "argparse help for --without-working-set",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case start, no period."
+  },
+  "cli.sessions_move_workset.help_yes": {
+    "role": "argparse help for --yes",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case start, no period. Keep --without-working-set verbatim. --yes now sends the files only when the destination-checked plan carries them; it refuses when the destination cannot take them or did not answer, and when run from an AI agent's shell. 'destination' = the device the conversation is moving to."
+  },
+  "cli.sessions_move_workset.reason.contended": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.outside_home": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.unmerged": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.in_progress_operation": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.submodule": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.lfs": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.history_secret": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.over_cap": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.destination_conflict": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.destination_cannot_clone": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.unsupported_by_peer": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.not_transferred": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.history_unscannable": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.unsafe_path": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.insufficient_space": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.probe_cannot_fetch": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} destination device name, {remote} a git remote URL; both verbatim. 'its own access' = the destination's own credentials (SSH key, login), not the source's. Warning only."
+  },
+  "cli.sessions_move_workset.probe_cannot_push": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, {remote} git remote URL, verbatim. 'push' is the git verb; keep it as the locale's usual git term."
+  },
+  "cli.sessions_move_workset.probe_cannot_clone": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, {remote} git remote URL, verbatim. Two causes: the remote address is of a kind lop refuses to try (local path, unusual transport), or git is not installed on the destination."
+  },
+  "cli.sessions_move_workset.probe_https_rewrite": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name; {url} an https:// URL the destination could use instead of the SSH remote; verbatim. Only an offer: nothing is changed now."
+  },
+  "cli.sessions_move_workset.probe_remedy": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{command} is a lop command (e.g. `lop network credential github include owner/repo`), verbatim, never translated. 'the device that lends GitHub access' = the mesh device whose GitHub login is shared with others."
+  },
+  "cli.sessions_move_workset.probe_unknown": {
+    "role": "CLI/TUI move confirmation, one line for the whole manifest",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, verbatim. Not an error: the destination could not be asked (older version or not reachable). 'lop' is the product name."
+  },
+  "cli.sessions_move_workset.prereq_missing_tools": {
+    "role": "CLI/TUI move confirmation, one line for the whole manifest; warning only",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name; {tools} a comma-separated list of program names (go, pnpm, node, uv, cargo, npm), verbatim. Must say the move is not blocked."
+  },
+  "cli.sessions_move_workset.prereq_team_bridge": {
+    "role": "CLI/TUI move confirmation, one line; warning only",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, verbatim. 'Team Bridge' is a product feature name, keep in English. Must say the move is not blocked."
+  },
+  "cli.sessions_move_workset.help_no_engage_on_arrival": {
+    "role": "argparse help for --no-engage-on-arrival on `lop sessions move`",
+    "tone": "plain, factual, calm",
+    "note": "lower-case start, no final period (argparse style). 'active conversation' = one the user or a subagent was using in the last few minutes or that was queued to move."
+  },
+  "cli.sessions_move_workset.receipt_resumed": {
+    "role": "CLI receipt line after a successful move",
+    "tone": "plain, factual, calm",
+    "note": "{device} destination device name, verbatim. The conversation was started on the destination automatically and given one note listing working files that did not come."
+  },
+  "cli.sessions_move_workset.unsupported_destination": {
+    "role": "refusal shown when the destination device is too old to forward the user's working-files confirmation",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} is a device name, verbatim (twice). The only remedy is updating lop on that device; do not suggest a flag."
+  },
+  "cli.sessions_move_workset.unknown_cause": {
+    "role": "second line under the 'could not read the working files' refusal: git's error class and a command to see it",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{cause} is one of the cause.* sentences (already translated, lowercase start). Keep `git -C {repo} status` verbatim: it is a command; {repo} is a path."
+  },
+  "cli.sessions_move_workset.cause.not_a_repository": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (a .git file pointing at a removed repository). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.dubious_ownership": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (git's safe.directory ownership refusal). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.index_corrupt": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (a damaged index file). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.object_corrupt": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (damaged git objects). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.git_missing": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (git not installed / not on PATH). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.timeout": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (git did not answer in time). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.git_error": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (any other git error). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.mentioned": {
+    "role": "one line listing repositories the conversation only mentioned (read or quoted), which the move ignores",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{paths} is a comma-separated list of ~/ paths, verbatim. Must say they are NOT included in the move."
+  },
+  "cli.sessions_move_workset.digest_mismatch": {
+    "role": "shown when the digest the user passed to --confirm-working-set matches nothing current",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --confirm-working-set and --dry-run verbatim. 'digest' is the scope_digest token; a following list of files is printed after this line."
+  },
+  "cli.sessions_move_workset.desktop_refused": {
+    "role": "desktop dialog refusal text when the working-set gate stops a move (the dialog renders the file list itself)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{source} = device that keeps the files, {device} = destination; both verbatim. Must NOT mention any command-line flag."
+  },
+  "cli.sessions_move_workset.receipt_transferred": {
+    "role": "CLI line after a move that carried the working files",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {source} is the device they came from (verbatim)."
+  },
+  "cli.sessions_move_workset.receipt_restored_row": {
+    "role": "CLI receipt row: one worktree restored on this device",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is the source path, {dest} the path here; both ~/-paths, keep verbatim."
+  },
+  "cli.sessions_move_workset.receipt_pending": {
+    "role": "CLI receipt line: worktrees whose files arrived but are not restored yet",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {source} verbatim. 'relay' is the product's background service name."
+  },
+  "cli.sessions_move_workset.receipt_left_row": {
+    "role": "CLI receipt row: one worktree that did not travel, with the reason",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{reason} is one of the reason.* phrases (lower-case clause); {path}/{source} verbatim."
+  },
+  "cli.sessions_move_workset.receipt_recipe": {
+    "role": "CLI receipt row: the command that recreates a worktree's dependencies (printed, never run)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{cwd} is a path and {run} a shell command; keep both verbatim."
+  },
+  "cli.sessions_move_workset.receipt_rewrite": {
+    "role": "CLI receipt row: the destination used an https form of an ssh remote",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{detail} is 'repo: old -> new' verbatim."
+  },
+  "cli.sessions_move_workset.reason.primary_absent": {
+    "role": "reason clause: why a worktree stayed behind",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.reason.restore_failed": {
+    "role": "reason clause: files arrived but the restore has not completed",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.reason.snapshot_failed": {
+    "role": "reason clause: the source could not snapshot a worktree",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; 'bare' is git's term."
+  },
+  "cli.sessions_move_workset.reason.restore_path_refused": {
+    "role": "reason clause: the destination's path policy refused where the repository would land",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; mesh.move.working_set_roots is a settings key, keep verbatim."
+  },
+  "cli.sessions_move_workset.reason.url_refused": {
+    "role": "reason clause: the destination refused to clone from the repository's remote address",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; HTTPS and SSH stay as written."
+  },
+  "cli.sessions_move_workset.reason.destination_declined": {
+    "role": "reason clause: the destination declined a worktree without saying why (it keeps the detail itself)",
+    "tone": "plain, factual, calm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.receipt_branch_moved": {
+    "role": "CLI receipt row: a recall advanced an existing local branch to the arrived commit",
+    "tone": "plain, factual, calm",
+    "note": "{branch} is a git branch name; {old} and {new} are abbreviated commit ids, verbatim."
+  },
+  "cli.sessions_move_workset.import_not_granted": {
+    "role": "CLI/TUI move confirmation, block-level line before the user confirms",
+    "tone": "plain, factual, calm",
+    "note": "{device} is the destination device's name. {command} is a lop command (`lop network member grant <network-id> <device-id> workset_import`), verbatim, never translated. 'working files' = the session's repositories, branches and uncommitted changes."
+  },
+  "cli.sessions_move_workset.reason.import_not_granted": {
+    "role": "Reason a worktree was not restored, shown in the move receipt",
+    "tone": "plain, factual",
+    "note": "Lower-case sentence fragment like the other reason.* keys."
+  },
+  "cli.sessions_move_workset.reason.too_many_worktrees": {
+    "role": "Reason a worktree was left behind, shown in the move receipt",
+    "tone": "plain, factual",
+    "note": "Lower-case sentence fragment like the other reason.* keys. 'worktrees' = git worktrees."
+  },
+  "cli.sessions_move_workset.reason.clone_parent_refused": {
+    "role": "Reason a worktree was left behind, shown in the move receipt on the destination",
+    "tone": "plain, factual",
+    "note": "mesh.move.working_set_roots is a setting key, verbatim, never translated."
+  },
+  "cli.sessions_move_workset.reason.kept_as_confirmed": {
+    "role": "Reason a worktree stayed on the source, shown in the move receipt",
+    "tone": "plain, factual",
+    "note": "Lower-case sentence fragment like the other reason.* keys. Used when the user confirmed a move that leaves the files where they are (including --without-working-set)."
+  },
+  "cli.sessions_move_workset.probe_refused_by_policy": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{remote} is a git remote URL, verbatim. 'by policy' = this program's own address rules (private/internal addresses are never contacted), not a missing permission."
+  },
+  "cli.sessions_move_workset.receipt_sent": {
+    "role": "CLI receipt headline on the SOURCE of a move: the destination reports how many worktrees it received",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {device} is the destination device name, verbatim. 'restores' = puts the worktrees back in place."
+  },
+  "cli.sessions_move_workset.receipt_sent_row": {
+    "role": "CLI receipt row on the SOURCE: one worktree the destination received",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is a ~/-path and {device} a device name; keep both verbatim."
+  },
+  "cli.sessions_move_workset.receipt_sent_unknown": {
+    "role": "CLI receipt line on the SOURCE when the destination's answer about the working files never arrived",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} is the destination device name, verbatim. Must not imply the files stayed: they may be on {device}."
+  },
+  "cli.sessions_move_workset.yes_preflight_failed": {
+    "role": "CLI refusal when `lop sessions move --yes` could not learn from the destination whether it can receive the working files (it did not answer: offline, rate-limited or unreachable)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --yes, --without-working-set and the command `lop network peers` verbatim (it lists the devices reachable right now). {device} is the destination device's name, verbatim. Nothing was moved: --yes refuses rather than guessing whether the files should travel or stay. Do not say the device cannot take the files: it is unknown. 'working files' = the conversation's git worktrees and uncommitted/unpushed work."
+  },
+  "cli.sessions_move_workset.yes_carry_unavailable": {
+    "role": "CLI refusal when `lop sessions move --yes` would only move the conversation because the destination cannot receive the working files (not allowed, or an older lop)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --yes and --without-working-set verbatim. {device} is the destination device's name (or id), verbatim. Nothing was moved: leaving the files behind must be asked for explicitly with --without-working-set, so --yes refuses. 'would stay' is conditional: the move did not happen."
+  },
+  "cli.sessions_move_workset.agent_needs_operator": {
+    "role": "CLI refusal when a move that would send working files to another device was confirmed from an AI agent's shell (--yes, --confirm-working-set, or answering the y/N prompt); read by the agent and relayed to the human operator",
+    "tone": "plain, factual, calm; explains who must confirm, without blame",
+    "note": "{flag} is the literal flag or command the agent used (--yes, --confirm-working-set, or `lop sessions move` for the y/N prompt), verbatim. {command} and {dry_run_command} are full `lop sessions move ...` commands, verbatim, never translated; each sits on its OWN line after a newline and two spaces of indentation so it can be copied whole: keep every \\n and the two-space indents exactly, and end the line before each command with a colon. 'this prints' refers to {dry_run_command} on the next line. Keep --confirm-working-set and --without-working-set verbatim. 'operator' = the human who owns this machine; 'agent's shell' = a command an AI agent ran. 'move card' = the confirmation card the desktop/mobile app shows when moving a conversation. 'digest' = the scope_digest token printed by --dry-run. Do NOT say the agent is blocked or forbidden: the sentence only says nothing moved and who can confirm."
+  },
+  "cli.sessions_move_workset.plan_not_honoured": {
+    "role": "CLI line printed FIRST (on stderr) after a move whose user had confirmed sending the working files, but the destination could no longer take them when the move ran, so only the conversation moved",
+    "tone": "plain, factual, calm; must not read as success, must not alarm: nothing was lost",
+    "note": "{device} is the destination device's name and {source} the device that still has the files, both verbatim. The first sentence must say clearly that the files were NOT sent. 'You confirmed sending them' = the user said yes to sending the files (it is the opposite of choosing to leave them). Keep `lop` and `push` (git) verbatim. 'move the conversation back ... and move it again' = run the move twice so the files travel this time."
+  },
+  "cli.sessions_move_workset.deps_help": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Subcommand one-line help in `lop sessions --help`. Must not suggest it installs anything."
+  },
+  "cli.sessions_move_workset.deps_description": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Subcommand description in `lop sessions setup-deps --help`. Keep node_modules, .venv and --status verbatim. Must say plainly that it is read-only and never runs a package manager."
+  },
+  "cli.sessions_move_workset.deps_session_help": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Help for the positional conversation id argument."
+  },
+  "cli.sessions_move_workset.deps_status_help": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Help for the required --status flag."
+  },
+  "cli.sessions_move_workset.deps_header": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "First line of the status report. {session} is a conversation id, verbatim. Must say the report is about the working set LAST restored on this device (a later move may have brought no working set, so it is not proof of the latest move) and that nothing was run or installed."
+  },
+  "cli.sessions_move_workset.deps_row": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "One row: {state} is one of the deps_state_* labels (already translated), {cwd} a home-relative path, {kind} a package-manager kind token kept verbatim (pnpm, npm, uv, git_lfs...). Keep the ' · ' separator."
+  },
+  "cli.sessions_move_workset.deps_row_plain": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "One row with no kind (the worktree itself was refused or unreadable). {state} is a deps_state_* label, {cwd} a path."
+  },
+  "cli.sessions_move_workset.deps_state_pending": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Row label: the dependency tree does not exist yet (absent or an empty folder). Short label, sentence case."
+  },
+  "cli.sessions_move_workset.deps_state_present_unverified": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Row label: a dependency folder exists but was NOT checked; it may be incomplete. Must not imply it is ready or usable."
+  },
+  "cli.sessions_move_workset.deps_state_unknown": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Row label: the folder or worktree could not be read (permissions, I/O). Must not imply present or absent."
+  },
+  "cli.sessions_move_workset.deps_state_refused": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Row label: the worktree's location is outside the restore's placement rules, so it is not described."
+  },
+  "cli.sessions_move_workset.deps_state_manual": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Row label: a step left to the user by design (e.g. git lfs). Not an error."
+  },
+  "cli.sessions_move_workset.deps_state_not_needed": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Row label: this kind of project has no dependency tree to create."
+  },
+  "cli.sessions_move_workset.deps_not_restored": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "A worktree of the move that is not restored on this device yet. {path} is a path, verbatim."
+  },
+  "cli.sessions_move_workset.deps_missing_tool": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Informational hint under a pending row. {tool} is an executable name, verbatim. Must not tell the reader to install it or run anything."
+  },
+  "cli.sessions_move_workset.deps_summary_pending": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Final summary when something is not set up. Must not tell the reader (who may be an agent) to run anything; it explains why this command does not."
+  },
+  "cli.sessions_move_workset.deps_summary_unknown": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Final summary when some entry could not be read."
+  },
+  "cli.sessions_move_workset.deps_summary_present_unverified": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Final summary when every folder exists. Must not claim they are complete or usable."
+  },
+  "cli.sessions_move_workset.deps_summary_nothing_needed": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Final summary when no worktree needs a dependency tree."
+  },
+  "cli.sessions_move_workset.deps_none": {
+    "role": "CLI line of `lop sessions setup-deps <id> --status`: a READ-ONLY report of the dependency trees (node_modules, .venv) of worktrees a session move restored on this device. Nothing is ever run, installed, linked or removed by this command.",
+    "tone": "plain, factual, calm",
+    "note": "Error line: no working set of {session} was restored on this device. {session} is a conversation id, verbatim."
+  }
+}

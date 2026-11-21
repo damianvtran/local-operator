@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "translator": {
+    "agent": "i18n-translator session bdce0d00e792",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "cef644ceab2f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "bdce0d00e792",
+    "actual_model_source": "System runtime model declaration for this session",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "First independent vi audit: 9/9 passed, 0 blocker/major. Second pass and runtime/visual evidence remain. Record i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/record.json",
+  "evidence": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/record.json",
+  "round": "a1",
+  "keys_audited": 9
+}

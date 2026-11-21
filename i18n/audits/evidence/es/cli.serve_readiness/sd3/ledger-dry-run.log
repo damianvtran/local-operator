@@ -1,0 +1,22 @@
+Record reference: i18n/audits/evidence/es/cli.serve_readiness/sd3/record.json
+Actual output, dry-run only.
+$ ledger.py append --help
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+$ ledger.py history-sha --locale es --namespace cli.serve_readiness
+5c414f1b0680cfca341224fe823db3ed13787f1be10e5da86fcb8ce1201b9bff
+
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/es/cli.serve_readiness/sd3/ledger-receipt.json --expected-history-sha 5c414f1b0680cfca341224fe823db3ed13787f1be10e5da86fcb8ce1201b9bff --dry-run
+i18n/audit-history/es/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE=0

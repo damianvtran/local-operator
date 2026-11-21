@@ -1,0 +1,70 @@
+{
+  "locale": "vi",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "305a7d6e171c957d538456b1c63ed7a369c5f29133d9abd130b4e461892f0844",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by delegation; not independently verified."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "session": "574c886faeaf",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "round": 2,
+  "head": "66c87c0755e264db07ea375c67242cffbe302bc0",
+  "scope": [
+    "tui.tool_card.status.send.no_new_wake",
+    "tui.tool_card.status.send.receipt_reused"
+  ],
+  "keys_read": {
+    "changed_audited": 2,
+    "namespace_pairs_read_for_context": 18
+  },
+  "checks": [
+    {
+      "key": "tui.tool_card.status.send.no_new_wake",
+      "english": "no new wake",
+      "target": "không gọi lại",
+      "arguments": [],
+      "rendered": "không gọi lại",
+      "cells": 13,
+      "maxCells": 14
+    },
+    {
+      "key": "tui.tool_card.status.send.receipt_reused",
+      "english": "receipt reused",
+      "target": "lấy biên nhận cũ",
+      "arguments": [],
+      "rendered": "lấy biên nhận cũ",
+      "cells": 16,
+      "maxCells": 16
+    }
+  ],
+  "findings": [
+    {
+      "id": "VI-R2-01",
+      "severity": "minor",
+      "key": "tui.tool_card.status.send.no_new_wake",
+      "current": "không gọi lại",
+      "proposed": "không gọi dậy",
+      "reason": "Gọi lại ordinarily means call back/call again, not wake a peer; calling the peer awake explicitly preserves the wake concept and distinguishes this fragment from generic duplicate-send suppression. The old-receipt neighbour keeps the current wording understandable, so this is non-blocking precision rather than a false outcome.",
+      "proposedCells": 13
+    }
+  ],
+  "composition": {
+    "text": "lấy biên nhận cũ · không gọi lại · phiên thử",
+    "cells": 44
+  },
+  "note": "Read-only round-2 delta audit; unchanged keys read only for context, not re-certified. No placeholders, ICU branches or markup in either changed string. NFC verified. Both fit maxCells (13/14 and 16/16). Read tool_card.py:1018-1038,844-865,5590-5618: receipt first; middle-dot composition; right truncation of whole summary, no separate hard 16-cell receipt clipping. Receipt translation is natural terse old-receipt retrieval/reuse in this composed context. One non-blocking wake precision suggestion. Formatter-only execution; no rendered-frame/native-speaker certification. No provider fallback."
+}

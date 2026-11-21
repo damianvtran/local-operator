@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "i18n-auditor / Audit daemon Urdu",
+    "session": "c736f176af6f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol. No fallback reported.",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Delegation identifies translator task and actual model; no fallback reported"
+  },
+  "source_audit_revision": {
+    "head": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+    "working_tree_inputs": "New uncommitted source/context/Urdu catalogue bytes; exact hashes below"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/cli.serve_readiness.json",
+      "sha256": "07c4be789363310c6f1863fd643974ca7741f18c99b7fd6c9404872ed84d9674"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1/report.md",
+      "sha256": "2b4c2a0722275e60211d2ea023f5b14ddcc8b1d4cc9f9cd8d6e28c3a52a445fc",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1/mechanical.py.txt",
+      "sha256": "ab3761b3e7e50523ab717b613ceaf556af22b165f8c13b61e41fbdacce2443fe",
+      "kind": "actual_command_stdin_reproduction"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1/audit.log",
+      "sha256": "4f384ba22e6b85d9c53161d8bed2cc17719f0f13cd63ab2ff6f55cd75090654d",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1/ledger-receipt.json",
+      "sha256": "cf474aedaa84271e6e02cb3f1e0d5b5f3e0d93eea0d31241e51e6deacf1e10dc",
+      "kind": "ledger_append_receipt_dry_run_validated"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "UR-SD1-M1"
+    ]
+  },
+  "coverage": {
+    "keys_reviewed": 11,
+    "plural_messages": 3,
+    "required_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "plural_counts_rendered": [
+      0,
+      1,
+      2
+    ],
+    "independent_passes_by_this_auditor": 1,
+    "second_separate_auditor_not_claimed": true,
+    "rendered_visual_rtl_evidence": false
+  },
+  "current_bytes_match_audited_hashes": true,
+  "ledger_operation": {
+    "append_applied": false,
+    "dry_run_exit_code": 0,
+    "expected_history_sha": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "parent_to_append": true
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention_state": "New uncommitted evidence in canonical repo-only root; parent must include in tracked commit"
+}

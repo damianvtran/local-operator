@@ -1,0 +1,23 @@
+{
+  "tui.settings_view.editor.contract": "{save_key}保存 · {cancel_key}取消",
+  "tui.settings_view.editor.contract_unset": "{save_key}保存 · {cancel_key}取消 · 留空即清除",
+  "tui.settings_view.editor.suggest_long": "{browse_keys}选建议 · {complete_key}补全 · {save_key}保存 · {cancel_key}",
+  "tui.settings_view.editor.suggest_medium": "{browse_keys}浏览 · {complete_key}补全 · {save_key}保存",
+  "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key}保存",
+  "tui.settings_view.pane.agents_empty": "未配置智能体",
+  "tui.settings_view.pane.empty_hint": "用{command}列出并附加",
+  "tui.settings_view.pane.more": "{count, plural, other {……另有{shown}项}}",
+  "tui.settings_view.pane.providers_empty": "未登录任何提供商 — {command}",
+  "tui.settings_view.pane.providers_header": "提供商",
+  "tui.settings_view.pane.tab_agents": "智能体",
+  "tui.settings_view.pane.tab_teams": "团队",
+  "tui.settings_view.pane.teams_empty": "未配置团队",
+  "tui.settings_view.row.add_chain": "+ 添加一条链",
+  "tui.settings_view.row.add_hop": "+ 添加一跳",
+  "tui.settings_view.scope.live": "立即",
+  "tui.settings_view.scope.never": "永不",
+  "tui.settings_view.scope.new_launch": "下次启动",
+  "tui.settings_view.scope.new_sessions": "新会话",
+  "tui.settings_view.section.takes_effect": "生效：{scope}",
+  "tui.settings_view.too_short": "终端高度不足以显示设置 — 请调高窗口"
+}

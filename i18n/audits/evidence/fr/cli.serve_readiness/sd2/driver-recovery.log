@@ -1,0 +1,19 @@
+Initial command:
+$ cd /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade && python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd2/reproduce.py.txt
+exit code: 1
+stdout: (empty)
+stderr:
+Traceback (most recent call last):
+  File "/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/i18n/audits/evidence/fr/cli.serve_readiness/sd2/reproduce.py.txt", line 168, in <module>
+    category = plural_category(count, locale) if plural else 'n/a'
+  File "/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/local_operator/i18n/format.py", line 386, in plural_category
+    return rule(value)
+  File "/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/local_operator/i18n/format.py", line 312, in _plural_en
+    _, i, v = _operands(value)
+  File "/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/local_operator/i18n/format.py", line 304, in _operands
+    decimal = abs(_decimal(value))
+  File "/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/local_operator/i18n/format.py", line 89, in _decimal
+    return Decimal(str(value))
+decimal.InvalidOperation: [<class 'decimal.ConversionSyntax'>]
+
+Cause: auditor-owned evidence driver reversed the production helper’s (locale, value) arguments; not a translation failure. Corrected call to plural_category(locale, count). Existing independent-verdict.json is verified and reused, never overwritten. No product file edited. Subsequent actual per-locale check output is in audit.log; final shell summary is in the session transcript.

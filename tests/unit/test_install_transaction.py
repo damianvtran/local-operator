@@ -308,7 +308,13 @@ def test_exact_publication_does_not_silently_become_latest(
     monkeypatch.setattr(
         update, "_pypi_release_document", lambda target: (publication_document(target), "")
     )
-    monkeypatch.setattr(update, "_fetch_pypi_version", lambda: "0.70.8")
+    # Latest confirmation consumes the read object, not the version-only wrapper:
+    # model an answered disagreement so an offline transport cannot mask this guard.
+    monkeypatch.setattr(
+        update,
+        "_fetch_pypi_read",
+        lambda: update._PypiRead(version="0.70.8", answered=True, named_version="0.70.8"),
+    )
     evidence = update._fresh_publication("0.70.7", "exact")
     assert evidence is not None and evidence.target == "0.70.7"
     with pytest.raises(update.UpdateError, match="fresh PyPI latest"):

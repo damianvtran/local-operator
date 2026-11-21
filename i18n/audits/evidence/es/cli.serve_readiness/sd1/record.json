@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon Spanish",
+    "session": "e68b64992930",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session-state Model: openai/gpt-6.1-sol; no fallback recorded or observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "task acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requester-provided translator identity"
+  },
+  "source_audit_revision": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca plus uncommitted input bytes",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/cli.serve_readiness.json",
+      "sha256": "11fe4d85d826ad5206ebbc4c2a379a9daa0ee529f831466ea9e363953cee6fcd"
+    }
+  },
+  "style_inputs": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/audit.log",
+      "sha256": "ac79167a64f3b5a798a2ebc11e2cb702b25acff492102f7ee804714a3902689b"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/report.md",
+      "sha256": "afc26d87a5f249748d542cd7e231a723c9de95c7dde105dd654519f4438d402c"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/receipt.json",
+      "sha256": "6c8a099be4daa0b9464801d1c29036f3274ec8ebea151439818376c72506e460"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/ledger-dry-run.log",
+      "sha256": "827797ed21a222468c99aaac241e7b6d14934a5ce576603d16d59657a628f6ef"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ES-SD1-01"
+    ]
+  },
+  "audit_notes_not_execution_log": {
+    "report": "i18n/audits/evidence/es/cli.serve_readiness/sd1/report.md",
+    "actual_execution_logs": [
+      "i18n/audits/evidence/es/cli.serve_readiness/sd1/audit.log",
+      "i18n/audits/evidence/es/cli.serve_readiness/sd1/ledger-dry-run.log"
+    ]
+  },
+  "coverage": {
+    "all_keys_reviewed": true,
+    "independent_pass": "sd1",
+    "second_independent_pass_claimed": false,
+    "mt_service_used": false,
+    "live_rendered_frame_claimed": false
+  },
+  "history_append_applied": false,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

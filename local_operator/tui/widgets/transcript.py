@@ -68,7 +68,7 @@ from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.harness.peer_cycles import PeerCycleCertificate
 from local_operator.i18n.format import format_number
-from local_operator.i18n.keys import tui_transcript
+from local_operator.i18n.keys import tui_bridge_card, tui_transcript
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
@@ -1408,6 +1408,9 @@ class ExpandableActionBlock(TranscriptBlock):
 _raw_t = tr("tui.transcript")
 _record_t = tr_record("tui.transcript")
 _t = display_tr("tui.transcript", technical_params=("pid",), technical_literals=("esc",))
+#: The inbound Team Bridge card's body copy (``tui.bridge_card``). ``m`` is the
+#: literal show-more key, kept an LTR island in every locale.
+_bt = display_tr("tui.bridge_card", technical_literals=("m",))
 
 # Raw constants are layout inputs. Projection happens after each marker line is
 # wrapped, so a narrow frame can never cut through an isolate.
@@ -3478,6 +3481,80 @@ class PeerMessageBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+def _count_label(count: int) -> str:
+    """A plain count in the active locale's digits (English stays raw)."""
+    locale = active_locale()
+    return str(count) if locale == "en" else format_number(count, locale)
+
+
+def _markdown_rows(body: str, width: int) -> list[Text]:
+    """Render UNTRUSTED markdown into styled rows ``width`` cells wide.
+
+    Each source line is sanitized first (control sequences and Cf removed, the
+    same rule as every other row on this spine) so a body cannot drive the
+    terminal; Rich then lays out the markdown. Hyperlinks are OFF: a link in a
+    third party's text is shown as its text and URL, never made a clickable
+    OSC-8 target the reader did not choose. Any renderer failure degrades to
+    the sanitized plain text, wrapped — the words are never lost.
+    """
+    from rich.markdown import Markdown
+
+    clean = "\n".join(_sanitize_line(line) for line in body.split("\n"))
+    # Chat bodies mean their single newlines (every chat surface keeps them),
+    # where plain markdown would join them into one paragraph. A trailing
+    # two-space hard break on each prose line keeps the author's lines; fenced
+    # code is left byte-exact.
+    fenced = False
+    kept: list[str] = []
+    for line in clean.split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            kept.append(line)
+        elif fenced or not line.strip():
+            kept.append(line)
+        else:
+            kept.append(line.rstrip() + "  ")
+    clean = "\n".join(kept)
+    room = max(width, 1)
+    try:
+        from local_operator.tui.bindings import markdown_theme
+
+        console = Console(
+            width=room,
+            color_system="truecolor",
+            force_terminal=True,
+            legacy_windows=False,
+            no_color=False,
+        )
+        # The brand markdown ramp (inline code in ``signal``, purple bullets),
+        # the same theme the app console pushes for the agent's own markdown
+        # (design round 1 D6). Built per call from the CURRENT theme's tokens,
+        # so a theme switch repaints bodies in the new ramp instead of Rich's
+        # defaults (bold dim on an ANSI-black slab, 3.77:1 in light).
+        console.push_theme(markdown_theme())
+        lines = console.render_lines(
+            Markdown(clean, hyperlinks=False, code_theme="ansi_dark"),
+            console.options.update(width=room),
+            pad=False,
+        )
+        rows: list[Text] = []
+        for line in lines:
+            text = Text()
+            for segment in line:
+                if segment.control:
+                    continue
+                text.append(segment.text, style=segment.style)
+            text.rstrip()
+            rows.append(text)
+    except Exception:  # noqa: BLE001 — never lose the words to a layout bug
+        rows = [Text(row) for row in wrap_cells(clean, room)]
+    while rows and not rows[-1].plain.strip():
+        rows.pop()
+    while rows and not rows[0].plain.strip():
+        rows.pop(0)
+    return rows or [Text("")]
+
+
 class TeamBridgeBlock(PeerMessageBlock):
     """A screened TEAM BRIDGE wake from a Radient org member, as its own card.
 
@@ -3499,14 +3576,369 @@ class TeamBridgeBlock(PeerMessageBlock):
     EXPANDED_CLASS = "bridge-expanded"
     tool_name = "org"
 
+    #: A long admitted body is clamped to this many rendered rows when the card
+    #: opens, with a "show more" row beneath (bridge-body design §7 PR 2). A
+    #: receipt that opens onto a screenful of someone else's text pushes the
+    #: conversation the reader was following off the top — the same reason the
+    #: collapsed card is one row.
+    BODY_CLAMP_ROWS = 12
+
     def __init__(
-        self, body: str, sender: dict[str, object] | None = None, *, fold_width: int = 0
+        self,
+        body: str,
+        sender: dict[str, object] | None = None,
+        *,
+        fold_width: int = 0,
+        body_loader: Any = None,
     ) -> None:
+        # Set BEFORE the base constructor: it builds the first frame, and that
+        # build reads these.
+        #: Zero-arg coroutine factory answering the resolver's ``{v, items,
+        #: more}`` (``tui.bridge_card_body``). ``None`` = no local journal to
+        #: key on, so the card keeps today's copy exactly.
+        self._body_loader = body_loader
+        self._card_body: dict[str, Any] | None = None
+        self._body_loading = False
+        self._body_show_all = False
+        #: Row index (within the built content) of the show-more toggle, or -1.
+        self._show_more_row = -1
+        #: Whether ``_card_body`` came from the FULL resolver (hub consulted)
+        #: rather than the local-only mount pass. The first open always runs
+        #: the full pass once, so a hub-side delete or a hub-only body is seen.
+        self._body_verified = False
+        #: Source-line count of the admitted bodies (the show-more label, D4).
+        self._source_lines = 0
         super().__init__(body, sender, fold_width=fold_width)
         # The peer class is the base's, not ours: a matcher keying on
         # ``peer-message-block`` must not paint an org card, and vice versa.
         self.remove_class("peer-message-block")
         self.add_class("team-bridge-block")
+
+    # -- admitted body (bridge-body design §7 PR 2) ---------------------------
+
+    def on_mount(self) -> None:
+        """Resolve the body from LOCAL files as the card appears (design D1).
+
+        WHY ON MOUNT. The operator's complaint was the collapsed card itself:
+        every card read ``(no preview available)`` until opened one by one. The
+        mount pass is ``local_only`` (the display store, holds and pending
+        reservations; no network), so a transcript of hundreds of cards costs
+        local reads only. A message nothing local knows reads "Open to load
+        message" and is fetched from the hub when the card is opened — so a
+        card from before this feature shows its body after one open.
+        """
+        if self._body_loader is not None and self._card_body is None:
+            self._start_load(local_only=True)
+
+    def _after_toggle(self) -> None:
+        super()._after_toggle()
+        if self._card_body is not None:
+            # The header's state line depends on whether the card is open (the
+            # offline retry advice, D8 / #4277 Q1), and ``_snippet`` is only
+            # rebuilt when an answer lands, so a toggle re-derives it. The base
+            # repaints right after this hook.
+            header = self._header_text(self._card_body)
+            if header:
+                self._snippet = header
+        if self._expanded:
+            self._maybe_load_body()
+
+    def _needs_body(self) -> bool:
+        """Fetch on open unless every item is already final for this view.
+
+        A local-only answer is never final: the first open runs the full
+        resolver once. ``admitted``/``refused`` from a full pass cannot change;
+        anything else (pending, held, offline...) may have moved since the last
+        open, so re-opening re-asks.
+        """
+        if self._body_loader is None or self._body_loading:
+            return False
+        if not self._body_verified:
+            return True
+        items = (self._card_body or {}).get("items")
+        if not isinstance(items, list) or not items:
+            return self._card_body is None
+        return any(item.get("state") not in ("admitted", "refused") for item in items)
+
+    def _maybe_load_body(self) -> None:
+        if self._needs_body():
+            self._start_load(local_only=False)
+
+    def _start_load(self, *, local_only: bool) -> None:
+        self._body_loading = True
+        try:
+            self.run_worker(
+                self._load_body(local_only=local_only),
+                exclusive=True,
+                group="bridge-card-body",
+            )
+        except Exception:  # noqa: BLE001 — unmounted (tests, replay build): no fetch
+            self._body_loading = False
+
+    async def _load_body(self, *, local_only: bool = False) -> None:
+        loader = self._body_loader
+        result: dict[str, Any] | None
+        try:
+            result = await loader(local_only=local_only) if loader is not None else None
+        except Exception:  # noqa: BLE001 — an unknown row/route is today's copy
+            result = None
+        self.apply_card_body(result, verified=not local_only)
+
+    def apply_card_body(self, result: dict[str, Any] | None, *, verified: bool = True) -> None:
+        """Adopt one resolver answer and repaint (also the test seam).
+
+        ``verified`` is False for the local-only mount pass, which keeps the
+        first open's full resolve due.
+        """
+        self._body_loading = False
+        if isinstance(result, dict) and isinstance(result.get("items"), list):
+            self._card_body = result
+            self._body_verified = self._body_verified or verified
+            header = self._header_text(result)
+            if header:
+                self._snippet = header
+        else:
+            # No answer (old row without a receipt, unknown entry): keep the
+            # card as it was rather than inventing a state.
+            self._card_body = self._card_body or {"v": 1, "items": [], "more": 0}
+            self._body_verified = self._body_verified or verified
+        self._refresh_row()
+        if self._expanded and not self._body_verified:
+            # Opened while the local-only mount pass was in flight: that open
+            # hit the ``_body_loading`` latch in ``_needs_body`` and started
+            # nothing, and no later event would — the card sat on "Loading
+            # message…" until it was closed and reopened (#4238 review m1).
+            # Only an OPEN card goes on to the hub; a closed one keeps the
+            # mount pass local-only (D1).
+            self._maybe_load_body()
+
+    def _header_text(self, result: dict[str, Any]) -> str:
+        """The collapsed header's text for a resolver answer, or "" to keep it.
+
+        Built from whatever the resolver knows, so it never says "no preview"
+        (D1): the first admitted body as an excerpt, else the first item's state
+        in its HEADER form. In the no-name branch the receipt's subject leads,
+        ``an organization member — <excerpt>`` (D2), so untrusted text never sits
+        where the eye looks for the sender.
+        """
+        items = [item for item in result.get("items", []) if isinstance(item, dict)]
+        if not items:
+            return ""
+        first = next(
+            (
+                item.get("body")
+                for item in items
+                if item.get("state") == "admitted" and isinstance(item.get("body"), str)
+            ),
+            None,
+        )
+        if first:
+            # The excerpt is the body as RENDERED (markdown marks resolved,
+            # then sanitized and flattened like the base preview), so it never
+            # reads "**bold**" literally.
+            rendered = _markdown_rows(first[:_SNIPPET_SOURCE_MAX_CHARS], 400)
+            text = " ".join(" ".join(row.plain for row in rendered).split())
+        else:
+            text = self._state_line(items[0], header=True)
+        if not text:
+            return ""
+        name, _quoted = self._sender_name()
+        if name:
+            return text
+        from local_operator.team_bridge.card import GENERIC_CARD_SUBJECT
+
+        return f"{GENERIC_CARD_SUBJECT} — {text}"
+
+    # Textual dispatches ``on_focus``/``on_blur`` to EVERY class in the MRO
+    # that defines one, so the base's handlers still run; calling them here
+    # would run them twice. The repaint is DEFERRED: this subclass handler runs
+    # before ``Widget._on_focus`` flips ``has_focus``, so an immediate rebuild
+    # read the old value and the focused card never showed its hint (measured
+    # in the round-2 frames).
+    def on_focus(self, event) -> None:  # type: ignore[no-untyped-def]
+        # The `` · m`` hint names a key that only works while THIS card has
+        # focus (D4), so the label is repainted as focus arrives and leaves.
+        if self._show_more_row >= 0:
+            self.call_after_refresh(self._refresh_row)
+
+    def on_blur(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._show_more_row >= 0:
+            self.call_after_refresh(self._refresh_row)
+
+    def toggle_show_more(self) -> bool:
+        """Flip the long-body clamp; False when there is nothing clamped."""
+        if not self._expanded or self._show_more_row < 0:
+            return False
+        self._body_show_all = not self._body_show_all
+        self._refresh_row()
+        return True
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        # ``m`` is claimed ONLY while a clamp toggle is on screen; everywhere
+        # else it still types into the composer like any printable key.
+        if event.key == "m" and self.toggle_show_more():
+            event.stop()
+            event.prevent_default()
+            return
+        super().on_key(event)
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        if (
+            self._show_more_row >= 0
+            and self._expanded
+            and event.y == self._show_more_row
+            and self.link_at(event.x, event.y) is None
+        ):
+            self.toggle_show_more()
+            event.stop()
+            return
+        super().on_click(event)
+
+    def _state_line(self, item: dict[str, Any], *, header: bool = False) -> str:
+        """One item's state sentence; ``header`` picks the collapsed-row form."""
+        state = item.get("state")
+        if state == "pending":
+            return _bt(tui_bridge_card.body_pending())
+        if state == "held":
+            hold = item.get("hold")
+            if isinstance(hold, dict) and hold.get("class") == "transient":
+                # A DELAY, not a decision (D3 / R4): screening has not run or
+                # delivery has not finished, and nobody is deciding anything,
+                # so "moderation" would be false (tool.py: DELAY IS NOT A HOLD).
+                return _bt(
+                    tui_bridge_card.header_held_transient()
+                    if header
+                    else tui_bridge_card.body_held_transient()
+                )
+            return _bt(tui_bridge_card.body_held())
+        if state == "refused":
+            return _bt(tui_bridge_card.body_refused())
+        if state == "not_admitted":
+            return _bt(tui_bridge_card.body_not_admitted())
+        reason = item.get("reason")
+        if reason == "signed_out":
+            return _bt(tui_bridge_card.body_signed_out())
+        if reason == "other_account":
+            return _bt(tui_bridge_card.body_other_account())
+        if reason == "not_member":
+            return _bt(tui_bridge_card.body_not_member())
+        if reason == "offline":
+            # The body line's retry is "close and reopen"; on the collapsed
+            # header the card is already closed, so it says "open" (D8). An
+            # OPEN card's header sits right above that body line, so it keeps
+            # the body's wording rather than contradicting it (#4277 Q1).
+            return _bt(
+                tui_bridge_card.header_offline()
+                if header and not self._expanded
+                else tui_bridge_card.body_offline()
+            )
+        if reason == "deleted":
+            return _bt(tui_bridge_card.body_deleted())
+        if reason == "not_loaded":
+            # Only the local-only mount pass answers this; opening the card is
+            # exactly the action that loads it, so an open card says it is
+            # loading while that full pass runs.
+            return _bt(
+                tui_bridge_card.header_open_to_load() if header else tui_bridge_card.body_loading()
+            )
+        return _bt(tui_bridge_card.body_unavailable())
+
+    def _resolved_rows(self, width: int) -> list[Text] | None:
+        """The body region from the resolver answer, or None for today's copy.
+
+        Also sets ``_source_lines``: the SOURCE line count of the admitted
+        bodies, which the show-more label reports so its number is the same at
+        any width (D4) — wrapped rows made one message read "12 of 30" at 110
+        columns and "12 of 51" at 60.
+        """
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        # State lines ARE the answer the operator opened the card for, so they
+        # take the header ink (``muted``, 6.58:1 light / 7.93:1 dark), not the
+        # faintest token (D5). ``dim`` stays for the transient "Loading…".
+        state_ink = Style(color=theme_mod.semantic_color("muted"))
+        self._source_lines = 0
+        if self._body_loader is None:
+            return None
+        if self._card_body is None:
+            return [Text(_bt(tui_bridge_card.body_loading()), style=dim)]
+        items = [item for item in self._card_body.get("items", []) if isinstance(item, dict)]
+        if not items:
+            return None
+        rows: list[Text] = []
+        for index, item in enumerate(items):
+            if index:
+                rows.append(Text(""))
+            body = item.get("body")
+            if item.get("state") == "admitted" and isinstance(body, str):
+                rows.extend(_markdown_rows(body, width))
+                self._source_lines += len(body.rstrip("\n").split("\n"))
+            else:
+                rows.append(Text(self._state_line(item), style=state_ink))
+        more = self._card_body.get("more")
+        if isinstance(more, int) and more > 0:
+            rows.append(Text(_bt(tui_bridge_card.body_more_messages(count=more)), style=state_ink))
+        return rows
+
+    def _build_content(self, width: int) -> Text:
+        """The base card, with the resolved body in place of the receipt line.
+
+        Identity header and copy semantics are the base's; only the BODY region
+        changes, and only when a loader exists (otherwise byte-identical to the
+        card this class always painted).
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+
+        self._show_more_row = -1
+        line_width = max(width - 2 - OUTPUT_INDENT, self.MIN_BODY)
+        resolved = self._resolved_rows(line_width) if self._expanded else None
+        if resolved is None:
+            return super()._build_content(width)
+        original = self._text
+        # Build the base card with NO body so its identity header and chrome
+        # accounting stay exactly the base's, then append our region.
+        self._text = ""
+        try:
+            row = super()._build_content(width)
+        finally:
+            self._text = original
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        warn = Style(color=theme_mod.semantic_color("warning"))
+        indent = " " * OUTPUT_INDENT
+        row.append("\n", style=dim)
+        row.append("\n" + indent, style=warn)
+        row.append(_bt(tui_bridge_card.frame_untrusted()), style=warn)
+        self._chrome_rows += 2
+        shown = resolved
+        total = len(resolved)
+        clamped = total > self.BODY_CLAMP_ROWS
+        if clamped and not self._body_show_all:
+            shown = resolved[: self.BODY_CLAMP_ROWS]
+            # The last visible row says text continues below it (D4): at narrow
+            # widths the clamp cut mid-sentence with no sign anything was hidden.
+            last = shown[-1].copy()
+            last.rstrip()
+            if last.cell_len >= line_width:
+                last.truncate(max(line_width - 1, 0))
+            last.append("…", style=dim)
+            shown = [*shown[:-1], last]
+        for line in shown:
+            row.append("\n" + indent)
+            row.append_text(line)
+        if clamped:
+            label = (
+                _bt(tui_bridge_card.body_show_less())
+                if self._body_show_all
+                else _bt(tui_bridge_card.body_show_more(total=self._source_lines or total))
+            )
+            if self.has_focus:
+                # ``m`` is claimed only by the FOCUSED card (``on_key``); with
+                # the composer focused it types an "m", so the hint would lie
+                # (D4). A key glyph, not copy: nothing here to translate.
+                label += " · m"
+            row.append("\n" + indent, style=dim)
+            row.append(label, style=Style(color=theme_mod.semantic_color("accent")))
+            self._show_more_row = len(row.plain.splitlines()) - 1
+        return row
 
     def _sender_name(self) -> tuple[str, bool]:
         """The MEMBER the receiver validated, then their organization (§2).

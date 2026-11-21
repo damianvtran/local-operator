@@ -261,6 +261,78 @@ async def _current_source(
     return source
 
 
+#: A backoff value no other sleep in the connect path uses, so the gate below
+#: can tell the retry loop's backoff apart from every other `asyncio.sleep`.
+_GATED_BACKOFF_S = 0.0371
+#: Backstop for a gate that is never reached. Not the assertion: the wait ends
+#: the moment the chain enters the held backoff; this only turns a hang into a
+#: failure instead of a stuck run.
+_GATE_DEADLOCK_GUARD_S = 60.0
+_real_sleep = asyncio.sleep
+
+
+class _BackoffGate:
+    """Hold the retry chain INSIDE a backoff, on an event rather than a clock.
+
+    WHY. The residue these tests pin is the one a chain leaves when the user
+    leaves while a backoff is sleeping. The first version of the reselect test
+    entered that window with real 0.05 s backoffs and three `sleep(0.06)` calls,
+    a bet on machine load: under contention (5 of 20 runs on a loaded host, and
+    CI shard (3.13, 2) on PR #4191) the chain was instead mid-bind when the user
+    left — that round latched and zeroed the counter, "no residue" — or had
+    already queued its next round, which the reselect then raced. The gate makes
+    the window a state the test waits for: the first ``hold_at - 1`` backoffs
+    pass after one loop turn, the ``hold_at``-th parks until ``release`` is set.
+
+    Installed as the app module's ``asyncio`` (``_AsyncioWithGatedSleep``) so
+    only `app.py`'s own sleeps can reach it; every other delay, and every other
+    asyncio attribute, is the real one.
+    """
+
+    def __init__(self, hold_at: int) -> None:
+        self.hold_at = hold_at
+        self.entries = 0
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def sleep(self, delay: float, result: Any = None) -> Any:
+        if delay != _GATED_BACKOFF_S:
+            return await _real_sleep(delay, result)
+        self.entries += 1
+        if self.entries < self.hold_at:
+            return await _real_sleep(0, result)
+        self.entered.set()
+        await self.release.wait()
+        return result
+
+    async def wait_held(self) -> None:
+        try:
+            await asyncio.wait_for(self.entered.wait(), _GATE_DEADLOCK_GUARD_S)
+        except TimeoutError:
+            pytest.fail(
+                f"the retry chain never reached backoff {self.hold_at} (entries={self.entries})"
+            )
+
+
+class _AsyncioWithGatedSleep:
+    """The real `asyncio` module, except that `sleep` goes through a gate."""
+
+    def __init__(self, gate: _BackoffGate) -> None:
+        self.sleep = gate.sleep
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(asyncio, name)
+
+
+def _install_backoff_gate(monkeypatch: pytest.MonkeyPatch, *, hold_at: int) -> _BackoffGate:
+    gate = _BackoffGate(hold_at)
+    monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_S", _GATED_BACKOFF_S)
+    monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_CEILING_S", _GATED_BACKOFF_S)
+    monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", 7)
+    monkeypatch.setattr(app_module, "asyncio", _AsyncioWithGatedSleep(gate))
+    return gate
+
+
 async def _drain_retries(app: OperatorApp, source: SessionInteraction, *, rounds: int = 40) -> None:
     """Await the whole retry chain, round by round, as the app drives it.
 
@@ -921,28 +993,29 @@ async def test_a_reselect_after_navigating_away_gets_a_full_budget(monkeypatch):
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         source = await _current_source(app, pilot, session)
-        # A SHORT REAL BACKOFF, not a zeroed one. The residue is left by a
-        # chain stopped BETWEEN rounds — the user switches away while a backoff
-        # is sleeping — so the window has to exist for the test to enter it.
-        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_S", 0.05)
-        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_CEILING_S", 0.05)
-        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", 7)
+        # HELD IN A BACKOFF, not raced into one. The residue is left by a chain
+        # stopped BETWEEN rounds — the user switches away while a backoff is
+        # sleeping — so the test waits until the chain is parked in its third
+        # backoff (see `_BackoffGate` for the timing bet this replaced).
+        gate = _install_backoff_gate(monkeypatch, hold_at=3)
 
         app._start_sidebar_connection(source)
+        await gate.wait_held()
         # Part-way through, NOT to exhaustion: an exhausted budget resets itself
         # on surrender, and the residue this pins is the one a chain leaves when
         # it is stopped early.
-        for _ in range(3):
-            await asyncio.sleep(0.06)
-        assert source.connect_attempts > 0, "the precondition never spent any budget"
-        assert source.connect_attempts < app_module.SIDEBAR_CONNECT_ATTEMPTS
+        assert source.connect_attempts == gate.hold_at, "one spent attempt per backoff entered"
+        assert 0 < source.connect_attempts < app_module.SIDEBAR_CONNECT_ATTEMPTS
 
-        # The user navigates away mid-backoff; the chain stops itself.
+        # The user navigates away mid-backoff; the chain stops itself once the
+        # backoff ends, because its `finally` sees a source no longer current.
         app._interaction = SessionInteraction(FakeSession())
         task = source.connection_task
-        if task is not None:
-            await task
+        assert task is not None and not task.done()
+        gate.release.set()
+        await task
         await asyncio.sleep(0)
+        assert source.connection_task is task, "a chain for a source left behind re-armed"
         carried = source.connect_attempts
         assert carried > 0, "the precondition left no residue to clear"
         assert not source.connection_error, "the budget was spent, not carried"
@@ -977,6 +1050,54 @@ async def test_a_reselect_after_navigating_away_gets_a_full_budget(monkeypatch):
         assert any(
             _shipped_span_from(spent) < COLD_FALLBACK_S for spent in range(1, _SHIPPED_ATTEMPTS + 1)
         ), "no residue could ever break the bound; this test would be vacuous"
+
+
+@pytest.mark.asyncio
+async def test_a_reselect_while_a_round_is_in_flight_refills_the_budget(monkeypatch):
+    """The same F2 residue through the shorter window: back before the round ends.
+
+    THE DEFECT THIS PINS. `_start_sidebar_connection` returns early while a
+    connect task is still in flight, and the budget refill used to sit AFTER
+    that return. A user who left mid-backoff and came back before the backoff
+    ended therefore refilled nothing; when the backoff finished, the round saw
+    its source current again and re-armed `continues_retry` on the spent counter.
+    Found as the second failure mode of the flaky
+    `test_a_reselect_after_navigating_away_gets_a_full_budget` (2 of 20 loaded
+    runs: "a reselect inherited a spent budget").
+
+    Asserted twice: synchronously at the reselect (the budget it begins with),
+    and as the count of further rounds the chain actually runs before it
+    surrenders — a full budget is `SIDEBAR_CONNECT_ATTEMPTS + 1` failed binds,
+    an inherited one only what was left of it.
+    """
+    session = RecoveringRemote("recovering")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        gate = _install_backoff_gate(monkeypatch, hold_at=3)
+
+        app._start_sidebar_connection(source)
+        await gate.wait_held()
+        assert source.connect_attempts == gate.hold_at
+        task = source.connection_task
+        assert task is not None and not task.done()
+
+        # Away and straight back while the backoff is still sleeping: the
+        # reselect meets a round in flight.
+        app._interaction = SessionInteraction(FakeSession())
+        app._interaction = source
+        app._start_sidebar_connection(source)
+        assert source.connection_task is task, "the precondition needs the round still in flight"
+        assert (
+            source.connect_attempts == 0
+        ), "a reselect during an in-flight round kept a spent budget"
+
+        binds_at_reselect = session.bind_calls
+        gate.release.set()
+        await _drain_retries(app, source)
+
+        assert source.connection_error, "a session that never heals must still surrender"
+        assert session.bind_calls - binds_at_reselect == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
 
 
 @pytest.mark.asyncio

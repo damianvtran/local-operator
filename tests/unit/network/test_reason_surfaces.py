@@ -55,6 +55,31 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # The working-set receipt block (PR B): ``str()`` normalises a restore/left-behind
+    # REASON CODE as it is copied from the restore report into the block's row. It
+    # stays a machine code there; the human sentence is ``workset_text.reason_text``.
+    ("local_operator/network/workset_move.py", "arrival_receipt", "reason"): (
+        2,
+        "a reason CODE copied into the receipt block, rendered later by workset_text",
+    ),
+    # The offload's return path (#4245 round 3, B2). Each ``str()`` normalises a reason
+    # CODE in transit and never renders it: ``destination_transfer`` journals the coarse
+    # code the owner was already sent into ``pending.json``'s ``source_left``;
+    # ``destination_outcome`` copies it into the ``done`` frame's row; ``source_receipt``
+    # keeps a peer code only if ``workset_text.known_reason`` admits it (else
+    # ``not_transferred``). The sentence is ``workset_text.reason_text``, at render time.
+    ("local_operator/network/workset_move.py", "destination_transfer", "reason"): (
+        1,
+        "a decline reason CODE journaled for the source's receipt, never rendered raw",
+    ),
+    ("local_operator/network/workset_move.py", "destination_outcome", "reason"): (
+        1,
+        "a reason CODE copied into the done frame's row, rendered later by workset_text",
+    ),
+    ("local_operator/network/workset_move.py", "source_receipt", "reason"): (
+        1,
+        "a peer reason CODE kept only if workset_text's closed table knows it",
+    ),
     # These f-strings use this device's HeavyClass.reason command label
     # (long-lived-command and acquired notices) and memory_budget.reason
     # (why the local cap is off). Neither value comes from a mesh peer.
@@ -106,6 +131,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/credentials/consent.py", "verified_permission", "detail"): (
         1,
         "internal executed-receipt verification discriminator, never rendered",
+    ),
+    # This local operator-entered audit explanation is persisted with the
+    # notification grant. It is not a peer refusal token or mesh-rendered reason.
+    ("local_operator/cli.py", "sessions_notifications_command", "reason"): (
+        1,
+        "operator-entered local notification-authority audit explanation, not a mesh code",
     ),
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
@@ -177,6 +208,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
         1,
         "ask_dismiss closed-set operator token forwarded to the session, never rendered",
+    ),
+    # The same ``ask_dismiss`` token, read once more with the SAME ``str(... or "")``
+    # coercion the ``_dispatch`` arm forwards with, so the app-signature attestation
+    # (``asks.app_attest``) binds exactly what the session will receive. It is a
+    # comparison key for ``AttestTable.consume``, never rendered and never peer prose.
+    ("local_operator/session/runtime/server.py", "_ask_answer_stamp", "reason"): (
+        1,
+        "ask_dismiss closed-set token bound into the app attestation key, never rendered",
     ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
@@ -284,6 +323,13 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/update.py", "_rolling_receipt", "reason"): (
         1,
         "a local DaemonStatus.reason, quoted in central_services_incomplete_reason",
+    ),
+    #   * ``_broker_roll_refresh`` — this device's own secret-broker roll outcome
+    #     (``secrets.roll.RollResult.reason``, a sentence authored for the reader,
+    #     never a peer token), folded into the failed step's detail.
+    ("local_operator/update.py", "_broker_roll_refresh", "reason"): (
+        1,
+        "this device's own broker-roll sentence (secrets.roll), never a mesh token",
     ),
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
@@ -639,6 +685,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # The reading for reachability rows READS the stage code only to classify it —
     # every sentence it returns is authored in one place — and the one verbatim arm
     # is the no-relay fallback's own prose row.
+    # The ``uplink`` rows (``network.uplink``) carry a detail this device composed
+    # from its own catalogue (``cli.network_uplink``) — localized prose, never a
+    # peer code — so both renderers print it as written.
+    ("local_operator/network/cli.py", "_cmd_doctor", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
+    ("local_operator/network/readiness.py", "uplink_lines", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
     ("local_operator/network/readiness.py", "reachability_reading", "detail"): (
         1,
         "classifier input; the returned sentences are authored here, never echoed",
@@ -668,6 +725,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "classifier input (both dialects' codes, compared against the producers' "
         "constants); the row's sentence is rendered by the glossing renderers",
+    ),
+    # The live-link silence classifier (#4110): the same dialect read as
+    # ``_no_answer_row`` — the probe's own code, compared against relay's
+    # ``DETAIL_NO_ANSWER`` / ``CONNECT_FAILED_PREFIX`` — returning only a bool that
+    # decides whether a live link covers the row. Nothing from it is printed.
+    ("local_operator/network/readiness.py", "_silent_row", "detail"): (
+        1,
+        "classifier input (the probe's own code, compared against the producer's "
+        "constants); returns a bool, never rendered",
     ),
     # The default-model frame (PR #2923): ``model_credential_row`` wraps the verdict
     # chain's OWN sentence for the NOT_SHARED / NO_CREDENTIAL arms in the clause that
@@ -740,7 +806,7 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Frame fields copied into audit records and ``set_trust(reason=…)``: the audit
     # trail is the machine register (`lop network log` prints the record verbatim on
     # purpose, and its ``remedy`` field is the human one).
-    ("local_operator/network/relay.py", "RelayServer._ctl_pair_confirm", "reason"): (
+    ("local_operator/network/relay.py", "RelayServer._pair_confirm_legacy", "reason"): (
         1,
         "an audit-record field",
     ),
@@ -848,6 +914,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the bridge's refusal code, mapped to this project's own refusal copy and "
         "returned as a machine code field, never rendered",
+    ),
+    # The same refusal on a SUBAGENT's site card (PR #4283): ``site_decide`` hands
+    # the card to ``_site_decide_bound`` with its own ``_refuse``, and the bound path
+    # reads the bridge's ``applied: false`` code exactly as above -- ``str()`` keys
+    # ``_site_not_applied_copy`` (one mapping shared with the host's own cards), and
+    # the raw token rides only in the answer's machine ``code`` field.
+    ("local_operator/session/session.py", "Session._site_decide_bound", "reason"): (
+        1,
+        "the bridge's refusal code on a subagent's card, mapped to the same refusal "
+        "copy and returned as a machine code field, never rendered",
     ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same
@@ -968,6 +1044,21 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "the browser host's page-program refusal token, read only to decide "
         "whether to attach the options list; never rendered to a person",
+    ),
+    # The working-set probe (docs/design/move-working-set.md §3.4). ``apply_probe``
+    # reads the DESTINATION's ``detail`` only to test it against ``DETAIL_CODES``:
+    # a code outside that closed set becomes ``"error"`` (security S3), and the kept
+    # code lands in the block's ``clone_detail`` field, which no text surface
+    # renders. ``audit_summary`` reads the answer THIS device's ``run_probe`` just
+    # produced, to COUNT codes for the ``session.workset.probe`` audit row.
+    ("local_operator/network/workset_probe.py", "apply_probe", "detail"): (
+        1,
+        "the destination's detail CODE, allowlisted against DETAIL_CODES and kept as "
+        "a block field; never rendered to a person",
+    ),
+    ("local_operator/network/workset_probe.py", "audit_summary", "detail"): (
+        1,
+        "this device's own probe codes, counted into the probe audit row; not rendered",
     ),
 }
 

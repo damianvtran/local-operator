@@ -13,5 +13,6 @@
   "tui.chrome.remote_park.approval_hint_there": "runs on {device} — allow there; deny works here",
   "tui.chrome.remote_park.approval_hint_floor": "runs on {device}",
   "tui.chrome.remote_park.ask_hint_answer": "runs on {device} — answer it from here",
-  "tui.chrome.remote_park.ask_hint_floor": "runs on {device}"
+  "tui.chrome.remote_park.ask_hint_floor": "runs on {device}",
+  "tui.chrome.remote_park.ask_agent_started": "runs on {device} · started by an agent on {agent_device}"
 }
