@@ -133,7 +133,7 @@ UNLOCK_BACKOFF_MAX_S = 8.0
 #: 2 s notice = exactly 8 s) left zero margin and the client gave up at the same
 #: instant the successor answered. So the hold is the client's budget minus the
 #: notice minus :data:`ROLL_HOLD_MARGIN_S` for write-lock queueing and scheduling
-#: (4 s), pinned by
+#: (2 s), leaving a 4 s hold, pinned by
 #: ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
 #: It still covers the re-registration path's own worst case: the old broker's
 #: ``stop()`` closes session channels after its ≤1 s watcher tick, and the

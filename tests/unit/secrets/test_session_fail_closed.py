@@ -899,6 +899,185 @@ def test_a_no_roll_outage_outside_a_session_still_falls_back(
     assert open_store_spy == [config_root]
 
 
+# --- #4389 S8 (security r4): a DENIAL after an observed roll is refused too --------
+#
+# The security owner's invariant: once a read has observed a roll — at entry or
+# anywhere during liveness/retrieval — both silence and denial end in a served
+# value or `BrokerRolling`, never `open_store(...).get(...)`. The successor's hold
+# only protects lineages it expects, so a late, unmarked lineage is denied after
+# the hold and a denial proves nothing about the redaction notice. Reads that saw
+# no roll keep §8 (denial → keyfile) and §13 (outage → local), pinned by the
+# controls below. Every case goes through the PUBLIC entry with a store tripwire.
+
+
+def _deny(*_args: object, **_kwargs: object) -> dict:
+    raise client.BrokerDenied("no lop session is registered with the broker")
+
+
+def test_a_denial_after_the_observed_roll_expires_never_decrypts_locally(
+    keyfile_store: SecretStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8 (a): seen at entry, lapsed before the retrieve, then DENIED: refuse."""
+    from local_operator.secrets.protocol import rolling_path
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(client, "ROLL_WAIT_S", 0.4)
+    _write_sentinel(rolling_path(config_root), 1)
+
+    def late_liveness(base=None, **_kwargs):
+        rolling_path(config_root).unlink()
+        return True
+
+    monkeypatch.setattr(client, "ensure_broker", late_liveness)
+    monkeypatch.setattr(client, "_bounded_request", _deny)
+    monkeypatch.setattr(access, "open_store", _tripwire)
+    with pytest.raises(client.BrokerRolling):
+        access.retrieve_secret("DEMO_TOKEN", config_root)
+
+
+def test_access_refuses_a_denial_from_retrieve_when_it_saw_the_roll_at_entry(
+    keyfile_store: SecretStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8 (a, access clause): whatever `retrieve` does, a denial reaching access
+    after it observed the roll is refused, not handed to the keyfile fallback."""
+    from local_operator.secrets.protocol import rolling_path
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    _write_sentinel(rolling_path(config_root), 1)
+
+    def deny_after_expiry(name, base=None, **_kwargs):
+        rolling_path(config_root).unlink()
+        _deny()
+
+    monkeypatch.setattr(client, "ensure_broker", lambda base=None, **_: True)
+    monkeypatch.setattr(client, "retrieve", deny_after_expiry)
+    monkeypatch.setattr(access, "open_store", _tripwire)
+    with pytest.raises(client.BrokerRolling):
+        access.retrieve_secret("DEMO_TOKEN", config_root)
+
+
+def test_a_roll_first_seen_inside_retrieval_then_a_denial_never_decrypts_locally(
+    keyfile_store: SecretStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8 (b): no sentinel at entry; the first attempt meets the roll, every
+    later one a denial after it lapsed. The observation inside retrieval holds."""
+    from local_operator.secrets.protocol import rolling_path
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(client, "ROLL_WAIT_S", 0.4)
+    attempts: list[int] = []
+
+    def roll_then_deny(*_args: object, **_kwargs: object) -> dict:
+        attempts.append(1)
+        if len(attempts) == 1:
+            _write_sentinel(rolling_path(config_root), 1)
+            raise BrokerUnavailable("the secret broker closed the connection")
+        rolling_path(config_root).unlink(missing_ok=True)
+        _deny()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(client, "ensure_broker", lambda base=None, **_: True)
+    monkeypatch.setattr(client, "_bounded_request", roll_then_deny)
+    monkeypatch.setattr(access, "open_store", _tripwire)
+    with pytest.raises(client.BrokerRolling):
+        access.retrieve_secret("DEMO_TOKEN", config_root)
+    assert len(attempts) >= 2, "the denial after the roll must have been met"
+
+
+def test_a_roll_that_starts_after_entry_refuses_when_no_broker_starts(
+    keyfile_store: SecretStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M4-1 (c): the sentinel appears only during the liveness ping, which then
+    reports no broker. Re-sampled, that is the roll not finishing: refuse."""
+    from local_operator.secrets.protocol import rolling_path
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+
+    def roll_begins(base=None, **_kwargs):
+        _write_sentinel(rolling_path(config_root), 1)
+        return False
+
+    monkeypatch.setattr(client, "ensure_broker", roll_begins)
+    monkeypatch.setattr(access, "open_store", _tripwire)
+    with pytest.raises(client.BrokerRolling):
+        access.retrieve_secret("DEMO_TOKEN", config_root)
+
+
+def test_a_no_roll_denial_outside_a_session_keeps_the_keyfile_fallback(
+    keyfile_store: SecretStore,
+    config_root: Path,
+    open_store_spy: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S8 control (d): the operator's terminal is denied by construction; with
+    NO roll observed the real client re-raises and §8's keyfile fallback serves."""
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    monkeypatch.setattr(client, "ensure_broker", lambda base=None, **_: True)
+    monkeypatch.setattr(client, "_bounded_request", _deny)
+    assert access.retrieve_secret("DEMO_TOKEN", config_root) == SECRET_VALUE
+    assert open_store_spy == [config_root]
+
+
+class _FakeClock:
+    """A `time` stand-in for client/access: `sleep` advances `monotonic`.
+
+    Wall-clock `time()` stays real: the roll sentinel's TTL is wall-clock."""
+
+    def __init__(self, start: float) -> None:
+        self.now = start
+        self.time = time.time
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_an_observed_roll_keeps_its_remaining_wait_and_then_serves(
+    keyfile_store: SecretStore, config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8 coverage (security r4 MINOR): the observation is FORWARDED to
+    `client.retrieve`, which keeps waiting on the ONE entry deadline — so a denial
+    after the sentinel lapsed is retried and a broker that then answers serves.
+    Without the forwarding the client would re-raise on the first attempt; with
+    a re-armed budget the recorded deadlines would differ."""
+    from local_operator.secrets.protocol import encode_bytes, rolling_path
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.delenv(access.SESSION_ID_ENV, raising=False)
+    clock = _FakeClock(100.0)
+    monkeypatch.setattr(client, "time", clock)
+    monkeypatch.setattr(access, "time", clock)
+    _write_sentinel(rolling_path(config_root), 1)
+    entry_deadline = 100.0 + client.ROLL_WAIT_S
+
+    def slow_liveness(base=None, *, deadline=None, **_kwargs):
+        assert deadline == entry_deadline
+        clock.now += 5.0  # the ping spends most of the budget...
+        rolling_path(config_root).unlink()  # ...and the sentinel lapses meanwhile
+        return True
+
+    deadlines: list[float | None] = []
+
+    def deny_then_serve(op: str, base=None, deadline=None, **_kwargs) -> dict:
+        deadlines.append(deadline)
+        if len(deadlines) == 1:
+            _deny()
+        return {"value": encode_bytes(SECRET_VALUE)}
+
+    monkeypatch.setattr(client, "ensure_broker", slow_liveness)
+    monkeypatch.setattr(client, "_bounded_request", deny_then_serve)
+    monkeypatch.setattr(access, "open_store", _tripwire)
+    assert access.retrieve_secret("DEMO_TOKEN", config_root) == SECRET_VALUE
+    assert deadlines == [entry_deadline, entry_deadline]
+    assert clock.now < entry_deadline
+
+
 @pytest.mark.allow_secret_broker
 @pytest.mark.skipif(not _SUPPORTED, reason="the broker is implemented for macOS and Linux")
 def test_outside_a_session_a_stalled_broker_costs_one_budget_then_falls_back(

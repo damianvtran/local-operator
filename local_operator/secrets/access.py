@@ -410,7 +410,9 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
     beside the store, so a refused caller reads it directly anyway, and the
     operator's own terminal has no lop session among its ancestors and is
     denied by construction. Making that fatal would break the store's primary
-    surface while buying nothing. In the hardened tier the denial stands.
+    surface while buying nothing. In the hardened tier the denial stands, and
+    so it does in ANY tier once the read observed a broker roll (#4389 S8): it
+    then ends in a served read or :class:`BrokerRolling`, never a local decrypt.
 
     **The error taxonomy is identical on both paths (R11/Q5).** A store failure
     raises the same class whichever side served it — the broker names the class
@@ -463,6 +465,9 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
         # No broker could be started. In the hardened tier there is no
         # unwrapped key on disk to fall back to, so let the local path raise
         # its own accurate message rather than inventing one here.
+        # Re-sampled, not just the entry reading (#4389 M4-1): a roll that
+        # began after entry is just as much a reason this broker is missing.
+        observed_roll = observed_roll or rolling_in_progress(base)
         if observed_roll and not hardened:
             raise _roll_outlasted(ROLL_WAIT_S)
     except BrokerUnavailable as exc:
@@ -471,14 +476,21 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
         # — unless a roll was observed, when silence is the roll not finishing.
         if hardened:
             raise
-        if observed_roll:
+        if observed_roll or rolling_in_progress(base):
             raise _roll_outlasted(ROLL_WAIT_S) from exc
-    except BrokerDenied:
-        # A denial is policy, not silence: it keeps the keyfile tier's
-        # documented fallback (§8) even after a roll, whose tail the
-        # successor's own hold covers (client `_retrieve_through_roll`).
+    except BrokerDenied as exc:
+        # With NO roll observed a denial is policy, not silence: it keeps the
+        # keyfile tier's documented fallback (§8). Once a roll was observed it
+        # does not (#4389 S8, security r4): the successor's hold covers only
+        # lineages it expects, so a denial here may be a late lineage it never
+        # heard of, and the local decrypt would skip the redaction notice. The
+        # client already refuses a denial it saw during a roll
+        # (`_retrieve_through_roll`); this clause covers the entry observation
+        # and a roll that started after it (M4-1).
         if hardened:
             raise
+        if observed_roll or rolling_in_progress(base):
+            raise _roll_denied() from exc
     return open_store(base, deadline=deadline).get(name, role=role, session_id=session_id())
 
 
@@ -489,6 +501,16 @@ def _roll_outlasted(budget: float) -> Exception:
     return BrokerRolling(
         "the secret broker is being replaced by an update and did not come back "
         f"within {budget:g}s; retry in a moment"
+    )
+
+
+def _roll_denied() -> Exception:
+    """The refusal for a broker denial met by a read that observed a roll."""
+    from local_operator.secrets.client import BrokerRolling
+
+    return BrokerRolling(
+        "the secret broker refused this read while it was being replaced by an "
+        "update; the value was not read locally, so retry in a moment"
     )
 
 

@@ -888,9 +888,10 @@ def _retrieve_through_roll(
     ``access.retrieve_secret`` turns both into an UNNOTIFIED local decrypt in
     the keyfile tier — the transcript leak §6 exists to prevent. So while
     the roll sentinel is present the request is retried for up to
-    :data:`ROLL_WAIT_S`; once the sentinel is gone the next answer is final
-    (the successor's own hold covers the tail), and if the roll outlasts the
-    budget the caller gets :class:`BrokerRolling`, which no fallback catches.
+    :data:`ROLL_WAIT_S`. Once a roll has been SEEN — by the caller or by any
+    attempt here — a denial or a silence is retried until that budget runs
+    out and then answered with :class:`BrokerRolling`, which no fallback
+    catches; only a served value or a structural refusal ends the wait early.
     Outside a roll and without a caller ``deadline`` this is exactly one
     ``request`` — no behaviour change.
     """
@@ -902,10 +903,14 @@ def _retrieve_through_roll(
     # also clipped like every retry, so a retrieval that meets a roll costs at
     # most ~ROLL_WAIT_S in total, not REQUEST_TIMEOUT_S plus retries. A
     # `BrokerUnavailable` raised once a roll was observed is answered with
-    # `BrokerRolling`, never re-raised into the fallback. A DENIAL after the
-    # sentinel is gone stays final here: the successor's own hold has ended,
-    # and inside a live session `access._retrieve_inside_session` (not this
-    # loop) decides what a denial means — it never decrypts locally.
+    # `BrokerRolling`, never re-raised into the fallback. **So is a DENIAL
+    # (#4389 S8, security r4).** The successor's hold only protects lineages it
+    # EXPECTS; a late, unmarked lineage (roll.py's S6 tail) is denied once the
+    # hold ends, and a re-raised denial is exactly what `access.retrieve_secret`
+    # turns into an unnotified keyfile decrypt. A denial after a seen roll
+    # therefore does not prove a local decrypt is safe: it is retried within
+    # the same budget (the session may still re-register) and then refused.
+    # Only a call that saw NO roll re-raises, keeping §8's keyfile fallback.
     seen_roll = observed_roll or rolling_in_progress(base)
     if deadline is None and seen_roll:
         deadline = time.monotonic() + ROLL_WAIT_S
@@ -915,7 +920,7 @@ def _retrieve_through_roll(
         except (BrokerUnavailable, BrokerDenied) as exc:
             rolling = rolling_in_progress(base)
             seen_roll = seen_roll or rolling
-            if not rolling and not (seen_roll and isinstance(exc, BrokerUnavailable)):
+            if not seen_roll:
                 raise
             if deadline is None:
                 deadline = time.monotonic() + ROLL_WAIT_S
