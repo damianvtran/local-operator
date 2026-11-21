@@ -31,7 +31,11 @@ from local_operator.secrets import broker as broker_module
 from local_operator.secrets import client
 from local_operator.secrets.broker import BrokerError, SecretBroker
 from local_operator.secrets.errors import BrokerUnavailable
-from local_operator.secrets.keys import key_path, registration_ticket, write_private_file
+from local_operator.secrets.keys import (
+    key_path,
+    registration_ticket,
+    write_private_file,
+)
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
