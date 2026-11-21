@@ -357,9 +357,7 @@ def test_gate_fails_on_a_new_missing_key(synthetic_catalogues: Path) -> None:
 
 
 @pytest.mark.parametrize("layout", ["complete", "missing_namespace", "missing_locale"])
-def test_gate_checks_whole_missing_catalogue_paths(
-    synthetic_catalogues: Path, layout: str
-) -> None:
+def test_gate_checks_whole_missing_catalogue_paths(synthetic_catalogues: Path, layout: str) -> None:
     # Runtime English fallback must keep working for old/incomplete packages,
     # but admission checks every declared locale, not just discovered files.
     messages = {"demo.title": "Title", "demo.body": "Body"}
