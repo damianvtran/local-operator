@@ -580,7 +580,7 @@
         {
           "path": "local_operator/team_bridge/integrations.py",
           "symbol": "ask_question",
-          "note": "tr renders every key before constructing the plain question and option labels/descriptions; integrations_tool._consent files those finished strings and retains affirm/decline as text"
+          "note": "tr renders every key before constructing the plain question and option labels/descriptions; integrations_tool._Run.file_ask files those finished strings and retains affirm/decline as text"
         }
       ],
       "references": {
