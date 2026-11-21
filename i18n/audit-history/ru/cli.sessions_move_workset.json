@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "cli.sessions_move_workset",
-  "history_sha256": "ee0d30a06657c11ffd11b05d288c9641b0ad6adf5d4fa78ec8aeaddf7d1f6e78",
+  "history_sha256": "b83fa142d4666732d98151c1ca53d61b9382c9cbe8dcd494239629be5566e041",
   "entries": [
     {
       "locale": "ru",
@@ -223,6 +223,66 @@
         {
           "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/slot2-conv/report.md",
           "sha256": "f48487028f3468c4c48b4250728c71c6911126c0c3fbee52b785d5bb22207bf8"
+        }
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+      "translator": {
+        "agent": "coder (lopdev) session 9a6e88d78421",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev) session e507d894afb3 — independent slot-1 audit",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Slot-1 independent audit of PR #4403 cwd-unknown copy (6 new keys) frozen at 3030a5e5c, merged target sha256 b7146c48d17adda258ce48323ef0f25cedf451debe2ca2c958989a90f219b8b4: PASS, 0 BLOCKER/0 MAJOR; 0 non-gating finding(s) deferred. 111 existing keys byte-identical to the catalogue certified at 0f5602723eb9. Agent-independent only (same model as translator). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/ru/cli.sessions_move_workset/cwd1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/cwd1/record.json",
+          "sha256": "a7e42a6b5faba41f33d247e6ddd83d7eef0ab5334eca9694fd540010917b6107"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/cwd1/report.md",
+          "sha256": "19840259392118f520f95360d24f6105e4a9df3750e64f68a7665cc2d15509ea"
+        }
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+      "translator": {
+        "agent": "lopdev coder (i18n-translator), session 9a6e88d78421",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev) / SECOND independent safety i18n-auditor slot 2, session 6fd346121602 [ru]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit (slot 2) of PR #4403's 6 cwd-unknown keys in ru `cli.sessions_move_workset` at copy freeze 3030a5e5c: PASS, 0 BLOCKER/0 MAJOR; findings [T5-RU-1]; non-gating, deferred, no wording changed. Target sha256 b7146c48d17adda258ce48323ef0f25cedf451debe2ca2c958989a90f219b8b4 (3030a5e5c catalogue + 6 values); context cc4712832270e6f8080a85343175b555f7db4378e58f9b4f844aacbc8ca26635. Chained after slot-1 receipt e507d894afb3 cwd1 (history ab046923b767d6d9…). Agent-independent only. No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/ru/cli.sessions_move_workset/slot2-cwd/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/slot2-cwd/record.json",
+          "sha256": "692f4dcdaca7504cab778791bc7fd971555234a1f60257ee3e45f300c4e40a44"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/slot2-cwd/report.md",
+          "sha256": "9f01ea0572536dc596918519fa16fba8e62ecc92fc6eb1cabded1eaf223740fe"
         }
       ]
     }

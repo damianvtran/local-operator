@@ -1,0 +1,67 @@
+{
+ "schema": 1,
+ "audit_id": "cwd1-ur",
+ "audit_kind": "independent slot-1 semantic audit (PR #4403 cwd-unknown copy, 6 new keys)",
+ "pr": 4403,
+ "locale": "ur",
+ "audit_date": "2026-11-21",
+ "freeze_head": "3030a5e5c47120191d3eb24ef78440d0170d4f2f",
+ "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+ "context_sha256": "cc4712832270e6f8080a85343175b555f7db4378e58f9b4f844aacbc8ca26635",
+ "target_sha256": "693aa70f1a1b5a40ad5cdcde3eae5036a6e71411ae9623e6314fd277edc2cfbc",
+ "target_method": "catalogue at 3030a5e5c + 6 values appended in en order, json.dumps(ensure_ascii=False, indent=2)+'\\n' (verified to reproduce every current catalogue byte-for-byte)",
+ "translation_input": {
+  "path": "/home/ec2-user/.local-operator/sessions/9a6e88d78421/scratchpad/tr4403/ur.json",
+  "sha256": "a6fcc32e4628bdcec09d228c2a6cd9a4556a17a3d7d22a90b4d0778f9d216bdb",
+  "index_sha256": "21c33d0ea2334a4a6d184a9d6d3de710682998c70477637fe504dd44a74c25f7"
+ },
+ "keys_audited": [
+  "cwd_unknown",
+  "cwd_unknown_advice",
+  "yes_cwd_unknown",
+  "needs_confirmation_cwd_unknown",
+  "receipt_cwd_unknown",
+  "receipt_keep_cwd_unknown"
+ ],
+ "carried": "111 existing keys byte-identical to the catalogue certified at en 0f5602723eb9 (last receipt passed; en minus the 6 new keys hashes to 0f5602723eb9)",
+ "translator": {
+  "agent": "coder (lopdev)",
+  "session": "9a6e88d78421",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none",
+  "source": "session transcript (provider anthropic, model claude-opus-5-5 only)"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev)",
+  "session": "e507d894afb3",
+  "slot": 1,
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none",
+  "model_independent": false
+ },
+ "result": "passed",
+ "unresolved_blocker_major": 0,
+ "findings_deferred": [],
+ "checks": [
+  "placeholder multiset parity 6/6",
+  "verbatim flags",
+  "no Cf/Cc",
+  "locale typography (fr U+202F, zh no CJK/Latin spaces, hi danda, ur ۔)",
+  "render_message with params, 0 unrendered",
+  "safety: listed folders stay on {source}; confirm = leave on {source}; yes refusal does not blame destination",
+  "check.py --catalogues-only on all 7 merged targets: 0 problems (control rc 0 after merge; old hi value rc 1)"
+ ],
+ "limitations": [
+  "no native-speaker review",
+  "no rendered terminal frame",
+  "agent-independent only (same model as translator)"
+ ],
+ "revision": "Revision 1 (translator index 21c33d0e…)",
+ "delta": {
+  "key": "needs_confirmation_cwd_unknown",
+  "previous": "ان فولڈرز کو --dry-run سے دیکھیں، پھر انہیں {source} پر چھوڑنے کے لیے --confirm-working-set {digest} کے ساتھ دوبارہ چلائیں، یا --without-working-set کے ساتھ۔",
+  "final": "ان فولڈرز کو --dry-run سے دیکھیں، پھر --confirm-working-set {digest} کے ساتھ دوبارہ چلائیں تاکہ یہ {source} پر ہی رہیں، یا --without-working-set کے ساتھ۔",
+  "reason": "previous value put {source} before {digest}; check.py's ICU argument-order parity rejects it (negative control rc 1). Slot-1 round 1 compared placeholder multisets only and missed this; superseded here.",
+  "verdict": "PASS: purpose clause bound to --confirm-working-set (confirming keeps the folders on {source}); argument order digest, source matches en"
+ }
+}

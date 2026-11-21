@@ -1,0 +1,39 @@
+{
+ "slot": "independent slot 2",
+ "pr": 4403,
+ "freeze": "3030a5e5c47120191d3eb24ef78440d0170d4f2f",
+ "locale": "zh-CN",
+ "namespace": "cli.sessions_move_workset",
+ "keys": [
+  "cwd_unknown",
+  "cwd_unknown_advice",
+  "yes_cwd_unknown",
+  "needs_confirmation_cwd_unknown",
+  "receipt_cwd_unknown",
+  "receipt_keep_cwd_unknown"
+ ],
+ "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+ "context_sha256": "cc4712832270e6f8080a85343175b555f7db4378e58f9b4f844aacbc8ca26635",
+ "target_sha256": "c74eee66460c2cef2a8bd9b66487964ed2929addff7260fadeeeb0dd3ece5424",
+ "target_method": "catalogue blob at 3030a5e5c + 6 translated values appended in en order, json.dumps(indent=2, ensure_ascii=False)+'\\n' (reproduces all 8 current catalogues byte-for-byte)",
+ "translations_file_sha256": "642773ad9f011719d0ef179c8b7b369adf40c77d73fac95e010b4f060e3afbe7",
+ "check_catalogues_only_on_merged": "2 problem(s): hi+ur needs_confirmation_cwd_unknown reordered (control: base catalogues = 42 missing-key problems)",
+ "findings": {},
+ "concurred_slot1": [
+  "L1-ZH-1 (slot 1, nit): concur — 它 antecedent drift"
+ ],
+ "blocker": 0,
+ "major": 0,
+ "verdict": "PASS",
+ "chained_on": {
+  "history_sha_at_freeze": "72d68f311d7a76c148c7d92d8058046a5e89208aebc3d88d0dd9af91d6896311",
+  "slot1_receipt_sha256": "664080fa5263d531abfe24d3c9608dfc2878e2dd0613954eb4c093053e45d4c1",
+  "history_sha_after_slot1": "2c6de918776db9965e1b90094a064e79beafa1444d59131afa98275da13a862e"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev) slot 2, session 6fd346121602",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none"
+ },
+ "limits": "no native-speaker review; no rendered terminal frame; agent-independent only (same model family as translator and slot 1)"
+}

@@ -1,0 +1,37 @@
+{
+ "slot": "independent slot 2",
+ "delta": "revision 1 (hi/ur needs_confirmation_cwd_unknown)",
+ "pr": 4403,
+ "freeze": "3030a5e5c47120191d3eb24ef78440d0170d4f2f",
+ "locale": "hi",
+ "namespace": "cli.sessions_move_workset",
+ "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+ "context_sha256": "cc4712832270e6f8080a85343175b555f7db4378e58f9b4f844aacbc8ca26635",
+ "target_sha256": "33a03aa14454cd1e85facf49abb96cef9eeeefe78ce41e59f8010835743e0f0f",
+ "translations_file_sha256": "a97002722922f065ce41b238cb86a0d2963fdbcb2b8b5ff854134924a8455815",
+ "values_read_this_round": [
+  "needs_confirmation_cwd_unknown"
+ ],
+ "other_5_values": "byte-identical to revision 0 (audited by slot 2, comment 7066697791)",
+ "check_catalogues_only_on_final_targets": "0 problem(s); negative control old ur value: 1 problem (reordered)",
+ "resolved": [
+  "T5-HI-1"
+ ],
+ "findings": {},
+ "carried_nits": [],
+ "blocker": 0,
+ "major": 0,
+ "verdict": "PASS",
+ "independence_caveat": "the changed value's wording was proposed by slot 2 and adopted verbatim; slot 2 does not claim independence for that value — slot 1's delta audit (e507d894afb3) is the independent audit of it",
+ "chained_on": {
+  "history_sha_at_freeze": "00222dea8897729ac7caa6460124418a719be320270c30685a3f3b6df5174fbd",
+  "slot1_receipt_sha256": "e24ab908cc59ed98a1d93c2ae019095b7c81e159c22da29bf9b0ba153fbd68e8",
+  "history_sha_after_slot1": "8d736bf91c0a55da0086955c18786ed30ced218a5e5ef142db23984a4ec6baf3"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev) slot 2, session 6fd346121602",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none"
+ },
+ "limits": "no native-speaker review; no rendered terminal frame; agent-independent only"
+}
