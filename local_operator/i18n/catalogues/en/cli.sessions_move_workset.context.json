@@ -308,5 +308,115 @@
     "role": "desktop dialog refusal text when the working-set gate stops a move (the dialog renders the file list itself)",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "{source} = device that keeps the files, {device} = destination; both verbatim. Must NOT mention any command-line flag."
+  },
+  "cli.sessions_move_workset.receipt_transferred": {
+    "role": "CLI line after a move that carried the working files",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {source} is the device they came from (verbatim)."
+  },
+  "cli.sessions_move_workset.receipt_restored_row": {
+    "role": "CLI receipt row: one worktree restored on this device",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is the source path, {dest} the path here; both ~/-paths, keep verbatim."
+  },
+  "cli.sessions_move_workset.receipt_pending": {
+    "role": "CLI receipt line: worktrees whose files arrived but are not restored yet",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {source} verbatim. 'relay' is the product's background service name."
+  },
+  "cli.sessions_move_workset.receipt_left_row": {
+    "role": "CLI receipt row: one worktree that did not travel, with the reason",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{reason} is one of the reason.* phrases (lower-case clause); {path}/{source} verbatim."
+  },
+  "cli.sessions_move_workset.receipt_recipe": {
+    "role": "CLI receipt row: the command that recreates a worktree's dependencies (printed, never run)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{cwd} is a path and {run} a shell command; keep both verbatim."
+  },
+  "cli.sessions_move_workset.receipt_rewrite": {
+    "role": "CLI receipt row: the destination used an https form of an ssh remote",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{detail} is 'repo: old -> new' verbatim."
+  },
+  "cli.sessions_move_workset.reason.primary_absent": {
+    "role": "reason clause: why a worktree stayed behind",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.reason.restore_failed": {
+    "role": "reason clause: files arrived but the restore has not completed",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.reason.snapshot_failed": {
+    "role": "reason clause: the source could not snapshot a worktree",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; 'bare' is git's term."
+  },
+  "cli.sessions_move_workset.reason.restore_path_refused": {
+    "role": "reason clause: the destination's path policy refused where the repository would land",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; mesh.move.working_set_roots is a settings key, keep verbatim."
+  },
+  "cli.sessions_move_workset.reason.url_refused": {
+    "role": "reason clause: the destination refused to clone from the repository's remote address",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; HTTPS and SSH stay as written."
+  },
+  "cli.sessions_move_workset.reason.destination_declined": {
+    "role": "reason clause: the destination declined a worktree without saying why (it keeps the detail itself)",
+    "tone": "plain, factual, calm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.receipt_branch_moved": {
+    "role": "CLI receipt row: a recall advanced an existing local branch to the arrived commit",
+    "tone": "plain, factual, calm",
+    "note": "{branch} is a git branch name; {old} and {new} are abbreviated commit ids, verbatim."
+  },
+  "cli.sessions_move_workset.import_not_granted": {
+    "role": "CLI/TUI move confirmation, block-level line before the user confirms",
+    "tone": "plain, factual, calm",
+    "note": "{device} is the destination device's name. {command} is a lop command (`lop network member grant <network-id> <device-id> workset_import`), verbatim, never translated. 'working files' = the session's repositories, branches and uncommitted changes."
+  },
+  "cli.sessions_move_workset.reason.import_not_granted": {
+    "role": "Reason a worktree was not restored, shown in the move receipt",
+    "tone": "plain, factual",
+    "note": "Lower-case sentence fragment like the other reason.* keys."
+  },
+  "cli.sessions_move_workset.reason.too_many_worktrees": {
+    "role": "Reason a worktree was left behind, shown in the move receipt",
+    "tone": "plain, factual",
+    "note": "Lower-case sentence fragment like the other reason.* keys. 'worktrees' = git worktrees."
+  },
+  "cli.sessions_move_workset.reason.clone_parent_refused": {
+    "role": "Reason a worktree was left behind, shown in the move receipt on the destination",
+    "tone": "plain, factual",
+    "note": "mesh.move.working_set_roots is a setting key, verbatim, never translated."
+  },
+  "cli.sessions_move_workset.reason.kept_as_confirmed": {
+    "role": "Reason a worktree stayed on the source, shown in the move receipt",
+    "tone": "plain, factual",
+    "note": "Lower-case sentence fragment like the other reason.* keys. Used when the user confirmed a move that leaves the files where they are (including --without-working-set)."
+  },
+  "cli.sessions_move_workset.probe_refused_by_policy": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{remote} is a git remote URL, verbatim. 'by policy' = this program's own address rules (private/internal addresses are never contacted), not a missing permission."
+  },
+  "cli.sessions_move_workset.receipt_sent": {
+    "role": "CLI receipt headline on the SOURCE of a move: the destination reports how many worktrees it received",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {device} is the destination device name, verbatim. 'restores' = puts the worktrees back in place."
+  },
+  "cli.sessions_move_workset.receipt_sent_row": {
+    "role": "CLI receipt row on the SOURCE: one worktree the destination received",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is a ~/-path and {device} a device name; keep both verbatim."
+  },
+  "cli.sessions_move_workset.receipt_sent_unknown": {
+    "role": "CLI receipt line on the SOURCE when the destination's answer about the working files never arrived",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} is the destination device name, verbatim. Must not imply the files stayed: they may be on {device}."
   }
 }
