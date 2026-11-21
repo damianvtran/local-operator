@@ -185,15 +185,21 @@ def _owner() -> OwnerSnapshot:
     )
 
 
-def _store(config_dir: Path) -> Store:
+def _store(config_dir: Path, *, multi_frame: bool = False) -> Store:
     store = Store(config_dir)
     store.commit_enrollment(
         _owner(), OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id=SESSION_ID
     )
     # The follow-up waiter re-checks the full authority fence, which reads the
     # feature flag from disk (the one a connector-less unit fixture must write).
+    # ``multi_frame_turns`` defaults OFF here on purpose: the tests in this file
+    # pin the one-body-per-turn contract, which is exactly what ``off`` must
+    # keep reproducing; the multi-frame tests opt in with ``multi_frame=True``.
     (config_dir / "config.yml").write_text(
-        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
+        json.dumps(
+            {"values": {"team_bridge": {"enabled": True, "multi_frame_turns": multi_frame}}}
+        ),
+        encoding="utf-8",
     )
     store.publish_screening_policy(
         _owner(),
@@ -217,10 +223,11 @@ def _reserve(
     seq: int = 3,
     config_dir: Path | None = None,
     routed_session: str | None = None,
+    conversation_id: str = CONVERSATION_ID,
 ) -> None:
     assert store.record_body_reservation(
         _owner(),
-        conversation_id=CONVERSATION_ID,
+        conversation_id=conversation_id,
         message_id=message_id,
         conversation_seq=seq,
         mention=True,
@@ -1981,3 +1988,93 @@ async def test_mid_turn_body_frame_stays_anchored_for_wire_prefix_stability(tmp_
         assert "cache_control" in json.dumps(
             m1[-2]
         ), f"{label}: tail breakpoint must land on the last persistent message"
+
+
+# -- multi-frame turns (``team_bridge.multi_frame_turns``) ---------------------
+
+
+def _states(config_dir: Path) -> dict[str, str]:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        return dict(conn.execute("SELECT message_id, state FROM body_reservations").fetchall())
+
+
+async def _serve_burst(tmp_path: Path, *, multi_frame: bool) -> tuple[CapturingStream, Path]:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir, multi_frame=multi_frame)
+    for n in range(1, 6):
+        _reserve(store, f"bcmsg_abcdef0{n}", 2 + n, config_dir)
+    stream = CapturingStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient()))
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+    return stream, config_dir
+
+
+@pytest.mark.asyncio
+async def test_a_five_message_burst_is_one_turn_of_five_frames(tmp_path) -> None:
+    """The operator's ask: a burst is answered ONCE. Before: 5 consecutive
+    full-context provider turns (``off`` below still does exactly that)."""
+
+    stream, config_dir = await _serve_burst(tmp_path, multi_frame=True)
+    assert len(stream.requests) == 1, _layout(stream)
+    frames = [t for t in stream.texts(0) if BODY in t]
+    assert len(frames) == 5, _layout(stream)
+    # Rules ride the first frame only; seq order on the wire.
+    assert [f.startswith("VERIFIED SOURCE") for f in frames] == [False, True, True, True, True]
+    seqs = [int(f.split("conversation_seq: ")[1].split("\n")[0]) for f in frames]
+    assert seqs == [3, 4, 5, 6, 7]
+    assert set(_states(config_dir).values()) == {"completed"}
+
+
+@pytest.mark.asyncio
+async def test_multi_frame_off_keeps_one_turn_per_body(tmp_path) -> None:
+    stream, config_dir = await _serve_burst(tmp_path, multi_frame=False)
+    assert len(stream.requests) == 5, _layout(stream)
+    assert all(sum(BODY in t for t in stream.texts(i)) == 1 for i in range(5))
+    assert set(_states(config_dir).values()) == {"completed"}
+
+
+async def _serve_interleaved(tmp_path: Path, *, multi_frame: bool) -> tuple[CapturingStream, Path]:
+    """Two conversations interleaved: aa1, bb1, aa2, bb2, aa3 (FIFO by admission)."""
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir, multi_frame=multi_frame)
+    other = "bcv_qaconvbb"
+    for n, (conversation, message_id) in enumerate(
+        [
+            (CONVERSATION_ID, "bcmsg_aa000001"),
+            (other, "bcmsg_bb000001"),
+            (CONVERSATION_ID, "bcmsg_aa000002"),
+            (other, "bcmsg_bb000002"),
+            (CONVERSATION_ID, "bcmsg_aa000003"),
+        ],
+        start=1,
+    ):
+        _reserve(store, message_id, 2 + n, config_dir, conversation_id=conversation)
+    stream = CapturingStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient()))
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+    return stream, config_dir
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multi_frame,requests", [(True, 2), (False, 5)])
+async def test_an_interleaved_two_conversation_burst_is_drained_in_one_pass(
+    tmp_path, multi_frame: bool, requests: int
+) -> None:
+    """Q1 (PR #4382): after the first row is attempted, the drain's exclusion
+    must not narrow the next read to that row's conversation. ``on``: one turn
+    per conversation; ``off``: one turn per body, exactly as before."""
+
+    stream, config_dir = await _serve_interleaved(tmp_path, multi_frame=multi_frame)
+    assert len(stream.requests) == requests, _layout(stream)
+    assert set(_states(config_dir).values()) == {"completed"}, _states(config_dir)

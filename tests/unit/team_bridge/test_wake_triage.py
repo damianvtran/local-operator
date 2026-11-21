@@ -75,6 +75,7 @@ from tests.unit.team_bridge.test_conversation_delivery import (
 def _fresh_triage_memory() -> None:
     # The roster cache, thread record and stagger senders are process-wide.
     conversation_mod._ROSTERS.clear()
+    conversation_mod._ROSTER_SELF_MISS.clear()
     conversation_mod._THREAD_SEEN.clear()
     conversation_mod._STAGGER_SENDER.clear()
     coalesce_mod.CONNECTOR_COALESCER._groups.clear()
@@ -260,6 +261,18 @@ def _meta(**kw: Any) -> ConversationCardMetadata:
             15.0,
         ),
         ({"addressed": "thread"}, {}, "fyi", "thread_follower", None, 15.0),
+        # #4377 Q5: a channel-wide mention beats the follower rule. ``@channel``
+        # in a followed thread reads ``addressed=thread`` with the mention bit,
+        # and must take the one-agent urgent path, not wake every follower.
+        ({"mention": True, "addressed": "thread"}, {"mention": True}, "fyi", "urgent", None, 0.0),
+        (
+            {"addressed": "everyone"},
+            {"thread_follower": True},
+            "fyi",
+            "urgent",
+            None,
+            0.0,
+        ),
         # Rule 4: urgent — everyone, a human, or a question.
         ({"addressed": "everyone"}, {}, "fyi", "urgent", None, 0.0),
         ({"sender_kind": "human"}, {"sender_kind": "human"}, "fyi", "urgent", None, 0.0),
@@ -873,6 +886,33 @@ def test_a_cached_roster_missing_self_is_reread_and_failures_are_cached(tmp_path
     assert broken.view_calls == 1
     _decide(owner, _ref(**_HUMAN_POST), meta, config_dir, broken, now=2061.0)
     assert broken.view_calls == 2  # the negative cache expires
+
+
+def test_a_reread_that_still_misses_self_is_cached_like_a_failure(tmp_path) -> None:
+    """#4377 m6/Q6: a roster that STILL omits this agent after the forced re-read
+    is remembered for ROSTER_FAILURE_TTL_S, so a burst of urgent posts is not
+    one person-gated view read per message for the whole roster TTL."""
+
+    config_dir = _mode_dir(tmp_path)
+    owner = _owner("g", 2)
+    meta = _meta(**_HUMAN_POST)
+    stale = _RosterClient([_agent("bep_x")])  # never lists bep_g
+    first = _decide(owner, _ref(**_HUMAN_POST), meta, config_dir, stale, now=1000.0)
+    assert first.wake_class is None  # off-roster = slot 0, wakes now
+    assert stale.view_calls == 2  # the initial read + ONE forced re-read
+    for n, moment in enumerate((1010.0, 1030.0, 1059.0)):
+        message_id = f"bcmsg_burst0{n}01"
+        _decide(
+            owner,
+            _ref(message_id=message_id, **_HUMAN_POST),
+            _meta(message_id=message_id, **_HUMAN_POST),
+            config_dir,
+            stale,
+            now=moment,
+        )
+    assert stale.view_calls == 2  # throttled: no re-read inside the window
+    _decide(owner, _ref(**_HUMAN_POST), meta, config_dir, stale, now=1061.0)
+    assert stale.view_calls == 3  # the window expired: one more forced re-read
 
 
 def test_the_roster_read_happens_only_for_urgent_messages_under_on(tmp_path) -> None:

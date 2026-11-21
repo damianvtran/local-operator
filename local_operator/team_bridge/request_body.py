@@ -145,6 +145,13 @@ class PendingBody:
     #: fields, but it arrives on the fetched body rather than on the row, so it
     #: travels here and overwrites the source's placeholder before rendering.
     sender_kind: str = "unknown"
+    #: Multi-frame turn shaping (``pending_turn.PendingTurnBatch``), passed
+    #: straight to :func:`build_body_frame`. The defaults are the one-body
+    #: frame byte-for-byte, so a single-body turn renders exactly as before.
+    with_rules: bool = True
+    participation: bool | None = None
+    delivery: str | None = None
+    omitted_ambient: int = 0
 
 
 @dataclass(frozen=True)
@@ -336,6 +343,10 @@ def assemble_injection(
         conversation_label=pending.conversation_label,
         sender_label=pending.sender_label,
         body=pending.body,
+        with_rules=pending.with_rules,
+        participation=pending.participation,
+        delivery=pending.delivery,
+        omitted_ambient=pending.omitted_ambient,
     )
     size = request_size(frame)
     if not frame_within_capacity(frame, request_bytes=budget.available_bytes):
