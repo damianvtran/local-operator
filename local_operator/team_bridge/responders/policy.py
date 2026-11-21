@@ -457,14 +457,16 @@ def _owned_and_private(st: os.stat_result, what: str) -> None:
 
 
 def _read_fenced(path: Path) -> bytes:
-    """The policy's bytes, refusing every shape an agent could have planted.
+    """The policy's bytes, refusing unsafe descriptor shapes, not proving authorship.
 
     WHY THE LOADER, NOT ONLY THE CLASSIFIER (PR #4383 security rounds 1-2: M1/S-1,
     S-11, n-2). Two rounds showed that enumerating write commands in the guardrail
     classifier keeps losing a route (``cp -l``, ``rsync`` into the state root, an
-    interpreter's ``os.link``). So the loader proves, on the descriptors it
-    actually reads, that the bytes can only have come from the owner writing this
-    one name:
+    interpreter's ``os.link``). The loader checks the descriptors it actually
+    reads, but cannot prove who wrote their bytes: a historical hardlink can
+    leave forged bytes behind after its second name is removed. Admission is
+    not a security boundary before GATE R3-HASH; these checks only establish
+    the following properties at read time:
 
     * the state directory and ``team_bridge`` are each opened ``O_DIRECTORY |
       O_NOFOLLOW`` and walked by ``dir_fd`` (``openat``), so the directory that
