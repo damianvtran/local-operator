@@ -1,0 +1,236 @@
+{
+  "locale": "es",
+  "namespace": "tui.tool_card",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "target_sha256": "5161d0a466fb1700c59fc641d4f00656057f7ea58d62b24beebaedcfbd40d653",
+  "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+  "status": "passed",
+  "audit_date": "2026-11-20",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance_source": "Delegating task brief"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "session": "72a8dde8974a",
+    "fallback": "none",
+    "independent_from_translator": true
+  },
+  "round": 2,
+  "scope": "Three changed keys and composition with neighbours; not a fresh full-namespace certification.",
+  "key_count": 3,
+  "key_coverage": [
+    "tui.tool_card.status.stop_unconfirmed",
+    "tui.tool_card.more.diff_lines",
+    "tui.tool_card.fetch.final"
+  ],
+  "neighbour_keys_read": [
+    "tui.tool_card.chip.you",
+    "tui.tool_card.fetch.cache",
+    "tui.tool_card.fetch.fetched",
+    "tui.tool_card.hint.collapse",
+    "tui.tool_card.hint.expand",
+    "tui.tool_card.hint.interrupt",
+    "tui.tool_card.imagegen.requests_ahead",
+    "tui.tool_card.live.earlier_lines",
+    "tui.tool_card.live.earlier_output_hidden",
+    "tui.tool_card.live.no_output_yet",
+    "tui.tool_card.live.running",
+    "tui.tool_card.more.lines",
+    "tui.tool_card.more.search_lines"
+  ],
+  "catalogue_keys_read": 17,
+  "verdict": "clean-with-findings",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ES-R2-01"
+    ]
+  },
+  "findings": [
+    {
+      "id": "ES-R2-01",
+      "severity": "minor",
+      "key": "tui.tool_card.more.diff_lines",
+      "current_text": "{count, plural, one {{shown} línea más de cambios} many {{shown} de líneas más de cambios} other {{shown} líneas más de cambios}}",
+      "proposed_text": "If a narrow rendered check clips important content, use {count, plural, one {{shown} línea más} many {{shown} de líneas más} other {{shown} líneas más}}; otherwise retain current wording.",
+      "reason": "23 cells versus English 17 at count 2; 32 versus 23 at one million, before the appended expand affordance. Flag for narrow-width rendered check; there is no maxCells cap and no observed clipping in this catalogue-only audit."
+    }
+  ],
+  "checks": [
+    {
+      "key": "tui.tool_card.status.stop_unconfirmed",
+      "message_arguments": [],
+      "parity": true,
+      "samples": [
+        {
+          "count": 0,
+          "plural_category": "other",
+          "text": "paro sin confirmar",
+          "cells": 18,
+          "english_cells": 16
+        },
+        {
+          "count": 1,
+          "plural_category": "one",
+          "text": "paro sin confirmar",
+          "cells": 18,
+          "english_cells": 16
+        },
+        {
+          "count": 2,
+          "plural_category": "other",
+          "text": "paro sin confirmar",
+          "cells": 18,
+          "english_cells": 16
+        },
+        {
+          "count": 5,
+          "plural_category": "other",
+          "text": "paro sin confirmar",
+          "cells": 18,
+          "english_cells": 16
+        },
+        {
+          "count": 21,
+          "plural_category": "other",
+          "text": "paro sin confirmar",
+          "cells": 18,
+          "english_cells": 16
+        },
+        {
+          "count": 1000000,
+          "plural_category": "many",
+          "text": "paro sin confirmar",
+          "cells": 18,
+          "english_cells": 16
+        }
+      ]
+    },
+    {
+      "key": "tui.tool_card.more.diff_lines",
+      "message_arguments": [
+        [
+          "count",
+          "plural"
+        ],
+        [
+          "shown",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "samples": [
+        {
+          "count": 0,
+          "plural_category": "other",
+          "text": "0 líneas más de cambios",
+          "cells": 23,
+          "english_cells": 17
+        },
+        {
+          "count": 1,
+          "plural_category": "one",
+          "text": "1 línea más de cambios",
+          "cells": 22,
+          "english_cells": 16
+        },
+        {
+          "count": 2,
+          "plural_category": "other",
+          "text": "2 líneas más de cambios",
+          "cells": 23,
+          "english_cells": 17
+        },
+        {
+          "count": 5,
+          "plural_category": "other",
+          "text": "5 líneas más de cambios",
+          "cells": 23,
+          "english_cells": 17
+        },
+        {
+          "count": 21,
+          "plural_category": "other",
+          "text": "21 líneas más de cambios",
+          "cells": 24,
+          "english_cells": 18
+        },
+        {
+          "count": 1000000,
+          "plural_category": "many",
+          "text": "1000000 de líneas más de cambios",
+          "cells": 32,
+          "english_cells": 23
+        }
+      ]
+    },
+    {
+      "key": "tui.tool_card.fetch.final",
+      "message_arguments": [
+        [
+          "url",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "samples": [
+        {
+          "count": 0,
+          "plural_category": "other",
+          "text": "(final: https://example.test/final)",
+          "cells": 35,
+          "english_cells": 35
+        },
+        {
+          "count": 1,
+          "plural_category": "one",
+          "text": "(final: https://example.test/final)",
+          "cells": 35,
+          "english_cells": 35
+        },
+        {
+          "count": 2,
+          "plural_category": "other",
+          "text": "(final: https://example.test/final)",
+          "cells": 35,
+          "english_cells": 35
+        },
+        {
+          "count": 5,
+          "plural_category": "other",
+          "text": "(final: https://example.test/final)",
+          "cells": 35,
+          "english_cells": 35
+        },
+        {
+          "count": 21,
+          "plural_category": "other",
+          "text": "(final: https://example.test/final)",
+          "cells": 35,
+          "english_cells": 35
+        },
+        {
+          "count": 1000000,
+          "plural_category": "many",
+          "text": "(final: https://example.test/final)",
+          "cells": 35,
+          "english_cells": 35
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Paro is valid technical Spanish for cessation of an operation, disambiguated by the sessions stop row; employment/strike senses do not make this contextual use erroneous. It names the unconfirmed stop and fits maxCells=18 (18 cells). Parada sin confirmar is 20 cells and would violate that budget.",
+    "Final is Spanish as well as English; unchanged spelling is not English leakage. Parentheses, URL placeholder and redirected-URL composition preserved.",
+    "Cambios is idiomatic Spanish for the diff preview; all one/many/other branches preserve count and shown. Long million marker has no maxCells budget; rendered check at narrow widths remains a UI concern, not a demonstrated translation defect."
+  ],
+  "hashes": {
+    "source": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+    "target": "5161d0a466fb1700c59fc641d4f00656057f7ea58d62b24beebaedcfbd40d653",
+    "context": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087"
+  }
+}

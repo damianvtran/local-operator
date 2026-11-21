@@ -648,6 +648,7 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
                 assert len(closures) == 0, "no model-visible nested proof may be invented"
                 assert len((report["trusted_display"] or {}).get("records", [])) == 1
                 from local_operator.harness.peer_cycle_display import (
+                    BUILDING,
                     discover_records,
                     validate_record,
                 )
@@ -655,6 +656,22 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
                 trusted = report["trusted_display"]["records"][0]
                 assert validate_record(trusted, history, session.session_id) is not None
                 archived = discover_records(session._transcript, history, session.session_id)
+                if archived is not None and archived.get("status") == BUILDING:
+                    # This test reads ON the loop, so the never-build-on-a-loop
+                    # contract (PR #4224, ``_index_or_arm``) may answer "not
+                    # ready" and arm the shared refresh. ``building`` is never
+                    # the durable answer: await that SAME armed single-flight
+                    # task (no second scan) and re-read. The durable assertion
+                    # below is unchanged, so a refresh that never makes the
+                    # archived record readable still fails here.
+                    from local_operator.session import transcript_index
+
+                    journal = session._transcript.directory
+                    armed = transcript_index.in_flight_refresh(journal.parent.parent, journal.name)
+                    assert armed is not None, "building must arm the shared refresh"
+                    await asyncio.wait_for(asyncio.shield(armed), timeout=20)
+                    archived = discover_records(session._transcript, history, session.session_id)
+                    assert archived is not None and "status" not in archived
                 assert archived is not None and [item["id"] for item in archived["records"]] == [
                     trusted["id"]
                 ]

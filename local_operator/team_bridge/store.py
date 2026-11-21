@@ -2081,6 +2081,7 @@ CREATE TABLE IF NOT EXISTS body_reservations (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     card_posted_at REAL,
+    routed_session TEXT,
     PRIMARY KEY (owner_key, conversation_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS body_reservations_eligible
@@ -3692,12 +3693,19 @@ class Store:
         consent_version: str | None,
         designated_session: str,
         now: float,
+        routed_session: str | None = None,
     ) -> bool:
         """Record one admitted message. Idempotent by primary key.
 
         Returns True only when THIS call created the row. The connector's own
         retry path may emit the same reservation again after a crash; a second
         insert must be a no-op rather than a duplicate promise.
+
+        ``routed_session`` names the session the CONNECTOR decided should read
+        this message instead of the designated one (``connector/routing.py``).
+        Only the connector writes it; a value equal to the designation is
+        stored as NULL, so "routed" always means "not the designated session".
+        A replay never rewrites it (``DO NOTHING``): the first decision stands.
         """
 
         from local_operator.team_bridge.types import (
@@ -3714,6 +3722,10 @@ class Store:
         self._reservation_field("designated_session", designated_session, _SESSION_TOKEN)
         if consent_version is not None:
             self._reservation_field("consent_version", consent_version, _CONSENT_TOKEN)
+        if routed_session is not None:
+            self._reservation_field("routed_session", routed_session, _SESSION_TOKEN)
+            if routed_session == designated_session:
+                routed_session = None
         if not isinstance(conversation_seq, int) or isinstance(conversation_seq, bool):
             raise StoreRefused("invalid_body_reservation", "conversation_seq")
         if conversation_seq < 1:
@@ -3723,6 +3735,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_routed_session_column(conn)
             self._ensure_card_handoff_column(conn)
             # ``card_handoff_id = ''`` is the PROVENANCE mark: this row was
             # written by a build that binds a card identity before dispatch, so
@@ -3734,8 +3747,8 @@ class Store:
                 "endpoint_id, credential_id, canonical_base_url, enrollment_generation, "
                 "conversation_id, message_id, conversation_seq, mention, body_sha256, "
                 "screening_fingerprint, policy_epoch, consent_version, designated_session, "
-                "state, created_at, updated_at, card_handoff_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'') "
+                "state, created_at, updated_at, card_handoff_id, routed_session) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'',?) "
                 "ON CONFLICT(owner_key, conversation_id, message_id) DO NOTHING",
                 (
                     _owner_key(owner),
@@ -3756,7 +3769,93 @@ class Store:
                     designated_session,
                     float(now),
                     float(now),
+                    routed_session,
                 ),
+            )
+            return cursor.rowcount == 1
+
+    def reclaim_routed(
+        self, owner: OwnerSnapshot, *, older_than: float, now: float | None = None
+    ) -> int:
+        """Hand routed rows nobody picked up back to the designated session.
+
+        A routed session that dies, or never reads its inbox, would strand its
+        message: the designated session is blind to a routed row by design. This
+        clears ``routed_session`` — which makes the row the designated session's
+        again — with a compare-and-set that holds only while the row is STILL
+        unclaimed (``pending``, or a claim whose lease expired: the same
+        eligibility the reader uses). A row a live turn has claimed is never
+        touched, so a slow but alive routed session cannot lose a message it is
+        mid-way through. Returns the number of rows handed back.
+
+        There is no local re-card: a card replay needs a hub re-delivery, so the
+        designated session finds the row on its next turn through the ordinary
+        pending lookup.
+        """
+
+        moment = time.time() if now is None else float(now)
+        # The loop calls this every minute: look first, with a read-only handle
+        # that creates and migrates nothing, and take the write lock only when a
+        # row is actually due. A store with no routed column has none.
+        with self._connect_readonly() as probe:
+            if probe is None or not self._has_routed_session_column(probe):
+                return 0
+            due = probe.execute(
+                "SELECT 1 FROM body_reservations WHERE owner_key = ? "
+                "AND routed_session IS NOT NULL AND created_at <= ? LIMIT 1",
+                (_owner_key(owner), float(older_than)),
+            ).fetchone()
+            if due is None:
+                return 0
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_routed_session_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET routed_session = NULL, updated_at = ? "
+                "WHERE owner_key = ? AND enrollment_generation = ? "
+                "AND routed_session IS NOT NULL AND created_at <= ? "
+                "AND (state = 'pending' OR (state = 'claimed' "
+                "AND claim_expires_at IS NOT NULL AND claim_expires_at < ?))",
+                (
+                    moment,
+                    _owner_key(owner),
+                    owner.enrollment_generation,
+                    float(older_than),
+                    moment,
+                ),
+            )
+            return int(cursor.rowcount)
+
+    def unroute_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        routed_session: str,
+    ) -> bool:
+        """Take ONE row back from ``routed_session`` while nobody has claimed it.
+
+        The connector's own undo: it routed a message, then found just before
+        the wake that the target was gone. Compare-and-set on both the named
+        session and an unclaimed state, so it can never strip a row a live turn
+        holds or one routed elsewhere in the meantime. True when the row is the
+        designated session's again.
+        """
+
+        self._reservation_field("routed_session", routed_session, _SESSION_TOKEN)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_routed_session_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET routed_session = NULL, updated_at = ? "
+                "WHERE owner_key = ? AND conversation_id = ? AND message_id = ? "
+                "AND routed_session = ? AND state = 'pending'",
+                (time.time(), _owner_key(owner), conversation_id, message_id, routed_session),
             )
             return cursor.rowcount == 1
 
@@ -3808,22 +3907,40 @@ class Store:
             if len(enrollments) != 1:
                 return None
             enrollment = enrollments[0]
-            if (
-                enrollment["designated_session"] != designated_session
-                or not enrollment["consent_version"]
-                or not enrollment["consent_ref"]
-            ):
+            if not enrollment["consent_version"] or not enrollment["consent_ref"]:
                 return None
+            routed_column = (
+                "routed_session"
+                if self._has_routed_session_column(conn)
+                else "NULL AS routed_session"
+            )
             rows = conn.execute(
                 "SELECT conversation_id, message_id, account_id, tenant_id, endpoint_id, "
                 "credential_id, canonical_base_url, enrollment_generation, "
-                "designated_session, consent_version, state FROM body_reservations "
+                f"designated_session, consent_version, state, {routed_column} "
+                "FROM body_reservations "
                 "WHERE owner_key = ? AND message_id = ? LIMIT 2",
                 (_owner_key(owner), in_reply_to_message_id),
             ).fetchall()
             if len(rows) != 1:
                 return None
             row = rows[0]
+            # WHO MAY ANSWER A ROW. An ordinary row: the designated session, and
+            # the row was reserved for that same designation. A ROUTED row: only
+            # the session it was routed to, and only while the designation the
+            # connector stamped on it is still the live one — a designation move
+            # kills the row's authority exactly as it does for an ordinary row.
+            # Never both: the designated session is blind to a routed row, so a
+            # reply bound to it is refused like any unknown message id.
+            routed = row["routed_session"]
+            if routed:
+                if routed != designated_session:
+                    return None
+                reserved_for = enrollment["designated_session"]
+            else:
+                if enrollment["designated_session"] != designated_session:
+                    return None
+                reserved_for = designated_session
             expected = {
                 "account_id": owner.account_id,
                 "tenant_id": owner.tenant_id,
@@ -3831,7 +3948,7 @@ class Store:
                 "credential_id": owner.credential_id,
                 "canonical_base_url": owner.canonical_base_url,
                 "enrollment_generation": owner.enrollment_generation,
-                "designated_session": designated_session,
+                "designated_session": reserved_for,
                 "consent_version": enrollment["consent_version"],
             }
             if any(row[key] != value for key, value in expected.items()):
@@ -3839,6 +3956,49 @@ class Store:
             if row["state"] not in ("pending", "claimed", "completed"):
                 return None
             return {"conversation_id": row["conversation_id"], "message_id": row["message_id"]}
+
+    def previous_delivery_seq(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        before_seq: int,
+        session_id: str,
+    ) -> int | None:
+        """The seq of the latest earlier message reserved for ``session_id`` here.
+
+        Read-only and advisory: it feeds one card line ("N messages since your
+        last delivery"), never a decision, so a store that cannot answer returns
+        None and the line is simply absent. Scoped to this owner's live
+        generation like every other read; no body, label or id escapes.
+        """
+
+        if not session_id or owner.enrollment_generation <= 0:
+            return None
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return None
+                if self._live_generation(conn, owner) != owner.enrollment_generation:
+                    return None
+                # "Delivered to this session" is the SERVING session, the same
+                # predicate the pending lookup uses: a row routed to another
+                # session was never this one's delivery, and a row routed TO it
+                # was. Old-shape files (no column) fall back to the designation.
+                serving = (
+                    "COALESCE(routed_session, designated_session)"
+                    if self._has_routed_session_column(conn)
+                    else "designated_session"
+                )
+                row = conn.execute(
+                    "SELECT MAX(conversation_seq) FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND conversation_seq < ? "
+                    f"AND {serving} = ?",
+                    (_owner_key(owner), conversation_id, before_seq, session_id),
+                ).fetchone()
+        except (StoreRefused, sqlite3.Error, OSError):
+            return None
+        return int(row[0]) if row is not None and row[0] is not None else None
 
     def conversation_of_reserved_message(self, owner: OwnerSnapshot, message_id: str) -> str | None:
         """The ``bcv_`` id an ADMITTED conversation message belongs to, or None.
@@ -3913,6 +4073,38 @@ class Store:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_handoff_id TEXT")
         if "card_handoff_card" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_handoff_card TEXT")
+
+    @staticmethod
+    def _ensure_routed_session_column(conn: sqlite3.Connection) -> None:
+        """Add ``routed_session`` to a carrying table that predates it.
+
+        ADDITIVE AND NULLABLE, with NO schema-version bump (same rule as
+        :meth:`_ensure_card_posted_column`): NULL means "delivered to the
+        designated session", which is what every earlier row and every earlier
+        writer meant. NOT in ``_BODY_RESERVATION_COLUMNS``. A version bump was
+        considered and rejected: the session-side readers open read-only and
+        would not refuse, while a bump WOULD make an older connector refuse the
+        store and block a rollback. Routing is instead gated on the receiving
+        session advertising ``team-bridge-routed-inbox-v1``.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "routed_session" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN routed_session TEXT")
+
+    @staticmethod
+    def _has_routed_session_column(conn: sqlite3.Connection) -> bool:
+        """Whether a (possibly old-shape) reservation table carries ``routed_session``.
+
+        The read-only readers cannot ALTER, and an old-shape file read before
+        any new writer touched it has no such column: they fall back to the
+        designated-session-only predicate rather than failing on the name.
+        """
+
+        return any(
+            row[1] == "routed_session"
+            for row in conn.execute("PRAGMA table_info(body_reservations)")
+        )
 
     @staticmethod
     def _ensure_receipt_rendered_template_column(conn: sqlite3.Connection) -> None:
@@ -4471,11 +4663,30 @@ class Store:
                 return None
             if self._live_generation(conn, owner) != owner.enrollment_generation:
                 return None
+            # THE ROW'S SERVING SESSION is the session it was routed to, else
+            # the designated one. The designated session is therefore BLIND to a
+            # routed row, which is the point: a message routed to the session
+            # that asked must not also be served here. A routed row additionally
+            # needs the live designation to still be the one it was stamped with
+            # (a designation move kills it, as it kills an ordinary row), so a
+            # stale routed row is not claimed only to drift on its first call.
+            # An old-shape table (no column yet) is the designated-only predicate.
+            if self._has_routed_session_column(conn):
+                serving = (
+                    "COALESCE(routed_session, designated_session) = ? "
+                    "AND (routed_session IS NULL OR designated_session = "
+                    "(SELECT designated_session FROM enrollments "
+                    "WHERE owner_key = body_reservations.owner_key "
+                    "AND enrollment_generation = body_reservations.enrollment_generation "
+                    "AND state = 'committed')) "
+                )
+            else:
+                serving = "designated_session = ? "
             return self._reservation(
                 conn.execute(
                     "SELECT * FROM body_reservations WHERE owner_key = ? "
                     "AND credential_id = ? AND enrollment_generation = ? "
-                    "AND designated_session = ? AND (state = 'pending' OR "
+                    f"AND {serving}AND (state = 'pending' OR "
                     "(state = 'claimed' AND claim_expires_at IS NOT NULL "
                     "AND claim_expires_at < ?)) "
                     + "".join(filters)
@@ -4688,7 +4899,11 @@ class Store:
             return cursor.rowcount == 1
 
     def per_call_admission_state(
-        self, owner: OwnerSnapshot, designated_session: str
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        reservation: tuple[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """The four local facts one provider call must still satisfy.
 
@@ -4700,6 +4915,13 @@ class Store:
         ``None`` means "could not verify" — an absent store, a fenced owner,
         no row. Callers treat it as drift and send the request without the
         frame; it is never evidence of withdrawal (design S-24).
+
+        ``reservation`` is the ``(conversation_id, message_id)`` the caller holds
+        a claim on. ``designation_matches`` is true when the caller IS the live
+        designation, and ALSO when the row was routed to the caller while the
+        live designation is still the one the connector stamped on it — the two
+        facts the routed session's authority consists of. Without ``reservation``
+        the answer is the designated-only one, exactly as before.
         """
 
         with self._connect_readonly() as conn:
@@ -4722,10 +4944,22 @@ class Store:
                 (_owner_key(owner),),
             ).fetchone()
             consent_version = row["consent_version"]
+            matches = live_designation == designated_session
+            if not matches and reservation is not None and self._has_routed_session_column(conn):
+                routed = conn.execute(
+                    "SELECT routed_session, designated_session FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND message_id = ?",
+                    (_owner_key(owner), reservation[0], reservation[1]),
+                ).fetchone()
+                matches = (
+                    routed is not None
+                    and routed["routed_session"] == designated_session
+                    and routed["designated_session"] == live_designation
+                )
             return {
                 "owner_live": True,
                 "designated_session": live_designation,
-                "designation_matches": live_designation == designated_session,
+                "designation_matches": matches,
                 "policy_epoch": int(policy["epoch"]) if policy is not None else None,
                 "consent_version": (consent_version if isinstance(consent_version, str) else None),
             }

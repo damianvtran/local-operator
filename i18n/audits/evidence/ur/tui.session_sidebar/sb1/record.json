@@ -1,0 +1,307 @@
+{
+  "locale": "ur",
+  "namespace": "tui.session_sidebar",
+  "date": "2026-11-20",
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "94bdbc7fa06a",
+  "source_commit": "c8343f3a608785b5064e61307c7333a2473126ae",
+  "files": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.json",
+      "sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/ur/tui.session_sidebar.json",
+      "sha256": "eb7df1d379f7498215a2e55db9f659b7e0b6c3807513e00a0c13a77822d08f6d"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.context.json",
+      "sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+    }
+  },
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null,
+    "instance": null,
+    "provenance": "Identity supplied by delegation; translation date and instance not supplied."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "94bdbc7fa06a",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "namespace_verdicts": {
+    "tui.session_sidebar": "clean"
+  },
+  "keys_read": 21,
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "checks": {
+    "key_parity": true,
+    "argument_name_and_kind_parity": "21/21; argument order can differ naturally for Urdu syntax",
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "plural_messages": 1,
+    "plural_branch_samples": [
+      0,
+      1,
+      9,
+      10,
+      99
+    ],
+    "exact_number_selectors": false,
+    "bidi_controls": "none; no RLM/LRM/ALM or embedding/isolation controls in target",
+    "literal_command": "runtime.render_message preserves lop stop exactly in conditional respectful- imperative remedy",
+    "counts": [
+      0,
+      9,
+      10,
+      99
+    ],
+    "widths": {
+      "tui.session_sidebar.footer.asks_note": {
+        "cells": [
+          9,
+          9,
+          10,
+          10
+        ],
+        "maxCells": 10
+      },
+      "tui.session_sidebar.footer.hub_note": {
+        "cells": [
+          5,
+          5,
+          6,
+          6
+        ],
+        "maxCells": 10
+      },
+      "tui.session_sidebar.footer.opening": {
+        "cells": [
+          11,
+          11,
+          11,
+          11
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.footer.refresh_failed": {
+        "cells": [
+          18,
+          18,
+          18,
+          18
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.pinned_overflow": {
+        "cells": [
+          23,
+          23,
+          24,
+          24
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.row.untitled": {
+        "cells": [
+          15,
+          15,
+          15,
+          15
+        ],
+        "maxCells": 20
+      },
+      "tui.session_sidebar.section.active": {
+        "cells": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.section.pinned": {
+        "cells": [
+          6,
+          6,
+          6,
+          6
+        ],
+        "maxCells": 27
+      },
+      "tui.session_sidebar.section.previous": {
+        "cells": [
+          11,
+          11,
+          11,
+          11
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.section.subagent": {
+        "cells": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "maxCells": 27
+      },
+      "tui.session_sidebar.state.empty": {
+        "cells": [
+          20,
+          20,
+          20,
+          20
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.state.error": {
+        "cells": [
+          25,
+          25,
+          25,
+          25
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.state.loading": {
+        "cells": [
+          24,
+          24,
+          24,
+          24
+        ],
+        "maxCells": 27
+      },
+      "tui.session_sidebar.title": {
+        "cells": [
+          5,
+          5,
+          5,
+          5
+        ],
+        "maxCells": 29
+      },
+      "tui.session_sidebar.tooltip.location": {
+        "cells": [
+          11,
+          11,
+          11,
+          11
+        ],
+        "maxCells": null
+      },
+      "tui.session_sidebar.tooltip.location_network": {
+        "cells": [
+          22,
+          22,
+          22,
+          22
+        ],
+        "maxCells": null
+      },
+      "tui.session_sidebar.tooltip.location_network_stale": {
+        "cells": [
+          40,
+          40,
+          40,
+          40
+        ],
+        "maxCells": null
+      },
+      "tui.session_sidebar.tooltip.location_stale": {
+        "cells": [
+          29,
+          29,
+          29,
+          29
+        ],
+        "maxCells": null
+      },
+      "tui.session_sidebar.tooltip.status_wedged": {
+        "cells": [
+          43,
+          43,
+          43,
+          43
+        ],
+        "maxCells": null
+      },
+      "tui.session_sidebar.tooltip.unnamed_device": {
+        "cells": [
+          13,
+          13,
+          13,
+          13
+        ],
+        "maxCells": null
+      },
+      "tui.session_sidebar.tooltip.unreachable": {
+        "cells": [
+          25,
+          25,
+          25,
+          25
+        ],
+        "maxCells": null
+      }
+    },
+    "width_violations": [],
+    "negative_controls": {
+      "renamed_placeholder_detected": true,
+      "missing_one_plural_detected": true
+    }
+  },
+  "terminology_evidence": [
+    {
+      "path": "i18n/glossary.md",
+      "lines": "19-30, 56-62, 79, 118-127",
+      "note": "Commands/tool names stay literal; session, subagent and device use Urdu forms. No generic hub keep-Latin exception; git/hub operations in lines 120-122 do not name the sidebar counter."
+    },
+    {
+      "path": "i18n/style-guides/ur.md",
+      "lines": "9-28, 38-50, 54-70, 76-85",
+      "note": "Polite Urdu, settled loans in Urdu script, one/other, Latin digits, logical-order RTL with no manual controls; TUI degraded stance acknowledged."
+    },
+    {
+      "keys": [
+        "relay.shell.list.section.active",
+        "relay.shell.list.section.previous",
+        "relay.shell.usage.refresh_failed",
+        "relay.chrome.drawer.conversations",
+        "relay.chrome.row.pin",
+        "relay.chrome.session.loading",
+        "tui.small.ask_queue.question_waiting",
+        "tui.small.panels.scroll_hint",
+        "tui.small.session_sidebar.asks_suffix"
+      ],
+      "note": "Same session, conversation, refresh, pin, question and scroll vocabulary."
+    },
+    {
+      "keys": [
+        "tui.hub_links.detail.title",
+        "cli.agents_help.push_hub_id",
+        "cli.services_heavy.heavy_description"
+      ],
+      "note": "Existing Urdu catalogues use ہب and رنز; sidebar adds no raw English lexical text. ICU syntax remains English machine tokens by design."
+    }
+  ],
+  "note": "Read all 21 English/Urdu messages with all context entries. Zero findings. Footer asks 9/9/10/10 cells and hub 5/5/6/6 cells; neither exceeds the 10-cell budget. All other bounded labels fit their actual sidecar budgets (20/27/29). Pinned overflow 23/23/24/24 cells. Mixed Latin names and lop stop retain logical byte order. This is a catalogue/runtime string audit, not a rendered-terminal shaping/mirroring validation; no screenshots or native RTL completeness claimed. No repo files edited; no provider/model fallback used."
+}

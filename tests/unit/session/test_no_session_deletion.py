@@ -4898,7 +4898,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/index_read_model.py::publish",
         "<path>.unlink",
-        "Removes only the sweep's own .tmp sibling when the publish did not commit",
+        "Removes only the build's own .tmp sibling when the publish did not commit, and "
+        "SQLite's <temp>-journal beside it (a FILE named from that same temp path)",
+        2,
     ),
     (
         "local_operator/session/index_read_model.py::write_naming",
@@ -4920,6 +4922,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Unlinks cache FILEs inside a read-models/<sid> directory whose session has no index; "
         "the directory itself is left in place",
+    ),
+    (
+        "local_operator/session/index_read_model.py::_sweep_dead_writer_temps",
+        "<path>.unlink",
+        "Unlinks only FILEs under cache/.../read-models/<sid>/ whose NAME matches the "
+        "writer-temp regex (<token>.<pid>.tmp[-journal]) and whose writer pid is dead or "
+        "reused; never a directory, never a companion, never below sessions/",
     ),
     # -- team-bridge moderation evaluation: a tmp world the harness built ------
     # `teardown_fixture` deletes the fixture tree ONE eval case ran in, created by

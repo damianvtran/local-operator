@@ -883,6 +883,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the bridge's refusal code, mapped to this project's own refusal copy and "
         "returned as a machine code field, never rendered",
     ),
+    # The same refusal on a SUBAGENT's site card (PR #4283): ``site_decide`` hands
+    # the card to ``_site_decide_bound`` with its own ``_refuse``, and the bound path
+    # reads the bridge's ``applied: false`` code exactly as above -- ``str()`` keys
+    # ``_site_not_applied_copy`` (one mapping shared with the host's own cards), and
+    # the raw token rides only in the answer's machine ``code`` field.
+    ("local_operator/session/session.py", "Session._site_decide_bound", "reason"): (
+        1,
+        "the bridge's refusal code on a subagent's card, mapped to the same refusal "
+        "copy and returned as a machine code field, never rendered",
+    ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same
     # class as the ack's payload key above. Nothing renders it into a line in

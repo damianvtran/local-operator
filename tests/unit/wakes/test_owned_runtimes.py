@@ -319,6 +319,52 @@ def test_a_stop_sweeps_an_earlier_invocations_runtime_and_spares_the_unmarked(
                 child.wait(timeout=5)
 
 
+def test_a_build_restart_stop_leaves_owned_runtimes_running(tmp_path: Path, monkeypatch) -> None:
+    """An upgrade's ``kickstart -k`` must not sweep the runtimes the supervisor owns.
+
+    Incident 2026-11-20: every ``lop-update`` SIGTERMed 3-12 wake-owned runtimes
+    through this stop handler, and one mid-turn runtime then held the operator's
+    prompt for ~7 minutes behind a subagent. The restart is recognised by the same
+    fact the restart acts on — this supervisor's generation is not ``current`` —
+    so the stand-in for a stale generation is the probe returning a path. Fails on
+    the pre-fix tree: the marked runtime exits -SIGTERM.
+    """
+    from local_operator import update
+
+    monkeypatch.delenv(owned_runtimes.OWNER_ENV, raising=False)
+    monkeypatch.delenv("LOP_WAKE_SUPERVISOR_ACTIVE", raising=False)
+    monkeypatch.setattr(
+        update,
+        "stale_generation_of_process",
+        lambda pid: tmp_path / "generations" / "20261120T171250Z-0.108.5",
+    )
+    root = tmp_path / "root"
+    root.mkdir()
+    owned = _spawn_stand_in(root, "s3upgrade01", owner="token-from-an-earlier-invocation")
+    try:
+        _await_probe([owned])
+        _stop_a_real_serve(root, monkeypatch, [owned])
+        assert _exited(owned, timeout=2.0) is None, "a build restart swept an owned runtime"
+    finally:
+        if owned.poll() is None:
+            owned.kill()
+            owned.wait(timeout=5)
+
+
+def test_a_restart_probe_that_fails_still_sweeps(monkeypatch) -> None:
+    """The uncertain direction keeps the sweep: a probe fault is not a restart."""
+    from local_operator import update
+    from local_operator.wakes import supervisor
+
+    def boom(pid: int) -> None:
+        raise OSError("ps unavailable")
+
+    monkeypatch.setattr(update, "stale_generation_of_process", boom)
+    assert supervisor._stop_is_build_restart() is False
+    monkeypatch.setattr(update, "stale_generation_of_process", lambda pid: None)
+    assert supervisor._stop_is_build_restart() is False
+
+
 # ---------------------------------------------------------------------------
 # #3028 review r4 MAJOR-2: the marker must not travel past the runtimes the
 # supervisor forks itself. TWO HOPS through the real env builder

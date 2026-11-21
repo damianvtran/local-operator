@@ -683,6 +683,22 @@ async def test_a_signal_exit_refuses_parked_and_later_gates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reopened_serving_handle_parks_a_card_instead_of_refusing() -> None:
+    """R1 on #4355, on the production handle: after the reopen a gate parks a card."""
+    handle, _ = make_handle(auto_approve=False)
+    handle.refuse_gates_for_exit()
+    assert await asyncio.wait_for(handle._approval_gate("bash", "x"), timeout=1) is False
+    handle.reopen_gates_after_yield()
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    assert not parked.done(), "the gate parked on the operator instead of refusing"
+    assert len(handle._pending_futures) == 1
+    (request_id,) = handle._pending_futures
+    await handle.approval_answer(request_id, True, False)
+    assert await asyncio.wait_for(parked, timeout=1) is True
+
+
+@pytest.mark.asyncio
 async def test_a_signal_between_two_questions_does_not_park_the_second() -> None:
     """m1 (agent review round 2 on #3028): the exit flag is re-read per question.
 

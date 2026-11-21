@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "audit_id": "tc2",
+  "locale": "hi",
+  "namespace": "tui.tool_card",
+  "record": "i18n/audits/evidence/hi/tui.tool_card/tc2/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from its session scratchpad (~/.local-operator/sessions/e0a50173dfc8/scratchpad/hi-tool-card-round2-receipt.json)",
+  "record_sha256": "5f268debb1125275ebe3bd05ced917474f6e69f0c56d6d8ccbe3bcba094ed47d",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+  "target_sha256": "cedd1fbcec84726aa0e84e4305033451ed5e396d145f34c13bb684efcaf45abe",
+  "verdict": "passed",
+  "commit_audited": "4e164d26c8ec (worktree head; locale bytes uncommitted at audit time)",
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+    "session": "e0a50173dfc8",
+    "model": "openai/gpt-6.1-sol"
+  },
+  "ledger_receipt": {
+    "locale": "hi",
+    "namespace": "tui.tool_card",
+    "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+    "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+    "target_sha256": "cedd1fbcec84726aa0e84e4305033451ed5e396d145f34c13bb684efcaf45abe",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator')",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-20",
+      "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+      "session": "e0a50173dfc8",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-20",
+      "result": "clean",
+      "findings": 0,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own receipt (model field)"
+    },
+    "status": "passed",
+    "note": "Independent audit (round 2 (delta re-audit after the round-1 fixes)) of the new tui.tool_card namespace (16 keys), source commit 4e164d26c8ec. Auditor e0a50173dfc8 (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/hi/tui.tool_card/tc2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/hi/tui.tool_card/tc2/record.json",
+    "round": "tc2"
+  }
+}

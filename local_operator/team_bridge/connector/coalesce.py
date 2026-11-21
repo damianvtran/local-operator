@@ -181,6 +181,9 @@ def merge_metadata(items: list[Any]) -> Any:
         # B4b: one released message in the burst puts the provenance line on the
         # whole card, because the agent reads every message of the group.
         owner_released=any(getattr(item, "owner_released", False) for item in items),
+        # The gap BEFORE the burst: the oldest message's own count. Later
+        # messages in the group follow it directly, so they add nothing.
+        since_last_delivery=int(getattr(items[0], "since_last_delivery", 0) or 0),
     )
 
 
@@ -211,8 +214,14 @@ class WakeCoalescer:
         session_id: str,
         config_dir: Path,
         now: float | None = None,
+        min_interval_s: float | None = None,
     ) -> None:
         """Buffer one admitted message's card. Idempotent per message id.
+
+        ``min_interval_s`` raises the gap after this destination's last wake
+        above the ordinary window: the per-destination gate for ROUTED groups
+        (``connector/routing.py``), whose target is not the session that always
+        received everything. ``None`` keeps the ordinary window.
 
         The crash-recovery hold is written HERE, before the caller deletes the
         feed ref: everything after this point may not run (a stop, a kill, a
@@ -229,7 +238,8 @@ class WakeCoalescer:
             last = self._last_wake.get(key)
             # Rate, not delay: a quiet conversation is due NOW (flushed at the
             # end of this iteration); a recently woken one waits out the window.
-            due = now if last is None else max(now, last + self.window_s)
+            gap = self.window_s if min_interval_s is None else max(self.window_s, min_interval_s)
+            due = now if last is None else max(now, last + gap)
             group = _Group(owner=owner, config_dir=config_dir, session_id=session_id, due_at=due)
             self._groups[key] = group
         if any(item.metadata.message_id == metadata.message_id for item in group.items):
