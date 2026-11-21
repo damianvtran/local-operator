@@ -848,6 +848,10 @@ def _confirmed_screen_result(stored: Mapping[str, Any]) -> Any:
     return ScreenResult(disposition="deliver", receipt=receipt)
 
 
+class RoutedSessionGone(Exception):
+    """``live_only`` delivery found its target no longer live. Nothing was sent."""
+
+
 async def deliver_wake(
     owner: Any,
     payload: str,
@@ -856,8 +860,17 @@ async def deliver_wake(
     config_dir: Path,
     bridge_meta: dict[str, Any] | None = None,
     sender_display: dict[str, Any] | None = None,
+    live_only: bool = False,
 ) -> str:
     """SEAM: hand the wake to the designated CoS session (lazy heavy import).
+
+    ``live_only`` is for a ROUTED target (a session that is not the designated
+    one): it is checked against the registry NOW, not as it was when the
+    decision was made, because this function otherwise passes ``record=None``
+    and a dead session with history would be cold-resumed. Resuming a task
+    session on a stranger's message is exactly what routing must never do, so a
+    target that is no longer live raises :class:`RoutedSessionGone` BEFORE
+    anything is delivered and the caller falls back to the designated session.
 
     Live target: the shipped ``deliver_peer_message`` with ``wake=True``.
     Cold target (no runtime): ``engage_runtime`` with a ``PeerMessageErrand``
@@ -873,6 +886,13 @@ async def deliver_wake(
         session_has_durable_history,
     )
 
+    live_record: Any | None = None
+    if live_only:
+        from .routing import live_capable_record
+
+        live_record = live_capable_record(None, session_id)
+        if live_record is None:
+            raise RoutedSessionGone(session_id)
     sender = {"account_id": owner.account_id, "source": TEAM_BRIDGE_MESSAGE_TYPE}
     if sender_display:
         # D1: the human card must be able to NAME the member. This dict is all
@@ -891,26 +911,36 @@ async def deliver_wake(
         from local_operator.team_bridge.display_receipt import validated_display_receipt
 
         sender.update(validated_display_receipt(sender_display, owner=owner))
-    if session_has_durable_history(session_id):
+    if live_only or session_has_durable_history(session_id):
         # Live, or cold WITH durable history: the primitive owns delivery and
         # answers with the TYPED outcome — no exception-type or message-string
         # inspection (the unengaged distinction is a state, not an error).
-        outcome = await deliver_peer_message_outcome(
-            None,
-            session_id=session_id,
-            text=payload,
-            mode="mailbox",
-            wake=True,
-            sender=sender,
-            # THE PROVENANCE KIND (H4e-render): the receiving session stamps
-            # this on the row, so the card is a bridge message rather than a
-            # generic peer one (§13.4). Re-validated at every hop.
-            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
-            # THE BRIDGE LOCATOR (H5 F3): bounded, closed-key, omitted when
-            # absent — the receiver uses it to find ITS OWN records and never
-            # as clearance (see the receive hook).
-            bridge_meta=bridge_meta,
-        )
+        try:
+            outcome = await deliver_peer_message_outcome(
+                # A routed delivery passes the record it just scanned, so the
+                # primitive can only DIAL that process: with ``None`` it resolves
+                # the id itself and may cold-resume a session that died in the
+                # meantime. A failed dial is a confirmed non-delivery, which is
+                # the designated fallback's cue, not a held card.
+                live_record,
+                session_id=session_id,
+                text=payload,
+                mode="mailbox",
+                wake=True,
+                sender=sender,
+                # THE PROVENANCE KIND (H4e-render): the receiving session stamps
+                # this on the row, so the card is a bridge message rather than a
+                # generic peer one (§13.4). Re-validated at every hop.
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                # THE BRIDGE LOCATOR (H5 F3): bounded, closed-key, omitted when
+                # absent — the receiver uses it to find ITS OWN records and never
+                # as clearance (see the receive hook).
+                bridge_meta=bridge_meta,
+            )
+        except RuntimeError as exc:
+            if live_only:
+                raise RoutedSessionGone(session_id) from exc
+            raise
         # Only a confirmed non-delivery is retryable. Returning its detail as
         # success would let the conversation caller mark its card posted and
         # discard the feed ref, permanently losing the message on replay.
@@ -921,6 +951,8 @@ async def deliver_wake(
         # delivered — the AttributeError lands in the handler's hold arm, so
         # the card stays owed instead of being settled unproven.
         if outcome.state == DELIVERY_FAILED:
+            if live_only:
+                raise RoutedSessionGone(session_id)
             raise DeliveryFailed(outcome.detail)
         return str(outcome.detail)
     # Cold with NO durable history: exactly the designated-CoS engagement

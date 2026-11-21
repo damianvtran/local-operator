@@ -25,6 +25,7 @@ from local_operator.team_bridge.tool import (
     build_bridge_tool,
     execute_bridge,
 )
+from tests.unit.team_bridge.ref_text import without_ref
 from tests.unit.team_bridge.test_channel_tool import RecordingClient, _runtime
 
 
@@ -235,7 +236,7 @@ async def test_dm_resolves_a_current_agent_and_posts_as_runtime_identity(runtime
         "origin_session_id": "sess_1",
     }
     assert post["conversation_id"] == "bcv_direct01"
-    assert post["tenant_id"] == "ten_1" and post["text"] == "hello"
+    assert post["tenant_id"] == "ten_1" and without_ref(post["text"]) == "hello"
     assert post["actor_endpoint_id"] == "bep_1" and post["origin_session_id"] == "sess_1"
     assert post["client_ref"] and post["thread_root_id"] is None
     assert post["expected_account_id"] == "acc_1"

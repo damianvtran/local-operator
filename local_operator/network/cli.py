@@ -2803,8 +2803,11 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     # device that has been shared a credential but whose record has not been re-read
     # would otherwise print "nothing is shared" — the exact state this listing exists
     # to make visible. The record is joined only for the NAME.
+    from local_operator.network.credentials import github as github_mod
+
     networks: list[dict[str, Any]] = []
     lines: list[str] = []
+    github_source: str | None = None
     for document in _placement_documents():
         record = _record_for(document.network_id)
         network_name = record.name if record is not None else document.network_id
@@ -2844,6 +2847,15 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     for h in entry.holders
                 ],
             }
+            if row["owned_here"] and key == github_mod.GITHUB_KEY:
+                # THE LEND THIS DEVICE SERVES, NAMED BY ITS ARM (lend honesty,
+                # 2026-11-19): the placement's ``kind`` is the row's wire type and
+                # stays put; ``label`` is what the operator reads, so a gh-served
+                # lend no longer prints as ``github-app``. Resolved once per listing.
+                if github_source is None:
+                    github_source = github_mod.resolve_source(_config_dir())
+                row["source"] = github_source
+                row["label"] = github_mod.source_label(github_source)
             if not row["owned_here"]:
                 holder = entry.is_holder(self_device)
                 if holder:
@@ -2863,8 +2875,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
                 # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
                 # 7, last acked 14:02)``. Read from the sync document only: a
-                # listing never dials and never reads a store, and a copy
-                # relationship with no generation yet shows NO segment (absent,
+                # listing never dials, and the one store touch is the github
+                # arm's metadata ``describe`` above (``resolve_source``; no value
+                # is read, as ``source_present`` already does for ``shareable``).
+                # A copy relationship with no generation yet shows NO segment (absent,
                 # never "failed" — the rollout segment's own rule). The §4.2
                 # selection mark rides the same read (S4): one document, so the
                 # mark cannot disagree with the holders it governs.
@@ -2885,6 +2899,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
             lines.append(f"{network_name}: nothing is shared in this network yet")
         else:
             lines.append(f"{network_name}:")
+            # The type column is sized to the widest entry (min 15, the historic
+            # width) so the 27-character gh label keeps ``owner:`` aligned across
+            # rows instead of pushing that one row right (agent review n1 / QA Q3).
+            kind_width = max([15] + [len(r.get("label") or r["kind"]) for r in keys])
             for row in keys:
                 owner = (
                     "this device"
@@ -2893,9 +2911,16 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 )
                 label = _peer_label(row["identity_label"] or "")
                 who = f" ({label})" if label else ""
+                shown_kind = row.get("label") or row["kind"]
                 lines.append(
-                    f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
+                    f"  {row['credential_name']:<14} {shown_kind:<{kind_width}} owner: {owner}{who}"
                 )
+                if row.get("source") == github_mod.SOURCE_GH:
+                    # The same caution the ``shareable`` row and ``ready`` give, on
+                    # the lend itself: borrowers of this row get the full account.
+                    from local_operator.network.readiness import GITHUB_BROAD_TOKEN_NOTE
+
+                    lines.append(f"      {GITHUB_BROAD_TOKEN_NOTE}")
                 if row.get("mark"):
                     mark_tail = " — never crosses" if row["mark"] == "local-only" else ""
                     lines.append(f"      marked {row['mark']}{mark_tail}")
@@ -3442,9 +3467,16 @@ def _github_shareable_row(self_device: str) -> dict[str, Any]:
                     "scope": holder.scope,
                 }
             )
+    # THE ARM THAT WOULD SERVE, beside the stable ``kind`` (lend honesty,
+    # 2026-11-19): ``kind`` stays ``github-app`` for every reader keyed on it, and
+    # ``source``/``label`` say what actually travels — a gh login is the account's
+    # full user token, not an App grant. Metadata only: no token is read.
+    source = github_mod.resolve_source(_config_dir())
     return {
         "provider": github_mod.GITHUB_KEY,
         "kind": github_mod.GITHUB_KIND,
+        "source": source,
+        "label": github_mod.source_label(source),
         "identity_label": "",
         "shared_with": shared_with,
         "remedy": (
@@ -11579,6 +11611,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         from local_operator.paths import config_dir
 
         checks.extend(readiness_mod.local_serve_daemon_rows(config_dir()))
+        checks.extend(readiness_mod.local_github_source_rows(config_dir()))
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),

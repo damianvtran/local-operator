@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.chip.you": "tú:",
+  "tui.tool_card.fetch.cache": "caché {state}",
+  "tui.tool_card.fetch.fetched": "Obtenido: {url}",
+  "tui.tool_card.fetch.final": "(final: {url})",
+  "tui.tool_card.hint.collapse": "contraer",
+  "tui.tool_card.hint.expand": "expandir",
+  "tui.tool_card.hint.interrupt": "{chord} para interrumpir",
+  "tui.tool_card.imagegen.requests_ahead": "{count, plural, one {{shown} petición por delante} many {{shown} de peticiones por delante} other {{shown} peticiones por delante}}",
+  "tui.tool_card.live.earlier_lines": "{count, plural, one {{shown} línea anterior} many {{shown} de líneas anteriores} other {{shown} líneas anteriores}}",
+  "tui.tool_card.live.earlier_output_hidden": "salida anterior oculta",
+  "tui.tool_card.live.no_output_yet": "aún sin salida",
+  "tui.tool_card.live.running": "en ejecución",
+  "tui.tool_card.more.diff_lines": "{count, plural, one {{shown} línea más de cambios} many {{shown} de líneas más de cambios} other {{shown} líneas más de cambios}}",
+  "tui.tool_card.more.lines": "{count, plural, one {{shown} línea más} many {{shown} de líneas más} other {{shown} líneas más}}",
+  "tui.tool_card.more.search_lines": "{count, plural, one {{shown} coincidencia más} many {{shown} de coincidencias más} other {{shown} coincidencias más}}",
+  "tui.tool_card.status.stop_unconfirmed": "paro sin confirmar"
+}

@@ -11387,3 +11387,107 @@ async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
     assert not {"origin", "needs_user"} & set(capture.attention)
     snapshot = module._wire_state_of(capture)["snapshot"]
     assert not {"origin", "needs_user"} & set(snapshot["attention"])
+
+
+# --- team targets whose roster names hub-pulled roles ------------------------
+#
+# Operator report: a new chat on a hub-pulled team showed "This conversation's
+# model was not resolved". ``sessions.preview`` ran ``validate_target``, which
+# raised a bare ``KeyError('iac-engineer')`` because the pulled roster role
+# carried only hub provenance tags. Both halves are pinned here: the member now
+# resolves, and a member that genuinely does not resolve is NAMED in the 404.
+
+
+def _seed_hub_team(root: Path, *, member_tags: list[str]) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamRegistry, parse_members
+    from tests.unit.test_agent_avatar import _edit_fields
+
+    agents = AgentRegistry(root)
+    for name, tags in (("hub-manager", ["role"]), ("iac-engineer", member_tags)):
+        row = agents.create_agent(_edit_fields(name=name, description="d", tags=tags))
+        agents.set_agent_system_prompt(row.id, f"{name} body")
+    TeamRegistry(root).create_team(
+        TeamEditFields(
+            name="pergamondev",
+            description=None,
+            manager="hub-manager",
+            members=parse_members(["iac-engineer"]),
+            instructions=None,
+            project=None,
+        )
+    )
+
+
+HUB_MEMBER_TAGS = ["hub:f5580f4a-0000-4000-8000-000000000001", "hub_sha256:" + "0" * 64]
+
+
+@pytest.mark.asyncio
+async def test_a_team_whose_member_is_a_hub_pulled_role_previews(draft_api) -> None:
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    _seed_hub_team(root, member_tags=HUB_MEMBER_TAGS)
+
+    pane = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "target": {"kind": "team", "name": "pergamondev"},
+        },
+    )
+
+    assert pane.status_code == 200, pane.text
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_team_member_is_named_in_the_404(draft_api) -> None:
+    """Same 404 and sentence as before; the failing team/slot/member ride as data."""
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    # A private chat agent: no role tag, no specialist category, no provenance.
+    _seed_hub_team(root, member_tags=[])
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "cwd": str(root),
+        "target": {"kind": "team", "name": "pergamondev"},
+    }
+
+    pane = await client.post("/v1/desktop/sessions/preview", json=body)
+    created = await client.post("/v1/desktop/sessions", json=body)
+
+    assert pane.status_code == 404, pane.text
+    detail = pane.json()["detail"]
+    assert detail["code"] == "wire.errors.desktop.requested_not_found"
+    assert detail["unresolved"] == {
+        "team": "pergamondev",
+        "slot": "member",
+        "member": "iac-engineer",
+    }
+    assert created.status_code == 404, created.text
+    assert created.json()["detail"] == detail
+
+
+def test_validate_target_names_the_unresolved_member(tmp_path) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.server.utils.desktop_profiles import (
+        UnresolvedTarget,
+        validate_target,
+    )
+    from local_operator.teams import TeamRegistry
+
+    _seed_hub_team(tmp_path, member_tags=[])
+    with pytest.raises(UnresolvedTarget) as raised:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "pergamondev")
+
+    assert isinstance(raised.value, KeyError), "the 404 contract keys on KeyError"
+    assert str(raised.value) == (
+        "team 'pergamondev' member 'iac-engineer' is not an installed role, specialist or team"
+    )
+    with pytest.raises(UnresolvedTarget) as missing:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "nope")
+    assert missing.value.wire_fields()["unresolved"] == {
+        "team": None,
+        "slot": "team",
+        "member": "nope",
+    }

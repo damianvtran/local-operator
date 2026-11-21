@@ -13,7 +13,9 @@ event so that question is answered by reading a file:
 * ``timeout``       a waiter gave up when its queue bound ran out (no slot);
 * ``stale-reclaim`` a slot was taken over from a holder that died without
                     releasing (its record was still on disk when the flock was
-                    free, so the kernel, not the holder, dropped the lock).
+                    free, so the kernel, not the holder, dropped the lock);
+* ``nested``        a descendant of a holder ran under the holder's slot
+                    (``holder`` = its pid) instead of queueing behind it.
 
 Two intervals serialized iff, for each slot, every ``take`` is followed by its
 ``release`` (or a ``stale-reclaim``) before the next ``take``.
@@ -82,9 +84,13 @@ AUDIT_GENERATIONS = 3
 #: --start-by`` refusing a run whose window passed while it queued (PR #4279);
 #: hyphenated like ``stale-reclaim`` and like run_bounded's
 #: ``termination_cause=late-start`` for the same breach, so one grep for
-#: ``late-start`` finds it on either trail. Event names are trail VALUES that
+#: ``late-start`` finds it on either trail. ``nested`` is a descendant of a
+#: holder running under that holder's slot instead of queueing behind it
+#: (``heavy_lease.inherited_lease``, the 2026-11-20 self-deadlock); ``holder``
+#: names the ancestor pid whose ``take`` covers it, and there is no ``release``
+#: for it because no slot changed hands. Event names are trail VALUES that
 #: readers match on, so they change only with every reader.
-EVENTS = ("take", "release", "timeout", "stale-reclaim", "late-start")
+EVENTS = ("take", "release", "timeout", "stale-reclaim", "late-start", "nested")
 
 #: The longest label part kept. Subcommands are short words; a long token in
 #: subcommand position is far more likely to be an identifier or a secret.

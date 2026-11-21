@@ -668,3 +668,224 @@ def test_per_call_admission_state_creates_nothing_when_absent(tmp_path) -> None:
 
     assert absent.per_call_admission_state(_owner(), "sess_cos") is None
     assert not absent._path.exists(), "a read-only check must not create the store"
+
+
+# -- routed reservations (routed_session) ------------------------------------
+#
+# A message the connector routed to the session that ASKED is readable by that
+# session and no other: the designated session is blind to it, a third session
+# never sees it, and moving the designation kills the routing. Nothing here
+# bumps the store schema version.
+
+ROUTED = "sess_task"
+
+
+def _reserve_routed(store: Store, routed: str | None = ROUTED) -> bool:
+    return store.record_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        conversation_seq=3,
+        mention=False,
+        body_sha256=DIGEST,
+        screening_fingerprint=FINGERPRINT,
+        policy_epoch=3,
+        consent_version="bridge_consent_v1",
+        designated_session="sess_cos",
+        now=time.time(),
+        routed_session=routed,
+    )
+
+
+def _pending(store: Store, session: str) -> dict[str, Any] | None:
+    return store.pending_body_reservation_for(_owner(), session)
+
+
+def test_the_routed_session_sees_the_row_and_the_designated_one_does_not(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+
+    routed = _pending(store, ROUTED)
+    assert routed is not None and routed["routed_session"] == ROUTED
+    assert _pending(store, "sess_cos") is None  # designated: blind
+    assert _pending(store, "sess_third") is None  # a third session: never
+
+
+def test_a_row_routed_to_the_designated_session_is_stored_as_unrouted(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve_routed(store, routed="sess_cos")
+    row = _row(store)
+    assert row["routed_session"] is None
+    assert _pending(store, "sess_cos") is not None
+
+
+def test_a_routed_value_outside_the_session_grammar_is_refused(tmp_path) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(StoreRefused):
+        _reserve_routed(store, routed="a body with spaces")
+
+
+def test_per_call_admission_follows_the_route_and_dies_with_the_designation(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+    here = (CONVERSATION_ID, MESSAGE_ID)
+
+    ok = store.per_call_admission_state(_owner(), ROUTED, reservation=here)
+    assert ok is not None and ok["designation_matches"] is True
+    # Without the reservation the answer is the designated-only one, as before.
+    bare = store.per_call_admission_state(_owner(), ROUTED)
+    assert bare is not None and bare["designation_matches"] is False
+    third = store.per_call_admission_state(_owner(), "sess_third", reservation=here)
+    assert third is not None and third["designation_matches"] is False
+
+    # The designation moves: the row was routed under the OLD one and is dead.
+    store.update_designated_session(_owner(), "sess_new")
+    moved = store.per_call_admission_state(_owner(), ROUTED, reservation=here)
+    assert moved is not None and moved["designation_matches"] is False
+    assert _pending(store, ROUTED) is None
+
+
+def test_the_reply_binding_follows_the_route(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+
+    def bind(session: str) -> dict[str, str] | None:
+        return store.admitted_inbound_reservation_readonly(
+            _owner(), in_reply_to_message_id=MESSAGE_ID, designated_session=session
+        )
+
+    assert bind(ROUTED) == {"conversation_id": CONVERSATION_ID, "message_id": MESSAGE_ID}
+    assert bind("sess_cos") is None  # the designated session did not get this one
+    assert bind("sess_third") is None
+    store.update_designated_session(_owner(), "sess_new")
+    assert bind(ROUTED) is None  # designation moved: the route is void
+
+
+def test_an_unrouted_row_still_binds_only_for_the_designated_session(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve(store)
+    bound = store.admitted_inbound_reservation_readonly(
+        _owner(), in_reply_to_message_id=MESSAGE_ID, designated_session="sess_cos"
+    )
+    assert bound is not None
+    assert (
+        store.admitted_inbound_reservation_readonly(
+            _owner(), in_reply_to_message_id=MESSAGE_ID, designated_session=ROUTED
+        )
+        is None
+    )
+
+
+def test_reclaim_hands_an_unclaimed_routed_row_back_to_the_designated_session(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+    assert _pending(store, "sess_cos") is None
+
+    # Too young: nothing is reclaimed.
+    assert store.reclaim_routed(_owner(), older_than=time.time() - 3600) == 0
+    assert store.reclaim_routed(_owner(), older_than=time.time() + 1) == 1
+
+    assert _row(store)["routed_session"] is None
+    assert _pending(store, "sess_cos") is not None
+    assert _pending(store, ROUTED) is None
+    # A second sweep finds nothing: the CAS has nothing left to clear.
+    assert store.reclaim_routed(_owner(), older_than=time.time() + 1) == 0
+
+
+def test_reclaim_never_touches_a_row_a_live_turn_has_claimed(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+    assert store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="pt:a",
+        turn_token="tt:a",
+        now=time.time(),
+        ttl=600,
+    )
+
+    assert store.reclaim_routed(_owner(), older_than=time.time() + 1) == 0
+    assert _row(store)["routed_session"] == ROUTED
+
+
+def test_reclaim_takes_back_a_row_whose_claim_lease_expired(tmp_path) -> None:
+    """A routed session that died MID-claim must not strand the message: the reader's own
+    eligibility rule treats an expired lease as unclaimed, and so does the reclaim."""
+
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+    now = time.time() - 100  # the lease has lapsed in real time too
+    assert store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="pt:a",
+        turn_token="tt:a",
+        now=now,
+        ttl=5,
+    )
+    # Inside the lease the claim holds (the existing negative control)...
+    assert store.reclaim_routed(_owner(), older_than=time.time() + 1, now=now + 1) == 0
+    # ...and once it lapses the row is the designated session's again.
+    assert store.reclaim_routed(_owner(), older_than=time.time() + 1, now=now + 60) == 1
+    assert _row(store)["routed_session"] is None
+    assert _pending(store, "sess_cos") is not None
+
+
+def test_an_old_shape_store_without_the_column_opens_and_reads_as_unrouted(tmp_path) -> None:
+    """A store file written before this column existed: every reader falls back to
+    the designated-only predicate, and the first writer adds the column."""
+
+    store = _store(tmp_path)
+    assert _reserve(store)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.execute("ALTER TABLE body_reservations DROP COLUMN routed_session")
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        before = [r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")]
+    assert "routed_session" not in before
+
+    assert _pending(store, "sess_cos") is not None
+    assert _pending(store, ROUTED) is None
+    state = store.per_call_admission_state(
+        _owner(), "sess_cos", reservation=(CONVERSATION_ID, MESSAGE_ID)
+    )
+    assert state is not None and state["designation_matches"] is True
+    assert store.admitted_inbound_reservation_readonly(
+        _owner(), in_reply_to_message_id=MESSAGE_ID, designated_session="sess_cos"
+    )
+    # Reads did not migrate the file; the schema version is untouched.
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        assert "routed_session" not in [
+            r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")
+        ]
+
+    # The first WRITER adds the column and the route works from then on.
+    assert store.record_body_reservation(  # a new-build writer, for a second message
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id="bcmsg_abcdef02",
+        conversation_seq=4,
+        mention=False,
+        body_sha256=DIGEST,
+        screening_fingerprint=FINGERPRINT,
+        policy_epoch=3,
+        consent_version="bridge_consent_v1",
+        designated_session="sess_cos",
+        now=time.time(),
+        routed_session=ROUTED,
+    )
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        assert "routed_session" in [
+            r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")
+        ]
+
+
+def test_routing_does_not_bump_the_schema_version(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        stamped = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+    assert stamped == str(SCHEMA_VERSION) == "8"

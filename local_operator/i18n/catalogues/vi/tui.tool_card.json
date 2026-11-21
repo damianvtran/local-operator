@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.chip.you": "bạn:",
+  "tui.tool_card.fetch.cache": "cache {state}",
+  "tui.tool_card.fetch.fetched": "Đã tải: {url}",
+  "tui.tool_card.fetch.final": "(đích cuối: {url})",
+  "tui.tool_card.hint.collapse": "thu gọn",
+  "tui.tool_card.hint.expand": "mở rộng",
+  "tui.tool_card.hint.interrupt": "{chord} để ngắt",
+  "tui.tool_card.imagegen.requests_ahead": "{count, plural, other {{shown} yêu cầu phía trước}}",
+  "tui.tool_card.live.earlier_lines": "{count, plural, other {{shown} dòng trước đó}}",
+  "tui.tool_card.live.earlier_output_hidden": "đã ẩn phần đầu ra trước đó",
+  "tui.tool_card.live.no_output_yet": "chưa có đầu ra",
+  "tui.tool_card.live.running": "đang chạy",
+  "tui.tool_card.more.diff_lines": "{count, plural, other {còn {shown} dòng thay đổi}}",
+  "tui.tool_card.more.lines": "{count, plural, other {còn {shown} dòng}}",
+  "tui.tool_card.more.search_lines": "{count, plural, other {còn {shown} dòng khớp}}",
+  "tui.tool_card.status.stop_unconfirmed": "chưa xác nhận dừng"
+}

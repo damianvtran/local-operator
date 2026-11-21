@@ -2053,6 +2053,22 @@ def _ask_refusal_copy(record: Mapping[str, Any] | None) -> str:
     return refusal_copy(record)
 
 
+def _site_not_applied_copy(reason: str) -> str:
+    """The operator's words for a typed ``applied: false`` from the node's
+    browser: one mapping for the host's own cards and a subagent's cards, so
+    the two answer paths cannot drift."""
+    from local_operator.i18n.keys import browser_site_approval as _copy
+    from local_operator.i18n.messages import render_resolved
+
+    copy = {
+        "unsigned_decision": _copy.refused_unsigned(),
+        "no_approver": _copy.refused_no_approver(),
+        "wrong_key": _copy.refused_bad_signature(),
+        "bad_signature": _copy.refused_bad_signature(),
+    }.get(reason, _copy.refused_expired())
+    return render_resolved(copy)
+
+
 def _collect_tool_call_delta(state: dict[int, dict[str, Any]], event: Any) -> None:
     """Fold one ``StreamToolCallDelta`` into the per-``index`` accumulator.
 
@@ -3727,6 +3743,54 @@ MCP_DISCOVERY_FAILED_DETAIL = (
 )
 
 
+@dataclass
+class _SiteCard:
+    """One site card a queue-less ``task`` subagent raised in its host's queue.
+
+    WHY (security review 60334): the card's question id binds ONE extension
+    entry of ONE requester (``session:<id>``). The host keeps who that is by
+    object identity (``owner`` is a weak reference, never a session id, so two
+    sessions sharing an id cannot alias — review m3) and a commit state, so a
+    decision, a teardown and a lapse cannot each act on the card at once.
+
+    ``state`` (every transition a synchronous check-and-set on the one event
+    loop the host and its in-process children share — ``run_subagent`` builds
+    children on the parent's loop — so no ``await`` sits between a check and
+    its set):
+
+    * ``open`` — nothing in flight; a decision, the owner's teardown or the
+      owner's own stale-card withdraw may take it.
+    * ``deciding`` — :meth:`Session.site_decide` took it before submitting the
+      signed decision. Teardown, pruning and withdraw leave it alone.
+    * ``answered`` — the extension acknowledged (``applied: true``) and the
+      answer was recorded in the same synchronous run.
+    * ``withdrawn`` — the owner's teardown or its own withdraw took it while
+      open, or the extension said it did NOT apply after the owner ended.
+    * ``unknown`` — the submit failed after it may have reached the extension
+      (lost reply, timeout, task cancellation). Nobody here can know whether
+      the decision applied, so the record stays open, every later tap is
+      refused without resubmitting, and the agent reads the truth from the
+      extension (``await_access``). Withdrawing the local decision grant on
+      ``unknown`` takes back only this process's authority to decide again;
+      it never revokes a browser grant the extension may already have applied
+      (60334 design correction (1)).
+
+    ``settled`` is set whenever a decision leaves ``deciding``; a teardown
+    waits on it (bounded) instead of acting on an in-flight card.
+
+    NO SHARING (narrowed, PR #4283 round 4): one card per requester's entry;
+    a second requester for an origin with an open card is refused
+    ``card_busy`` and never bound to this card. Cross-requester sharing needs
+    an entry-scoped ``cancel_access`` in the extension and is a follow-up.
+    """
+
+    origin: str
+    entry_id: str
+    owner: Callable[[], Any]
+    state: str = "open"
+    settled: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+
+
 class Session:
     """The session facade. Satisfies ``SessionProtocol``."""
 
@@ -4392,6 +4456,34 @@ class Session:
             weakref.ref(parent_session) if parent_session is not None else None
         )
         self._parent_session_id = str(parent_session_id or "")
+        #: REQUESTER side of the family's site cards (security review 60334):
+        #: the extension entries THIS session's browser path asked its host
+        #: queue to raise a card for, keyed by entry id. The host refuses facts
+        #: not pending here and refuses a DECISION once they are gone — defence
+        #: in depth: the extension's own entry binding (the signed decision
+        #: names one ``entryId``) is the real tie. In memory only: an
+        #: in-process child and its extension entries (10-minute TTL) do not
+        #: outlive the runtime.
+        self._pending_site_requests: dict[str, Any] = {}
+        #: Per pending entry, the browser tool's ``cancel_access`` closure, so
+        #: teardown can withdraw the entry on this requester's own behalf.
+        self._site_request_cancels: dict[str, Callable[[], Awaitable[Any]]] = {}
+        #: Set at teardown (:meth:`_release_site_requests`): THE FENCE. From
+        #: here the browser tool may not dispatch a new ``request_access``
+        #: (:meth:`begin_site_request`), no card is raised for this requester
+        #: and none of its cards is decided (60334 design correction (2)).
+        self._site_requests_closed = False
+        #: ``request_access`` calls this requester's browser tool has in
+        #: flight (dispatched, reply not yet turned into a card), keyed by a
+        #: token: ``(cancel, done)``. Teardown waits for them (bounded) and
+        #: then cancels their entries, so a request that crossed the fence
+        #: while in flight is not left behind (60334 design correction (2)).
+        self._site_dispatches: dict[object, tuple[Callable[[], Awaitable[Any]], asyncio.Event]] = {}
+        #: HOST side: ``ask_id -> _SiteCard`` for the cards queue-less
+        #: subagents raised in THIS queue. A card the host raised itself
+        #: (main's ``enqueue_ask`` path) has no entry here. Pruned once a card
+        #: can no longer be decided (review N1).
+        self._site_cards: dict[str, _SiteCard] = {}
         #: Channel records relayed from LIVE children (design §5.1): a SEPARATE
         #: fold from this session's own, because the children block is their
         #: home on the wire and mixing them into ``rows`` would present a
@@ -14192,6 +14284,20 @@ class Session:
                 return await BridgeClient().call("submit_signed_decision", payload)
 
             submit = _bridge_submit
+        # A CHILD-BOUND CARD (security review 60334) takes the explicit commit
+        # protocol of :class:`_SiteCard`; a card the host raised itself has no
+        # binding and keeps main's path below unchanged.
+        card = self._site_cards.get(ask_id)
+        if card is not None:
+            return await self._site_decide_bound(
+                card,
+                params,
+                submit,
+                refuse=_refuse,
+                slot=str(question.get("id") or ""),
+                word=decision_word,
+                question_id=question_id,
+            )
         try:
             result = await submit(params)
         except Exception:  # noqa: BLE001 — any transport failure: nothing was decided
@@ -14201,13 +14307,7 @@ class Session:
             return _refuse(render_resolved(_copy.refused_unreachable()), "site_unreachable")
         if not result.get("applied"):
             reason = str(result.get("reason") or "")
-            copy = {
-                "unsigned_decision": _copy.refused_unsigned(),
-                "no_approver": _copy.refused_no_approver(),
-                "wrong_key": _copy.refused_bad_signature(),
-                "bad_signature": _copy.refused_bad_signature(),
-            }.get(reason, _copy.refused_expired())
-            return _refuse(render_resolved(copy), reason or "no_live_request")
+            return _refuse(_site_not_applied_copy(reason), reason or "no_live_request")
         consume_bridge_decide_grant(
             session_id=session_id, ask_id=ask_id, question_id=question_id, word=decision_word
         )
@@ -14220,6 +14320,139 @@ class Session:
             logger.warning("site decide: ask %s decided in the browser but not recorded", ask_id)
             return {"ok": True, "word": decision_word, "recorded": False}
         return {"ok": True, "word": decision_word, "state": str(result.get("state") or "")}
+
+    #: How long a teardown waits for a signed decision already at the extension,
+    #: or for a ``request_access`` already dispatched, before it moves on. The
+    #: bridge calls themselves are bounded (``BridgeClient`` ``timeout_for``);
+    #: this only stops a child's dispose from waiting on them indefinitely.
+    #: Past it a deciding card settles itself (answered / withdrawn / unknown)
+    #: and an in-flight dispatch's entry is cancelled on the tool's own path.
+    _SITE_TEARDOWN_DECIDE_WAIT_S = 15.0
+
+    async def _site_decide_bound(
+        self,
+        card: _SiteCard,
+        params: dict[str, Any],
+        submit: Callable[[dict[str, Any]], Awaitable[Mapping[str, Any]]],
+        *,
+        refuse: Callable[..., dict[str, Any]],
+        slot: str,
+        word: str,
+        question_id: str,
+    ) -> dict[str, Any]:
+        """THE COMMIT PROTOCOL for a subagent's card (60334 R2-1, design §1).
+
+        The lock is taken synchronously before the submit, and the answer is
+        recorded in the SAME synchronous run as the extension's
+        acknowledgement — no ``await`` between ``applied`` and
+        ``queue.respond``, so nothing (a teardown, a prune) can act on the card
+        in between. Every way the submit can end maps to exactly one state:
+
+        * ``applied: true`` → ``answered``. ``queue.respond`` also records a
+          card whose ask timed out while deciding: the queue folds a bridge
+          carriage's answer after its deadline to ``late`` (``asks/store.py``),
+          so a lapse never discards an acknowledged outcome (60334 design
+          correction (1)). Only a record something else made unanswerable
+          meanwhile comes back ``recorded: False``, logged with its ask id.
+        * ``applied: false`` (the extension SAID it did not apply) → ``open``
+          for a live owner (the operator may answer again, main's behaviour),
+          else ``withdrawn``: nobody is left to answer for.
+        * ``HostPreDeliveryFailure`` (nothing was dispatched) → as
+          ``applied: false``: the decision provably never left.
+        * any other failure, including the task being CANCELLED mid-submit →
+          ``unknown``: the decision may have applied, so neither ``open`` nor
+          ``withdrawn`` would be true (60334 design correction (1)).
+        """
+        from local_operator.browser_bridge.backend import HostPreDeliveryFailure
+        from local_operator.harness.approval import consume_bridge_decide_grant
+        from local_operator.i18n.keys import browser_site_approval as _copy
+        from local_operator.i18n.messages import render_resolved
+
+        ask_id = str(params.get("ask_id") or "")
+        session_id = str(params.get("session_id") or "")
+        queue = self.ask_queue()
+        assert queue is not None  # site_decide found the record in it
+        if card.state == "unknown":
+            return refuse(render_resolved(_copy.refused_outcome_unknown()), "site_outcome_unknown")
+        if card.state == "deciding":
+            return refuse(
+                "a decision for this request is already being applied.", "decision_in_flight"
+            )
+        # A FINISHED REQUESTER IS NOT DECIDED FOR (S60334-1): refused before
+        # anything is signed into the browser. Covers an answer racing the
+        # teardown's withdraw, and a card whose owner withdrew the request.
+        if card.state != "open" or not self._site_request_live(card.owner(), card.entry_id):
+            return refuse(render_resolved(_copy.refused_expired()), "requester_gone")
+        card.state = "deciding"
+        card.settled.clear()
+        try:
+            try:
+                result = await submit(params)
+            except HostPreDeliveryFailure:
+                logger.warning("site decide: ask %s was not dispatched to the browser", ask_id)
+                self._site_card_not_applied(ask_id, card)
+                return refuse(render_resolved(_copy.refused_unreachable()), "site_unreachable")
+            except asyncio.CancelledError:
+                # Cancellation cannot prove the decision never reached the
+                # extension (60334 design correction (1)): unknown, then let
+                # the cancellation propagate. ``refuse`` withdraws only the
+                # local decision grant, never a browser grant already applied.
+                self._site_card_unknown(ask_id, card, "cancelled mid-submit")
+                refuse("cancelled", "site_outcome_unknown")
+                raise
+            except Exception:  # noqa: BLE001 — after dispatch, any failure may follow delivery
+                self._site_card_unknown(ask_id, card, "lost reply")
+                return refuse(
+                    render_resolved(_copy.refused_outcome_unknown()), "site_outcome_unknown"
+                )
+            if not result.get("applied"):
+                self._site_card_not_applied(ask_id, card)
+                reason = str(result.get("reason") or "")
+                return refuse(_site_not_applied_copy(reason), reason or "no_live_request")
+            # ACKNOWLEDGED: from here to ``settled.set()`` is one synchronous run.
+            consume_bridge_decide_grant(
+                session_id=session_id, ask_id=ask_id, question_id=question_id, word=word
+            )
+            outcome = queue.respond(ask_id, {slot: [word]}, by="operator")
+            card.state = "answered"
+            self._site_cards.pop(ask_id, None)
+            owner = card.owner()
+            if isinstance(owner, Session):
+                owner._forget_site_request(card.entry_id)
+            if not outcome.get("ok"):
+                logger.warning(
+                    "site decide: ask %s decided %r in the browser but not recorded: %s",
+                    ask_id,
+                    word,
+                    outcome.get("error"),
+                )
+                return {"ok": True, "word": word, "recorded": False}
+            return {"ok": True, "word": word, "state": str(result.get("state") or "")}
+        finally:
+            if card.state == "deciding":
+                # Defence in depth: an exit no branch above names is still
+                # never mistaken for "nothing happened".
+                self._site_card_unknown(ask_id, card, "unexpected exit")
+            card.settled.set()
+
+    def _site_card_not_applied(self, ask_id: str, card: _SiteCard) -> None:
+        """The extension did not apply a decision: reopen, or withdraw when the
+        owner has ended (its teardown left the deciding card to us)."""
+        if self._site_request_live(card.owner(), card.entry_id):
+            card.state = "open"
+            return
+        card.state = "withdrawn"
+        self._site_cards.pop(ask_id, None)
+        queue = self.ask_queue()
+        if queue is not None:
+            queue.withdraw(ask_id, reason="moot")
+
+    @staticmethod
+    def _site_card_unknown(ask_id: str, card: _SiteCard, why: str) -> None:
+        card.state = "unknown"
+        # Rollout watch: a frequent count means the bridge's read timeout is
+        # too tight for ``submit_signed_decision``.
+        logger.warning("site_outcome_unknown: ask %s (%s, %s)", ask_id, card.origin, why)
 
     def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
         """TB-02 P1: the ONLY door a bridge request may be decided through.
@@ -14999,6 +15232,17 @@ class Session:
         the relayed phone) is still a person's turn and counts — on a headless
         node it is the operator's only way to chat at all.
         """
+        # ONE COUNTER PER FAMILY (review m2): every site card for ``origin`` in
+        # the queue that holds the family's cards counts, whoever in the agent
+        # family raised it. Counting per requester let N children raise 2N
+        # cards the operator never answered; one counter keeps "the operator
+        # hasn't answered twice" true to its words. A subagent with no queue of
+        # its own reads its host's count through this same method.
+        host = self._site_card_host()
+        return 0 if host is None else host._count_site_lapses(origin)
+
+    def _count_site_lapses(self, origin: str) -> int:
+        """The lapse count of :meth:`site_ask_lapses`, over THIS session's queue."""
         from local_operator.asks import store as _ask_store
         from local_operator.browser_bridge.site_approval import is_site_question_id
 
@@ -15038,14 +15282,42 @@ class Session:
         So the browser tool withdraws it (``moot``: nothing is injected, the
         operator's surfaces drop it) and raises a card bound to the live entry.
         ``keep_question_id`` spares the card that IS bound to the live entry.
+
+        SCOPED TO THIS REQUESTER (60334): a session withdraws only the cards it
+        raised — on the queue's own session the cards no subagent is bound to,
+        on a queue-less subagent its own cards in its host's queue. A top-level
+        session's stale-card withdraw therefore never takes a subagent's card
+        (60334 design correction (3)).
         """
+        for entry_id, facts in list(self._pending_site_requests.items()):
+            if facts.origin == origin and facts.question_id != keep_question_id:
+                self._forget_site_request(entry_id)
+        host = self._site_card_host()
+        if host is None:
+            return []
+        return host._withdraw_site_cards_of(self, origin, keep_question_id)
+
+    def _withdraw_site_cards_of(
+        self, requester: Session, origin: str, keep_question_id: str
+    ) -> list[str]:
+        """HOST side of :meth:`withdraw_site_asks` for ``requester``."""
         from local_operator.browser_bridge.site_approval import is_site_question_id
 
         queue = self.ask_queue()
-        if queue is None:
+        if queue is None or not (requester is self or self._is_live_descendant(requester)):
             return []
+        self._prune_site_cards()
         withdrawn: list[str] = []
         for record in queue.open_records():
+            ask_id = str(record.get("ask_id") or "")
+            if self._site_card_owner(ask_id) is not requester:
+                continue
+            card = self._site_cards.get(ask_id)
+            if card is not None and card.state != "open":
+                # ``deciding``: the in-flight decision settles it (R2-1).
+                # ``unknown``: the record stays open until its own timeout so
+                # every tap keeps being refused rather than resubmitted.
+                continue
             for question in record.get("questions") or ():
                 if not isinstance(question, Mapping):
                     continue
@@ -15057,11 +15329,462 @@ class Session:
                     and str(site.get("origin") or "") == origin
                     and question_id != keep_question_id
                 ):
-                    outcome = queue.withdraw(str(record.get("ask_id") or ""), reason="moot")
+                    outcome = queue.withdraw(ask_id, reason="moot")
                     if outcome.get("ok"):
-                        withdrawn.append(str(record.get("ask_id") or ""))
+                        withdrawn.append(ask_id)
+                        if card is not None:
+                            card.state = "withdrawn"
+                            self._site_cards.pop(ask_id, None)
                     break
         return withdrawn
+
+    # -- a queue-less subagent's site cards (security review 60334) ----------------------
+    #
+    # A ``task`` child is built without an ask handler, so it has no queue and a
+    # headless node's browser could never raise its operator-signed site card.
+    # The child hands the TYPED facts of its live extension request to the
+    # nearest ancestor that has a queue (the HOST); the host checks the child is
+    # its live descendant and that the request is pending there, then rebuilds
+    # the canonical card itself. Top-level sessions do not use this door: they
+    # keep main's ``enqueue_ask`` path unchanged. Every check below is one of
+    # 60334's constraints:
+    #   * typed facts only, card reconstructed server-side ("deriving a question
+    #     ID alone is not sufficient authentication");
+    #   * bound to the actual requester (live object lineage, not a claimed id),
+    #     the node (its own device id), and the live request (pending, unexpired);
+    #   * withdraw scoped to that requester; the lapse bound counted once per
+    #     family (review m2);
+    #   * ONE commit protocol per card (:class:`_SiteCard`), with an explicit
+    #     ``unknown`` when the extension's answer was lost;
+    #   * owner-only teardown behind a fence that stops new ``request_access``
+    #     dispatch first and accounts for dispatches already in flight;
+    #   * ONE open card per origin and NO sharing (narrowed, round 4): a second
+    #     requester gets ``card_busy`` carrying the open card's id, its own entry
+    #     is left to the extension's TTL rather than cancelled from here, and an
+    #     approve — a node-wide exact-origin grant — already covers its retry.
+
+    #: How far up a child walks for an ancestor with a queue; the same bound
+    #: :meth:`_ancestor_session_ids` uses, so a cycle no real tree has stops.
+    _SITE_ANCESTOR_HOPS = 16
+
+    def _site_card_ancestor(self) -> Session | None:
+        """The nearest LIVE ancestor whose ask queue exists, or ``None``.
+
+        ``ask_queue()`` is ``None`` under the kill switch and on a host with no
+        ask surface, so this is ``None`` exactly where no operator card can be
+        queued anywhere in the family — the fail-closed case.
+        """
+        seen: set[int] = {id(self)}
+        parent = self._parent_session
+        while parent is not None and len(seen) <= self._SITE_ANCESTOR_HOPS:
+            if id(parent) in seen:
+                return None
+            seen.add(id(parent))
+            ask_queue = getattr(parent, "ask_queue", None)
+            if callable(ask_queue) and ask_queue() is not None:
+                return cast("Session", parent)
+            parent = getattr(parent, "_parent_session", None)
+        return None
+
+    def _site_card_host(self) -> Session | None:
+        """The session whose queue holds THIS session's site cards: its own
+        queue when it has one, else :meth:`_site_card_ancestor`."""
+        return self if self.ask_queue() is not None else self._site_card_ancestor()
+
+    def _is_live_descendant(self, child: Any) -> bool:
+        """Whether ``child`` is a live session whose parent chain reaches THIS object.
+
+        Identity, not ids: a session id is a string anyone can repeat, while
+        the weak parent links are set only by ``run_subagent`` at construction.
+        """
+        if not isinstance(child, Session) or child is self:
+            return False
+        seen: set[int] = {id(child)}
+        parent = child._parent_session
+        while parent is not None and len(seen) <= self._SITE_ANCESTOR_HOPS:
+            if parent is self:
+                return True
+            if id(parent) in seen:
+                return False
+            seen.add(id(parent))
+            parent = getattr(parent, "_parent_session", None)
+        return False
+
+    def _site_card_enqueue_callable(self) -> Callable[..., Any] | None:
+        """The site-card door: bound ONLY on a subagent with no queue of its own
+        (it reaches its nearest ancestor's). A session that can queue an ask
+        itself keeps main's ``enqueue_ask`` path byte-for-byte, so this change
+        has no top-level regression surface (narrowed design, round 4)."""
+        if self._parent_session_id and self.ask_queue() is None:
+            return self.raise_site_card
+        return None
+
+    def begin_site_request(self, cancel: Callable[[], Awaitable[Any]]) -> Callable[[], None] | None:
+        """THE FENCE, BEFORE DISPATCH (60334 design correction (2)).
+
+        The browser tool calls this before it sends ``request_access`` and
+        calls the returned ``finish`` once the reply has become a card (or a
+        refusal). ``None`` means this requester's teardown has started: the
+        tool sends nothing, so no extension entry is created for a session
+        whose cleanup already ran. A dispatch that was already in flight when
+        the teardown started is in :attr:`_site_dispatches`; the teardown
+        waits for it (bounded) and cancels its entry with ``cancel`` — the
+        tool's own ``cancel_access`` for this requester.
+        """
+        if self._site_requests_closed:
+            return None
+        token = object()
+        done = asyncio.Event()
+        self._site_dispatches[token] = (cancel, done)
+
+        def _finish() -> None:
+            self._site_dispatches.pop(token, None)
+            done.set()
+
+        return _finish
+
+    def raise_site_card(
+        self,
+        facts: Any,
+        timeout: Any = None,
+        tool_call_id: str = "",
+        cancel: Callable[[], Awaitable[Any]] | None = None,
+    ) -> dict[str, Any]:
+        """REQUESTER side: record the live request, then have the host raise it.
+
+        ``cancel`` withdraws this request's extension entry (the browser tool's
+        own ``cancel_access`` closure); it is kept so this requester's
+        teardown can withdraw its entry (never anyone else's: ``cancel_access``
+        is keyed by origin and THIS requester).
+        """
+        from local_operator.browser_bridge.site_approval import (
+            SITE_REQUESTER_CLOSED,
+            SiteAccessFacts,
+        )
+
+        if not isinstance(facts, SiteAccessFacts) or not facts.entry_id:
+            return {"ok": False, "error": "only typed site-access facts can raise a site card"}
+        if self._site_requests_closed:
+            return {
+                "ok": False,
+                "code": SITE_REQUESTER_CLOSED,
+                "error": "site card refused: this session has finished",
+            }
+        host = self._site_card_host()
+        if host is None:
+            return {
+                "ok": False,
+                "no_ancestor": True,
+                "error": (
+                    "this subagent has no ask queue of its own and none of the sessions "
+                    "that delegated to it can queue an ask for the operator"
+                ),
+            }
+        # Registered BEFORE the call: it is what the host checks the facts
+        # against, and it is cleared on withdraw, settle, teardown or a refusal.
+        self._pending_site_requests[facts.entry_id] = facts
+        if cancel is not None:
+            self._site_request_cancels[facts.entry_id] = cancel
+        if host is self:
+            outcome = self._queue_site_card_checked(
+                facts, requester=self, timeout=timeout, tool_call_id=tool_call_id
+            )
+        else:
+            outcome = host.enqueue_child_site_card(
+                facts,
+                child=self,
+                request_id=facts.entry_id,
+                timeout=timeout,
+                tool_call_id=tool_call_id,
+            )
+        if not outcome.get("ok") and "already carries that question" not in str(
+            outcome.get("error") or ""
+        ):
+            self._forget_site_request(facts.entry_id)
+        return outcome
+
+    def _forget_site_request(self, entry_id: str) -> None:
+        self._pending_site_requests.pop(entry_id, None)
+        self._site_request_cancels.pop(entry_id, None)
+
+    def _site_request_live(self, requester: Any, entry_id: str) -> bool:
+        """Whether ``requester`` still has ``entry_id`` pending and is still in
+        this family. The extension's entry binding is the real tie for a
+        decision; this is the in-process side of it (defence in depth)."""
+        if not isinstance(requester, Session) or requester._site_requests_closed:
+            return False
+        if requester is not self and not self._is_live_descendant(requester):
+            return False
+        return entry_id in requester._pending_site_requests
+
+    def _this_node_device_id(self) -> str:
+        """This machine's mesh device id: what setup wrote into the extension's
+        policy as ``nodeDeviceId`` (``site_approval.anchor_policy_fields``),
+        ``""`` when there is no identity, exactly as setup falls back."""
+        try:
+            from local_operator.network import identity
+
+            device = identity.load()
+        except Exception:  # noqa: BLE001 — unreadable identity binds to "", as setup does
+            device = None
+        return str(device.device_id) if device is not None else ""
+
+    def enqueue_child_site_card(
+        self,
+        facts: Any,
+        *,
+        child: Any,
+        request_id: str,
+        timeout: Any = None,
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
+        """HOST side: rebuild and queue a DESCENDANT's signed site card.
+
+        Takes NO question, options or payload — only the typed facts — and
+        refuses unless every 60334 binding holds. ``child`` must be a live
+        descendant: this door is never the host's own (that is
+        :meth:`raise_site_card`).
+        """
+        from local_operator.browser_bridge.site_approval import SiteAccessFacts
+
+        if not isinstance(facts, SiteAccessFacts):
+            return self._refuse_site_card(
+                "only typed site-access facts are accepted, never a question"
+            )
+        if not self._is_live_descendant(child):
+            return self._refuse_site_card("the requester is not a live subagent of this session")
+        if not request_id or request_id != getattr(facts, "entry_id", None):
+            return self._refuse_site_card("the facts are for a different request")
+        return self._queue_site_card_checked(
+            facts, requester=child, timeout=timeout, tool_call_id=tool_call_id
+        )
+
+    @staticmethod
+    def _refuse_site_card(why: str) -> dict[str, Any]:
+        logger.info("site card refused: %s", why)
+        return {"ok": False, "error": f"site card refused: {why}"}
+
+    def _queue_site_card_checked(
+        self, facts: Any, *, requester: Session, timeout: Any, tool_call_id: str
+    ) -> dict[str, Any]:
+        """The 60334 checks every requester's facts pass before a card exists."""
+        from local_operator.browser_bridge.site_approval import (
+            SITE_REQUESTER_CLOSED,
+            SiteAccessFacts,
+        )
+
+        refuse = self._refuse_site_card
+        if not isinstance(facts, SiteAccessFacts):
+            return refuse("only typed site-access facts are accepted, never a question")
+        if self.ask_queue() is None:
+            return refuse("this session has no ask queue")
+        if requester._site_requests_closed:
+            # Typed, so the tool leaves the entry to the guarded teardown
+            # (``site_approval.SITE_REQUESTER_CLOSED``).
+            return {**refuse("the requester has finished"), "code": SITE_REQUESTER_CLOSED}
+        if requester._pending_site_requests.get(facts.entry_id) != facts:
+            return refuse("that request is not pending in the requester's browser")
+        if facts.expires_at_ms is not None and facts.expires_at_ms <= int(time.time() * 1000):
+            requester._forget_site_request(facts.entry_id)
+            return refuse("that request has expired")
+        if facts.node_device_id != self._this_node_device_id():
+            return refuse("the request is bound to another node")
+        if not facts.origin:
+            return refuse("the request names no origin")
+        return self._queue_site_card(
+            facts, requester=requester, timeout=timeout, tool_call_id=tool_call_id
+        )
+
+    def _queue_site_card(
+        self, facts: Any, *, requester: Session, timeout: Any, tool_call_id: str = ""
+    ) -> dict[str, Any]:
+        """Raise ``requester``'s card, or refuse it as ``busy``.
+
+        ONE OPEN CARD PER ORIGIN, NO SHARING (narrowed design, round 4). An
+        open card bound to this very request (same canonical question id,
+        hence entry) and requester is simply still pending. Any OTHER open
+        site card for the origin — another subagent's, or the host's own —
+        refuses this request ``busy`` with that card's ids, so the tool can
+        point the agent at it (manager 79). Nothing is bound to the other
+        card, and nothing about it changes: a busy refusal neither claims nor
+        withdraws it (60334 design correction (3)).
+        """
+        from local_operator.tools.builtin import _node_display_name
+
+        self._prune_site_cards()
+        open_card = self._open_site_card(facts.origin)
+        if open_card is not None:
+            ask_id, question_id = open_card
+            if question_id == facts.question_id and self._site_card_owner(ask_id) is requester:
+                return {
+                    "ok": False,
+                    "error": "this ask queue already carries that question",
+                    "details": {"ask_id": ask_id},
+                }
+            return {
+                "ok": False,
+                "busy": True,
+                "error": "another open card already asks the operator about this site",
+                "details": {"ask_id": ask_id, "question_id": question_id},
+            }
+        question = facts.card(node_name=_node_display_name())
+        outcome = self._enqueue_ask([question], timeout, tool_call_id=tool_call_id)
+        if outcome.get("ok"):
+            details = outcome.get("details")
+            ask_id = str(details.get("ask_id") or "") if isinstance(details, Mapping) else ""
+            if ask_id:
+                self._site_cards[ask_id] = _SiteCard(
+                    origin=facts.origin, entry_id=facts.entry_id, owner=weakref.ref(requester)
+                )
+        return outcome
+
+    def _open_site_card(self, origin: str) -> tuple[str, str] | None:
+        """``(ask_id, question_id)`` of the open site card for ``origin``, if any."""
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None:
+            return None
+        for record in queue.open_records():
+            for question in record.get("questions") or ():
+                if not isinstance(question, Mapping):
+                    continue
+                site = question.get("site")
+                if (
+                    is_site_question_id(question.get("question_id"))
+                    and isinstance(site, Mapping)
+                    and str(site.get("origin") or "") == origin
+                ):
+                    return str(record.get("ask_id") or ""), str(question.get("question_id"))
+        return None
+
+    def _site_card_owner(self, ask_id: str) -> Session | None:
+        """Who a card in this queue was raised for; an unbound card is the host's."""
+        card = self._site_cards.get(ask_id)
+        return self if card is None else card.owner()
+
+    def _prune_site_cards(self) -> None:
+        """Drop the cards that can no longer be decided (review N1, design §3).
+
+        LAPSE IS NOT A STATE. A card whose ask timed out keeps its binding:
+        the queue still accepts an answer to it (folded ``late``), and the
+        binding is what makes that answer pass the requester checks and the
+        commit protocol. Only a record nobody can answer any more (withdrawn,
+        dismissed, expired, answered, gone) drops it. A ``deciding`` card is
+        the decision's to settle. No extension call is made here — main never
+        cancels on lapse; the entry has its own TTL.
+        """
+        queue = self.ask_queue()
+        if queue is None or not self._site_cards:
+            return
+        for ask_id, card in list(self._site_cards.items()):
+            if card.state == "deciding":
+                continue
+            record = queue.find(ask_id)
+            if record is None or _ask_refusal_copy(record):
+                self._site_cards.pop(ask_id, None)
+
+    async def _release_site_requests(self) -> None:
+        """TEARDOWN of a queue-less subagent that raised site requests (S60334-1).
+
+        Runs first in dispose, which every end of a child reaches (normal end,
+        ``cancel_subagents``, ``jobs cancel``, dispose). Owner-only by
+        construction: it acts on THIS requester's cards and entries only, and
+        ``cancel_access`` is keyed by (origin, ``session:<this id>``), so it
+        cannot touch another requester's entry (60334 R3-1).
+
+        1. Synchronously: close the FENCE (no new ``request_access`` is
+           dispatched, no card raised, none decided — 60334 design correction
+           (2)), snapshot and clear the pending entries and in-flight
+           dispatches, and on the host move every ``open`` card of this
+           requester to ``withdrawn``.
+        2. Wait, bounded, for this requester's ``deciding`` cards to settle and
+           its in-flight dispatches to finish.
+        3. Cancel the entries of the cards it withdrew (and of in-flight
+           dispatches) — each re-checked synchronously right before its
+           ``await``: the entry of a card that was ``deciding``, and any origin
+           with a card of this requester still ``deciding`` or ``unknown``, is
+           NOT cancelled (the decision may have
+           applied; cancelling could race it) and is left to the extension's
+           TTL. That is harmless: the requester is gone, and a late approve
+           grants what the operator chose (60334 R2-2).
+
+        A session with its own queue is skipped: its cards are durable in its
+        own ask log and survive a runtime restart by design.
+        """
+        if self.ask_queue() is not None:
+            return
+        self._site_requests_closed = True
+        to_cancel: list[tuple[str, str | None, Callable[[], Awaitable[Any]]]] = [
+            (entry_id, facts.origin, cancel)
+            for entry_id, cancel in self._site_request_cancels.items()
+            if (facts := self._pending_site_requests.get(entry_id)) is not None
+        ]
+        dispatches = list(self._site_dispatches.values())
+        self._pending_site_requests.clear()
+        self._site_request_cancels.clear()
+        self._site_dispatches.clear()
+        # An in-flight dispatch's origin is the extension's to normalise, so
+        # its cancel is checked against ANY unsettled card of this requester.
+        to_cancel.extend(("", None, cancel) for cancel, _done in dispatches)
+        host = self._site_card_ancestor()
+        in_flight = host._withdraw_requester_cards(self) if host is not None else []
+        # A card that was DECIDING belongs to its decision whatever it settles
+        # to (answered: the entry is decided; withdrawn or unknown: the entry
+        # is left to the extension's TTL), so its entry is never cancelled here.
+        decided_entries = {card.entry_id for card in in_flight}
+        waits = [card.settled.wait() for card in in_flight] + [
+            done.wait() for _cancel, done in dispatches
+        ]
+        if waits:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*waits), timeout=self._SITE_TEARDOWN_DECIDE_WAIT_S
+                )
+            except TimeoutError:
+                logger.warning(
+                    "site card teardown: a decision or request is still in flight; "
+                    "its card settles itself and its entry is left to the extension's TTL"
+                )
+        for entry_id, origin, cancel in to_cancel:
+            # THE MUTATION BOUNDARY: synchronous, immediately before the await.
+            if entry_id in decided_entries or (
+                host is not None and host._requester_card_unsettled(self, origin)
+            ):
+                continue
+            try:
+                await asyncio.wait_for(cancel(), timeout=5)
+            except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
+                logger.debug("site card teardown: cancelling an entry failed", exc_info=True)
+
+    def _withdraw_requester_cards(self, requester: Session) -> list[_SiteCard]:
+        """HOST side of teardown, synchronous: withdraw ``requester``'s open
+        cards and return its ``deciding`` ones for the teardown to wait on.
+        ``unknown`` cards stay open until their own timeout."""
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        in_flight: list[_SiteCard] = []
+        for ask_id, card in list(self._site_cards.items()):
+            if card.owner() is not requester:
+                continue
+            if card.state == "deciding":
+                in_flight.append(card)
+            elif card.state == "open":
+                card.state = "withdrawn"
+                self._site_cards.pop(ask_id, None)
+                queue.withdraw(ask_id, reason="moot")
+        return in_flight
+
+    def _requester_card_unsettled(self, requester: Session, origin: str | None) -> bool:
+        """Whether ``requester`` owns a card here (for ``origin``; ``None``: any)
+        whose decision may have reached the extension."""
+        return any(
+            card.owner() is requester
+            and card.state in ("deciding", "unknown")
+            and (origin is None or card.origin == origin)
+            for card in self._site_cards.values()
+        )
 
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
@@ -21831,12 +22554,27 @@ class Session:
             return None
         if self._abort_requested or self._graceful_cancel_requested:
             return None
-        from local_operator.team_bridge.host import owner_fence_refusal
+        from local_operator.team_bridge.host import (
+            outbound_tool_fence,
+            owner_fence_refusal,
+        )
         from local_operator.team_bridge.store import Store
 
         try:
-            if owner_fence_refusal(runtime) is not None:
-                return None
+            # THE ROW IS THE AUTHORITY for a non-designated session. The strict
+            # fence answers not_designated for a task session the connector routed
+            # a DM reply to, which left a busy routed session unable to serve its
+            # own row until the sweep handed it back to the designated session.
+            # So a not_designated refusal alone is retried with the binding-only
+            # fence (every owner/generation/consent check, designation relaxed),
+            # and such a session may then serve ONLY a row routed to it; the
+            # per-call facts below re-prove the stamped designation is still live.
+            routed_only = False
+            refusal = owner_fence_refusal(runtime)
+            if refusal is not None:
+                if refusal.get("code") != "not_designated" or outbound_tool_fence(runtime):
+                    return None
+                routed_only = True
             store = Store(runtime.config_dir)
             skipped = set(exclude)
             while True:
@@ -21849,10 +22587,15 @@ class Session:
                 )
                 if row is None:
                     return None
-                facts = store.per_call_admission_state(runtime.owner, runtime.session_id)
+                facts = store.per_call_admission_state(
+                    runtime.owner,
+                    runtime.session_id,
+                    reservation=(str(row["conversation_id"]), str(row["message_id"])),
+                )
                 receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
                 if (
-                    facts
+                    (not routed_only or row.get("routed_session") == runtime.session_id)
+                    and facts
                     and facts.get("designation_matches")
                     and facts.get("consent_version") == row["consent_version"]
                     and facts.get("policy_epoch") == row["policy_epoch"]
@@ -24247,12 +24990,26 @@ class Session:
             # A node's stale site cards (cancelled or superseded extension
             # entries) are settled through the same engine, so the same
             # condition binds it.
+            # On a SUBAGENT with no queue of its own (security review 60334) the
+            # site-card trio reaches the nearest ancestor's queue instead,
+            # scoped to this requester's own cards; the methods pick the host.
             withdraw_site_asks=(
-                self.withdraw_site_asks if self._ask_withdraw_callable() is not None else None
+                self.withdraw_site_asks
+                if self._ask_withdraw_callable() is not None
+                or self._site_card_enqueue_callable() is not None
+                else None
             ),
-            # The re-raise bound (review U15) reads the same queue.
+            # The re-raise bound (review U15) reads the same queue, counted
+            # once per family (review m2).
             site_ask_lapses=(
-                self.site_ask_lapses if self._ask_withdraw_callable() is not None else None
+                self.site_ask_lapses
+                if self._ask_withdraw_callable() is not None
+                or self._site_card_enqueue_callable() is not None
+                else None
+            ),
+            enqueue_site_card=self._site_card_enqueue_callable(),
+            begin_site_request=(
+                self.begin_site_request if self._site_card_enqueue_callable() is not None else None
             ),
             # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
             # same two conditions as the two doors above, so its presence IS
@@ -37883,6 +38640,12 @@ class Session:
         if unsubscribe_state is not None:
             unsubscribe_state()
             self._unsubscribe_subagent_state = None
+        # A subagent's site cards in its ancestor's queue end with it (S60334-1):
+        # first, so no decision lands on a request whose session is going away.
+        try:
+            await self._release_site_requests()
+        except Exception:  # noqa: BLE001 — the cards' and entries' own TTLs are the floor
+            logger.warning("releasing a subagent's site cards failed", exc_info=True)
         # A LEAVING RUNTIME'S PARKED PEER MESSAGES AND WAKES GO TO THE SUCCESSOR
         # FIRST (review round 1, R1-2). A leaving runtime delivers them into its
         # live turn (``ServingSessionHandle._admits_into_live_turn``), and the

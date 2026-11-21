@@ -135,6 +135,20 @@ def wait_command(
         return 0
     settings = heavy_lease.configured_settings()
     directory = heavy_lease.lease_dir()
+    # A `wait` inside a leased command (its own ancestor holds the slot) would
+    # otherwise wait for that ancestor to finish, i.e. for itself: return at
+    # once, but only on a VERIFIED inherited lock (heavy_lease.inherited_lease;
+    # a bare or forged LOCAL_OPERATOR_HEAVY_LEASE queues as before).
+    inherited = heavy_lease.inherited_lease(directory)
+    if inherited is not None:
+        heavy_lease.record_nested(
+            directory,
+            inherited,
+            session_id=os.environ.get("LOCAL_OPERATOR_SESSION_ID", ""),
+            label=WAIT_LABEL,
+        )
+        print(heavy_lease.nested_line(inherited), file=out, flush=True)
+        return 0
     bound = timeout if timeout is not None else settings.wait_seconds
     started = clock()
     last_note: float | None = None
@@ -201,6 +215,15 @@ def run_command(
     replaced with ``/dev/null`` — heavy jobs are builds and tests, not
     interactive programs, and an inherited tty fd would be one it cannot own.
     A piped stdin is passed through untouched.
+
+    Nested inside another leased command (a verified
+    ``LOCAL_OPERATOR_HEAVY_LEASE``, see ``heavy_lease.inherited_lease``), the
+    run does not queue and takes NO slot of its own: it shares its ancestor's,
+    as any child of a leased command does. So a nested run that outlives the
+    ancestor (started in the background) keeps running with no slot once the
+    ancestor releases, and an unrelated heavy job may start beside it; that is
+    the residual a self-backgrounded child already has (``heavy_lease``'s
+    module docstring), not a second queue.
     """
     out = out if out is not None else sys.stderr
     if not argv:
@@ -228,7 +251,12 @@ def run_command(
             pass  # already gone; the wait below returns on its own
 
     previous = {sig: signal.signal(sig, _on_signal) for sig in _FORWARDED}
-    lease: heavy_lease.Lease | None = None
+    # An InheritedLease when this `run` sits inside another leased command (see
+    # heavy_lease.HEAVY_LEASE_INHERITED_ENV): acquire() returns it at once
+    # instead of queueing behind our own ancestor (the 2026-11-20 deadlock), and
+    # its release() is a no-op, so the `finally` below never frees the
+    # ancestor's slot.
+    lease: heavy_lease.Lease | heavy_lease.InheritedLease | None = None
     exit_code: list[int] = []
     try:
         off = _queue_off_line()
@@ -267,6 +295,8 @@ def run_command(
             if isinstance(result, heavy_lease.Refusal):
                 print(result.message, file=out)
                 return EXIT_TIMED_OUT
+            if isinstance(result, heavy_lease.InheritedLease):
+                print(heavy_lease.nested_line(result), file=out, flush=True)
             lease = result
         if received:
             return 128 + received[0]
@@ -319,12 +349,19 @@ def run_command(
         fd = lease.fileno() if lease is not None else None
         stdin = subprocess.DEVNULL if _stdin_is_tty() else None
         inherited: tuple[int, ...] = (fd,) if fd is not None else ()
+        # The child gets the lock fd AND the marker naming it, so a `heavy run`
+        # or bash-tool lease anywhere below it runs under this slot instead of
+        # queueing behind it; with no fd passed, any marker this process
+        # inherited is cleared rather than handed to a child that lacks the fd.
+        child_env = dict(os.environ)
+        heavy_lease.export_marker(child_env, lease if fd is not None else None)
         try:
             proc = subprocess.Popen(
                 list(argv),
                 stdin=stdin,
                 pass_fds=inherited,
                 start_new_session=True,
+                env=child_env,
             )
         except OSError as exc:
             # The shell's own codes: 127 "not found", 126 "found, not runnable".

@@ -46,6 +46,7 @@ from local_operator.team_bridge.types import (
     RecipientNameRefused,
     resolve_member_by_name,
 )
+from tests.unit.team_bridge.ref_text import without_ref
 from tests.unit.team_bridge.test_channel_tool import RecordingClient, _runtime
 from tests.unit.team_bridge.test_client import FakeStore, _ok
 
@@ -203,7 +204,7 @@ async def test_a_unique_name_delivers_a_mention_of_the_resolved_account(tmp_path
     assert "Ada Lovelace" not in body_text.decode("utf-8")
     # The undirected parts of the wire are unchanged.
     assert body["actor_endpoint_id"] == "bep_1"
-    assert body["body"] == "standing by for the QA round"
+    assert without_ref(body["body"]) == "standing by for the QA round"
 
 
 @pytest.mark.asyncio

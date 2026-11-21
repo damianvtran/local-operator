@@ -34,6 +34,7 @@ from local_operator.team_bridge.secret_guard import (
     credential_classes,
 )
 from local_operator.team_bridge.tool import BridgeRuntime, execute_bridge
+from tests.unit.team_bridge.ref_text import without_ref
 from tests.unit.team_bridge.test_channel_tool import RecordingClient, _runtime
 
 # --- synthetic credentials, built from parts (see the module docstring) -----
@@ -211,7 +212,7 @@ async def test_a_benign_post_still_goes_out(tmp_path: Path, body: str) -> None:
     )
     assert outcome["ok"] is True
     assert [c["method"] for c in client.calls] == ["conversation_send"]
-    assert client.calls[0]["text"] == body
+    assert without_ref(client.calls[0]["text"]) == body
 
 
 def test_a_40_character_value_needs_its_aws_label() -> None:

@@ -1,0 +1,300 @@
+{
+  "locale": "ru",
+  "namespace": "tui.session_sidebar",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "target_sha256": "cc61db700964d0153b45de93fcc8a527c6c01f875d12c21300b2629dcf82376e",
+  "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": [
+    "tui.session_sidebar.footer.asks_note",
+    "tui.session_sidebar.footer.hub_note",
+    "tui.session_sidebar.pinned_overflow"
+  ],
+  "keys_read": 3,
+  "unresolved_blocker_major": 0,
+  "findings": [],
+  "note": "Delta-only independent re-audit at c8343f3a608785b5064e61307c7333a2473126ae with uncommitted locale bytes. Three changed keys reviewed against English/context, plus unchanged plural siblings and footer/title composition. Not a fresh full-namespace audit. вопр. is an intelligible terse abbreviation of вопросы; связи names the counted object from shipped Связи с хабом, no Latin hub. Formal прокрутите and ellipsis of сессия agree with Закреплённые. Fractional other correctly uses закреплённой; 1.5 takes 30 cells vs 29, not a reachable overflow defect: _pinned_overflow returns sum(1 for ...), an integer, and the caller passes count=missing, shown=str(missing). Integer counts 0,1,2,5,9,10,21,99 all fit. No RTL applicability. No provider fallback. No repository edits.",
+  "mechanical_checks": [
+    {
+      "key": "tui.session_sidebar.footer.asks_note",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "renders": [
+        {
+          "count": 0,
+          "en": "asks: 0",
+          "ru": "вопр.: 0",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 1,
+          "en": "asks: 1",
+          "ru": "вопр.: 1",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 9,
+          "en": "asks: 9",
+          "ru": "вопр.: 9",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 10,
+          "en": "asks: 10",
+          "ru": "вопр.: 10",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 99,
+          "en": "asks: 99",
+          "ru": "вопр.: 99",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 2,
+          "en": "asks: 2",
+          "ru": "вопр.: 2",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 5,
+          "en": "asks: 5",
+          "ru": "вопр.: 5",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 21,
+          "en": "asks: 21",
+          "ru": "вопр.: 21",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 1.5,
+          "en": "asks: 1.5",
+          "ru": "вопр.: 1.5",
+          "cells": 10,
+          "maxCells": 10,
+          "fits": true
+        }
+      ]
+    },
+    {
+      "key": "tui.session_sidebar.footer.hub_note",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "renders": [
+        {
+          "count": 0,
+          "en": "hub: 0",
+          "ru": "связи: 0",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 1,
+          "en": "hub: 1",
+          "ru": "связи: 1",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 9,
+          "en": "hub: 9",
+          "ru": "связи: 9",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 10,
+          "en": "hub: 10",
+          "ru": "связи: 10",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 99,
+          "en": "hub: 99",
+          "ru": "связи: 99",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 2,
+          "en": "hub: 2",
+          "ru": "связи: 2",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 5,
+          "en": "hub: 5",
+          "ru": "связи: 5",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 21,
+          "en": "hub: 21",
+          "ru": "связи: 21",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 1.5,
+          "en": "hub: 1.5",
+          "ru": "связи: 1.5",
+          "cells": 10,
+          "maxCells": 10,
+          "fits": true
+        }
+      ]
+    },
+    {
+      "key": "tui.session_sidebar.pinned_overflow",
+      "arguments": [
+        [
+          "count",
+          "plural"
+        ],
+        [
+          "shown",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "renders": [
+        {
+          "count": 0,
+          "en": "+0 more pinned — scroll",
+          "ru": "+0 закреплённых — прокрутите",
+          "cells": 28,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 1,
+          "en": "+1 more pinned — scroll",
+          "ru": "+1 закреплённая — прокрутите",
+          "cells": 28,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 9,
+          "en": "+9 more pinned — scroll",
+          "ru": "+9 закреплённых — прокрутите",
+          "cells": 28,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 10,
+          "en": "+10 more pinned — scroll",
+          "ru": "+10 закреплённых — прокрутите",
+          "cells": 29,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 99,
+          "en": "+99 more pinned — scroll",
+          "ru": "+99 закреплённых — прокрутите",
+          "cells": 29,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 2,
+          "en": "+2 more pinned — scroll",
+          "ru": "+2 закреплённые — прокрутите",
+          "cells": 28,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 5,
+          "en": "+5 more pinned — scroll",
+          "ru": "+5 закреплённых — прокрутите",
+          "cells": 28,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 21,
+          "en": "+21 more pinned — scroll",
+          "ru": "+21 закреплённая — прокрутите",
+          "cells": 29,
+          "maxCells": 29,
+          "fits": true
+        },
+        {
+          "count": 1.5,
+          "en": "+1.5 more pinned — scroll",
+          "ru": "+1.5 закреплённой — прокрутите",
+          "cells": 30,
+          "maxCells": 29,
+          "fits": false
+        }
+      ]
+    }
+  ],
+  "composition": {
+    "door_title": "Связи с хабом",
+    "section_pinned": "Закреплённые",
+    "footer_example": "вопр.: 99 · связи: 99",
+    "footer_example_cells": 21,
+    "code_paths": [
+      "local_operator/tui/widgets/session_sidebar.py:964-975",
+      "local_operator/tui/widgets/session_sidebar.py:2850",
+      "local_operator/tui/widgets/session_sidebar.py:3139-3167"
+    ]
+  }
+}

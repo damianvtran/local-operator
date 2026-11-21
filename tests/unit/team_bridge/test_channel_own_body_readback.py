@@ -24,6 +24,7 @@ from local_operator.team_bridge import host as host_mod
 from local_operator.team_bridge import tool as tool_mod
 from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.tool import BridgeRuntime, execute_bridge
+from tests.unit.team_bridge.ref_text import without_ref
 from tests.unit.team_bridge.test_channel_tool import _owner
 
 TENANT = "ten_1"
@@ -143,7 +144,7 @@ async def test_posting_then_reading_back_returns_the_body() -> None:
         await execute_bridge(runtime, {"op": "channel_history", "channel_id": CONV, "limit": 10})
     )
 
-    assert [r["body"] for r in rows] == ["hello from the agent"]
+    assert [without_ref(r["body"]) for r in rows] == ["hello from the agent"]
 
 
 @pytest.mark.asyncio

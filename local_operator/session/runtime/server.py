@@ -140,6 +140,7 @@ from local_operator.session.runtime.types import (
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
     RUNTIME_RECORD_KIND,
+    TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY,
     VIEWED_MOVE_REFUSAL,
     ClientKind,
     ClientLocality,
@@ -3230,6 +3231,10 @@ class RuntimeServer:
                 # and the viewer must see the string before it sends the op,
                 # because an unknown op costs it the whole stream.
                 + [ATTACH_ACTIVITY_CAPABILITY]
+                # Unconditional: the routed-inbox lookup is this runtime's own
+                # code (see the constant), and the connector reads the string
+                # to decide whether it may route a Team Bridge message here.
+                + [TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
