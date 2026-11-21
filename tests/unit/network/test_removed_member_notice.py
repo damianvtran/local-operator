@@ -165,6 +165,20 @@ def test_an_offline_removed_member_learns_at_reconnect_and_drops_its_lends(
         assert len(ended) == 1, ended
         assert ended[0]["actor"] == net.a.identity.device_id
         assert ended[0]["detail"]["credentials_dropped"] is True
+        # R1-2: B still lists A as active, so its redial loop dials A again, and A
+        # answers again once its rate window passed (clock seam: age A's window
+        # rather than sleep 300 s). The second notice verifies too; it must not
+        # write a second row.
+        with net.a._removal_notices_lock:  # noqa: SLF001
+            assert net.a._removal_notices, "A never recorded the first notice"  # noqa: SLF001
+            for key in list(net.a._removal_notices):  # noqa: SLF001
+                net.a._removal_notices[key] -= relay.REMOVAL_NOTICE_INTERVAL_S + 1  # noqa: SLF001
+        _link, again = server._ensure_link_with_reason(  # noqa: SLF001
+            net.a.identity.device_id, probe_timeout_s=10.0
+        )
+        assert _link is None and again == "membership_ended", again
+        net.b.audit.flush()
+        assert len(_audit_rows(net.b.root, "membership_ended")) == 1
         # REDUCE-ONLY: no rejoin, no rotation, nothing deleted beyond the drop.
         after = store.load(net.network_id, net.b.root)
         assert after.epoch == before.epoch
@@ -704,4 +718,107 @@ def test_relay_ignores_a_forged_notice_from_a_non_member(b_side: BSide) -> None:
     assert code == hs_mod.REASON_SIGNATURE
     assert b_side.self_active(), "a forged notice reached the drop path"
     b_side.server.audit.flush()
+    assert _audit_rows(b_side.root, "membership_ended") == []
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation (review R1-2..R1-5, security S3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_removed_listener_never_sends_a_notice(net: Net, verifies: list[str]) -> None:
+    """R1-4: a listener whose OWN row is tombstoned has no standing to tell anyone.
+
+    B cannot catch this itself (it checks the signer only against its own record),
+    so A must stay silent — on the same one-verify path every non-proven dialer
+    takes, not an early exit.
+    """
+    with store.mutate(net.network_id, net.root) as record:
+        me = record.self_member()
+        assert me is not None and me.active
+        me.removed_at = time.time()
+        me.removed_by = net.d_identity.device_id
+        me.lifecycle = "expired"
+        store.save(record, net.root)
+    _hs, raw, error = net.dial(net.b_identity)
+    assert error is None
+    assert raw == b"", "a removed listener answered a tombstone with a notice"
+    assert verifies == ["lop-mesh-auth-v1"], verifies
+    assert [code for code, _ in net.refusals] == [hs_mod.REASON_MEMBER]
+
+
+def test_the_dummy_key_is_minted_at_import_not_on_first_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-5: no keygen on the first non-tombstone probe (a one-time timing tell).
+
+    Executes a FRESH copy of the module (under a private name, so the real module
+    and its classes are untouched) and reads the key before any probe has run.
+    """
+    import importlib.util
+    import sys
+
+    name = "local_operator.network._handshake_import_probe"
+    spec = importlib.util.spec_from_file_location(name, hs_mod.__file__)
+    assert spec is not None and spec.loader is not None
+    fresh = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, fresh)
+    spec.loader.exec_module(fresh)
+    minted = fresh._DUMMY_PUBLIC_KEY  # noqa: SLF001
+    assert isinstance(minted, str) and len(wire.unb64u(minted)) == 32
+    assert fresh._dummy_public_key() == minted  # noqa: SLF001
+
+
+class _DropSpy:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invalidate_membership(self) -> None:
+        self.calls += 1
+
+
+@pytest.fixture()
+def drops(monkeypatch: pytest.MonkeyPatch) -> _DropSpy:
+    """Stand in for B's credential client so the drop is countable."""
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    spy = _DropSpy()
+    monkeypatch.setattr(
+        MeshCredentialClient, "for_this_device", classmethod(lambda cls, *_a, **_k: spy)
+    )
+    return spy
+
+
+def test_a_repeated_notice_is_audited_once_but_still_drops(b_side: BSide, drops: _DropSpy) -> None:
+    """R1-2: A answers again every rate window for 7 days; B audits only the flip.
+
+    The scripted listener has no rate limit, so two dials here are two notices
+    "more than REMOVAL_NOTICE_INTERVAL_S apart" as far as B can tell.
+    """
+    assert b_side.dial_scripted(b_side.a_identity) == "membership_ended"
+    assert b_side.dial_scripted(b_side.a_identity) == "membership_ended"
+    b_side.server.audit.flush()
+    assert len(_audit_rows(b_side.root, "membership_ended")) == 1
+    # The drop is reduce-only and idempotent, so it re-runs on every verified notice.
+    assert drops.calls == 2
+
+
+@pytest.mark.parametrize("error", [OSError("disk full"), ValueError("corrupt record")])
+def test_a_record_write_failure_still_drops_the_borrowed_credentials(
+    b_side: BSide, drops: _DropSpy, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """R1-3 / S3: the self-tombstone failing to save must not keep the hold alive.
+
+    ``ValueError`` stands for a corrupt record (S3: it used to escape the dial's
+    ``except MembershipEnded`` handler); ``OSError`` for the old early return.
+    """
+
+    def broken_save(*_args: Any, **_kwargs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(relay.store, "save", broken_save)
+    assert b_side.dial_scripted(b_side.a_identity) == "membership_ended"
+    assert drops.calls == 1, "a failed record write skipped the credential drop"
+    b_side.server.audit.flush()
+    # Nothing transitioned on disk, so nothing is audited; the next notice retries.
     assert _audit_rows(b_side.root, "membership_ended") == []

@@ -287,7 +287,20 @@ class MembershipEnded(HandshakeRefusal):
         self.signer = signer
 
 
-_DUMMY_PUBLIC_KEY: str = ""
+def _mint_dummy_public_key() -> str:
+    """A fresh Ed25519 public key whose private half is dropped on return."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    raw = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return b64u(raw)
+
+
+#: Minted at IMPORT, not on first use (review R1-5): a lazy mint made the first
+#: non-tombstone probe in each process pay for a keygen the tombstoned path never
+#: pays — a one-time timing difference between the two classes ``_probe_tombstone``
+#: exists to make indistinguishable. Import happens before any listener accepts.
+_DUMMY_PUBLIC_KEY: str = _mint_dummy_public_key()
 
 
 def _dummy_public_key() -> str:
@@ -296,15 +309,9 @@ def _dummy_public_key() -> str:
     Used by ``Handshake._probe_tombstone`` when no notice-eligible tombstone
     matches, so an unknown id, a never-member and a tombstoned id with a random key
     all run one signature verification and all fail it. Nobody holds the private
-    key (it is minted per process and dropped), so this can never verify.
+    key (it is minted once per process at import and dropped), so this can never
+    verify.
     """
-    global _DUMMY_PUBLIC_KEY
-    if not _DUMMY_PUBLIC_KEY:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-
-        raw = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-        _DUMMY_PUBLIC_KEY = b64u(raw)
     return _DUMMY_PUBLIC_KEY
 
 
@@ -1176,6 +1183,14 @@ class Handshake:
             self.phase = "pair"
         else:
             if self.epoch not in (policy.current_epoch, policy.previous_epoch):
+                # KNOWN BOUND OF THE G9-B NOTICE (security P3 ruling, review R1-1/S2):
+                # this refusal runs BEFORE the tombstone probe, so a removed device
+                # that is two or more rotations behind (``member rm`` it, then any
+                # other rotation — a second removal, a ``leave``, a ``panic`` — inside
+                # the notice window) is refused here and gets SILENCE, exactly as
+                # before G9-B, until its offline hold ends. Probing every stale member
+                # hello uniformly changes the pre-challenge contract for live stale
+                # members, so it is a security-reviewed follow-up, not a patch here.
                 raise HandshakeRefusal(
                     REASON_EPOCH,
                     "the other device is at an epoch this one no longer accepts; it must "
@@ -1317,6 +1332,13 @@ class Handshake:
         and each ends in the same ``not_a_member`` refusal with nothing sent. Only a
         dialer that holds the exact stored key learns anything, and it learns only
         what it already knew it might be: removed.
+
+        SIGNATURE ONLY, NO EPOCH MAC — DELIBERATELY (security S1): a live member
+        also passes the step-8 epoch MAC, but here the signature over ``T`` (which
+        carries this listener's fresh nonce) is the identity proof; the MAC would
+        only show a prior-epoch secret every former member shares, and checking it
+        would give the tombstoned path a branch the dummy path lacks, breaking the
+        equal-timing property above.
 
         ``removed_member_public_key`` is optional on a policy: a policy without it
         (an older test double, a doctor probe) simply never proves a removal.

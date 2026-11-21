@@ -1509,6 +1509,13 @@ HANDSHAKE_REFUSED = "handshake_refused"
 #: security owner's floor for the persisted tombstone; the row itself lives for
 #: ``store.TOMBSTONE_PRUNE_AGE_S`` (90 days), so the window, not the row, is the
 #: bound. After it the device gets the plain silent refusal again.
+#:
+#: KNOWN LIMIT (security P3 ruling, review R1-1/S2): the window holds only while the
+#: removed device is at most ONE rotation behind. After a second rotation inside it
+#: (another removal, a ``leave``, a ``panic``) the handshake's epoch check refuses
+#: the device before the tombstone probe runs, so it gets silence, same as before
+#: G9-B, until its hold ends. Closing that is a security-reviewed follow-up
+#: (``Handshake.read_hello``'s epoch check).
 REMOVAL_NOTICE_WINDOW_S = 7 * 24 * 60 * 60.0
 #: At most one notice per tombstoned key per this many seconds, per relay process;
 #: every other attempt in the window is the plain silent close. The value is the
@@ -5752,6 +5759,14 @@ class ServerPolicy(ListenerPolicy):
         signature; it authorises nothing.
         """
         if not self._record or network_id != self._record.network_id:
+            return None
+        # A listener that knows it was itself removed has no standing to tell
+        # anyone else they were (review R1-4): the dialer verifies the signer only
+        # against ITS OWN record, which may not yet show this device removed, so the
+        # check has to live here. Falling through to ``None`` keeps the probe on the
+        # same one-verify path (the discarded key stands in), so this is silence.
+        me = self._record.self_member()
+        if me is None or not me.active:
             return None
         member = self._record.member(device_id)
         if member is None or member.active or member.removed_at is None:
@@ -14765,12 +14780,30 @@ class RelayServer:
         the credential client's own membership-loss path runs here too
         (``invalidate_membership``: persistent network deny, borrowed cache drop,
         GitHub revoke, held rows retired) so the offline hold ends now rather than at
-        its expiry. One ``membership_ended`` audit row.
+        its expiry.
+
+        ONE ``membership_ended`` ROW, ON THE TRANSITION ONLY (review R1-2): after
+        this runs, this device's record still lists the signer as active, so it
+        keeps re-dialling it, and the signer answers again every
+        ``REMOVAL_NOTICE_INTERVAL_S`` for the whole notice window. Every one of
+        those notices verifies; only the first one that flips our self row from
+        active to removed is audited. The drop itself re-runs each time, which is
+        harmless (it only ever reduces authority). A crash between the record save
+        and the audit write loses that one row; the removal itself is persisted.
+
+        FAIL SAFE ON A RECORD ERROR (review R1-3, security S3): a verified notice is
+        reason enough to drop borrowed bearers even when the self-tombstone cannot
+        be saved — without it the lazy ``_self_membership_active`` gate never fires
+        either — so any write failure is logged and the drop still runs. No audit
+        row then: nothing transitioned on disk, and the next notice retries.
         """
         moment = time.time()
+        transitioned = False
+        epoch = 0
         try:
             with store.mutate(network_id, self.root) as record:
                 me = record.self_member()
+                was_active = me is not None and me.active
                 if me is not None and me.active:
                     me.removed_at = moment
                     me.removed_by = ended.signer
@@ -14780,9 +14813,14 @@ class RelayServer:
                 record.stale = "refused_by_peers"
                 store.save(record, self.root)
                 epoch = record.epoch
-        except (FileNotFoundError, MeshRefusal, OSError):
-            logger.warning("relay: could not record a verified removal network=%s", network_id[:80])
-            return
+                transitioned = was_active
+        except Exception as exc:  # noqa: BLE001 — the credential drop below must still run
+            transitioned = False
+            logger.warning(
+                "relay: could not record a verified removal network=%s exception=%s",
+                network_id[:80],
+                type(exc).__name__[:64],
+            )
         dropped = False
         try:
             from local_operator.network.credentials.client import MeshCredentialClient
@@ -14797,6 +14835,8 @@ class RelayServer:
                 network_id[:80],
                 type(exc).__name__[:64],
             )
+        if not transitioned:
+            return
         self.audit.record(
             AuditEvent(
                 event="membership_ended",
