@@ -474,13 +474,24 @@ def _anchor_current(directory: Path) -> bool:
         # Asked and answered in this process: this journal needs no sidecar (see
         # ``_NO_ANCHOR_NEEDED``). Without this the degraded pass spins on it forever.
         return True
-    if companion_first(directory.parent.parent, directory.name) and _settled_on_disk(directory):
+    if _settled_on_disk(directory) and _companion_answers(directory.parent.parent, directory.name):
         # Asked and answered by an EARLIER process, and the pin still holds (see
         # ``SETTLED_DIRNAME``): without this every serve start re-selected it and
         # hydrated an index its open path no longer reads. COMPANION-FIRST ONLY,
         # deliberately: a smaller journal's open reads the RESIDENT index first,
         # so the per-start warm it gets by being re-selected is the warm the queue
         # exists for, and it stays exactly as it was.
+        #
+        # AND ONLY WHILE THE COMPANION READS ``ready`` (PR #4398 QA, Q1). The
+        # record settles the ANCHOR question; it says nothing about the companion
+        # the open path actually reads. A companion that is missing or names
+        # another derivation (a read-model ``SCHEMA`` bump renames every one, a
+        # serve stopped before ``_publish_when_idle``, a pruned or failed publish)
+        # would otherwise never be rebuilt at boot, and the first click would pay
+        # the whole resident hydration. Falling through re-selects the journal, and
+        # ``warm_index_cache``'s own ``_companion_answers`` check then refreshes it.
+        # ``_companion_answers`` is itself size-gated (``companion_first``), and
+        # the selector runs on a worker thread, so its head read is allowed here.
         return True
     if _rewritten_since_record(directory, stat):
         return False
@@ -499,6 +510,16 @@ def _settled_path(directory: Path) -> Path | None:
     if not _SETTLED_STEM.fullmatch(directory.name):
         return None
     return directory.parent.parent / "cache" / SETTLED_DIRNAME / f"{directory.name}.json"
+
+
+def settled_record_path(config_dir: str | Path, session_id: str) -> Path | None:
+    """The settlement record a session id names, for ``cleanup._drop_session_sidecars``.
+
+    The record lives under ``cache/``, outside the session directory, so removing
+    the directory never took it (PR #4398 review, m1); the remover clears it by
+    this name. ``None`` for an id the stem allow-list refuses, which never had one.
+    """
+    return _settled_path(Path(config_dir) / "sessions" / session_id)
 
 
 def _settled_on_disk(directory: Path) -> bool:
@@ -847,7 +868,13 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     whether a NEW record was written.
     """
     directory = Path(root) / "sessions" / session_id
-    if _settled_on_disk(directory):
+    # The durable record exists only for companion-first journals (PR #4398 review,
+    # m1/m2): below that line the selector never honours it, so writing one costs a
+    # file per checkpointed session for nothing, and reading one would skip the
+    # scan on a size the record does not describe. One stat; the same gate
+    # ``_anchor_current`` applies through ``_companion_answers``.
+    durable = companion_first(root, session_id)
+    if durable and _settled_on_disk(directory):
         # Settled by an earlier pass and still pinned: nothing to prove, and the
         # backward scan below is the cost the record exists to skip. Mirrored into
         # the in-process record so the selector's F11 rule holds for this process.
@@ -879,7 +906,7 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     try:
         anchor, pin = build_anchor_settled(directory)
         if anchor is None:
-            if pin is not None:
+            if pin is not None and durable:
                 # DURABLE when the reason survives any append (``NoAnchorPin``):
                 # the next serve start reads this instead of re-selecting the
                 # journal. The in-process record below still covers the rest.

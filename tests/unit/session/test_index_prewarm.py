@@ -439,8 +439,9 @@ async def test_no_anchor_needed_is_honoured_after_a_restart(tmp_path, monkeypatc
 
     monkeypatch.setattr(transcript_index, "COMPANION_FIRST_MIN_BYTES", 1)
     root = tmp_path
-    await journal_with_checkpoint_row(root, "s", mtime=3_000.0)
-    await build_index(root, "s")
+    # A READY companion too: the record is honoured only while it reads ``ready``
+    # (PR #4398 QA, Q1), so without one the journal is rightly re-selected.
+    await companion_backed(root, "s", mtime=3_000.0)
     assert prewarm.sessions_needing_warm(root) == ["s"]
     assert prewarm.write_tail_anchor(root, "s") is False
 
@@ -453,7 +454,9 @@ async def test_no_anchor_needed_is_honoured_after_a_restart(tmp_path, monkeypatc
 
 
 def _settled(root: Path, sid: str) -> bool:
-    return prewarm._anchor_current(root / "sessions" / sid)
+    # The PIN's verdict alone. ``_anchor_current`` also asks for a ready companion
+    # (Q1), which these journals deliberately do not have.
+    return prewarm._settled_on_disk(root / "sessions" / sid)
 
 
 @pytest.mark.asyncio
@@ -529,6 +532,105 @@ async def test_the_persisted_settlement_survives_appends_and_dies_with_rewrites(
     changed = path.stat().st_ctime_ns
     os.utime(record, ns=(changed, changed))
     assert not _settled(root, "s")
+
+
+async def _settled_then(root: Path, monkeypatch, sid: str) -> list[str]:
+    """Settle ``sid`` (record on disk, companion ready), restart, prove it is skipped.
+
+    Returns the list ``start_refresh`` appends to, so the caller can break the
+    companion and watch the next boot.
+    """
+    from local_operator.session import transcript_index
+
+    await companion_backed(root, sid, mtime=5_000.0)
+    monkeypatch.setattr(transcript_index, "COMPANION_FIRST_MIN_BYTES", 1)
+    refreshed: list[str] = []
+    monkeypatch.setattr(
+        prewarm,
+        "start_refresh",
+        lambda _r, s: (refreshed.append(s), (asyncio.sleep(0), True))[1],
+    )
+    await prewarm.warm_index_cache(root, limit=8)
+    assert refreshed == []
+    assert (root / "cache" / prewarm.SETTLED_DIRNAME / f"{sid}.json").is_file()
+    fresh_process(monkeypatch)
+    # The control: settled + ready companion is NOT a candidate after a restart.
+    assert prewarm.sessions_needing_warm(root) == []
+    return refreshed
+
+
+@pytest.mark.asyncio
+async def test_a_missing_companion_is_rebuilt_at_boot_despite_the_record(tmp_path, monkeypatch):
+    """PR #4398 QA Q1: settled record + ready index + MISSING companion => refreshed.
+
+    Failed before the fix: ``_anchor_current`` honoured the record without asking
+    about the companion, so the journal was never selected, the companion was never
+    rebuilt, and the first click paid the resident hydration (3.5 s in QA's rig).
+    """
+    import shutil as _shutil
+
+    from local_operator.session import index_read_model
+
+    root = tmp_path
+    refreshed = await _settled_then(root, monkeypatch, "big")
+    _shutil.rmtree(index_read_model._directory(root) / "big")
+    assert index_read_model.header(root, "big").state != "ready"
+
+    assert prewarm.sessions_needing_warm(root) == ["big"]
+    await prewarm.warm_index_cache(root, limit=8)
+    assert refreshed == ["big"]
+
+
+@pytest.mark.asyncio
+async def test_a_schema_bump_rebuilds_every_settled_companion(tmp_path, monkeypatch):
+    """The production shape of Q1: a read-model ``SCHEMA`` bump renames every token.
+
+    The index json stays current and the record still holds, yet the companion the
+    new code looks for does not exist; the boot pass must rebuild it.
+    """
+    from local_operator.session import index_read_model
+
+    root = tmp_path
+    refreshed = await _settled_then(root, monkeypatch, "big")
+    monkeypatch.setattr(index_read_model, "SCHEMA", index_read_model.SCHEMA + 1)
+    assert index_read_model.header(root, "big").state != "ready"
+
+    assert prewarm.sessions_needing_warm(root) == ["big"]
+    await prewarm.warm_index_cache(root, limit=8)
+    assert refreshed == ["big"]
+
+
+@pytest.mark.asyncio
+async def test_no_record_is_written_or_read_below_the_companion_line(tmp_path, monkeypatch):
+    """PR #4398 review m1/m2: the record exists only for companion-first journals.
+
+    Below the line the selector never honours it, so writing one only grows
+    ``cache/prewarm_settled`` by a file per checkpointed session; and a stray one
+    (written by an older build, or before the journal shrank under the line) must
+    not let ``write_tail_anchor`` skip its scan.
+    """
+    from local_operator.session import transcript_index
+
+    root = tmp_path
+    await journal_with_checkpoint_row(root, "s", mtime=3_000.0)
+    size = (root / "sessions" / "s" / "transcript.jsonl").stat().st_size
+    monkeypatch.setattr(transcript_index, "COMPANION_FIRST_MIN_BYTES", size + 1)
+    record = root / "cache" / prewarm.SETTLED_DIRNAME / "s.json"
+
+    assert prewarm.write_tail_anchor(root, "s") is False
+    assert not record.exists(), "a small journal got a durable record"
+
+    # A record written while the line was lower is ignored, not trusted.
+    monkeypatch.setattr(transcript_index, "COMPANION_FIRST_MIN_BYTES", 1)
+    fresh_process(monkeypatch)
+    prewarm.write_tail_anchor(root, "s")
+    assert record.is_file()
+    monkeypatch.setattr(transcript_index, "COMPANION_FIRST_MIN_BYTES", size + 1)
+    fresh_process(monkeypatch)
+    scans: list[object] = []
+    monkeypatch.setattr(prewarm, "build_anchor_settled", lambda d: scans.append(d) or (None, None))
+    prewarm.write_tail_anchor(root, "s")
+    assert len(scans) == 1, "a small journal's scan was skipped on a durable record"
 
 
 def test_only_append_monotone_reasons_are_pinned(tmp_path):

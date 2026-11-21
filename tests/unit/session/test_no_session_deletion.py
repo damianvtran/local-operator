@@ -384,6 +384,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic swap of a sibling pid-temp FILE onto the derived cache record "
         "under <config>/cache; never a session path.",
     ),
+    # ``_write_settled`` publishes the boot prewarm's settlement record by renaming
+    # its own pid-suffixed temp FILE onto ``<config>/cache/prewarm_settled/<id>.json``
+    # (``index_prewarm.SETTLED_DIRNAME``), and unlinks only that temp when the
+    # write fails. ``_settled_path`` builds both from the CONFIG ROOT plus an id
+    # checked against ``_SETTLED_STEM``, so no ``sessions/`` path can be named;
+    # the record is a derived cache, re-proven from the journal when missing.
+    (
+        "local_operator/session/index_prewarm.py::_write_settled",
+        "os.replace",
+        "Atomic swap of a sibling pid-temp FILE onto the derived prewarm settlement "
+        "record under <config>/cache/prewarm_settled; never a session path.",
+    ),
+    (
+        "local_operator/session/index_prewarm.py::_write_settled",
+        "<path>.unlink",
+        "Removes only the failed write's own pid-temp FILE under "
+        "<config>/cache/prewarm_settled; never a session path.",
+    ),
     # ``_record_absence`` publishes the absence-proof sidecar beside that record:
     # ``<config>/cache/cold_replay/<id>.absence.json``, named by
     # ``absence_proof_path`` (``with_name`` on the record path, so the same
@@ -5369,6 +5387,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # receiver is the config dir plus the session id, and it names a FILE
         # under cache/, so neither side can be a session directory.
         "local_operator/session/cold_metadata.py::write_cold_metadata",
+        # tmp FILE -> <config>/cache/prewarm_settled/<id>.json: the boot prewarm's
+        # settlement record, same derived-cache argument (config root + a
+        # _SETTLED_STEM-checked id, a FILE under cache/).
+        "local_operator/session/index_prewarm.py::_write_settled",
         # tmp FILE -> <config>/cache/cold_replay/<id>.absence.json: the absence-proof
         # sidecar beside that record, same directory, same derived-cache argument.
         "local_operator/session/replay_cache.py::_record_absence",
