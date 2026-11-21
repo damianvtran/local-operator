@@ -43,8 +43,8 @@ class _SessionDouble(Session):
     """A typed ``Session`` double for the readiness surface.
 
     Built via :meth:`build` so the engine constructor never runs: only the
-    live ``_tools`` inventory and ``mcp_manager`` -- exactly what
-    ``wait_for_tools`` reads -- are seeded. Seeds use ``model_construct``
+    live ``_tools`` inventory, ``mcp_manager`` and the two grant bounds -- exactly
+    what ``wait_for_tools`` reads -- are seeded. Seeds use ``model_construct``
     because ``AgentTool.execute`` is a required field this surface never
     touches.
     """
@@ -56,6 +56,10 @@ class _SessionDouble(Session):
         session = cls.__new__(cls)
         session._tools = [AgentTool.model_construct(name=name) for name in names]
         session.mcp_manager = manager
+        # Read by the named-tool grant (``_grant_named_mcp_tools``): an
+        # undeclared, top-level session, the SDK's ordinary shape.
+        session._declared_tools = None
+        session._mcp_reach_inherited = False
         return session
 
     def seed_tool(self, name: str) -> None:
@@ -262,3 +266,99 @@ async def test_invalid_inputs_are_refused_before_any_wait(required: Any, timeout
     with pytest.raises(ValueError):
         await session.wait_for_tools(required, timeout_s=timeout_s)
     assert manager.calls == 0
+
+
+# --- lazy MCP tools: named is activated --------------------------------------
+#
+# Measured before the fix (SDK + slow stdio fixture, fresh roots): the server
+# read ``connected`` and the manager listed ``mcp__slowfix_search``, yet
+# ``wait_for_tools`` answered ``missing`` with discovery settled, because a lazy
+# tool stays out of the enforced inventory until something activates it.
+
+
+class _LazyManager(McpManager):
+    """A connected server whose tool is lazy: listed, never in the inventory.
+
+    ``arrives_on_wait`` models a cold server: the tool is listed only once the
+    caller has waited on discovery.
+    """
+
+    def __init__(self, name: str, *, arrives_on_wait: bool = False) -> None:
+        self.name = name
+        self.listed = not arrives_on_wait
+        self.calls = 0
+
+    def get_tools(self) -> list[AgentTool]:
+        if not self.listed:
+            return []
+        return [AgentTool.model_construct(name=self.name)]
+
+    async def wait_settled(
+        self, timeout_s: float, *, servers: Collection[str] | None = None, first: bool = False
+    ) -> bool:
+        self.calls += 1
+        self.listed = True
+        return True
+
+
+def _real_session(tmp_path, manager: McpManager):
+    from tests.unit.session.test_declared_tool_inventory import (
+        ScriptedStream,
+        make_session,
+    )
+
+    session = make_session(tmp_path, ScriptedStream([]), tools=[])
+    setattr(session, "mcp_manager", manager)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_a_lazy_tool_a_connected_server_offers_reads_ready_without_waiting(
+    tmp_path,
+) -> None:
+    manager = _LazyManager("mcp__srv_search")
+    session = _real_session(tmp_path, manager)
+    assert "mcp__srv_search" not in session.tool_inventory, "precondition: lazy"
+
+    readiness = await session.wait_for_tools(["mcp__srv_search"], timeout_s=5.0)
+
+    assert readiness.status == "ready" and readiness.discovery_settled is None
+    assert manager.calls == 0, "a tool already delivered needs no discovery wait"
+    assert "mcp__srv_search" in session.tool_inventory, "named is activated"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_lazy_tool_from_a_cold_server_is_granted_after_the_wait(tmp_path) -> None:
+    manager = _LazyManager("mcp__srv_search", arrives_on_wait=True)
+    session = _real_session(tmp_path, manager)
+
+    readiness = await session.wait_for_tools(["mcp__srv_search"], timeout_s=5.0)
+
+    assert readiness.status == "ready" and readiness.discovery_settled is True
+    assert manager.calls == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_naming_a_lazy_tool_never_widens_a_declaration(tmp_path) -> None:
+    session = _real_session(tmp_path, _LazyManager("mcp__srv_search"))
+    session.set_tool_inventory(["mcp__srv_fetch"], unattended=True)
+
+    readiness = await session.wait_for_tools(["mcp__srv_search"], timeout_s=0.1)
+
+    assert readiness.status == "missing"
+    assert "mcp__srv_search" not in session.tool_inventory
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_is_never_granted_a_lazy_tool_by_name(tmp_path) -> None:
+    session = _real_session(tmp_path, _LazyManager("mcp__srv_search"))
+    session._mcp_reach_inherited = True  # what ``harness.subagent`` stamps
+
+    readiness = await session.wait_for_tools(["mcp__srv_search"], timeout_s=0.1)
+
+    assert readiness.status == "missing"
+    assert "mcp__srv_search" not in session.tool_inventory
+    await session.dispose()

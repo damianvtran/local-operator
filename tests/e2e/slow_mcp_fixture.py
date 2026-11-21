@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import os
 import time
+from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 
 server = MCPServer(name="slowfix", log_level="WARNING")
 
@@ -34,6 +36,22 @@ def fetch(url: str) -> str:
     head = f"fixture page {url} BEGIN "
     tail = " END-OF-PAGE"
     return head + "p" * (PAGE_CHARS - len(head) - len(tail)) + tail
+
+
+#: Opt-in OVER-CAP tool: a positive ``SLOW_MCP_BIG_SCHEMA_CHARS`` registers
+#: ``bigsearch``, whose input schema carries a parameter description that long.
+#: Past ``mcp.resources.MAX_INLINE_TOOL_SCHEMA_CHARS`` (16,000) an ``mcp://``
+#: read cannot inline the schema and PUBLISHES the tool instead, the one read
+#: route that goes through the factory's ``activate`` (PR #4349 review R1's
+#: duplicate-name repro). Env-gated so every other test sees the same two tools.
+BIG_SCHEMA_CHARS = int(os.environ.get("SLOW_MCP_BIG_SCHEMA_CHARS", "0") or 0)
+
+if BIG_SCHEMA_CHARS > 0:
+
+    @server.tool()
+    def bigsearch(query: Annotated[str, Field(description="q" * BIG_SCHEMA_CHARS)]) -> str:
+        """Search the fixture corpus through an over-cap input schema."""
+        return f"big fixture result for {query}"
 
 
 if __name__ == "__main__":

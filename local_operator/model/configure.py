@@ -8348,6 +8348,7 @@ class SessionStreamFn:
         try:
             from local_operator.providers.clients import (
                 ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK,
+                GOOGLE_CACHE_DIAGNOSIS_NO_BREAK,
             )
 
             if (
@@ -8357,6 +8358,10 @@ class SessionStreamFn:
             ):
                 return
             if provider in ("google", "google-vertex"):
+                if miss_type in GOOGLE_CACHE_DIAGNOSIS_NO_BREAK:
+                    # Includes ``unchanged_block_tail``: a healthy read short
+                    # by Google's block granularity is never a break.
+                    return
                 # Google includes cache reads in input and reports no writes.
                 # A large NEW suffix is not a lost cache prefix: require both
                 # locally diagnosed loss and actual uncached input to qualify.
@@ -8398,6 +8403,11 @@ class SessionStreamFn:
         if self._closed:
             return
         self._closed = True
+        # This stream fn's Google comparison chain can never be used again;
+        # evict it now instead of leaving it to the module-level LRU bound.
+        from local_operator.providers.clients import forget_google_cache_chain
+
+        forget_google_cache_chain(self._cache_diagnostics_chain)
         self._transport.owners -= 1
         if self._transport.owners == 0:
             await self._http.aclose()

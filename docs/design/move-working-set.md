@@ -3,7 +3,7 @@
 Status: design (architect, lopdev, 2026-11-18). Base: `origin/main` @ `3a5a6d957`.
 Owner of the transfer primitives this reuses: the mesh-replication lane
 (session `7c8130c573dd`, project `mesh-remote-offload`). Audit foundation:
-PR #4228 (`AuditLog.record_required`), unmerged at time of writing.
+PR #4228, merged as `0b7fe5641`; serves gate on `AuditLog.record_required`.
 
 ## 0. Summary
 
@@ -349,7 +349,10 @@ proceeds exactly as today.
   directory is the cache).
 - **W3 — audit-before-bytes.** Owner writes one `session.workset.serve` record per
   artifact via `AuditLog.record_required` (PR #4228) **before** the first chunk.
-  If the durable write fails, the fetch is refused (`audit_unavailable`).
+  If the durable write fails, the fetch is refused (`audit_unavailable`). That one
+  record covers the stream's contiguous continuations; each re-checks the log's
+  health (`AuditLog.admits_required`) and refuses with zero bytes once it is
+  disabled or degraded.
 - **W4 — fetch.** `D → O: net_session_move {phase:"workset_fetch", session_id,
   lease_epoch, digest, offset}` → `{data_b64, eof}` chunks of
   `sync.SYNC_CHUNK_BYTES` (512 KiB, `sync.py:92`), served only from

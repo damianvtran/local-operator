@@ -85,7 +85,9 @@ def test_an_unconfirmed_working_set_is_refused_and_nothing_changes(
     assert block["destination"]["device_id"] == server_b.identity.device_id
     assert [row["path"] for row in block["worktrees"]] == ["~/proj/.worktrees/feat"]
     assert block["worktrees"][0]["state"] == "planned"
-    assert block["carries_files"] is False
+    # Both relays speak the transfer protocol (PR B), so the manifest says the files
+    # travel; ``test_workset_move_e2e`` pins what then arrives.
+    assert block["carries_files"] is True
     # THE SOURCE IS UNTOUCHED: the directory is still here and nothing journaled.
     assert source.is_dir()
     assert read_handoff_journal(server_a.root) == {}
@@ -114,6 +116,9 @@ def test_a_confirmed_move_proceeds_and_says_the_work_was_not_transferred(
 ) -> None:
     _server_a, server_b, _host, _port = pair
     source = _session_with_worktree(pair, monkeypatch, rig)
+    # PR A's arrival, now the OLDER-DESTINATION path: a destination that speaks
+    # working-set protocol 1 is never sent files, and its receipt says so honestly.
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
     digest = _move(server_b, monkeypatch, to="local", dry_run=True)["working_set"]["scope_digest"]
     status_before = (rig.feat / "b.txt").read_bytes()
 
@@ -126,8 +131,9 @@ def test_a_confirmed_move_proceeds_and_says_the_work_was_not_transferred(
     assert block["transferred"] is False
     assert block["consent"] == "confirmed"
     assert block["scope_digest"] == digest
+    # QA Q3 (#4245): the reason names THIS case — the destination cannot receive files.
     assert [(row["state"], row["reason"]) for row in block["worktrees"]] == [
-        ("left_behind", "not_transferred")
+        ("left_behind", "unsupported_by_peer")
     ]
     # Never deletes: the worktree on the source is exactly as it was.
     assert (rig.feat / "b.txt").read_bytes() == status_before

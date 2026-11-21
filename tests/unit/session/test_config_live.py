@@ -531,6 +531,13 @@ def _librarian_policy(watcher: Any):
     return proactive.policy(watcher.config_dir)
 
 
+def _workset() -> Any:
+    """``network.workset``, imported at observe time like the other per-use readers."""
+    from local_operator.network import workset
+
+    return workset
+
+
 def _librarian_name(watcher: Any) -> str:
     from local_operator.librarian import bootstrap
 
@@ -1040,6 +1047,23 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         lambda s, w: _librarian_policy(w).max_extra_per_day,
     ),
     "librarian.cadence.min_gap_minutes": (30, lambda s, w: _librarian_policy(w).min_gap_minutes),
+    # -- mesh moves: the working-set readers a move calls per request ----------
+    # No ``Session`` holds these: the move handlers in ``network/workset_move.py``
+    # and ``network/mobility.py`` call ``workset.cap_bytes(server.root)`` /
+    # ``workset.restore_roots(server.root)`` on every move, and each opens
+    # config.yml afresh through ``store.read_config``. Observing those readers on
+    # the watcher's directory (the config root a mesh server is handed) is the
+    # exact read the next move makes, so a row moving here is the LIVE claim. 64 MiB
+    # sits inside the registry's 1 MiB–16 GiB range; the roots compare as a list
+    # because the reader returns a tuple.
+    "mesh.move.working_set_max_bytes": (
+        64 * 1024 * 1024,
+        lambda s, w: _workset().cap_bytes(w.config_dir),
+    ),
+    "mesh.move.working_set_roots": (
+        ["~/code", "~/work"],
+        lambda s, w: list(_workset().restore_roots(w.config_dir)),
+    ),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns

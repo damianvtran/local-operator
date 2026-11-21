@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "cli.sessions_move_workset",
-  "history_sha256": "cb54724026db7ccfc393624a9ebfa709270d4470821bbaa09040a08c2b725cc4",
+  "history_sha256": "50786d653b23f9265faba208c73adeeccd8500f298fc1e768e86a5f91cae938f",
   "entries": [
     {
       "locale": "es",
@@ -103,6 +103,74 @@
         {
           "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw-secondary/audit.log",
           "sha256": "08dff53884c08f8abf3057416eabbaa4ccd63c94d2ead65e4b71d8227fae9267"
+        }
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "es `cli.sessions_move_workset` PR #4245 delta audit (696a18338..a69e0e74b, new move-transfer keys): PASS, 0 BLOCKER/0 MAJOR, 1 minor deferred. Other keys byte-identical to the last passed copy. No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/mt1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/record.json",
+          "sha256": "ada43d5edc011c19ce2342760342bc3ef4e971edc185a03edba2db13bab54555"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/report.md",
+          "sha256": "6db32fdf1382f72d0df854e280b6444c86ba149debac55bce1cb46245a2b8518"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/audit.log",
+          "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
+        }
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "task (lopdev) / SECOND independent safety i18n-auditor 1946542ef662 [es]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit of the PR #4245 delta in es `cli.sessions_move_workset` (22 keys vs 696a18338) at 4ba2f4218: PASS, 0 BLOCKER/0 MAJOR; 2 non-gating finding(s) [T-ALL-1, T-ALL-2] proposed for deferral, no wording changed. Other keys carried by prior receipts. First audit 482db48afe47 (mt1). Agent-independent only (same model as translators/first auditor). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/record.json",
+          "sha256": "a5df6a186a72b403606e0ab427bbd491292a9e89135317363727bc8964e9df40"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/report.md",
+          "sha256": "3d6317b4be1051e628be49276b6c575ff62565025394e475a6e427424d386785"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/audit.log",
+          "sha256": "15cde9155b4197b10215f1422fde146165f06157f1d7057b39a6fd2ddc5bb06f"
         }
       ]
     }

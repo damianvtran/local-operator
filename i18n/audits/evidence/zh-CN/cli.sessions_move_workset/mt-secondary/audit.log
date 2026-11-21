@@ -1,0 +1,23 @@
+# Second independent safety audit — zh-CN — PR #4245 delta (22 cli.sessions_move_workset + 6 wire.settings mesh_* keys vs 696a18338)
+# auditor session 1946542ef662 (anthropic/claude-opus-5-5); worktree HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10
+
+## HOWTO gates (each alone)
+# HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10 origin/main 1d7e456afbb93d14e855884a4eb988cbbe5f7553 — before second-audit receipts
+$ python scripts/i18n/generate.py --check
+generate.py --check: 179 artifact(s) byte-identical
+exit=0
+$ python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ python scripts/i18n/check.py --audit-base origin/main
+check.py: ok — 235 file(s) scanned, 2714 literal(s) at or below the baseline, catalogues consistent; 107 advisory finding(s) (report-only until activated)
+exit=0
+
+## Independent mechanical pass + plural renders (n=0,1,2,5,21; source=mbp, device=studio)
+zh-CN cli.sessions_move_workset: 22 delta keys present=True; mismatches=none
+zh-CN wire.settings: 6 delta keys present=True; mismatches=none
+zh-CN n=0: 工作文件已从mbp传来：0个worktree已在此恢复。 | 0个worktree尚未恢复；本设备会在其relay重启时重试，mbp上仍保留这些文件。 | 工作文件已发送到studio：已在那里收到0个worktree；对话到达时studio会恢复它们。
+zh-CN n=1: 工作文件已从mbp传来：1个worktree已在此恢复。 | 1个worktree尚未恢复；本设备会在其relay重启时重试，mbp上仍保留这些文件。 | 工作文件已发送到studio：已在那里收到1个worktree；对话到达时studio会恢复它们。
+zh-CN n=2: 工作文件已从mbp传来：2个worktree已在此恢复。 | 2个worktree尚未恢复；本设备会在其relay重启时重试，mbp上仍保留这些文件。 | 工作文件已发送到studio：已在那里收到2个worktree；对话到达时studio会恢复它们。
+zh-CN n=5: 工作文件已从mbp传来：5个worktree已在此恢复。 | 5个worktree尚未恢复；本设备会在其relay重启时重试，mbp上仍保留这些文件。 | 工作文件已发送到studio：已在那里收到5个worktree；对话到达时studio会恢复它们。
+zh-CN n=21: 工作文件已从mbp传来：21个worktree已在此恢复。 | 21个worktree尚未恢复；本设备会在其relay重启时重试，mbp上仍保留这些文件。 | 工作文件已发送到studio：已在那里收到21个worktree；对话到达时studio会恢复它们。
