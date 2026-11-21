@@ -25608,6 +25608,10 @@ class Session:
             observation=observation,
             evidence=evidence,
             target_tools=tuple(sorted(host_names)),
+            # The SAME object ``counted_host_tools`` above takes its limit
+            # from: the budget the child is told is the one enforced. A typed
+            # check gets it too -- its prompt is this one plus the typed rows.
+            limits=limits,
         )
         if typed_evidence is not None:
             prompt += "\n" + typed_evidence.prompt()

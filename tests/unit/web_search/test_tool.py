@@ -218,6 +218,51 @@ async def test_tavily_oauth_delegate_accepts_structured_mcp_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tavily_oauth_delegate_marks_its_result_as_harness_parsed() -> None:
+    """The delegate ``json.loads`` the MCP result's text, so it must ask the
+    producer for that text untouched (review R1-M1's lead): the MCP manager
+    appends a dropped-argument note for a model's benefit, and one trailing
+    line after a JSON body is a parse failure. The mark rides a per-call copy;
+    the session's own context must not carry it into the model's calls."""
+    seen: list[ToolContext] = []
+
+    async def execute(tool_call_id, _args, _signal, _on_update, call_context):
+        seen.append(call_context)
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="mcp__tavily_search",
+            content=[
+                TextContent(
+                    text=(
+                        '{"answer": "JSON answer", "results": [{"title": "Source", '
+                        '"url": "https://json.example.com", "content": "Evidence"}]}'
+                    )
+                )
+            ],
+        )
+
+    context = ToolContext(
+        delegated_tools={
+            "mcp__tavily_search": AgentTool(
+                name="mcp__tavily_search",
+                execute=execute,
+            )
+        }
+    )
+    delegate = _tavily_oauth_delegate(context, None, None)
+
+    assert delegate is not None
+    response = await delegate("query", 2)
+
+    assert len(seen) == 1 and seen[0].result_parsed_by_harness is True
+    assert seen[0] is not context and context.result_parsed_by_harness is False
+    # Everything else the call needs is still the caller's.
+    assert seen[0].delegated_tools.keys() == context.delegated_tools.keys()
+    assert response.answer == "JSON answer"
+    assert response.sources[0].url == "https://json.example.com"
+
+
+@pytest.mark.asyncio
 async def test_search_wrapper_reaps_provider_task_when_parent_is_cancelled() -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
