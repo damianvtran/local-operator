@@ -497,6 +497,16 @@ def static_feature_flags() -> dict[str, Any]:
         # alone, because the UI's reaction hold was lifted on exactly that
         # condition. A renderer that does not see it shows no reaction controls.
         "team_bridge_reactions": 1,
+        # RENAME: `POST .../conversations/{id}/rename` with body `{name}` plus
+        # the optional captured-owner receipt (`expected_account_id` +
+        # `tenant_id`) in the BODY, under the same rules as create/send. It
+        # gates the conversation menu's Rename item: a renderer that does not
+        # see this key offers no Rename, because on an older daemon the call
+        # would 404 (or 405) instead of renaming. The upstream decides authority
+        # (the same as archive) and every rule, and its refusals
+        # (`conversation_name_taken` with `details`, `conversation_archived`,
+        # `invalid_transition` with `rule`, 403, 404, 503) pass through as-is.
+        "team_bridge_conversation_rename": 1,
         # TYPING INDICATORS (typing-indicators design §5): `GET|PUT|DELETE
         # .../conversations/{id}/typing` for the signed-in HUMAN only (no actor
         # endpoint on this plane). Both writes REQUIRE the captured-owner
