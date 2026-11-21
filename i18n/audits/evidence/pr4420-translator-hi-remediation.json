@@ -1,0 +1,280 @@
+{
+  "locale": "hi",
+  "namespace": "tui.info",
+  "stage": "translator authoring only; independent audit pending",
+  "risk": "C1 bounded copy fix; <20-minute lane",
+  "agent": "translator / info-remediate-hi / ad9306355f35",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback": "anthropic/claude-opus-5-5 quota provider failure; host notice before authoring",
+  "head": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_before_sha256": "76406c8f5c7f42bb71d6fdf872090a7407701531688151c0e96152be25aa0702",
+  "target_sha256": "4917914cae4994eab9cdb0ba490794653d4be94872b3ac3ef6d8af99a4513fa2",
+  "key_count": 277,
+  "changed_keys": [
+    "tui.info.fleet_caveats.lower_bound",
+    "tui.info.tree_lines.deeper",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime"
+  ],
+  "unchanged_keys": 273,
+  "key_order_and_format_preserved": true,
+  "placeholder_argument_select_plural_contract": "PASS four changed keys; exact select codes unmeasured/other and other-branch same interpolation; CLDR one/other",
+  "findings": {
+    "HI-1": "Authored trajectory referent instead of runtimes in both arms",
+    "HI-2": "Authored hidden subagent node count instead of depth levels",
+    "HI-3": "Authored natural चलने की अवधि label in both uptime field branches",
+    "HI-4": "Deferred fit-only risk; unchanged कतार preserves explicit queue meaning. No unexplained letter abbreviation invented; no rendered fit claim."
+  },
+  "glossary_choices": [
+    "Retained सत्र, रनटाइम, ट्रैजेक्टरी and उप-एजेंट per catalogue/glossary",
+    "Uptime: चलने की अवधि; build age retains बिल्ड की उम्र",
+    "Missing feminine noun fields: अज्ञात is a natural invariant predicate/label value; not latest-version wording"
+  ],
+  "controls": [
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "0",
+      "category": "one",
+      "text": "0 सत्र पुराना बिल्ड चला रहा है और उप-एजेंट की संख्या नहीं बताता — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "1",
+      "category": "one",
+      "text": "1 सत्र पुराना बिल्ड चला रहा है और उप-एजेंट की संख्या नहीं बताता — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "2",
+      "category": "other",
+      "text": "2 सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "5",
+      "category": "other",
+      "text": "5 सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "11",
+      "category": "other",
+      "text": "11 सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "21",
+      "category": "other",
+      "text": "21 सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "1000",
+      "category": "other",
+      "text": "1,000 सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "0.5",
+      "category": "one",
+      "text": "0.5 सत्र पुराना बिल्ड चला रहा है और उप-एजेंट की संख्या नहीं बताता — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "value": "1.5",
+      "category": "other",
+      "text": "1.5 सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "missing_argument": "MessageFormatError",
+      "tr_record": "tui.info.fleet_caveats.lower_bound"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "0",
+      "category": "one",
+      "text": "  + 0 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "1",
+      "category": "one",
+      "text": "  + 1 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "2",
+      "category": "other",
+      "text": "  + 2 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "5",
+      "category": "other",
+      "text": "  + 5 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "11",
+      "category": "other",
+      "text": "  + 11 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "21",
+      "category": "other",
+      "text": "  + 21 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "1000",
+      "category": "other",
+      "text": "  + 1,000 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "0.5",
+      "category": "one",
+      "text": "  + 0.5 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "value": "1.5",
+      "category": "other",
+      "text": "  + 1.5 और उप-एजेंट नीचे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "missing_argument": "MessageFormatError",
+      "tr_record": "tui.info.tree_lines.deeper"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "value": "unmeasured",
+      "category": null,
+      "text": "  बिल्ड की उम्र      अज्ञात",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "value": "0 सेकंड",
+      "category": null,
+      "text": "  बिल्ड की उम्र      0 सेकंड",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "value": "2 घंटे",
+      "category": null,
+      "text": "  बिल्ड की उम्र      2 घंटे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "value": "PSEUDO-DURATION-123",
+      "category": null,
+      "text": "  बिल्ड की उम्र      PSEUDO-DURATION-123",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "missing_argument": "MessageFormatError",
+      "tr_record": "tui.info.export.build_age"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "value": "unmeasured",
+      "category": null,
+      "text": "  चलने की अवधि      अज्ञात",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "value": "0 सेकंड",
+      "category": null,
+      "text": "  चलने की अवधि      0 सेकंड",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "value": "2 घंटे",
+      "category": null,
+      "text": "  चलने की अवधि      2 घंटे",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "value": "PSEUDO-DURATION-123",
+      "category": null,
+      "text": "  चलने की अवधि      PSEUDO-DURATION-123",
+      "source_locale": "hi",
+      "pseudo_wrapper": "PASS"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "missing_argument": "MessageFormatError",
+      "tr_record": "tui.info.export.uptime"
+    }
+  ],
+  "negative_placeholder_control": "PASS rejected renamed placeholder",
+  "rtl_control": "PASS no authored bidi controls; Hindi LTR, no Urdu/RTL rendering run",
+  "pseudo_control": "PASS synthetic bracket-wrapper message formatting + pseudo duration parameter; NOT a pseudo-locale UI or expansion-layout test",
+  "interpreter": "3.12.13 (main, Mar  3 2026, 15:35:03) [Clang 21.1.4 ]",
+  "pythonpath": "/Users/damian/local-operator/.worktrees/i18n-info-readout",
+  "not_run": [
+    "pytest",
+    "App/TUI/native/browser/rendered frames",
+    "build",
+    "whole-tree check/generation",
+    "CI",
+    "independent translation audit",
+    "full namespace clearance"
+  ],
+  "additional_context_observation": "state.stale remains पुरानी जानकारी under unchanged accepted report. New context defines PID gone rather than heartbeat expiry; flag for independent auditor/manager, not proactively expanded beyond native-finding authority."
+}

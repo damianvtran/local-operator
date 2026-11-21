@@ -1,0 +1,115 @@
+PR #4420 independent code review, round 1
+Reviewer: reviewer / session 866e2e57c59c / openai/gpt-6.1-sol
+Fallback from anthropic/claude-opus-5-5 due provider quota occurred before implementation review.
+Scope: 7e5da6775c41d867365347f380e2d01fbbeeab29..e9e6c3711149cba6899083eab019342d98d5fa55
+
+This is the verbatim discriminating execution command and actual stdout, exit 0, stderr empty. The companion JSON receipt's per-row command fields are condensed procedural summaries (including pseudo-inline loops), not executable shell/Python commands; use THIS exact command to reproduce. No test/App/browser lease was used.
+
+COMMAND:
+cd /Users/damian/local-operator/.worktrees/i18n-info-readout && ISO=$(mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/final-review-home.XXXXXX") && env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/config" PATH="$PATH" TERM=xterm-256color PYTHONPATH="$PWD" /Users/damian/local-operator/.venv/bin/python - <<'PY'
+import json
+from dataclasses import asdict
+from pathlib import Path
+from local_operator.i18n.text import set_active_locale
+from local_operator.i18n.keys import tui_info as k
+from local_operator.info.model import InfoSnapshot, InstallInfo, ProcessInfo, SessionsInfo, SessionLine, EnvInfo
+from local_operator.info.render import build_export, not_answering_clause
+from local_operator.info.copy import InfoRow, info_text, paint_info_row
+from local_operator.info.collect import LiveState
+from local_operator.tui.widgets.info_panel import _Body, _install_section, build_info_report
+out={}
+set_active_locale('fr')
+out['R1']=[line for line in build_export(InfoSnapshot()).splitlines() if 'unknown' in line]
+set_active_locale('ur')
+clause=not_answering_clause(SessionsInfo(total=1,wedged=1,lines=(SessionLine(pid=4243,state='wedged',heartbeat_age_s=65),)))
+b=_Body(1000);b.note(clause)
+whole="\u2066'lop stop --pid 4243 --force'\u2069"
+direct=InfoRow();direct.append(info_text(k.not_answering_clause_remedy_one(pid='4243')))
+out['R2']={'real_path_force_command_isolated':whole in b.to_text().plain,'direct_helper_force_command_isolated':whole in paint_info_row(direct).plain,'real_path_literals':list(clause.parts[0].literals)}
+s=InfoSnapshot(install=InstallInfo(version='0.90.0',kind='uv-tool',is_git_snapshot=True,source_ref='a1b2c3d4e5f67890'))
+out['R3']={}
+for locale in ('en','fr','es','vi','ur'):
+ set_active_locale(locale);b=_Body(51);_install_section(b,s,False)
+ label=str(info_text(k.label_source()))
+ out['R3'][locale]={'label_cells':b.label_cells,'source_row':next(r.plain for r in b.lines if label in r.plain),'complete_sha': 'a1b2c3d4e5f6' in b.to_text().plain}
+home=str(Path.home())
+s=InfoSnapshot(install=InstallInfo(version='0.90.0',kind='uv-tool',prefix=home+'/synthetic/install'),process=ProcessInfo(cwd=home+'/synthetic/work',config_dir=home+'/synthetic/config'),env=EnvInfo(credential_keys=('SYNTHETIC_KEY',)))
+before=asdict(s);checks=[]
+for locale in ('en','fr','es','zh-CN','vi','hi','ru','ur'):
+ set_active_locale(locale)
+ exported=build_export(s)
+ for width in (101,65,47):
+  rendered=build_info_report(s,LiveState(),width)
+  checks.append(rendered.cell_len >= 0)
+ checks.extend((home not in exported,not any(c in exported for c in '\u2066\u2067\u2069'),before==asdict(s)))
+out['safety_matrix']={'assertions':len(checks),'failures':checks.count(False),'locales':8,'pure_body_widths':[101,65,47]}
+print(json.dumps(out,ensure_ascii=False,indent=2))
+PY
+
+ACTUAL STDOUT:
+{
+  "R1": [
+    "local-operator unknown · unknown install",
+    "  âge compilation   unknown",
+    "  durée d’activité  unknown"
+  ],
+  "R2": {
+    "real_path_force_command_isolated": false,
+    "direct_helper_force_command_isolated": true,
+    "real_path_literals": [
+      "1m",
+      "'lop stop --pid N'",
+      "'/stop N'",
+      "'lop stop --pid N --force'"
+    ]
+  },
+  "R3": {
+    "en": {
+      "label_cells": 20,
+      "source_row": "  Source              git snapshot @ a1b2c3d4e5f6",
+      "complete_sha": true
+    },
+    "fr": {
+      "label_cells": 26,
+      "source_row": "  Source                    instantané Git @ a1b2c3",
+      "complete_sha": false
+    },
+    "es": {
+      "label_cells": 25,
+      "source_row": "  Origen                   instantánea de git @ a1b",
+      "complete_sha": false
+    },
+    "vi": {
+      "label_cells": 23,
+      "source_row": "  Nguồn                  ảnh chụp Git @ a1b2c3d4e5f",
+      "complete_sha": false
+    },
+    "ur": {
+      "label_cells": 23,
+      "source_row": "  ماخذ                   git اسنیپ شاٹ @ a1b2c3d4e5",
+      "complete_sha": false
+    }
+  },
+  "safety_matrix": {
+    "assertions": 48,
+    "failures": 0,
+    "locales": 8,
+    "pure_body_widths": [
+      101,
+      65,
+      47
+    ]
+  }
+}
+
+STATUS MATRIX:
+FAIL R1 localized clipboard contains English duration unknown (stable triage prefix excluded).
+FAIL R2 real sentence loses whole actual-PID command isolation; direct helper control passes.
+FAIL R3 translated Source rows crop SHA at width 51; identical English input/control retains full 12-character SHA.
+PASS pure-helper smoke/redaction/immutability/control-free clipboard, 48 checks, 8 locales. Smoke nonnegative cell_len is NOT a row-fit or rendered-frame proof.
+NOT RUN pytest/App/run_test/native/browser/full gates: independent QA owns exclusive lease; source review and pure helpers only.
+NOT RUN native Urdu shaping: pure text/SVG/raster do not approve native shaping.
+NOT RUN mounted switch/scroll execution and EN rendered identity: independent QA/design lanes.
+
+No server/background process was started; all foreground probe commands exited 0. No live sessions, registry or credentials were read/mutated.
+Known language findings and unfinished ledger/generation integration are parent-owned and not duplicated.
