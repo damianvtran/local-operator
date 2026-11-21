@@ -15,7 +15,7 @@ import os
 import socket
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pytest
 
@@ -343,3 +343,19 @@ def _uplink_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     # The per-endpoint lookup too (``local_offline``, the redial kick): bound by
     # ``RelayServer.__init__`` and resolved at call time by ``uplink_checks``.
     monkeypatch.setattr(uplink, "endpoint_has_route", lambda endpoint: None)
+
+
+@pytest.fixture(autouse=True)
+def _forget_github_outage_notes() -> Iterator[None]:
+    """Every cell starts with no GitHub owner outage already told.
+
+    The bash tool says the outage note once per session per outage episode
+    (``builtin._GITHUB_OUTAGE_TOLD``, in-process). Cells here reuse synthetic
+    session ids, so an episode one cell left open would silence the next cell's
+    first note.
+    """
+    from local_operator.tools import builtin
+
+    builtin._reset_github_outage_notes()  # noqa: SLF001
+    yield
+    builtin._reset_github_outage_notes()  # noqa: SLF001

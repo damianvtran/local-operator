@@ -4,5 +4,5 @@
   "cli.failures.invalid_choice": "आर्ग्युमेंट {argument}: अमान्य विकल्प: {value} ({choices} में से चुनें)",
   "cli.failures.invalid_command": "अमान्य {group} कमांड: {command}",
  "cli.failures.github_borrow_timeout": "{owner} से GitHub क्रेडेंशियल {seconds} सेकंड में नहीं मिला; कमांड फिर से चलाएँ",
- "cli.failures.github_owner_offline": "GitHub लॉगिन {owner} द्वारा दिया गया है, जो ऑफ़लाइन है; इस सत्र के पास इस बीच उपयोग के लिए कोई सहेजी गई पहुँच नहीं है"
+ "cli.failures.github_owner_offline": "GitHub लॉगिन {owner} द्वारा दिया गया है, जो अभी जवाब नहीं दे रहा है; इस सत्र के पास इस बीच उपयोग के लिए कोई सहेजी गई पहुँच नहीं है"
 }

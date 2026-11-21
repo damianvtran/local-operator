@@ -4,5 +4,5 @@
   "cli.failures.invalid_choice": "аргумент {argument}: недопустимое значение: {value} (выберите из {choices})",
   "cli.failures.invalid_command": "Недопустимая команда {group}: {command}",
   "cli.failures.github_borrow_timeout": "Не удалось получить учётные данные GitHub с устройства {owner} за {seconds} сек; повторите команду",
-  "cli.failures.github_owner_offline": "Вход в GitHub предоставлен устройством {owner}, которое сейчас не в сети; у этой сессии нет сохранённого доступа на это время"
+  "cli.failures.github_owner_offline": "Вход в GitHub предоставлен устройством {owner}, которое сейчас не отвечает; у этой сессии нет сохранённого доступа на это время"
 }

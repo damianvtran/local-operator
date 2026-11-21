@@ -941,7 +941,7 @@ def test_a_child_with_no_harness_ancestors_bridges_nothing(
     notes: list[str] = []
     gh_env = asyncio.run(builtin._github_git_injections(forged, notes))  # noqa: SLF001
     assert gh_env == {}
-    assert len(notes) == 1 and "offline" in notes[0] and parent.access_token not in notes[0]
+    assert len(notes) == 1 and "isn't answering" in notes[0] and parent.access_token not in notes[0]
 
     async def run() -> Any:
         return await builtin.execute_bash(

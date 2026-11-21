@@ -4598,6 +4598,30 @@ def _github_owner_offline_note(outcome: Any) -> str:
     return _failure_copy(_cli_failures.github_owner_offline(owner=owner))
 
 
+# Session ids whose current GitHub owner outage has already been told once.
+#
+# WHY (PR #4364 review m4): a session with no saved access during an owner
+# outage refuses on EVERY bash call, so the note rode every result -- even
+# ``ls`` -- and a line printed on every command trains people to skip it. The
+# note is now said once per session per outage EPISODE: the id enters here when
+# its first outage note is emitted and leaves the moment one of its borrows
+# completes without an outage refusal (the link recovered, or the refusal
+# stopped), so the next outage is told again.
+# CONSTRAINTS: emission-side only -- nothing about the borrow, grant or hold
+# changes, and the note is merely withheld, never the outcome. In-process,
+# never persisted: a restarted process tells an ongoing outage once more,
+# which is the right default. Bounded by sessions currently in an outage.
+# Borrows run on worker threads (``asyncio.to_thread``), hence the lock.
+_GITHUB_OUTAGE_TOLD: set[str] = set()
+_GITHUB_OUTAGE_TOLD_LOCK = threading.Lock()
+
+
+def _reset_github_outage_notes() -> None:
+    """Forget every told outage (test seam; nothing in the runtime calls it)."""
+    with _GITHUB_OUTAGE_TOLD_LOCK:
+        _GITHUB_OUTAGE_TOLD.clear()
+
+
 def _hold_fallback_session_ids(context: Any) -> tuple[str, ...]:
     """The session's ancestors, from the harness's task tree ONLY.
 
@@ -4633,9 +4657,24 @@ async def _github_git_injections(
         return {}
     store = getattr(context, "variables", None)
     extra: dict[str, Any] = {}
+    session_id = context.session_id or ""
+    refused: list[Any] = []
     if notes is not None:
-        extra["on_timeout"] = lambda outcome: notes.append(_github_borrow_timeout_note(outcome))
-        extra["on_refusal"] = lambda outcome: notes.append(_github_owner_offline_note(outcome))
+        sink = notes
+
+        def on_refusal(outcome: Any) -> None:
+            # Once per session per outage episode (see ``_GITHUB_OUTAGE_TOLD``).
+            # A context with no session id has no episode to key on: always told.
+            refused.append(outcome)
+            if session_id:
+                with _GITHUB_OUTAGE_TOLD_LOCK:
+                    if session_id in _GITHUB_OUTAGE_TOLD:
+                        return
+                    _GITHUB_OUTAGE_TOLD.add(session_id)
+            sink.append(_github_owner_offline_note(outcome))
+
+        extra["on_timeout"] = lambda outcome: sink.append(_github_borrow_timeout_note(outcome))
+        extra["on_refusal"] = on_refusal
     ancestors = _hold_fallback_session_ids(context)
     if ancestors:
         extra["hold_fallback_session_ids"] = ancestors
@@ -4644,12 +4683,17 @@ async def _github_git_injections(
 
         env, _token = await asyncio.to_thread(
             github.lent_github_env,
-            session_id=context.session_id or "",
+            session_id=session_id,
             register=getattr(store, "register_redaction", None),
             **extra,
         )
     except Exception:  # noqa: BLE001 — a broker fault must not fail a command
         return {}
+    if notes is not None and session_id and not refused:
+        # This borrow ended without an outage refusal: the episode is over, so
+        # the next outage is a new one and is told again.
+        with _GITHUB_OUTAGE_TOLD_LOCK:
+            _GITHUB_OUTAGE_TOLD.discard(session_id)
     return env
 
 

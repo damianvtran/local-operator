@@ -22,7 +22,9 @@ from local_operator.tools import builtin
 from tests.unit.network.test_github_borrow_timeout_note import _run_bash
 
 NOTE = (
-    "GitHub login is lent by synthetic-owner, which is offline; "
+    # One wording for every OUTAGE_REFUSALS code (offline, unreachable, busy):
+    # the copy names no single cause, so a busy owner is never called offline.
+    "GitHub login is lent by synthetic-owner, which isn't answering right now; "
     "this session has no saved access to use meanwhile"
 )
 
@@ -42,6 +44,7 @@ def test_a_denial_is_not_an_outage_and_shows_no_offline_note(
 ) -> None:
     text, outcome, _ = _run_bash(tmp_path, monkeypatch, "deny")
     assert type(outcome) is BrokerError and outcome.code == "not_a_holder"
+    assert "isn't answering right now" not in text, text
     assert "which is offline" not in text, text
 
 
@@ -112,3 +115,59 @@ def test_only_a_tuple_of_harness_ancestors_is_read_from_the_context() -> None:
     assert read(SimpleNamespace(ancestor_session_ids=("p", "", "g"))) == ("p", "g")
     assert read(SimpleNamespace(ancestor_session_ids=["p"])) == ()
     assert read(SimpleNamespace()) == ()
+
+
+def test_the_outage_note_is_told_once_per_session_per_outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m4: a note on every bash result (even ``ls``) trains people to skip it.
+
+    Drives the REAL bash tool; only the borrow door is scripted, so the outcome
+    reaching ``on_refusal`` is exactly what ``lent_github_env`` would hand it.
+    One session in one outage sees the note once over three commands; a borrow
+    that succeeds ends the episode, so the next outage is told again; a second
+    session in the same outage gets its own first note.
+    """
+    import asyncio
+    import shlex
+    import sys
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.variables import VariableStore
+
+    up = {"value": False}
+
+    def door(*, session_id: str, register: Any, on_refusal: Any = None, **_: Any) -> Any:
+        if up["value"]:
+            return {"GH_TOKEN": "synthetic-token"}, "synthetic-token"
+        if on_refusal is not None:
+            on_refusal(
+                BrokerError(code="owner_busy", key="github", owner_device_name="synthetic-owner")
+            )
+        return {}, ""
+
+    monkeypatch.setattr(github, "lent_github_env", door)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    command = shlex.join([sys.executable, "-c", "print('ran')"])
+
+    def bash(session_id: str) -> str:
+        context = ToolContext(
+            cwd=str(tmp_path), variables=VariableStore(cwd=str(tmp_path)), session_id=session_id
+        )
+
+        async def run() -> Any:
+            return await builtin.execute_bash("m4", {"command": command}, None, None, context)
+
+        text = asyncio.run(run()).text
+        assert "ran" in text, text
+        return text
+
+    first_outage = [bash("synthetic-a") for _ in range(3)]
+    assert [t.count(NOTE) for t in first_outage] == [1, 0, 0], first_outage
+    assert NOTE in bash("synthetic-b"), "a second session's first outage note was swallowed"
+
+    up["value"] = True
+    assert NOTE not in bash("synthetic-a")
+    up["value"] = False
+    second_outage = [bash("synthetic-a") for _ in range(3)]
+    assert [t.count(NOTE) for t in second_outage] == [1, 0, 0], second_outage
