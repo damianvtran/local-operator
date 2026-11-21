@@ -299,6 +299,13 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/team_bridge/rename_audit.py": (
+        1,
+        "``RENAME_AUDIT_FILENAME`` ('conversation_renames.jsonl') is the owner's "
+        "config-level audit under <config>/team_bridge/, not a session-directory "
+        "entry. It records this host's owner-acting attempts and must not travel "
+        "as session data; session copying does not copy the owner's account audit.",
+    ),
     "local_operator/network/nat64.py": (
         1,
         "``_DISCOVERY_NAME`` ('ipv4only.arpa') is the RFC 7050 DNS discovery hostname "
