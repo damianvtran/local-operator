@@ -97,11 +97,7 @@ _BACKWARD_CHUNK_BYTES = 1 << 16
 
 
 def _iter_lines_backward(
-    handle: Any,
-    end_of_file: int,
-    *,
-    chunk_bytes: int = _BACKWARD_CHUNK_BYTES,
-    max_bytes: int | None = None,
+    handle: Any, end_of_file: int, *, chunk_bytes: int = _BACKWARD_CHUNK_BYTES
 ):
     """Yield the file's lines NEWEST FIRST, as raw bytes.
 
@@ -113,17 +109,11 @@ def _iter_lines_backward(
     as the reference reader documents.
     """
     position = end_of_file
-    # ``max_bytes`` bounds how far back the walk reads: the rows wholly inside the
-    # newest ``max_bytes`` are yielded, and the walk stops there without yielding the
-    # row it cut through (a torn head would only fail its parse anyway).
-    floor = max(0, end_of_file - max_bytes) if max_bytes is not None else 0
     # Fragments of one row, in READ order (newest first), each contiguous with
     # the next; never joined until the boundary that ends the row arrives.
     carried: list[bytes] = []
     while True:
-        if floor and position <= floor:
-            return
-        chunk_start = max(floor, position - chunk_bytes)
+        chunk_start = max(0, position - chunk_bytes)
         handle.seek(chunk_start)
         chunk = handle.read(position - chunk_start)
         position = chunk_start
@@ -147,13 +137,7 @@ def _iter_lines_backward(
             return
 
 
-def latest_custom_details(
-    session_dir: Path,
-    custom_type: str,
-    *,
-    max_bytes: int | None = None,
-    read_only: bool = False,
-) -> dict[str, Any] | None:
+def latest_custom_details(session_dir: Path, custom_type: str) -> dict[str, Any] | None:
     """The newest ``custom_type`` row's ``payload.details``, or ``None``.
 
     Row-for-row compatible with ``session.transcript.read_latest_custom_entry``
@@ -172,12 +156,7 @@ def latest_custom_details(
     # bytes. Opening the plain name here read ``None`` for every compressed
     # session, and opening an archive raw would decode compressed bytes as JSONL
     # and silently carry nothing.
-    #
-    # ``read_only`` is for a PREVIEW (review #4403, R1-m3: the move's cwd fallback runs
-    # on every dry run): it refuses ``transcript_for_read``'s last-resort restore of
-    # the plain transcript into the session directory, which runs without the writer
-    # lock. The carry itself keeps the default.
-    path = compression.transcript_for_read(Path(session_dir), read_only=read_only)
+    path = compression.transcript_for_read(Path(session_dir))
     if path is None:
         return None
     try:
@@ -186,7 +165,7 @@ def latest_custom_details(
         return None
     with handle:
         handle.seek(0, os.SEEK_END)
-        for raw in _iter_lines_backward(handle, handle.tell(), max_bytes=max_bytes):
+        for raw in _iter_lines_backward(handle, handle.tell()):
             if not raw.strip():
                 continue
             try:
@@ -466,10 +445,10 @@ _CWD_DENY_ANY = frozenset({"autostart", "launchagents", "launchdaemons", "system
 def contained_cwd(value: str, *, home: str | Path, config_root: str | Path | None = None) -> str:
     """``value``'s canonical path when it is a usable LOCAL working directory, else "".
 
-    THE ONE CONTAINMENT RULE FOR THE DURABLE CWD HINTS (security review #4403, S1/S2/S4):
-    ``cwd.json`` and the frontend checkpoint's ``state.cwd`` are new places a
-    working directory comes from, and either can hold a value this device did not
-    choose (a carried record, an imported transcript row). Before such a value seeds
+    THE ONE CONTAINMENT RULE FOR CWD DISCOVERY (security review #4403, S1/S2/S4):
+    A carried ``cwd.json`` can hold a value this device did not choose; a legacy
+    wake, marker or runtime cwd can also be stale or adopted from another device.
+    Before such a value seeds
     working-set discovery (``git status`` and file-fact reads) or is persisted as an
     arrived session's cwd, it must be:
 

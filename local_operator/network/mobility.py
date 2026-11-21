@@ -5385,8 +5385,6 @@ def _source_session_cwd(
        record of an open session whose marker was never written;
     4. ``cwd.json`` (``session.creation.CWD_RECORD_NAME``) — written at birth and on
        each runtime start, so an IDLE exec/TUI session still answers;
-    5. the latest ``frontend_state_checkpoint_v1`` row's ``state.cwd``, read from a
-       bounded tail (:data:`_CHECKPOINT_TAIL_BYTES`) — sessions older than ``cwd.json``.
 
     Every step passes the same S-2 ``usable`` rule.
 
@@ -5403,16 +5401,6 @@ def _source_session_cwd(
     )
 
 
-#: How far back from the transcript's end ``_session_cwd_at`` looks for the latest
-#: ``frontend_state_checkpoint_v1`` row. Measured 2026-11-21 over the 212 transcripts
-#: on the dev host that hold one (of 500 with a plain transcript): distance from EOF to
-#: the start of the latest checkpoint row median 26,992 B, p95 165,368 B, max
-#: 6,954,061 B. 16 MiB clears that max more than twice over while keeping a move's
-#: preflight from reading a 170 MB transcript whole; a session whose last checkpoint
-#: is further back reads as "cwd unknown", which the plan now says honestly.
-_CHECKPOINT_TAIL_BYTES = 16 * 1024 * 1024
-
-
 def _session_cwd_at(
     root: Path,
     session_id: str,
@@ -5424,18 +5412,18 @@ def _session_cwd_at(
     object (``request_move``'s stale-relay check runs in the CLI process).
 
     ``home`` is the home the move resolves the working set under
-    (``workset_move.home_of``); the durable hints (steps 4 and 5) must be contained
+    (``workset_move.home_of``); the durable hints (step 4) must be contained
     under it. Default: this user's home.
 
     ``durable_hints=False`` stops after the three LEGACY sources (security review
     #4403, S1). The value this returns is also what the prepare sends as the wire
     ``cwd`` — which the destination may adopt as its ``desktop.json`` marker and
     wake-index cwd (``carry.rewrite_host_cwd``) with only the legacy "keep a path
-    that exists here" rule. ``cwd.json`` and the checkpoint row are new sources whose
+    that exists here" rule. ``cwd.json`` is a new source whose
     value may have arrived from another device, so they must never reach that path:
     the wire callers pass ``False``, and the destination gets ``cwd.json`` through
     the copy set instead, where its promote contains it (``carry.remap_cwd_record``).
-    Discovery (the manifest's seeds) keeps all five.
+    Discovery (the manifest's seeds) validates all four.
     """
     session_dir = root / "sessions" / session_id
     home_text = str(home) if home is not None else str(Path.home())
@@ -5501,18 +5489,9 @@ def _session_cwd_at(
     for value in legacy:
         if carry_mod.contained_cwd(value, home=home_text, config_root=root):
             return value
-    # THE TWO DURABLE FALLBACKS (coordinator retest on v0.111.4): an idle session
-    # created by ``lop exec`` or the TUI has no wake entry, no marker and — its runtime
-    # gone — no runtime record, so every step above answered nothing and its worktree
-    # (unpushed commit, dirty files) was listed only as "mentioned": nothing planned,
-    # no confirmation, and a real move would have left the work behind silently.
-    # CONTAINED BEFORE THEY SEED ANYTHING (security review #4403, S1/S4). Either
-    # value can name a path this device never chose, and the next thing a seed does
-    # is ``git status`` and file-fact reads in it. ``carry.contained_cwd`` admits only
-    # an existing directory this user owns, under this home, outside the protected
-    # dot/system directories and the config root; anything else falls through, so a
-    # stale record reads as "unknown" (which keeps the cwd gap) instead of a known
-    # cwd that suppresses the confirmation.
+    # THE DURABLE RECORD: idle exec/TUI sessions have no legacy source once their
+    # runtime exits. Verify the sidecar and contain its cwd before discovery can run
+    # git or read file facts there, just as for each legacy candidate above.
     try:
         from local_operator.session.creation import read_session_cwd
 
@@ -5524,115 +5503,10 @@ def _session_cwd_at(
             return found
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's cwd record", session_id, exc_info=True)
-    # 5. The latest frontend checkpoint's ``state.cwd`` — the one record a session
-    # older than ``cwd.json`` has. IMPORTED CHECKPOINTS ARE PASSIVE (security review
-    # #4403, S1): the row is transcript content, so in a session that arrived from
-    # another device (a move, a ``--keep`` copy, a replica recovery) it may have been
-    # written there, naming a folder that device chose. Rows carry no per-row device
-    # proof, so the rule is per session: a session with any arrival provenance never
-    # takes its cwd from a checkpoint. That costs nothing real: this step exists for
-    # sessions OLDER than ``cwd.json``, and an arrived session opened here gets a
-    # ``cwd.json`` from its own runtime (``server._note_session_cwd``).
-    try:
-        if _arrived_from_another_device(root, session_id):
-            return ""
-        from local_operator.session.frontend_state import (
-            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-        )
-
-        # A bounded tail read, never a full scan: see ``_CHECKPOINT_TAIL_BYTES`` for
-        # the measured distribution behind the cap. ``read_only`` (review R1-m3): a
-        # preview must never inflate a compressed archive into the cache, nor restore
-        # it into the session directory without the writer lock.
-        details = carry_mod.latest_custom_details(
-            session_dir,
-            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-            max_bytes=_CHECKPOINT_TAIL_BYTES,
-            read_only=True,
-        )
-        state = (details or {}).get("state")
-        found = usable(state.get("cwd")) if isinstance(state, Mapping) else ""
-        found = carry_mod.contained_cwd(found, home=home_text, config_root=root) if found else ""
-        if found:
-            return found
-    except Exception:  # noqa: BLE001
-        logger.debug("mobility: could not read %s's checkpoint cwd", session_id, exc_info=True)
-    # Nothing usable anywhere: the first legacy value is still the honest answer —
-    # the manifest's ``cwd_known`` re-checks it (``workset._usable_local_dir``), so a
-    # stale one keeps the gap exactly as it did before S4's fall-through existed.
-    return legacy[0] if legacy else ""
-
-
-#: How many fork generations :func:`_arrived_from_another_device` follows before it
-#: gives up and answers "arrived" (fail closed). Real chains are a handful deep; the
-#: bound exists only so a crafted ``origin.json`` loop or chain cannot spin.
-_FORK_LINEAGE_MAX_DEPTH = 32
-
-
-def _arrived_from_another_device(root: Path, session_id: str, *, _depth: int = 0) -> bool:
-    """Whether ``session_id``'s directory carries ANY sign it arrived from elsewhere.
-
-    The signals, each written by an import door (``_promote`` / ``sync.promote_replica``):
-    a ``mesh.json`` stamp whose ``origin`` names a ``source_device``, an ``origin.json``
-    with a ``source_device``, or a marker flagged ``moved_in``. FAIL CLOSED: a
-    ``mesh.json`` that exists but cannot be parsed counts as arrived, since a stamp
-    nobody can read proves nothing about where the rows were written. Never raises.
-
-    A FORK INHERITS ITS PARENT'S ROWS, SO IT INHERITS ITS PARENT'S ANSWER (security
-    review #4403 r2, S1). ``fork.fork_session`` copies the journal but not
-    ``mesh.json``, so a fork of an imported session used to look local and turned the
-    parent's passive checkpoint into a discovery seed. Two signals close that:
-    ``inherited_arrival`` in the fork's ``origin.json`` (written at fork time from this
-    same answer, so it survives the parent's later deletion), and — for forks made
-    before that flag — the ``parent`` the fork origin names, followed here. A fork
-    whose parent is gone or whose lineage is too deep to follow proves nothing local
-    and counts as arrived; a fork of a genuinely local session stays local, because
-    its inherited rows were this device's own evidence for the same work.
-    """
-    from local_operator.network import carry as carry_mod
-    from local_operator.network.types import MeshRefusal
-    from local_operator.resume import ORIGIN_FORK
-
-    session_dir = Path(root) / "sessions" / session_id
-    try:
-        stamp: Any = json.loads((session_dir / "mesh.json").read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        stamp = {}
-    except (OSError, ValueError):
-        return True
-    if not isinstance(stamp, dict):
-        return True
-    origin = stamp.get("origin")
-    if isinstance(origin, dict) and origin.get("source_device"):
-        return True
-    try:
-        marked: Any = json.loads((session_dir / "origin.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        marked = {}
-    if isinstance(marked, dict) and (
-        marked.get("source_device") or marked.get("inherited_arrival")
-    ):
-        return True
-    if carry_mod.moved_in(session_dir):
-        return True
-    if isinstance(marked, dict) and marked.get("origin") == ORIGIN_FORK:
-        parent = marked.get("parent")
-        if (
-            not isinstance(parent, str)
-            or not parent
-            or parent == session_id
-            or _depth >= _FORK_LINEAGE_MAX_DEPTH
-        ):
-            return True
-        try:
-            # The id names a directory to read: never a path component that escapes.
-            _validated_session_id(parent)
-        except MeshRefusal:
-            return True
-        if not (Path(root) / "sessions" / parent).is_dir():
-            return True
-        return _arrived_from_another_device(root, parent, _depth=_depth + 1)
-    return False
+    # Exhausted validated sources means UNKNOWN, never a rejected legacy value.
+    # Transcript rows (including inherited fork checkpoints) are content, not cwd
+    # authority. Older sessions acquire a durable record when their runtime starts.
+    return ""
 
 
 def _handoff_in_progress_refusal(server: "RelayServer", session_id: str) -> dict[str, Any] | None:

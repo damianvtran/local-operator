@@ -12,7 +12,7 @@ Each cell drives the real path (the CLI or ``mobility.request_move`` over the
 in-process two-relay rig, with real git) and pins one part of the fix:
 
 * (a) the retest's fixture shape, with ``cwd.json`` written at birth, is PLANNED;
-* (b) a session older than ``cwd.json`` is planned from its latest checkpoint row;
+* (b) a checkpoint-only older session stays unknown and asks before leaving work;
 * (c) a relative ``cwd.json`` or one naming the session directory is ignored (S-2);
 * (d) no cwd anywhere plus a mentioned worktree asks for confirmation, plans
   nothing, says why, and ``--yes`` is refused (reason ``cwd_unknown`` since review round 1);
@@ -136,15 +136,39 @@ def test_a_the_retest_fixture_is_planned_from_cwd_json(
     assert "mentioned" not in block  # it is the cwd now, not a mention
     assert (server_a.root / "sessions" / SESSION).is_dir()
 
+    # The durable-only seed must drive the actual transfer, not just the preview.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    destination_preview: dict[str, Any] = dict(
+        mobility.request_move(SESSION, root=server_b.root, to="local", dry_run=True)
+    )
+    assert destination_preview["ok"] is True, destination_preview
+    moved: dict[str, Any] = dict(
+        mobility.request_move(
+            SESSION,
+            root=server_b.root,
+            to="local",
+            confirm_working_set=destination_preview["working_set"]["scope_digest"],
+        )
+    )
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is True, moved
+    landed = bhome / "proj" / ".worktrees" / "retest"
+    assert landed.is_dir(), json.dumps(moved, sort_keys=True)
+    assert git(landed, "log", "-1", "--format=%s") == "unpushed retest work"
+    assert (landed / "staged.txt").read_text() == "staged\n"
+    assert (landed / "b.txt").read_text() == "b\nunstaged edit\n"
+    assert not (landed / ".env.local").exists()
+    assert (server_b.root / "sessions" / SESSION / "cwd.json").is_file()
 
-def test_b_a_session_without_cwd_json_is_planned_from_its_latest_checkpoint(
+
+def test_b_a_checkpoint_only_session_is_unknown_and_requires_confirmation(
     pair: Devices,
     monkeypatch: pytest.MonkeyPatch,
     rig: Rig,
     bhome: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Sessions older than ``cwd.json`` carry their cwd only in the frontend
-    checkpoint row; the LATEST one wins (an older row names a stale folder)."""
+    """Transcript rows are not cwd authority, even for a local pre-release session."""
     server_a, server_b, _host, _port = pair
     source = _idle_cli_session(pair, monkeypatch, rig, bhome)
     tree = _retest_worktree(rig)
@@ -165,7 +189,7 @@ def test_b_a_session_without_cwd_json_is_planned_from_its_latest_checkpoint(
             )
     assert not (source / "cwd.json").exists()
 
-    assert mobility._session_cwd_at(server_a.root, SESSION) == str(tree)
+    assert mobility._session_cwd_at(server_a.root, SESSION) == ""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     shown: dict[str, Any] = dict(
         mobility.request_move(
@@ -174,8 +198,23 @@ def test_b_a_session_without_cwd_json_is_planned_from_its_latest_checkpoint(
     )
 
     block = shown["working_set"]
-    assert [(r["path"], r["state"]) for r in block["worktrees"]] == [(RETEST, "planned")], block
+    assert block["worktrees"] == [], block
+    assert block["cwd_known"] is False
+    assert block["cwd_unknown_reason"] == "not_recorded"
+    # Both checkpoint paths can remain passive mentions, never discovery seeds.
+    assert block["mentioned"] == ["~/proj/.worktrees/other", RETEST]
     assert shown["confirmation_required"] is True
+    code, out = _cli(
+        server_a, monkeypatch, capsys, "--to", server_b.identity.device_id, "--dry-run"
+    )
+    assert code == 0
+    assert "working folder is not recorded" in out.out, out.out
+    _grant_import(server_b, server_a)
+    code, out = _cli(
+        server_a, monkeypatch, capsys, "--to", server_b.identity.device_id, "--yes", "--json"
+    )
+    assert code == 1
+    assert json.loads(out.out)["consent_declined"]["reason"] == "cwd_unknown"
 
 
 @pytest.mark.parametrize("recorded", ["relative/dir", "SESSION_DIR"])
@@ -199,19 +238,37 @@ def test_c_a_relative_or_session_dir_cwd_json_is_ignored(
     assert manifest.to_dict()["cwd_unknown_reason"] == "not_recorded"
 
 
+@pytest.mark.parametrize("rejected_legacy", [False, True])
 def test_d_unknown_cwd_with_a_mentioned_worktree_asks_and_yes_is_refused(
+    rejected_legacy: bool,
     pair: Devices,
     monkeypatch: pytest.MonkeyPatch,
     rig: Rig,
     bhome: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """No source names the cwd: nothing is planned (a mention is never trusted as
+    """No validated source names the cwd: nothing is planned (a mention is never trusted as
     work), but the move asks, the preview says why, and ``--yes`` refuses through the
     existing #4380 rules — the work never strands silently."""
     server_a, server_b, _host, _port = pair
-    _idle_cli_session(pair, monkeypatch, rig, bhome)
+    source = _idle_cli_session(pair, monkeypatch, rig, bhome)
     _retest_worktree(rig)
+    if rejected_legacy:
+        from types import SimpleNamespace
+
+        from local_operator.mobile import attach_client
+        from local_operator.wakes import store as wake_store
+
+        protected = rig.home / ".ssh"
+        protected.mkdir()
+        rejected = str(protected)
+        (source / "desktop.json").write_text(json.dumps({"cwd": rejected}), "utf-8")
+        monkeypatch.setattr(wake_store, "read_entry", lambda *_: {"cwd": rejected})
+        monkeypatch.setattr(
+            attach_client, "find_runtime_record", lambda *_: (SimpleNamespace(cwd=rejected), None)
+        )
+        assert mobility._session_cwd_at(server_a.root, SESSION, home=rig.home) == ""
+        assert mobility._session_cwd_at(server_a.root, SESSION, durable_hints=False) == rejected
     _grant_import(server_b, server_a)  # B COULD take files: the refusal is not a grant gap
     target = server_b.identity.device_id
 
@@ -356,26 +413,16 @@ def test_l1_a_hostile_cwd_record_is_never_a_discovery_seed(
     assert manifest.worktrees == () and manifest.cwd_known is False
 
 
-def test_l1_an_imported_checkpoint_is_passive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("imported", [False, True])
+def test_l1_checkpoint_rows_are_passive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported: bool
 ) -> None:
-    """L1/S1: a checkpoint row in a session that ARRIVED from another device (its
-    stamp names a ``source_device``) is transcript content written elsewhere, so it is
-    never this device's cwd seed. The same row in a local session still is."""
+    """No transcript cwd becomes a discovery seed, regardless of arrival metadata."""
     root, session, home = _bare_root(tmp_path)
     monkeypatch.setenv("HOME", str(home))
     _checkpoint(session, str(home / "proj"))
-    assert os.path.realpath(mobility._session_cwd_at(root, SESSION)) == os.path.realpath(
-        home / "proj"
-    )
-
-    (session / "mesh.json").write_text(
-        json.dumps({"session_id": SESSION, "origin": {"kind": "moved", "source_device": "dev-x"}}),
-        encoding="utf-8",
-    )
-    assert mobility._session_cwd_at(root, SESSION) == ""
-    # An unreadable stamp proves nothing about where the rows came from: passive too.
-    (session / "mesh.json").write_text("{not json", encoding="utf-8")
+    if imported:
+        _imported_stamp(session)
     assert mobility._session_cwd_at(root, SESSION) == ""
 
 
@@ -516,7 +563,8 @@ def test_l4_a_stale_legacy_marker_cwd_is_not_known_either(tmp_path: Path) -> Non
 
     root, session, home = _bare_root(tmp_path)
     (session / "desktop.json").write_text(json.dumps({"cwd": str(home / "gone")}), "utf-8")
-    assert mobility._session_cwd_at(root, SESSION) == str(home / "gone")
+    assert mobility._session_cwd_at(root, SESSION, home=home) == ""
+    assert mobility._session_cwd_at(root, SESSION, durable_hints=False) == str(home / "gone")
     _mention(session, f"cd {home / 'proj'}")
     manifest = workset.compute_manifest(root, SESSION, to_device="d", home=home)
     assert manifest.cwd_known is False and manifest.cwd_gap is True
@@ -653,26 +701,6 @@ def test_l9_the_gap_is_part_of_the_scope_digest() -> None:
     assert workset.block_scope_digest(gap.to_dict(), to_device="d") == workset.scope_digest(gap)
 
 
-def test_l10_the_checkpoint_fallback_reads_read_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """L10 (R1-m3): the preview never restores a compressed transcript in place."""
-    from local_operator.session import compression
-
-    root, session, home = _bare_root(tmp_path)
-    seen: list[bool] = []
-    real = compression.transcript_for_read
-
-    def spy(directory: Path, *, read_only: bool = False) -> Any:
-        seen.append(read_only)
-        return real(directory, read_only=read_only)
-
-    monkeypatch.setattr(compression, "transcript_for_read", spy)
-    monkeypatch.setenv("HOME", str(home))
-    mobility._session_cwd_at(root, SESSION)
-    assert seen == [True], seen
-
-
 def test_l12_an_answered_root_cwd_is_not_resolved_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -709,43 +737,25 @@ def _imported_stamp(session: Path) -> None:
     )
 
 
-def test_m1_a_fork_of_an_imported_session_keeps_the_inherited_checkpoint_passive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("imported", [False, True])
+def test_m1_a_fork_checkpoint_never_becomes_a_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported: bool
 ) -> None:
-    """M1/S1 (r2): a fork copies the journal but not the parent's ``mesh.json``, so an
-    imported parent's checkpoint row must not become the fork's "local" cwd seed —
-    neither for a fork made now (it carries the parent's arrival) nor for one made
-    before this rule (its origin names the imported parent, which is followed). A fork
-    of a genuinely LOCAL session keeps the seed: the parent's rows were this device's
-    own evidence, and the fork continues the same work in the same folder."""
+    """Copying journal content never grants it cwd authority, even before origin exists."""
     from local_operator.fork import fork_session
-    from local_operator.resume import ORIGIN_FORK, mark_session_origin
 
     root, session, home = _bare_root(tmp_path)
     monkeypatch.setenv("HOME", str(home))
     _checkpoint(session, str(home / "proj"))
-
-    local_fork = fork_session(root, SESSION)
-    assert os.path.realpath(mobility._session_cwd_at(root, local_fork)) == os.path.realpath(
-        home / "proj"
-    )
-
-    _imported_stamp(session)
-    imported_fork = fork_session(root, SESSION)
-    assert not (root / "sessions" / imported_fork / "mesh.json").exists()
-    assert mobility._session_cwd_at(root, imported_fork) == ""
-    # A fork of that fork inherits the same provenance.
-    assert mobility._session_cwd_at(root, fork_session(root, imported_fork)) == ""
-
-    # A fork written before this rule: origin.json names the parent, nothing else.
-    legacy = root / "sessions" / "legacyfork01"
-    legacy.mkdir()
-    (legacy / "transcript.jsonl").write_bytes((session / "transcript.jsonl").read_bytes())
-    mark_session_origin(legacy, ORIGIN_FORK, parent=SESSION, forked_at=1.0)
-    assert mobility._session_cwd_at(root, "legacyfork01") == ""
-    # Its parent gone, nothing proves the rows local: passive (fail closed).
-    mark_session_origin(legacy, ORIGIN_FORK, parent="vanished0001", forked_at=1.0)
-    assert mobility._session_cwd_at(root, "legacyfork01") == ""
+    if imported:
+        _imported_stamp(session)
+    fork_id = fork_session(root, SESSION)
+    fork_dir = root / "sessions" / fork_id
+    assert not (fork_dir / "mesh.json").exists()
+    assert mobility._session_cwd_at(root, fork_id) == ""
+    (fork_dir / "origin.json").unlink()
+    assert mobility._session_cwd_at(root, fork_id) == ""
+    assert mobility._session_cwd_at(root, fork_session(root, fork_id)) == ""
 
 
 def test_m2_replica_recovery_publishes_only_a_stamped_contained_session(
@@ -791,7 +801,6 @@ def test_m2_replica_recovery_publishes_only_a_stamped_contained_session(
     assert json.loads((final / "cwd.json").read_text(encoding="utf-8"))["cwd"] == ""
     stamp = json.loads((final / "mesh.json").read_text(encoding="utf-8"))
     assert stamp["origin"]["source_device"] == "d_owner", stamp
-    assert mobility._arrived_from_another_device(root, "recovered0001")
 
     # A refused recovery: nothing ever exists at the final path.
     other = root / "sessions" / "recovered0002"

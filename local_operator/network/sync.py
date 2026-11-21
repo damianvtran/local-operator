@@ -4141,10 +4141,10 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         from local_operator.network import carry
 
         carry.remap_cwd_record(target, new_id, home=str(Path.home()), config_root=Path(root))
-        # THE IMPORT STAMP IS MANDATORY AND IN PLACE BEFORE THE PUBLISH (S2 r2): it is
-        # what makes every reader treat the copy's checkpoint rows as imported
-        # (``mobility._arrived_from_another_device``), so a failure to write it
-        # refuses the recovery rather than publish a copy that reads as local.
+        # THE IMPORT STAMP IS MANDATORY AND IN PLACE BEFORE THE PUBLISH (S2 r2):
+        # the copy must expose its import provenance on its first visible read,
+        # never appear as a local session during recovery. A failed stamp write
+        # refuses recovery instead of publishing incomplete metadata.
         cursor = read_replica_cursor(root, session_id)
         owner = str(cursor.get("owner_device") or "")
         from local_operator.network.projection import self_device_id
