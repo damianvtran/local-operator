@@ -195,6 +195,18 @@ def add_parser(
         default="",
         help="Bind the token to one device id (only that device may redeem it)",
     )
+    # INDEPENDENT OF --role on purpose: a read invite still offers by default, and
+    # coupling the two would change every existing read pairing. Read-only rigs
+    # (QA, demos, test devices) are told in the network guide to pass this.
+    invite.add_argument(
+        "--no-credential-offers",
+        action="store_true",
+        dest="no_credential_offers",
+        help=(
+            "Pair without credentials: this device never lists its logins, sends an "
+            "empty share list and grants nothing (recommended for read-only rigs)"
+        ),
+    )
     invite.add_argument(
         "--print",
         action="store_true",
@@ -327,7 +339,13 @@ def add_parser(
     # the default `drive` role cannot move, delete or borrow a login, and the only
     # other way to widen it is a re-pair that burns the device id.
     for verb, words in (
-        ("grant", "Allow a peer more on this device (move, delete, broker_credential, ...)"),
+        # ``workset_import`` is named here because ``move`` does not imply it: without
+        # it a move onto this device carries the conversation and leaves the files.
+        (
+            "grant",
+            "Allow a peer more on this device (move, workset_import, delete, "
+            "broker_credential, ...)",
+        ),
         ("revoke", "Take capabilities back from a peer on this device"),
     ):
         caps = member_actions.add_parser(verb, help=words)
@@ -1393,6 +1411,7 @@ def _relay_call(
     allow_no_answer: bool = False,
     allow_no_relay: bool = False,
     no_answer_message: str | None = None,
+    report_unsent: bool = False,
     **fields: Any,
 ) -> dict[str, Any] | None:
     """Run one op on the running relay, or REFUSE when no relay answers it.
@@ -1430,11 +1449,29 @@ def _relay_call(
     destructive operation offline. Keep that distinction at this single lookup.
     ``no_answer_message`` lets the caller name its already-resolved context;
     it is display-only and never sent in the control frame or read back from disk.
+
+    ``report_unsent`` is for a caller whose sentence depends on WHETHER the op could
+    have run (security review round 3, S-R3-1: ``confirm`` reports a terminal
+    pairing answer). With it, "the op never left this device" — no relay record, or
+    ``relay.control_request`` saw the connection fail before the op line was
+    written — raises :class:`~local_operator.network.types.ControlRequestUnsent`,
+    and a ``None`` (under ``allow_no_answer``) then means only "sent, no reply":
+    the relay may have acted. It is forwarded only when set, so the existing test
+    doubles of ``control_request`` keep their exact call shape.
     """
     from local_operator.network import relay, store
 
     record = store.find_own_relay()
-    reply = relay.control_request(record, op, timeout=timeout, **fields) if record else None
+    if record is None and report_unsent:
+        from local_operator.network.types import ControlRequestUnsent
+
+        raise ControlRequestUnsent()
+    unsent_flag: dict[str, Any] = {"report_unsent": True} if report_unsent else {}
+    reply = (
+        relay.control_request(record, op, timeout=timeout, **unsent_flag, **fields)
+        if record
+        else None
+    )
     if reply is None:
         if allow_no_answer or (allow_no_relay and record is None):
             return None
@@ -2772,8 +2809,11 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     # device that has been shared a credential but whose record has not been re-read
     # would otherwise print "nothing is shared" — the exact state this listing exists
     # to make visible. The record is joined only for the NAME.
+    from local_operator.network.credentials import github as github_mod
+
     networks: list[dict[str, Any]] = []
     lines: list[str] = []
+    github_source: str | None = None
     for document in _placement_documents():
         record = _record_for(document.network_id)
         network_name = record.name if record is not None else document.network_id
@@ -2813,6 +2853,15 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     for h in entry.holders
                 ],
             }
+            if row["owned_here"] and key == github_mod.GITHUB_KEY:
+                # THE LEND THIS DEVICE SERVES, NAMED BY ITS ARM (lend honesty,
+                # 2026-11-19): the placement's ``kind`` is the row's wire type and
+                # stays put; ``label`` is what the operator reads, so a gh-served
+                # lend no longer prints as ``github-app``. Resolved once per listing.
+                if github_source is None:
+                    github_source = github_mod.resolve_source(_config_dir())
+                row["source"] = github_source
+                row["label"] = github_mod.source_label(github_source)
             if not row["owned_here"]:
                 holder = entry.is_holder(self_device)
                 if holder:
@@ -2832,8 +2881,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
                 # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
                 # 7, last acked 14:02)``. Read from the sync document only: a
-                # listing never dials and never reads a store, and a copy
-                # relationship with no generation yet shows NO segment (absent,
+                # listing never dials, and the one store touch is the github
+                # arm's metadata ``describe`` above (``resolve_source``; no value
+                # is read, as ``source_present`` already does for ``shareable``).
+                # A copy relationship with no generation yet shows NO segment (absent,
                 # never "failed" — the rollout segment's own rule). The §4.2
                 # selection mark rides the same read (S4): one document, so the
                 # mark cannot disagree with the holders it governs.
@@ -2854,6 +2905,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
             lines.append(f"{network_name}: nothing is shared in this network yet")
         else:
             lines.append(f"{network_name}:")
+            # The type column is sized to the widest entry (min 15, the historic
+            # width) so the 27-character gh label keeps ``owner:`` aligned across
+            # rows instead of pushing that one row right (agent review n1 / QA Q3).
+            kind_width = max([15] + [len(r.get("label") or r["kind"]) for r in keys])
             for row in keys:
                 owner = (
                     "this device"
@@ -2862,9 +2917,16 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 )
                 label = _peer_label(row["identity_label"] or "")
                 who = f" ({label})" if label else ""
+                shown_kind = row.get("label") or row["kind"]
                 lines.append(
-                    f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
+                    f"  {row['credential_name']:<14} {shown_kind:<{kind_width}} owner: {owner}{who}"
                 )
+                if row.get("source") == github_mod.SOURCE_GH:
+                    # The same caution the ``shareable`` row and ``ready`` give, on
+                    # the lend itself: borrowers of this row get the full account.
+                    from local_operator.network.readiness import GITHUB_BROAD_TOKEN_NOTE
+
+                    lines.append(f"      {GITHUB_BROAD_TOKEN_NOTE}")
                 if row.get("mark"):
                     mark_tail = " — never crosses" if row["mark"] == "local-only" else ""
                     lines.append(f"      marked {row['mark']}{mark_tail}")
@@ -3411,9 +3473,16 @@ def _github_shareable_row(self_device: str) -> dict[str, Any]:
                     "scope": holder.scope,
                 }
             )
+    # THE ARM THAT WOULD SERVE, beside the stable ``kind`` (lend honesty,
+    # 2026-11-19): ``kind`` stays ``github-app`` for every reader keyed on it, and
+    # ``source``/``label`` say what actually travels — a gh login is the account's
+    # full user token, not an App grant. Metadata only: no token is read.
+    source = github_mod.resolve_source(_config_dir())
     return {
         "provider": github_mod.GITHUB_KEY,
         "kind": github_mod.GITHUB_KIND,
+        "source": source,
+        "label": github_mod.source_label(source),
         "identity_label": "",
         "shared_with": shared_with,
         "remedy": (
@@ -4995,6 +5064,14 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             timed_out=int(live.get("timed_out") or 0),
             unacknowledged=int(live.get("unacknowledged") or 0),
         )
+        # G9: what it was LENT, beside what was copied to it (``lends.py``).
+        endings += messages_mod.render_removal_lends(
+            _member_name(record, device_id) or str(live.get("removed") or device_id),
+            revoked=int(live.get("lends_revoked") or 0),
+            open_lends=list(live.get("lends_open") or []),
+            told=int(live.get("lends_told") or 0),
+            renewal_ended=int(live.get("lends_renewal_ended") or 0),
+        )
         return _emit(
             args,
             {"ok": True, **live},
@@ -5015,6 +5092,11 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # what the ledger shows, or a removal with live copies reads as a clean sweep.
     copies, unacknowledged = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
+    # G9, relay-less: nothing can tell the member (no link) and no broker runs to
+    # DELETE an App token, so every unexpired lend is reported as left usable.
+    from local_operator.network.credentials.lends import removal_lends
+
+    lends = removal_lends(None, record.network_id, device_id, told=False, revokes_at_issuer=False)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
             continue
@@ -5051,6 +5133,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "wiped": 0,
             "timed_out": 0,
             "unacknowledged": unacknowledged,
+            **lends,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
@@ -5061,6 +5144,13 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
                 wiped=0,
                 unacknowledged=unacknowledged,
             ),
+            *messages_mod.render_removal_lends(
+                _member_name(record, device_id) or args.device,
+                revoked=int(lends["lends_revoked"]),
+                open_lends=list(lends["lends_open"]),
+                told=0,
+                renewal_ended=int(lends["lends_renewal_ended"]),
+            ),
         ],
     )
 
@@ -5068,6 +5158,12 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Pairing
 # ---------------------------------------------------------------------------
+
+
+#: The control-plane codes a relay answers for an op it does not serve
+#: (``RelayServer.control_dispatch``): what an older relay says to
+#: ``net_invite_policy``, having changed nothing.
+_UNSERVED_OP_CODES: frozenset[str] = frozenset({"unknown_local_op", "not_implemented"})
 
 
 def _cmd_invite(args: argparse.Namespace) -> int:
@@ -5090,29 +5186,105 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    from local_operator.network.types import CREDENTIAL_OFFERS_NONE
+
     hosts = [host for host in (args.hosts or "").split(",") if host]
+    no_offers = bool(getattr(args, "no_credential_offers", False))
     # ADOPT BEFORE MINTING (mesh-mcp-credentials §3): the offer built at admission
     # reads the needs-list, and a literal in ``mcp.json`` is invisible to it until
     # it becomes a ``${NAME}`` reference. Best-effort by design — a mint must not
     # fail because the owner's config could not be rewritten — and completely
     # silent about values: only counts leave this block.
+    #
+    # SKIPPED UNDER --no-credential-offers: adoption exists only to feed an offer
+    # this invite will never build, and it reads and rewrites ``mcp.json`` — a
+    # credential walk the operator asked this pairing not to make.
     adoption: dict[str, Any] = {}
-    try:
-        from local_operator.mcp.credential_sources import adopt_literal_credentials
-        from local_operator.paths import config_dir
+    if not no_offers:
+        try:
+            from local_operator.mcp.credential_sources import adopt_literal_credentials
+            from local_operator.paths import config_dir
 
-        adoption = adopt_literal_credentials(config_dir())
-    except Exception:  # noqa: BLE001 — an invite is not blocked by adoption
-        adoption = {}
-    live = _relay_call(
-        "net_invite",
-        network=args.network,
-        role=args.role,
-        ttl_s=float(args.expires),
-        hosts=hosts,
-        device_id=args.device,
-        allow_no_answer=True,
-    )
+            adoption = adopt_literal_credentials(config_dir())
+        except Exception:  # noqa: BLE001 — an invite is not blocked by adoption
+            adoption = {}
+    if no_offers:
+        # A SEPARATE, VERSIONED OP, NOT A FIELD ON ``net_invite`` (review round 1,
+        # S2/R1-2): a relay that predates the policy ignores an unknown field and
+        # mints, and writes the token of, an ordinary credential-offering invite
+        # before this process could read its reply. ``net_invite_policy`` is an op
+        # name such a relay does not serve, so it refuses with NOTHING written —
+        # the support check is the mutation's own precondition, not a rollback.
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            live = _relay_call(
+                "net_invite_policy",
+                network=args.network,
+                role=args.role,
+                ttl_s=float(args.expires),
+                hosts=hosts,
+                device_id=args.device,
+                credential_offers=CREDENTIAL_OFFERS_NONE,
+                # ``allow_no_relay``, NOT ``allow_no_answer`` (review round 2, R2-1 /
+                # security S2): the local mint below is safe ONLY when no relay record
+                # exists. A registered relay that does not answer may be an older
+                # process that later serves admission for a row it cannot read the
+                # policy of, and would then offer credentials; the joiner's own refusal
+                # comes after its receipt, so it is no privacy proof. So silence from a
+                # registered relay refuses and mints nothing here.
+                #
+                # OFFLINE ASSUMPTION (operator-accepted): with no record, the local
+                # mint relies on whatever relay later serves this network being this
+                # build or newer, which reads ``credential_offers`` off the row.
+                # Starting an OLDER owner relay on a newer invite record is unsupported
+                # — source cannot retrofit code that is already installed.
+                allow_no_relay=True,
+                no_answer_message=(
+                    "refusing: the running relay did not answer, and no invite was minted "
+                    "locally and no token is returned here: a relay that predates "
+                    "--no-credential-offers would admit a locally minted invite WITH "
+                    "credential offers. Check it with `lop network status`, restart it "
+                    "(`lop network serve`/launchd unit) on this build and mint again. "
+                    "(A current relay that answers late still applies the policy to "
+                    "anything it mints.)"
+                ),
+            )
+        except MeshRefusal as refusal:
+            if refusal.code == "relay_control_failed":
+                # Exit 2 like the sibling unsupported-relay refusal: both are the
+                # policy declining to mint, not a transport fault of the command.
+                print(str(refusal), file=sys.stderr)
+                return 2
+            if refusal.code not in _UNSERVED_OP_CODES:
+                raise
+            print(
+                "refusing: the running relay predates --no-credential-offers, so it was not "
+                "asked to mint anything and no invite or token was created; restart it "
+                "(`lop network serve`/launchd unit) on this build and mint again",
+                file=sys.stderr,
+            )
+            return 2
+        if live is not None and live.get("credential_offers") != CREDENTIAL_OFFERS_NONE:
+            # Unreachable from any build that serves ``net_invite_policy`` (it
+            # mints with the policy or refuses); kept so a receipt can never
+            # present a policy the relay did not confirm.
+            print(
+                "refusing: the running relay did not confirm --no-credential-offers for "
+                f"invite {live.get('invite_id') or '?'}; do not hand out its token",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        live = _relay_call(
+            "net_invite",
+            network=args.network,
+            role=args.role,
+            ttl_s=float(args.expires),
+            hosts=hosts,
+            device_id=args.device,
+            allow_no_answer=True,
+        )
     if live is not None:
         payload = {"ok": True, **live}
         path = str(live.get("path") or "")
@@ -5165,7 +5337,8 @@ def _cmd_invite(args: argparse.Namespace) -> int:
         }
     lines = [
         f"invite {payload['invite_id']} for role {payload['role']}, "
-        f"expires in {int(float(payload.get('expires_in_s') or 0))}s",
+        f"expires in {int(float(payload.get('expires_in_s') or 0))}s"
+        + (", no credential offers" if no_offers else ""),
         f"token written to {path}",
         "it is single use and is not printed: read that file, or run this with a TTY "
         "and --print",
@@ -5188,6 +5361,7 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
     from local_operator.network import relay as relay_mod
     from local_operator.network import store
     from local_operator.network.invite import mint as mint_invite
+    from local_operator.network.types import CREDENTIAL_OFFERS_NONE
 
     record = _resolve(args.network)
     state = store.require_secrets(record.network_id)
@@ -5204,6 +5378,9 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         or relay_mod.advertise_endpoints(relay_mod.NetworkSettings.from_config())
         or None,
         device_id=args.device,
+        credential_offers=(
+            CREDENTIAL_OFFERS_NONE if getattr(args, "no_credential_offers", False) else ""
+        ),
     )
     # Same rule as the relay's mint: dead entries go with the write that adds one.
     expired = store.prune_invites(record, keep=store.binding_invite_ids())
@@ -5220,11 +5397,13 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
             "role": minted.record.role,
             "expires_at": minted.record.expires_at,
             "bound_device": minted.record.device_id,
+            "credential_offers": minted.record.credential_offers,
         },
     )
     return (
         {
             "ok": True,
+            "credential_offers": minted.record.credential_offers,
             "invite_id": minted.record.invite_id,
             "path": str(path),
             "expires_at": minted.record.expires_at,
@@ -5502,7 +5681,43 @@ def _cmd_join(args: argparse.Namespace) -> int:
                 lines=link_result[0],
             )
         return _emit(args, {"ok": True, **link_result[1]}, link_result[0])
-    failure = MeshRefusal(
+    failure = _join_failure(last_reason)
+    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
+    if explain:
+        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
+    raise failure
+
+
+class _KnownJoinCause(str):
+    """A per-host join sentence whose cause the joiner KNOWS (``code``).
+
+    A ``str`` so every caller that loops over ``_join_one``'s sentences keeps working;
+    the ``code`` lets :func:`_join_failure` drop the ambiguous-close tail, which is
+    true of a silent close and false of a refusal this device decided itself.
+    """
+
+    code: str
+
+    def __new__(cls, code: str, sentence: str) -> _KnownJoinCause:
+        made = super().__new__(cls, sentence)
+        made.code = code
+        return made
+
+
+def _join_failure(last_reason: str) -> Any:
+    """The ``join_failed`` refusal for the last host's sentence.
+
+    The token tail ("a redeemed token, a rejected one and a wrong address all end
+    the same way") explains a SILENT close, and ends in "mint a fresh one". After a
+    refusal THIS device decided (the inviter could not prove itself, or another
+    device answered) it is wrong, and re-minting from the same old inviter fails the
+    same way, so the specific sentence stands alone (UX U2, review N2).
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if isinstance(last_reason, _KnownJoinCause):
+        return MeshRefusal("join_failed", f"could not join: {last_reason}.")
+    return MeshRefusal(
         "join_failed",
         "could not join: "
         f"{last_reason or 'every endpoint in the invite refused or was unreachable'}. "
@@ -5511,10 +5726,6 @@ def _cmd_join(args: argparse.Namespace) -> int:
         "every refusal tells an attacker which tokens are real. If you are not certain "
         "the token is still open, mint a fresh one with `lop network invite`.",
     )
-    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
-    if explain:
-        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
-    raise failure
 
 
 def _read_token(argument: str) -> str:
@@ -6080,6 +6291,8 @@ def _join_one(
 
     Handshake = helpers["Handshake"]
     Credential = helpers["Credential"]
+    from local_operator.network.handshake import DialerExpectation
+
     store = helpers["store"]
     invite_mod = helpers["invite_mod"]
     relay_mod = helpers["relay_mod"]
@@ -6104,6 +6317,12 @@ def _join_one(
         attempt.note("dial", exc.__class__.__name__)
         _record_join_attempt(attempt, envelope, store, ok=False)
         return f"nothing was listening at {host} ({exc.__class__.__name__})"
+    # The joiner's end of a pair socket may now park for up to the whole invite life
+    # (``handshake.PAIR_PARK_CEILING_S``) while a person types the code in the app;
+    # kernel keepalive keeps NAT/tunnel mappings warm without any new wire frame.
+    from local_operator.network.handshake import set_pair_keepalive
+
+    set_pair_keepalive(sock)
     deadline = wire.deadline_in(settings.handshake_timeout_s)
     # ONE ANSWER, used for the hello we send AND for our own durable record: the
     # inviter copies the hello's list onto our member row, and `listen` is what
@@ -6138,6 +6357,14 @@ def _join_one(
             "joiner_public_key": identity.public_key,
             "joiner_name": args.name or identity.name,
         }
+        policy = str(getattr(envelope, "credential_offers", "") or "")
+        if policy:
+            # ECHOED, NOT ENFORCED: the owner compares this with the invite it
+            # saved and refuses a mismatch; omitted for a default invite so the
+            # hello stays byte-identical to older builds.
+            from local_operator.network.invite import OFFER_POLICY_KEY
+
+            handshake.join_block[OFFER_POLICY_KEY] = policy
         handshake.send_hello(sock)
         reader = wire.FrameReader(sock)
         attempt.stage = "challenge"
@@ -6151,9 +6378,23 @@ def _join_one(
         # ``_JoinAttempt`` names it, and without this line a death while WRITING the
         # auth frame was filed at `challenge` — one statement behind the wire.
         attempt.stage = "auth"
+        # A challenge from anyone but the token's inviter is refused before our auth
+        # frame leaves (``Handshake.refuse_unexpected_peer``); the proof check below
+        # is what actually authenticates the inviter.
+        inviter = DialerExpectation(device_id=envelope.inviter_device_id)
+        handshake.refuse_unexpected_peer(inviter)
         handshake.send_auth(sock, credential)
         attempt.stage = "welcome"
-        handshake.read_welcome(reader, deadline)
+        # PINNED TO THE TOKEN'S INVITER (mesh-listener-auth §5). The joiner has no
+        # member table, so the welcome proof is verified under the key the inviter
+        # sends in ``welcome.inviter`` — accepted only because its fingerprint is
+        # the token's ``inviter_device_id`` — and MACed under the invite key. That MAC
+        # is NOT the identity check: every member can derive the invite key (epoch
+        # secret + the plaintext invite id), so join security rests on the signature
+        # under the fingerprint-bound key (design §5, review N-1). Without this the SAS
+        # digits were the only MITM defence, and ``--automated`` joins
+        # (``typed = result.sas``) skip that comparison.
+        handshake.read_welcome(reader, deadline, inviter)
         attempt.stage = "establish"
         result = handshake.establish()
         attempt.result = result
@@ -6172,6 +6413,9 @@ def _join_one(
             reader=reader,
             remaining_s=invite_mod.remaining_seconds(envelope),
             attempt=attempt,
+        )
+        _refuse_offer_against_policy(
+            envelope, offer_view["items"], sock=sock, codec=codec, helpers=helpers
         )
         # The offer read is done; the NEXT wire step is the ready frame, whichever
         # seat (park, automated, prompt) decides its value. Marking it here means a
@@ -6266,6 +6510,19 @@ def _join_one(
         # sentence below would be unreachable.
         attempt.note("handshake", refusal.code)
         _record_join_attempt(attempt, envelope, store, ok=False)
+        if refusal.code == "listener_unproven":
+            # A KNOWN CAUSE, not an ambiguous wire close (UX U2, security S-5): the
+            # inviter answered and could not prove itself. The sentence already names
+            # the only way forward (update the inviter), so the caller must not bury
+            # it under the generic "mint a fresh token" tail, which loops.
+            return _KnownJoinCause(refusal.code, refusal.sentence)
+        if refusal.code in ("invite_wrong_inviter", "peer_identity_mismatch"):
+            return _KnownJoinCause(
+                refusal.code,
+                f"a different device answered at {host}, not the one that issued this "
+                "invite, so this device stopped before joining; nothing was shared. Check "
+                "the address (or drop --host) and try again",
+            )
         return f"the handshake at {host} stopped: {refusal.sentence}"
     except MeshRefusal as exc:
         if isinstance(exc, JoinParkUnanswered):
@@ -6384,7 +6641,9 @@ def _drain_pair_offer(
     op = str(frame.get("op") or "")
     if op == "net_pair_abort":
         raise refusal_from_pairing(
-            str(frame.get("reason") or "aborted"), detail=str(frame.get("detail") or "")
+            str(frame.get("reason") or "aborted"),
+            detail=str(frame.get("detail") or ""),
+            spent=frame.get("spent") is True,
         )
     if op != "net_pair_offer":
         raise MeshRefusal(
@@ -6394,6 +6653,75 @@ def _drain_pair_offer(
         )
     items = parse_pair_offer(frame)
     return ("empty" if not items else "listed"), items
+
+
+def _refuse_offer_against_policy(
+    envelope: Any,
+    items: list[dict[str, Any]],
+    *,
+    sock: Any,
+    codec: Any,
+    helpers: dict[str, Any],
+) -> None:
+    """Fail closed when a ``--no-credential-offers`` invite receives a non-empty list.
+
+    The owner enforces the policy from its saved invite; this is the joiner's own
+    half, so a modified or misbehaving owner cannot get credential rows onto this
+    screen (or into a confirm) under an invite that promised none. An EMPTY list,
+    or no frame at all (an owner predating ``pair-offer-v1``), is fine.
+
+    THE OWNER IS TOLD (review round 1, R1-3): raising alone left the owner waiting
+    out its window and recording a retryable ``timeout``, so the invite stayed
+    redeemable. A sealed ``net_pair_abort`` (``protocol_error``) in place of the
+    ready frame is what the owner's ready read already treats as terminal, so it
+    consumes the invite at once — the same wire the local decline uses. Sending
+    is best effort: the joiner refuses whether or not the owner is still there.
+    """
+    if items and not getattr(envelope, "offers_credentials", True):
+        from local_operator.network.types import MeshRefusal
+
+        sentence = (
+            "the other device sent a share list although this invite carries no "
+            "credential offers; the pairing is refused"
+        )
+        try:
+            sock.sendall(
+                codec.seal(
+                    helpers["pair_abort_frame"](req=1, reason="protocol_error", detail=sentence)
+                )
+            )
+        except OSError:
+            pass
+        raise MeshRefusal("protocol_error", sentence)
+
+
+def _pin_inviter_key(answer: dict[str, Any], envelope: Any, handshake: Any) -> None:
+    """Refuse a member table whose inviter row carries a key the handshake did not verify.
+
+    The welcome proof bound the inviter to ONE key (fingerprint == the token's
+    ``inviter_device_id``, signature under it). The ``pair_result`` table that
+    follows is what the joiner persists and later verifies every dial against, so
+    an inviter row with a different ``public_key`` would undo the handshake's pin
+    on the very next dial (mesh-listener-auth §5). A row for the inviter that is
+    absent is left to ``_persist_join``; a row that disagrees is refused here,
+    before anything is written.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    for row in answer.get("members") or []:
+        if not isinstance(row, dict) or row.get("device_id") != envelope.inviter_device_id:
+            continue
+        verified = (
+            str(getattr(handshake, "peer_public_key", "") or "")
+            if getattr(handshake, "auth_verified", False)
+            else ""
+        )
+        if not verified or str(row.get("public_key") or "") != verified:
+            raise MeshRefusal(
+                "invite_wrong_inviter",
+                "the inviter's member row carries a different key than the one it proved "
+                "in the handshake; nothing was admitted",
+            )
 
 
 def _finish_pairing(
@@ -6460,6 +6788,7 @@ def _finish_pairing(
                 "the other device sent a second share list; the pairing is refused",
             )
         items = parse_pair_offer(answer)
+        _refuse_offer_against_policy(envelope, items, sock=sock, codec=codec, helpers=helpers)
         offer_view["state"] = "empty" if not items else "listed"
         offer_view["items"] = items
         answer = codec.open(reader.read_record_payload(deadline))
@@ -6475,11 +6804,23 @@ def _finish_pairing(
         # The refusing device's own sentence comes too: it is the only place the
         # joiner can learn which id was refused and what to do about it (Q-R3-3).
         raise refusal_from_pairing(
-            str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
+            str(answer.get("reason") or "aborted"),
+            detail=str(answer.get("detail") or ""),
+            spent=answer.get("spent") is True,
         )
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
     shares = [str(key) for key in (answer.get("shares") or [])]
+    if shares and not getattr(envelope, "offers_credentials", True):
+        # FAIL CLOSED BEFORE PERSISTING: a --no-credential-offers invite was
+        # answered with granted shares, which an honest owner of this build
+        # cannot produce (it grants from its saved invite). Not joining is the
+        # only safe reading of a peer that broke the invite's terms.
+        raise MeshRefusal(
+            "protocol_error",
+            "the other device granted credentials although this invite carries no "
+            "credential offers; the pairing is refused",
+        )
     # THE WIRE READ IS DONE; what follows is LOCAL persistence. Advancing the stage past
     # ``result_read`` is what lets ``_park_join``'s transport clause tell a death ON THE
     # WIRE (a transport ``pairing_stopped``) from a LOCAL write failure — an ``OSError``
@@ -6487,6 +6828,7 @@ def _finish_pairing(
     # be relabelled a peer-side stop (review round 1, F2).
     if attempt is not None:
         attempt.stage = "persist"
+    _pin_inviter_key(answer, envelope, handshake)
     record = _persist_join(
         answer,
         envelope,
@@ -6656,10 +6998,30 @@ def _awaiting_payload(pending: Any) -> dict[str, Any]:
         # An owner-side state must never leak into a joiner payload: this record is
         # a PendingJoin, whose states are the three below.
         state = offers_mod.OFFER_EMPTY
-    sentence = (
-        f"Ask the user to read back the {what} {shown} from the other device, then "
-        f"confirm it with `lop network join --confirm <{what}>`."
-    )
+    if pending.verify:
+        # ``--verify`` asks for the 160-bit FINGERPRINT, which the Mesh approvals card's
+        # six-digit input cannot carry, so this mode stays on the terminal path.
+        sentence = (
+            f"Ask the user to read back the {what} {shown} from the other device, then "
+            f"confirm it with `lop network join --confirm <{what}>`."
+        )
+    else:
+        # APP FIRST (operator request: pairing must not require terminal commands). The
+        # person approves it in the app's Mesh approvals by typing the code the OTHER
+        # device shows; the agent relays nothing back. The terminal path still exists
+        # as a same-user fallback (GUIDE "Without the app") and is not named here, so
+        # an agent reading this sentence is never handed a command to run itself. The
+        # last clause claims only what holds (review round 1, M3/S-R1-6): the app's
+        # attestation guards the CARD; the CLI fallback is not gated, so the sentence
+        # asks the agent to leave the answer to the person rather than claiming an
+        # agent cannot answer.
+        sentence = (
+            f"This device's code is {shown}: the person on the other device types it "
+            "there. Ask the user to approve this pairing in the app's Mesh approvals by "
+            "typing the code the other device shows. Leave the answer to the user: the "
+            "app's card is the path that needs a person, and the terminal fallback is "
+            "a same-user path with no such check."
+        )
     clause = offers_mod.sentence_clause(
         state, items, inviter=pending.inviter_name or pending.inviter_device_id
     )
@@ -6787,6 +7149,10 @@ def _park_join(
         # printed, not a re-enumeration that could have drifted.
         offers=[dict(item) for item in offer_view["items"]],
         offer_state=str(offer_view["state"]),
+        # The Mesh approvals card's attestation binds this (``pairing_attest``).
+        nonce=types.new_pairing_nonce(),
+        # The card's "as <role>" (QA round 1, Q1): the token's own role.
+        role=str(getattr(envelope, "role", "") or ""),
     )
     # A leftover answer from an earlier ceremony would answer THIS one: the record is
     # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is
@@ -6813,7 +7179,8 @@ def _park_join(
             )
         )
         print(
-            f"waiting up to {int(window)}s for the code from the other device: answer it with "
+            f"waiting up to {int(window)}s for the code from the other device: type it in "
+            "the app's Mesh approvals, or answer it with "
             "`lop network join --confirm <code>`, run wherever the person reading that "
             "screen is."
         )
@@ -6924,11 +7291,11 @@ def _live_parked_joins(store: Any) -> list[Any]:
     that knows the difference between "that ceremony has an outcome, report it" and
     "that ceremony is gone", and it is the only place both are asked at once.
     """
-    return [
-        row
-        for row in store.pending_joins()
-        if row.status == "awaiting_confirmation" and row.is_open() and _process_alive(row.pid)
-    ]
+    # ONE implementation shared with the Mesh approvals card (``pairing_answers``);
+    # the probe stays this module's ``_process_alive`` so callers can patch it here.
+    from local_operator.network import pairing_answers
+
+    return pairing_answers.live_parked_joins(store, alive=_process_alive)
 
 
 def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
@@ -6948,7 +7315,7 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
     through its outcome, so answering one twice reports the same receipt instead of
     inventing a second pairing.
     """
-    from local_operator.network import store, types
+    from local_operator.network import store
     from local_operator.network.types import MeshRefusal
 
     records = store.pending_joins()
@@ -6974,13 +7341,12 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
     live_ids = {row.invite_id for row in live}
     chosen = next((row for row in reversed(matches) if row.invite_id in live_ids), None)
     if chosen is not None:
-        answer = types.JoinAnswer(
-            invite_id=chosen.invite_id,
-            decision="admit",
-            code=typed,
-            answered_by=_answered_by(args),
+        # The ONE writer of a joiner answer, shared with the Mesh approvals card.
+        from local_operator.network import pairing_answers
+
+        pairing_answers.submit(
+            store, chosen, decision="admit", code=typed, answered_by=_answered_by(args)
         )
-        store.save_join_answer(answer)
         outcome = _await_join_result(chosen, store)
         store.clear_pending_join(chosen.invite_id)
         store.clear_join_answer(chosen.invite_id)
@@ -7037,20 +7403,12 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
 def _parked_code_matches(pending: Any, typed: str) -> bool:
     """Whether the human's value is this ceremony's own derivation.
 
-    ``--verify`` compares the 160-bit fingerprint as the prompt path does, and strips
-    the same separators; otherwise it is the six digits through the shared
-    ``sas_matches`` (constant time, and a value that is not six digits is a mismatch
-    rather than a near miss).
+    Delegates to ``pairing_answers.parked_code_matches`` — the one checker the CLI
+    and the Mesh approvals card share, so the two doors cannot drift.
     """
-    import hmac
+    from local_operator.network import pairing_answers
 
-    from local_operator.network.handshake import sas_matches
-
-    if pending.verify:
-        typed_fp = typed.replace("-", "").replace(" ", "").upper()
-        derived_fp = str(pending.fingerprint).replace("-", "").upper()
-        return bool(typed_fp) and hmac.compare_digest(derived_fp, typed_fp)
-    return sas_matches(str(pending.sas), typed)
+    return pairing_answers.parked_code_matches(pending, typed)
 
 
 def _await_join_result(pending: Any, store: Any) -> Any:
@@ -7162,6 +7520,16 @@ def _persist_join(
                 added_via="invite",
             ),
         ]
+    # NO RECEIVER-LOCAL GRANT RIDES THE ADMISSION TABLE (#4245 security round 4, S17,
+    # the join-path sibling of S15): ``workset_import`` is THIS device's own decision
+    # about a peer ("granted on the receiver, never implied by any role incl. admin"),
+    # and a fresh joiner has decided nothing yet, so whatever the inviter's table says
+    # about it is dropped here exactly as ``relay.adopt_members`` drops it from a pull.
+    from local_operator.network.relay import _without_receiver_local
+
+    for row in rows:
+        if row.device_id != identity.device_id:
+            row.capabilities = _without_receiver_local(row.capabilities)
     self_row = next((row for row in rows if row.device_id == identity.device_id), None)
     # WHERE WE CAN BE REACHED, from our own settings rather than from the address
     # we happened to dial.
@@ -9976,6 +10344,26 @@ def _peer_line(row: Any) -> str:
     return line + readiness_mod.build_suffix(comparison)
 
 
+def _listener_proof_line(row: Any) -> str:
+    """The dedicated line for a member whose listener cannot prove its identity.
+
+    NOT PART OF THE REACHABILITY PARENTHETICAL, on purpose: that clause follows
+    ``reason``, which the redial loop overwrites with each later ``connect_failed``,
+    while ``listener_proof`` is the relay's sticky fact (``RelayServer.
+    _unproven_listeners``) — so this line stays put until a verified outbound link
+    to the member exists, and the remedy is never hidden by backoff.
+    """
+    from local_operator.resume import UNNAMED_DEVICE, listener_unproven_sentence
+
+    if not isinstance(row, Mapping):
+        return ""
+    proof = row.get("listener_proof")
+    if not isinstance(proof, Mapping) or proof.get("state") != "unproven":
+        return ""
+    name = str(row.get("name") or "").strip() or UNNAMED_DEVICE
+    return "  " + listener_unproven_sentence(name, proof, device_id=str(row.get("device_id") or ""))
+
+
 def _cmd_peers(args: argparse.Namespace) -> int:
     # A LISTING PROBES ITS PEERS, so it needs the relay's own listing budget plus
     # slack rather than the 5s default: with the default, one unreachable member
@@ -10011,11 +10399,16 @@ def _cmd_peers(args: argparse.Namespace) -> int:
     if not isinstance(raw_rows, list):
         raw_rows = live.get("peers")
     rows: list[Any] = raw_rows if isinstance(raw_rows, list) else []
+    lines: list[str] = []
+    for row in rows:
+        lines.append(_peer_line(row))
+        proof_line = _listener_proof_line(row)
+        if proof_line:
+            lines.append(proof_line)
     return _emit(
         args,
         {"ok": True, "peers": rows},
-        [_peer_line(row) for row in rows]
-        or ["no peers: this device is the only member of its networks"],
+        lines or ["no peers: this device is the only member of its networks"],
     )
 
 
@@ -10305,7 +10698,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
     property the joiner's prompt enforces from the other side. ``--sas-stdin`` is
     the harness's seam and is refused outside ``LOP_NETWORK_TEST_MODE=1``.
     """
-    from local_operator.network import store, types
+    from local_operator.network import types
 
     rows = _pending_pairings()
     if args.list_pending:
@@ -10340,47 +10733,47 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         answer, shares = _read_confirmation(args, chosen)
         admit = answer == "yes"
     chosen_shares = sorted(shares) if admit else []
-    live = _relay_call(
-        "net_pair_confirm",
-        invite_id=invite_id,
-        decision="admit" if admit else "decline",
-        matched=admit,
-        reason="" if admit else "declined",
-        answered_by=_answered_by(args),
-        # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
-        # have sent an offer understands them; one that does not answers without
-        # the echo below, and this CLI says so by name instead of quietly
-        # admitting more than the operator chose.
-        shares=chosen_shares,
-        allow_no_answer=True,
-    )
-    if live is None:
-        # No relay running: the pairing loop cannot be waiting either, so this
-        # records the answer for a relay that starts later — and says so, rather
-        # than reporting a success that nobody is watching for.
-        decision = types.PairDecision(
+    # ONLY A LIVE ACKNOWLEDGMENT IS AN ANSWER (security review round 3, S-R3-1).
+    # This used to write a decision file and a success audit itself whenever the
+    # relay did not answer, "for a relay that starts later". That fallback was
+    # wrong twice: the file is unstamped, so no ceremony's poll would ever honour
+    # it (it only blocked the next live answer), and a missing reply AFTER the
+    # frame left may mean the relay already recorded an answer — so reporting
+    # either "recorded" or "nothing recorded" would be a guess. Each outcome is
+    # now said only as far as it is known, nothing is written here, and the exit
+    # is non-zero. An explicit relay rejection still raises from ``_relay_call``
+    # with the relay's own code and sentence.
+    try:
+        live = _relay_call(
+            "net_pair_confirm",
             invite_id=invite_id,
             decision="admit" if admit else "decline",
             matched=admit,
             reason="" if admit else "declined",
+            answered_by=_answered_by(args),
+            # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
+            # have sent an offer understands them; one that does not answers without
+            # the echo below, and this CLI says so by name instead of quietly
+            # admitting more than the operator chose.
             shares=chosen_shares,
+            allow_no_answer=True,
+            report_unsent=True,
         )
-        store.save_pair_decision(decision, None)
-        _audit(
-            "pairing_confirmed" if admit else "pairing_refused",
-            actor=str(chosen.get("joiner_device_id") or ""),
-            subject=str(chosen.get("network_id") or ""),
-            cause="" if admit else "declined",
+    except types.ControlRequestUnsent as exc:
+        # Known: the frame never left this device, so nothing can have recorded it.
+        raise types.MeshRefusal(
+            CODE_RELAY_UNAVAILABLE,
+            "No relay is running on this device, so nothing was recorded. "
+            "Start it and answer again.",
+        ) from exc
+    if live is None:
+        # Sent, but no reply: the relay may or may not have recorded it, so this
+        # claims neither.
+        raise types.MeshRefusal(
+            "pairing_answer_unconfirmed",
+            "Could not confirm whether the relay recorded this answer.",
         )
-        live = {
-            "invite_id": invite_id,
-            "decision": decision.decision,
-            "matched": admit,
-            "joiner_device_id": chosen.get("joiner_device_id"),
-            "shares": list(chosen_shares),
-            "relay": "not running: the answer is recorded for when it is",
-        }
-    elif chosen_shares and "shares" not in live:
+    if chosen_shares and "shares" not in live:
         # §4.5, the one silent-loss case: the relay that answered did not report
         # the share choices, so it is older than this CLI and the shares were not
         # applied by it. The admission still lands — warn, never refuse; the
@@ -10412,7 +10805,16 @@ def _pending_pairings() -> list[dict[str, Any]]:
     rows = live.get("value") if isinstance(live, dict) else None
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
-    return [pending.to_json() for pending in store.pending_pairings()]
+    # Stage-1 rows (``awaiting_joiner``) are the Mesh approvals card's "waiting for
+    # the joiner" state: nothing to compare yet, so the y/N never lists them —
+    # the same filter the relay's ``net_pair_pending`` applies for this caller.
+    from local_operator.network.types import PAIR_STAGE_AWAITING_CONFIRMATION
+
+    return [
+        pending.to_json()
+        for pending in store.pending_pairings()
+        if pending.stage == PAIR_STAGE_AWAITING_CONFIRMATION
+    ]
 
 
 def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tuple[str, list[str]]:
@@ -10590,6 +10992,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _doctor_locally(args)
     checks = [dict(check) for check in payload.get("checks") or []]
+    # THIS DEVICE'S NETWORK FIRST (2026-11-18): see ``network.uplink``. A
+    # passive route reading taken here, on the relay's own host; prepended so
+    # the first remedy names this device when the fault is ours.
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     from local_operator.network import relay as relay_mod
 
     supervision = relay_mod.supervision_state()
@@ -10648,14 +11056,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         observed = check.get("observed")
         observed = observed if isinstance(observed, Mapping) else {}
         scoped = bool(observed.get("out_of_scope"))
+        if check.get("check") == "uplink":
+            # Composed, localized prose (``network.uplink``): printed as written,
+            # never through the dial-code gloss, with its remedies under it.
+            state = (
+                "n/a " if observed.get("not_applicable") else ("ok " if check.get("ok") else "FAIL")
+            )
+            lines.extend(readiness_mod.uplink_lines(check, state))
+            continue
         if scoped:
             # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING (F9; design
             # round 1, D3): the same address reads the same way here as on
             # ``ready`` — neither a failure nor a verification — and the raw
             # dial result does not ride along.
             state = "n/a "
+        elif check.get("ok"):
+            state = "ok "
         else:
-            state = "ok " if check.get("ok") else "FAIL"
+            # ``severity: warn`` (the unproven-listener finding): named, not gating.
+            state = "warn" if check.get("severity") == "warn" else "FAIL"
         # The shared clause hangs here with one separator spelling: the
         # sentences live in ``readiness``, so these lines and the readiness
         # readings cannot drift apart (design round 1, D3).
@@ -10665,25 +11084,57 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         else:
             clause = readiness_mod.informational_clause(check)
             detail_words = doctor_detail_words(str(check.get("detail", "")))
+            if check.get("check") == "listener_proof" and check.get("message"):
+                # The warning's own sentence; its ``detail`` stays a code (UX U8).
+                detail_words = str(check["message"])
+            elif check.get("endpoint_removed") and check.get("endpoint"):
+                # Said only when the address really left the row (UX U6): the
+                # ``bad_mac`` demotion, never an unauthenticated answer (review M1).
+                owner = str(check.get("device_name") or check.get("device_id") or "")
+                detail_words += f"; this device removed the address from {owner}'s record"
+        # Empty columns are dropped, not joined: a row with no endpoint printed two
+        # spaces where the address would be (UX U7).
+        # ``state`` keeps its padding ("ok " aligns with "FAIL"); only the columns
+        # after it collapse.
+        head = f"{state} " + " ".join(
+            str(part)
+            for part in (
+                check.get("check", ""),
+                check.get("device_id", ""),
+                check.get("endpoint", ""),
+                detail_words,
+            )
+            if part
+        )
         lines.append(
-            f"{state} {check.get('check', '')} {check.get('device_id', '')} "
-            f"{check.get('endpoint', '')} {detail_words}".rstrip()
+            head
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
             + (f" — {clause}" if clause else "")
         )
+        if check.get("check") == "listener_proof":
+            # The member cannot be dialled until it updates, so the remedy is the
+            # point of the row: printed, not left to ``--json``.
+            lines.extend(f"    - {remedy}" for remedy in check.get("remedies") or ())
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
     if not payload.get("identity_present", True):
         lines.append(readiness_mod.NO_IDENTITY_LINE)
 
     def failure_words(check: Mapping[str, Any]) -> str:
+        if check.get("check") == "uplink":
+            return f"uplink: {check.get('detail', '') or 'failed'}"
         return (
             f"{check.get('check', '')}: "
             f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
         )
 
+    # A ``severity: warn`` row (the unproven-listener finding) is NAMED but does not
+    # gate: the handshake row beside it already reports the failed dial, and an
+    # inbound link from that member can still be healthy.
     link_failures = [
-        failure_words(check) for check in checks if not check.get("ok") and check["class"] == "link"
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "link" and check.get("severity") != "warn"
     ]
     payload_failures = [
         failure_words(check)
@@ -10706,6 +11157,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "degraded": degraded,
         "payload_failures": payload_failures,
         "supervision_failures": supervision_failures,
+        "uplink": uplink_reading,
     }
     if not healthy:
         answer["code"] = "unhealthy"
@@ -10745,6 +11197,49 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                     "this device"
                 )
     return _emit(args, answer, lines)
+
+
+def _uplink_reading() -> dict[str, Any]:
+    """This device's passive uplink reading (``network.uplink``); never raises.
+
+    A module attribute lookup at call time so tests inject a scripted reading
+    with ``monkeypatch`` instead of depending on the runner's real routes.
+    """
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.read_uplink()
+    except Exception:  # noqa: BLE001 — fail-safe: an unreadable uplink claims nothing
+        return uplink_mod.unknown_reading()
+
+
+def _uplink_rows(reading: Mapping[str, Any], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``uplink`` rows, or none at all when building them fails (fail-safe)."""
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.uplink_checks(reading, checks, names=_member_names())
+    except Exception:  # noqa: BLE001 — never let the new row break the old report
+        return []
+
+
+def _member_names() -> dict[str, str]:
+    """Device id -> member name across this device's networks, for row labels.
+
+    ``doctor``'s rows carry only the id; an uplink sentence that names a peer
+    reads its name. An unreadable store labels by id, never fails the report.
+    """
+    from local_operator.network import store
+
+    names: dict[str, str] = {}
+    try:
+        for record in store.list_networks():
+            for member in record.members:
+                if member.name:
+                    names.setdefault(member.device_id, member.name)
+    except Exception:  # noqa: BLE001 — labels only
+        return {}
+    return names
 
 
 def _ready_lines(checks: list[dict[str, Any]]) -> list[str]:
@@ -10811,6 +11306,11 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
+    # THIS DEVICE'S NETWORK FIRST: the same rows, and the same reason, as
+    # ``doctor`` (see ``network.uplink``).
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     # THE ROW'S OWN STATE, ON THE ROW (F8 residual): `ready --json` is the
     # drill's acceptance surface, and a reader there scans ROWS, not the
     # aggregate — a reported-but-non-gating row must not read failure-shaped
@@ -10834,7 +11334,7 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     # nothing admission-shaped or still-gating.
     failures = [_ready_failure(check) for check in readiness_mod.onboarding_failures(checks)]
     healthy = not failures and bool(payload.get("identity_present", True))
-    answer: dict[str, Any] = {**payload, "ok": healthy}
+    answer: dict[str, Any] = {**payload, "checks": checks, "ok": healthy, "uplink": uplink_reading}
     if not healthy:
         answer["code"] = "unhealthy"
         answer["message"] = "; ".join(failures) or "the device has no identity"
@@ -11148,6 +11648,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         from local_operator.paths import config_dir
 
         checks.extend(readiness_mod.local_serve_daemon_rows(config_dir()))
+        checks.extend(readiness_mod.local_github_source_rows(config_dir()))
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
@@ -12853,7 +13354,9 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             # the state round trip and the apply's summary), printed rather than
             # re-derived here — the definitions verb's rule.
             lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
-            for outcome in ("installed", "updated"):
+            # ``withdrawn``: a mirror the peer removed because this device turned
+            # the server off — the peer's own answer, never what was asked.
+            for outcome in ("installed", "updated", "withdrawn"):
                 for row in item.get(outcome) or []:
                     if isinstance(row, dict):
                         lines.append(f"  {outcome} server {row.get('name')!r}")
@@ -12910,6 +13413,11 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         withheld = str(row.get("withheld") or "")
         if withheld:
             line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
+        # A server this device turned off is not sent; its name goes out as a
+        # withdrawal instead (mcpdefs' explicit-withdrawal exception). Only for
+        # the device's own rows: a mirror is never sent from here either way.
+        if row.get("disabled") and not origin:
+            line += " — disabled: not sent; peers withdraw an unedited mirror of it"
         lines.append(line)
     if not lines:
         lines = ["no user-scope MCP servers on this device"]

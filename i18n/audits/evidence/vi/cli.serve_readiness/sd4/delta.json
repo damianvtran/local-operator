@@ -1,0 +1,70 @@
+{
+  "prior_record": "i18n/audits/evidence/vi/cli.serve_readiness/sd2r/record.json",
+  "prior_target_sha256": "a2a52a9ae4d17d96c11f57a1cfb75ba5ba3dc673480cb3ec31eb3f1051423d22",
+  "prior_catalogue_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "unchanged_keys": [
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.stale"
+  ],
+  "changed_new_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "before_after": {
+    "cli.serve_readiness.unproven": {
+      "before": "đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)",
+      "after": "đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)"
+    },
+    "cli.serve_readiness.not_reporting": {
+      "before": "đã được ghi nhận nhưng không phản hồi (heartbeat đã ngừng)",
+      "after": "đã ghi nhận nhưng không phản hồi (heartbeat đã ngừng)"
+    },
+    "cli.serve_readiness.not_this_daemon": {
+      "before": "đã được ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác",
+      "after": "đã ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác"
+    },
+    "cli.serve_readiness.unknown_state": {
+      "before": "được ghi nhận ở trạng thái không xác định",
+      "after": "bản ghi có trạng thái không xác định"
+    },
+    "cli.serve_readiness.recorded_gap": {
+      "before": "bản dựng được ghi nhận {recorded}, bản cài đặt {install} (chưa xác minh danh tính tiến trình)",
+      "after": "bản ghi cho biết bản dựng {recorded}; bản dựng đã cài đặt là {install}"
+    },
+    "cli.serve_readiness.unknown": {
+      "before": "{count, plural, other {daemon `lop serve` trên {device}: {reasons}, nên chưa biết có khớp với bản cài đặt và được giám sát hay không}}",
+      "after": "{count, plural, other {daemon `lop serve` trên {device} — {reasons}, nên chưa biết có khớp với bản cài đặt và được giám sát hay không}}"
+    },
+    "cli.serve_readiness.identity_restart": {
+      "before": "trên {device}, chạy `lop services status` để kiểm tra các bản ghi, rồi chạy `lop services restart` để ghi nhận danh tính tiến trình; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện",
+      "after": "trên {device}, chạy `lop services restart` để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện"
+    },
+    "cli.serve_readiness.pid_reason": {
+      "before": null,
+      "after": "{count, plural, other {mã định danh tiến trình {pids} — {reason}}}"
+    },
+    "cli.serve_readiness.and_more": {
+      "before": null,
+      "after": "{count, plural, other {và # nữa}}"
+    },
+    "cli.serve_readiness.identity_no_action": {
+      "before": null,
+      "after": "{count, plural, other {bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này}}"
+    },
+    "cli.serve_readiness.identity_restart_manual": {
+      "before": null,
+      "after": "trên {device}, khởi động lại `lop serve` thủ công để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; daemon không thể tự nạp lại trong tiến trình hiện tại"
+    }
+  }
+}

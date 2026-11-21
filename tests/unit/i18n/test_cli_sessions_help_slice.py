@@ -79,7 +79,7 @@ def test_the_catalogue_is_the_golden_fixture() -> None:
 
 
 def test_the_sessions_block_renders_through_the_help_bootstrap() -> None:
-    """The block's 45 calls + 6 descriptions all use the envelope pattern; and
+    """The block's 46 calls + 6 descriptions all use the envelope pattern; and
     no site inside the block carries an ignore (there is none to carry)."""
     source = (REPO / CLI).read_text(encoding="utf-8")
     start = source.index("sessions_parser = subparsers.add_parser(")
@@ -91,8 +91,19 @@ def test_the_sessions_block_renders_through_the_help_bootstrap() -> None:
     nxt = after + source[after:].index(" = subparsers.add_parser(")
     block = source[start:nxt]
     calls = block.count("_sh.")
-    assert calls == 51, calls
-    assert block.count('.envelope(locale=help_locale)["text"]') == 51
+    # 52 = 51 on main + `sessions setup-deps --json`'s help (`_sh.json()`, PR #4378);
+    # the call lists otherwise match name for name.
+    assert calls == 52, calls
+    # `sessions move`'s working-set flags (PR #4241: --no-engage-on-arrival,
+    # --dry-run, --confirm-working-set, --without-working-set, --yes) render through
+    # the same bootstrap from their own fully translated namespace
+    # (`cli.sessions_move_workset`, imported as `_wsh`), so they add envelope sites
+    # without adding `_sh.` keys or growing this tranche's recorded coverage gaps.
+    # `sessions setup-deps` (PR #4378) adds four more from the same namespace: its
+    # help, description, `session` positional and `--status` (`_wsh.deps_*`).
+    working_set_calls = block.count("_wsh.")
+    assert working_set_calls == 9, working_set_calls
+    assert block.count('.envelope(locale=help_locale)["text"]') == calls + working_set_calls
     assert "# i18n: ignore" not in block
     assert "_sh." in block
 

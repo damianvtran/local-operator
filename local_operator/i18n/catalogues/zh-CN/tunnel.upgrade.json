@@ -1,0 +1,5 @@
+{
+  "tunnel.upgrade.client.label": "需要更新隧道客户端",
+  "tunnel.upgrade.client.guidance": "Radient需要支持中继的隧道客户端。请运行{update_command}，如果config.yml中设置了{override}覆盖配置，则将其移除，然后使用{reconnect_command}重新连接。重新登录或更改计费设置无法解决此问题。",
+  "tunnel.upgrade.client.plain": "请将Local Operator更新到支持仅通过中继连接的隧道的版本。如果config.yml中设置了tunnel.transport: cloudflare覆盖配置，请将其移除，然后重新连接此电脑。重新登录或更改计费设置无法解决此问题。"
+}

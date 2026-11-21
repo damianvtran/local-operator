@@ -1,0 +1,17 @@
+{
+  "cli.serve_readiness.unproven": "đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)",
+  "cli.serve_readiness.not_reporting": "đã ghi nhận nhưng không phản hồi (heartbeat đã ngừng)",
+  "cli.serve_readiness.not_this_daemon": "đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID",
+  "cli.serve_readiness.unknown_state": "bản ghi có trạng thái không xác định",
+  "cli.serve_readiness.install_unknown": "chạy bản dựng không thể đối chiếu với bản cài đặt",
+  "cli.serve_readiness.cgroup_unknown": "chạy trong cgroup mà lần kiểm tra này chưa phân loại được",
+  "cli.serve_readiness.recorded_gap": "bản ghi cho biết bản dựng {recorded}; bản dựng đã cài đặt là {install}",
+  "cli.serve_readiness.unknown": "{count, plural, other {daemon `lop serve` trên {device} — {reasons}, nên chưa biết có khớp với bản cài đặt và được giám sát hay không}}",
+  "cli.serve_readiness.stale": "{count, plural, other {daemon `lop serve` trên {device} ({pids}) chạy {builds}, nhưng bản cài đặt là {install}: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó}}",
+  "cli.serve_readiness.other_unit": "{count, plural, other {daemon `lop serve` trên {device} thuộc dịch vụ khác ({holders}), không thuộc unit lop serve}}",
+  "cli.serve_readiness.identity_restart": "trên {device}, chạy `lop services restart` để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện",
+  "cli.serve_readiness.pid_reason": "{count, plural, other {mã định danh tiến trình {pids} — {reason}}}",
+  "cli.serve_readiness.and_more": "{count, plural, other {và # nữa}}",
+  "cli.serve_readiness.identity_no_action": "{count, plural, other {bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này}}",
+  "cli.serve_readiness.identity_restart_manual": "trên {device}, khởi động lại `lop serve` thủ công để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; daemon không thể tự nạp lại trong tiến trình hiện tại"
+}

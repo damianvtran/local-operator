@@ -91,6 +91,7 @@ from local_operator.network.credentials.messages import (
 from local_operator.network.credentials.placement import PlacementDocument
 from local_operator.network.credentials.repair import REPAIR_FAILURES
 from local_operator.network.credentials.types import (
+    BROKER_ERROR_REASONS,
     QUOTA_REASON_HOLDER_EXCLUDED,
     QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
@@ -993,6 +994,22 @@ class MeshCredentialBroker:
             session_id=for_session,
             detail=detail,
         )
+        # G9: ids only, so a later ``member rm`` can name what this holder may still
+        # serve from its hold if it is unreachable when it is removed (``lends.py``).
+        # (Distinct local names: binding ``github_app`` here would make it a local
+        # for the WHOLE function and break its earlier module-level uses.)
+        from local_operator.network.credentials.github import is_installation_grant
+        from local_operator.network.credentials.lends import note_lend
+
+        note_lend(
+            self.root,
+            self.network_id,
+            holder=by,
+            key=key,
+            grant_id=grant.grant_id,
+            until_ms=max(int(grant.grant_expires_at_ms or 0), int(grant.hold_until_ms or 0)),
+            revocable=is_installation_grant(grant),
+        )
         return grant.to_detail()
 
     async def _coalesced_resolve(self, **fields: Any) -> Any:
@@ -1185,15 +1202,27 @@ class MeshCredentialBroker:
             # "nothing signed in": the rows exist and the holder saw them answer a
             # usage limit. Judged on the owner's own id space — only an excluded id
             # this device really has counts, so a stale list over a logged-out owner
-            # still reads as the logout it is. ``retry_after_ms`` stays 0: the window
-            # is the HOLDER's evidence, and the borrower renders it from its own
-            # cooldowns (``client._resting_refusal``) rather than caching this.
+            # still reads as the logout it is. The holder's window is the HOLDER's
+            # evidence: the borrower renders it from its own cooldowns
+            # (``client._resting_refusal``) rather than caching this.
+            #
+            # WHAT THE OWNER ADDS (#3066 follow-up, review r2 n2): the rows the holder
+            # did NOT exclude may be kept out by THIS device's own blocks. Their
+            # earliest PROVEN reopening rides ``retry_after_ms`` under the same marker,
+            # so the borrower can state the earlier of the two waits instead of only
+            # its own. Only a proven time travels (``QuotaEligibility.retry_after_ms``
+            # is 0 otherwise), and 0 still means "nothing to add". The marker keeps a
+            # borrower of any build reading this as the holder's exclusion
+            # (``BrokerError.is_holder_exclusion`` checks ``reason`` first), so a
+            # remainder here is never cached as the owner's own pool state.
             if set(peer_excluded) & set(self._row_stamps(provider)):
+                owner_quota = self._quota_eligibility(provider, model_id, excluded_ids)
                 return BrokerError(
                     code="quota_blocked",
                     key=key,
                     owner_device=self.self_device,
                     owner_device_name=self.self_device_name,
+                    retry_after_ms=owner_quota.retry_after_ms if owner_quota is not None else 0,
                     message=(
                         f"every lendable login for {provider!r} was excluded by the holder, "
                         "which saw them rate-limited; nothing was lent"
@@ -1641,6 +1670,20 @@ class MeshCredentialBroker:
         if lender is None or not github_app.is_github_key(key):
             return 0
         return lender.revoke_holder(holder, key=key, cause=cause)
+
+    def tracks_lent_token(self, key: str, holder: str) -> bool:
+        """Whether :meth:`revoke_outstanding` would find a token for ``(key, holder)`` now.
+
+        The ``member rm`` receipt asks this before counting an App lend as
+        "revocation requested" (G9 review R1-1): the DELETE reaches only the
+        lender's IN-MEMORY registry, so after a relay restart a ledger row can name
+        a token nothing will revoke. Deliberately NOT :meth:`lent_hold_until_ms` —
+        that map also records PAT/``gh`` arms, which no DELETE reaches.
+        """
+        lender = self._github_lender
+        if lender is None or not github_app.is_github_key(key):
+            return False
+        return lender.outstanding(key=key, holder=holder) > 0
 
     def revoke_all_outstanding(self, *, cause: str = "panic") -> int:
         """DELETE every outstanding lent GitHub token, for every holder, now.
@@ -3714,17 +3757,26 @@ class MeshCredentialBroker:
         # reads is rendered where the operator is (``client.py`` →
         # ``messages.py``), because only that side knows the last-seen time and
         # whether the operator can run the remedy locally.
+        detail: dict[str, Any] = {
+            "credential_key": key,
+            "act": self.self_device,
+            "sub": by,
+            "code": code,
+            "capability": "broker_credential",
+        }
+        if error.reason in BROKER_ERROR_REASONS:
+            # WHICH ARM REFUSED (#3066 follow-up, QA r2 Q7). ``quota_blocked`` alone
+            # reads the same for "the holder excluded every login it saw resting" and
+            # "this device's own pool is spent"; the marker the wire reply already
+            # carries tells them apart. Only the quota-arm vocabulary is recorded (a
+            # fixed word, never an id, label or value), so every other refusal's
+            # audit row is byte-for-byte what it was.
+            detail["reason"] = error.reason
         self._audit(
             "credential.grant_refused",
             actor=self.self_device,
             subject=by,
-            detail={
-                "credential_key": key,
-                "act": self.self_device,
-                "sub": by,
-                "code": code,
-                "capability": "broker_credential",
-            },
+            detail=detail,
         )
         error.message = message or f"{provider!r} was refused ({code})"
         return error.to_detail()
@@ -3891,6 +3943,21 @@ def revoke_lent_on_removal(server: Any, network_id: str, device_ids: Iterable[st
         except Exception:  # noqa: BLE001 — the tombstone holds; the token's hour bounds it
             logger.warning("member removal: revoking lent GitHub tokens failed", exc_info=True)
     return revoked
+
+
+def lent_token_tracked(server: Any, network_id: str, key: str, holder: str) -> bool:
+    """Whether :func:`revoke_lent_on_removal` will DELETE ``holder``'s ``key`` token.
+
+    The same broker lookup and network guard as that function, and the same key
+    (``GITHUB_KEY``) it revokes, so the receipt's "revocation requested" count
+    cannot claim a DELETE the removal will not attempt (G9 review R1-1).
+    """
+    broker = getattr(server, _BROKER_ATTR, None)
+    if broker is None or (network_id and broker.network_id != network_id):
+        return False
+    if key != github_app.GITHUB_KEY:
+        return False
+    return broker.tracks_lent_token(key, holder)
 
 
 def _end_renewal_lends(

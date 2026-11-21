@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "audit_date": "2026-11-16",
+  "record_reference": {
+    "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/record.json",
+    "sha256": "0dd2884cea06c84c347e0879bbae798f5af4eb6383d55532bef984e54019813d"
+  },
+  "auditor_record_reference": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/record.json#/auditor",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "artifact_hashes": [
+    {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/report.md",
+      "sha256": "7adf116e1c0499e39b9be72b0044790320be37f7f2bf3461495aaa474a65da98"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "317c686cb8c9f3f42491dda172c5da4bf820fb237fc96b4ea0d4317d51d96c7b"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/ledger-receipt.json",
+      "sha256": "3a560b07236ccc7ce420672ff7c2ce3bdd1f5e051252c198a74454c725288782"
+    }
+  ],
+  "ledger_receipt": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/ledger-receipt.json",
+  "note": "Bundle integrity manifest, not execution log or ledger row; actual auditor provenance in referenced record."
+}

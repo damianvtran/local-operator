@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_operator import procstate
 from local_operator.session import index_read_model as rm
 from local_operator.session import transcript_index as ti
 
@@ -1170,3 +1171,465 @@ def test_the_order_projection_rejects_a_row_a_later_append_added(tmp_path):
         tmp_path, SID, collected_ids=[new_id], order_ids=[], source=rm.source_of(index)
     )
     assert result.state != "ready", "a pre-append projection answered for an appended row"
+
+
+# ---------------------------------------------------------------------------
+# The append-prefix rule (ADR docs/design/transcript-index-off-process.md step 2)
+# ---------------------------------------------------------------------------
+
+
+def _append(path: Path, *rows: dict[str, object]) -> tuple[int, int, float]:
+    """Append in place (same inode) and return the grown journal's source."""
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    st = path.stat()
+    return st.st_ino, st.st_size, st.st_mtime
+
+
+def _custom(id_: str, custom_type: str, **details: object) -> dict[str, object]:
+    return {
+        "id": id_,
+        "ts": 99.0,
+        "type": "custom",
+        "payload": {"custom_type": custom_type, "details": details},
+    }
+
+
+def _all_reads(root: Path, source: Any, *, prefix_ok: bool, collected: list[str]) -> list[str]:
+    return [
+        rm.summary(root, SID, source, prefix_ok=prefix_ok).state,
+        rm.order_facts(
+            root, SID, collected_ids=collected, order_ids=[], source=source, prefix_ok=prefix_ok
+        ).state,
+        rm.frame_facts(
+            root,
+            SID,
+            collected_ids=collected,
+            reaches_eof=True,
+            order_ids=[],
+            source=source,
+            prefix_ok=prefix_ok,
+        ).state,
+    ]
+
+
+def test_a_run_neutral_append_matches_the_grown_derivation(publication):
+    """Every prefix answer equals the resident derivation of the grown journal."""
+    from local_operator.session import open_frame as frame
+
+    root, _ = publication
+    path = root / "sessions" / SID / "transcript.jsonl"
+    source = _append(
+        path,
+        _custom("s1", "frontend_state_checkpoint_v1", state={}),
+        _custom("b1", "session_spend.v1"),
+    )
+    collected = ["u2", "a2", "s1", "b1"]
+    assert _all_reads(root, source, prefix_ok=False, collected=collected) == ["stale"] * 3
+    summary = rm.summary(root, SID, source, prefix_ok=True)
+    facts = rm.frame_facts(
+        root,
+        SID,
+        collected_ids=collected,
+        reaches_eof=True,
+        order_ids=["b1", "u1", "absent"],
+        source=source,
+        prefix_ok=True,
+    )
+    order = rm.order_facts(
+        root,
+        SID,
+        collected_ids=collected,
+        order_ids=["b1", "absent"],
+        source=source,
+        prefix_ok=True,
+    )
+    assert (summary.state, facts.state, order.state) == ("ready",) * 3, (
+        summary.reason,
+        facts.reason,
+        order.reason,
+    )
+    grown = ti.refresh_index(root, SID)
+    assert grown is not None
+    assert summary.value.scan.rows == grown.scan.rows
+    assert summary.value.runs == grown.runs[-1:]
+    bounds = frame.page_seq_bounds(grown, [{"id": id_} for id_ in collected], reaches_eof=True)
+    assert bounds is not None
+    assert facts.value.runs == frame.publish_runs(grown, first_seq=bounds[0], last_seq=bounds[1])
+    assert facts.value.rows == {id_: grown.journal_rows[id_] for id_ in (*collected, "u1", "b1")}
+    assert facts.value.missing_ids == ["absent"] and order.value.missing_ids == ["absent"]
+    assert facts.value.generation == grown.journal_generation
+    assert order.value.rows == {id_: grown.journal_rows[id_] for id_ in (*collected, "b1")}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(
+            {
+                "id": "u9",
+                "ts": 9.0,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": [{"text": "q"}]},
+            },
+            id="message-opens-a-run",
+        ),
+        pytest.param(_custom("m1", "completion_attention", token="t", anchor="u2"), id="marker"),
+        pytest.param(_custom("u1", "session_spend.v1"), id="repeats-a-covered-id"),
+        pytest.param({"id": "c1", "ts": 9.0, "type": "compaction", "payload": {}}, id="compaction"),
+    ],
+)
+def test_an_append_that_can_move_a_fact_is_never_prefix_ready(publication, row):
+    root, _ = publication
+    source = _append(root / "sessions" / SID / "transcript.jsonl", row)
+    assert "ready" not in _all_reads(root, source, prefix_ok=True, collected=["u2", "a2"])
+
+
+def test_a_torn_or_oversized_tail_and_an_in_place_rewrite_are_refused(publication, monkeypatch):
+    root, _ = publication
+    path = root / "sessions" / SID / "transcript.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"id":"half","type":"custom"')  # no newline: a write in flight
+    st = path.stat()
+    torn = (st.st_ino, st.st_size, st.st_mtime)
+    assert "ready" not in _all_reads(root, torn, prefix_ok=True, collected=["u2"])
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(',"payload":{"custom_type":"x"}}\n')
+    st = path.stat()
+    whole = (st.st_ino, st.st_size, st.st_mtime)
+    assert _all_reads(root, whole, prefix_ok=True, collected=["u2"]) == ["ready"] * 3
+    monkeypatch.setattr(rm, "_PREFIX_TAIL_MAX_BYTES", 8)
+    assert "ready" not in _all_reads(root, whole, prefix_ok=True, collected=["u2"])
+    monkeypatch.undo()
+
+    # Same inode, rewritten in place and longer: the covered last row moved, so
+    # the prefix is not proved and nothing answers from it.
+    data = path.read_bytes()
+    with path.open("r+b") as handle:
+        handle.write(data.replace(b'"q1"', b'"Q1-rewritten"'))
+    st = path.stat()
+    rewritten = (st.st_ino, st.st_size, st.st_mtime)
+    assert "ready" not in _all_reads(root, rewritten, prefix_ok=True, collected=["u2"])
+
+
+def _settled_tail_journal(root: Path) -> Path:
+    """One run whose completion marker settled it: ``start, u1, a1, marker``."""
+    return _journal(
+        root,
+        [
+            _custom("s1", "attention_started", token="t1"),
+            *_rows(1),
+            _custom("m1", "completion_attention", token="t1", kind="complete", anchor="a1"),
+        ],
+    )
+
+
+def test_a_start_appended_to_a_settled_run_answers_as_the_resident_scan(tmp_path):
+    """Review round 1, M1 / QA Q1: ``attention_started`` is not answer-neutral.
+
+    ``_Derivation.emit`` settles the tail run only while its marker follows the
+    last start, so a start appended after a settled run reopens it. The prefix
+    read must not keep serving the companion's settled tail.
+    """
+    from local_operator.session import open_frame as frame
+
+    path = _settled_tail_journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None and index.runs[-1].settled
+    _materialize(tmp_path, index)
+    ti._reset_for_tests()
+    source = _append(path, _custom("s2", "attention_started", token="t2"))
+    collected = ["u1", "a1", "m1", "s2"]
+    # Every companion read happens BEFORE the resident refresh below, which
+    # republishes and would leave these reads nothing to answer from.
+    summary = rm.summary(tmp_path, SID, source, prefix_ok=True)
+    facts = rm.frame_facts(
+        tmp_path,
+        SID,
+        collected_ids=collected,
+        reaches_eof=True,
+        order_ids=[],
+        source=source,
+        prefix_ok=True,
+    )
+    states = _all_reads(tmp_path, source, prefix_ok=True, collected=collected)
+    ti._reset_for_tests()
+    grown = ti.refresh_index(tmp_path, SID)
+    assert grown is not None and not grown.runs[-1].settled
+    # Answering is allowed only with the resident scan's answer (open run).
+    if summary.state == "ready":
+        assert summary.value.runs == grown.runs[-1:]
+    if facts.state == "ready":
+        bounds = frame.page_seq_bounds(grown, [{"id": id_} for id_ in collected], reaches_eof=True)
+        assert bounds is not None
+        assert facts.value.runs == frame.publish_runs(
+            grown, first_seq=bounds[0], last_seq=bounds[1]
+        )
+    # Today the rule falls back on a start row.
+    assert "ready" not in states, states
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(_custom("b1", "session_spend.v1", usd=0.1), id="spend"),
+        pytest.param(_custom("f1", "frontend_state_checkpoint_v1", state={}), id="checkpoint"),
+        pytest.param(_custom("x1", "a_custom_type_nobody_wrote_yet.v9"), id="unknown-custom"),
+    ],
+)
+def test_an_accepted_tail_row_is_answer_neutral_on_a_settled_run(tmp_path, row):
+    """Every accepted kind leaves summary, run facts and order exactly resident.
+
+    Pinned on a SETTLED tail run, the shape where a row that moved settlement
+    would show (M1). An unknown custom type is accepted because the resident
+    classifier itself calls it ``other`` -- the rule asks that classifier, so
+    the day it learns the type as a start or marker this read refuses it.
+    """
+    from local_operator.session import open_frame as frame
+
+    path = _settled_tail_journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    _materialize(tmp_path, index)
+    ti._reset_for_tests()
+    source = _append(path, row)
+    collected = ["u1", "a1", "m1", str(row["id"])]
+    summary = rm.summary(tmp_path, SID, source, prefix_ok=True)
+    facts = rm.frame_facts(
+        tmp_path,
+        SID,
+        collected_ids=collected,
+        reaches_eof=True,
+        order_ids=[str(row["id"])],
+        source=source,
+        prefix_ok=True,
+    )
+    order = rm.order_facts(
+        tmp_path, SID, collected_ids=collected, order_ids=[], source=source, prefix_ok=True
+    )
+    assert (summary.state, facts.state, order.state) == ("ready",) * 3
+    ti._reset_for_tests()
+    grown = ti.refresh_index(tmp_path, SID)
+    assert grown is not None and grown.runs[-1].settled
+    assert summary.value.runs == grown.runs[-1:]
+    assert summary.value.scan.rows == grown.scan.rows
+    bounds = frame.page_seq_bounds(grown, [{"id": id_} for id_ in collected], reaches_eof=True)
+    assert bounds is not None
+    assert facts.value.runs == frame.publish_runs(grown, first_seq=bounds[0], last_seq=bounds[1])
+    assert facts.value.rows == {id_: grown.journal_rows[id_] for id_ in collected}
+    assert order.value.rows == {id_: grown.journal_rows[id_] for id_ in collected}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(
+            {"id": "z1", "ts": 9.0, "type": "brand_new_row_type", "payload": {}}, id="unknown-type"
+        ),
+        pytest.param(
+            {
+                "id": "h1",
+                "ts": 9.0,
+                "type": "message",
+                "payload": {"kind": "custom", "custom_type": "wake", "content": "x"},
+            },
+            id="injected-message",
+        ),
+        pytest.param(_custom("s9", "attention_started", token="t9"), id="start"),
+    ],
+)
+def test_a_row_the_classifier_does_not_call_neutral_falls_back(publication, row):
+    root, _ = publication
+    source = _append(root / "sessions" / SID / "transcript.jsonl", row)
+    assert "ready" not in _all_reads(root, source, prefix_ok=True, collected=["u2", "a2"])
+
+
+def test_an_other_row_is_answer_neutral_to_the_derivation():
+    """The one assumption ``_ANSWER_NEUTRAL_KINDS`` rests on, pinned directly.
+
+    Feeding ``other`` rows into ``_Derivation`` -- after a settled run and mid
+    run -- must leave every emitted checkpoint, message and run unchanged. If the
+    derivation ever starts reading ``other`` rows this fails, and the prefix
+    rule must narrow with it.
+    """
+    assert rm._ANSWER_NEUTRAL_KINDS == frozenset({"other"})
+    rows = [
+        _custom("s1", "attention_started", token="t1"),
+        *_rows(1),
+        _custom("m1", "completion_attention", token="t1", kind="complete", anchor="a1"),
+        _custom("s2", "attention_started", token="t2"),
+        *[{**r, "id": f"{r['id']}b"} for r in _rows(1)],
+    ]
+    filler = _custom("o", "session_spend.v1")
+
+    def derive(with_other: bool) -> Any:
+        state = ti._Derivation()
+        ordinal = 0
+        for row in rows:
+            for item in ([row, {**filler, "id": f"o{ordinal}"}] if with_other else [row]):
+                line = json.dumps(item).encode()
+                classified = ti._classify(ordinal, 0, 0, line[: ti._ROW_HEAD_BYTES], line)
+                if str(item["id"]).startswith("o"):
+                    assert classified.kind == "other"
+                state.consume(classified)
+                ordinal += 1
+        checkpoints, messages, runs = state.emit(
+            prior_checkpoints=[], prior_messages=[], turn_base=0
+        )
+        # Ordinals shift by construction; compare everything ordinal-free.
+        strip = lambda items: [  # noqa: E731
+            {k: v for k, v in vars(i).items() if "seq" not in k and "ordinal" not in k}
+            for i in items
+        ]
+        return strip(checkpoints), strip(messages), strip(runs)
+
+    assert derive(True) == derive(False)
+
+
+# ---------------------------------------------------------------------------
+# Dead-writer temp reclamation
+#
+# A KILLED builder never reaches its `finally`, so `<token>.<pid>.tmp` and the
+# SQLite `-journal` beside it leaked forever (~961 files on one operator store).
+# These pin the sweep's invariant: name-matched, not ours, older than the grace,
+# and the writer provably gone (dead pid, or a pid reused by a later process).
+# ---------------------------------------------------------------------------
+
+_OLD = 1_600_000_000  # 2020: far older than any grace and any live process
+
+
+def _read_models(root: Path) -> Path:
+    return ti.index_path(root, SID).parent / "read-models"
+
+
+def _dead_pid() -> int:
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    if procstate.pid_liveness(child.pid) is not False:
+        pytest.skip("the reaped child's pid was reused before the probe")
+    return child.pid
+
+
+def _leak(directory: Path, name: str, mtime: float) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(b"leaked")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def _sleeper():
+    import subprocess
+    import sys
+
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def test_a_killed_writers_temps_are_reclaimed_by_collect(publication):
+    root, index = publication
+    pid = _dead_pid()
+    own = _read_models(root) / SID
+    other = _read_models(root) / "another-session"
+    leaked = [
+        _leak(own, f"{'a' * 32}.{pid}.tmp", _OLD),
+        _leak(own, f"{'a' * 32}.{pid}.tmp-journal", _OLD),
+        _leak(own, f"{'b' * 32}.naming.{pid}.naming.tmp", _OLD),
+        # Another LIVE session's directory: _sweep_orphans skips it (its index
+        # exists), so only the temp sweep can reach these.
+        _leak(other, f"{'c' * 32}.{pid}.tmp", _OLD),
+        _leak(other, f"{'c' * 32}.{pid}.tmp-journal", _OLD),
+    ]
+    (ti.index_path(root, "another-session")).parent.mkdir(parents=True, exist_ok=True)
+    ti.index_path(root, "another-session").write_text("{}", encoding="utf-8")
+    companion = _leak(other, f"{'d' * 32}.sqlite", _OLD)
+    rm.collect(root, SID, rm.token_for(index))
+    assert [path.name for path in leaked if path.exists()] == []
+    # A companion is never a temp, however old.
+    assert companion.exists()
+
+
+def test_a_young_temp_is_kept_even_when_its_writer_is_dead(publication):
+    root, index = publication
+    young = _leak(_read_models(root) / SID, f"{'a' * 32}.{_dead_pid()}.tmp", time.time())
+    rm.collect(root, SID, rm.token_for(index))
+    assert young.exists()
+
+
+def test_this_processs_own_temps_are_never_swept(publication):
+    root, index = publication
+    mine = _leak(_read_models(root) / SID, f"{'a' * 32}.{os.getpid()}.tmp", _OLD)
+    rm.collect(root, SID, rm.token_for(index))
+    assert mine.exists()
+
+
+def test_a_live_foreign_writers_temp_is_kept(publication, monkeypatch):
+    root, index = publication
+    child = _sleeper()
+    try:
+        # Grace 0 so a file written AFTER the peer started already qualifies by
+        # age; it must still survive because its writer is alive and is the
+        # process that wrote it (started before the file).
+        time.sleep(1.1)
+        monkeypatch.setattr(rm, "_ORPHAN_GRACE_S", -5.0)
+        live = _leak(_read_models(root) / SID, f"{'a' * 32}.{child.pid}.tmp", time.time())
+        rm.collect(root, SID, rm.token_for(index))
+        assert live.exists()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_temp_whose_pid_was_reused_by_a_later_process_is_reclaimed(publication):
+    root, index = publication
+    child = _sleeper()
+    try:
+        if procstate.birth_token(child.pid) is None:
+            pytest.skip("this platform reports no process start time")
+        # The file predates the process now holding its pid: the writer is gone.
+        reused = _leak(_read_models(root) / SID, f"{'a' * 32}.{child.pid}.tmp", _OLD)
+        rm.collect(root, SID, rm.token_for(index))
+        assert not reused.exists()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_retention_of_companions_is_unchanged_by_the_temp_sweep(publication):
+    root, index = publication
+    directory = _read_models(root) / SID
+    stale = [_leak(directory, f"{n:032x}.sqlite", _OLD + n) for n in range(1, 6)]
+    rm.collect(root, SID, rm.token_for(index))
+    kept = sorted(path.stem for path in directory.glob("*.sqlite"))
+    assert rm.token_for(index) in kept
+    assert len(kept) == rm._RETAIN_PREVIOUS + 1
+    # The newest stale ones are the retained predecessors, exactly as before.
+    assert [p.exists() for p in stale] == [False, False, False, True, True]
+
+
+def test_a_finished_build_removes_its_journal_sibling(tmp_path, monkeypatch):
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    real = rm._head_token
+    seen: list[Path] = []
+
+    def head_token(root, sid):
+        # Stand in for SQLite having left its rollback journal beside the temp
+        # (it does when the process dies mid-transaction or the journal outlives
+        # a failed close); the `finally` must not leave it behind.
+        for temp in (_read_models(tmp_path) / SID).glob(f"*.{os.getpid()}.tmp"):
+            journal = Path(f"{temp}-journal")
+            journal.write_bytes(b"journal")
+            seen.append(journal)
+        return real(root, sid)
+
+    monkeypatch.setattr(rm, "_head_token", head_token)
+    rm.publish(tmp_path, SID, index)
+    assert seen, "the build never reached its compare-and-publish"
+    assert [path.name for path in seen if path.exists()] == []
+    ti._reset_for_tests()

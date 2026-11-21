@@ -9,6 +9,62 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def bridge_deleted() -> Msg:
+    return Msg("relay.transcript.bridge.deleted", {})
+
+
+def bridge_held() -> Msg:
+    return Msg("relay.transcript.bridge.held", {})
+
+
+def bridge_held_transient() -> Msg:
+    return Msg("relay.transcript.bridge.held_transient", {})
+
+
+def bridge_loading() -> Msg:
+    return Msg("relay.transcript.bridge.loading", {})
+
+
+def bridge_more_messages(*, count: int | float) -> Msg:
+    return Msg("relay.transcript.bridge.more_messages", {"count": count})
+
+
+def bridge_not_admitted() -> Msg:
+    return Msg("relay.transcript.bridge.not_admitted", {})
+
+
+def bridge_not_member() -> Msg:
+    return Msg("relay.transcript.bridge.not_member", {})
+
+
+def bridge_offline() -> Msg:
+    return Msg("relay.transcript.bridge.offline", {})
+
+
+def bridge_other_account() -> Msg:
+    return Msg("relay.transcript.bridge.other_account", {})
+
+
+def bridge_pending() -> Msg:
+    return Msg("relay.transcript.bridge.pending", {})
+
+
+def bridge_provenance() -> Msg:
+    return Msg("relay.transcript.bridge.provenance", {})
+
+
+def bridge_refused() -> Msg:
+    return Msg("relay.transcript.bridge.refused", {})
+
+
+def bridge_signed_out() -> Msg:
+    return Msg("relay.transcript.bridge.signed_out", {})
+
+
+def bridge_unavailable() -> Msg:
+    return Msg("relay.transcript.bridge.unavailable", {})
+
+
 def composer_queued(*, count: int | float) -> Msg:
     return Msg("relay.transcript.composer.queued", {"count": count})
 

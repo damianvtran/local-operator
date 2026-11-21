@@ -1,0 +1,58 @@
+{
+  "locale": "hi",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "target_sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92",
+  "context_sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "47e37aebb87c",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19",
+    "actual_model_source": "Host session-state Model: openai/gpt-6.1-sol",
+    "fallback": "none observed"
+  },
+  "auditor": {
+    "agent": null,
+    "model": null,
+    "result": "not_audited"
+  },
+  "status": "translated",
+  "keys_translated": 9,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/hi/wire.teams.effective.json",
+      "sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92"
+    }
+  },
+  "source_commit": "e70bc818b8553dca1fad007705257817be49ee37",
+  "note": "Scratch Hindi candidate; translated, not audited. Mechanical checks only. Two independent audits required for these high-visibility remedies; no pseudo/bidi/runtime/rendered proof or shipping approval.",
+  "glossary_proposals": {
+    "registry": "रजिस्ट्री",
+    "agent definition": "एजेंट की परिभाषा",
+    "model mapping": "मॉडल मैपिंग",
+    "model selector": "मॉडल चुनने के लिए दिया गया मान",
+    "reasoning effort": "तर्क-प्रयास (existing wire.settings usage)",
+    "provider": "प्रोवाइडर (existing wire.settings usage)"
+  },
+  "translation_decisions": [
+    "No fixed width budget in the sidecar; wrap naturally, no truncation.",
+    "Model selector uses an explanatory Hindi phrase rather than an English noun; provider/model stays literal.",
+    "Mapping remains the developer loan मैपिंग, denoting a config object; model required, effort optional.",
+    "Unresolvable uses पहचाना नहीं जा सका without asserting a missing provider or corrupt file."
+  ],
+  "evidence_limits": {
+    "independent_audits": 0,
+    "pseudo": "not_run",
+    "bidi_runtime": "not_run",
+    "rendered": "not_run"
+  }
+}

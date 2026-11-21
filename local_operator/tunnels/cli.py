@@ -145,7 +145,12 @@ def _stamp(seconds: Any) -> str:
 
 
 def _status_text(
-    payload: dict[str, Any], record: dict[str, Any], source: str, *, stopped: bool = False
+    payload: dict[str, Any],
+    record: dict[str, Any],
+    source: str,
+    *,
+    stopped: bool = False,
+    stale_build: str = "",
 ) -> str:
     """`lop tunnel status`, human form: the connector leads, then the login.
 
@@ -204,6 +209,12 @@ def _status_text(
             else ""
         )
         lines.append(f"Transport: {transport}{overlap}")
+    if stale_build:
+        # A connector on an OLD BUILD answers like a current one; after an
+        # upgrade that is what kept remote access on old code (2026-11-18).
+        # Already keyed copy, from `services.stale_daemon_status_line`; printed
+        # bare so this English-labelled block adds no untranslated word.
+        lines.append(stale_build)
     login = payload["login"]
     if login["state"] == "login_required":
         if stopped:
@@ -470,7 +481,22 @@ async def _adopt_conflicting_create(api: RadientTunnels, pending: dict[str, Any]
     return matches[0]
 
 
-def _prepare_mobile(value: dict[str, Any]) -> None:
+def _mobile_build_is_stale() -> bool:
+    """Whether the supervised mobile daemon is PROVEN to run an older build."""
+    from local_operator import update
+    from local_operator.mobile import install as mobile_install
+
+    pid = mobile_install._supervised_pid()
+    return pid is not None and update.generation_staleness_of_process(pid) is True
+
+
+def _prepare_mobile(value: dict[str, Any]) -> str:
+    """Make sure the mobile relay the tunnel fronts is installed and current.
+
+    Returns the mobile install's running-build step when this call restarted a
+    stale mobile daemon (review R1-3: `lop tunnel install` used to bounce the
+    phone's relay without saying so), else ``""``.
+    """
     from local_operator.mobile import install as mobile_install
 
     mobile = next(
@@ -478,15 +504,27 @@ def _prepare_mobile(value: dict[str, Any]) -> None:
         None,
     )
     if mobile is None:
-        return
-    if mobile_install.health(mobile["port"]) and mobile_install.gate_closed(mobile["port"]):
-        return
+        return ""
+    serving = mobile_install.health(mobile["port"]) and mobile_install.gate_closed(mobile["port"])
+    # A HEALTHY MOBILE DAEMON ON AN OLD BUILD is not "prepared" (field finding,
+    # 2026-11-18: the phone kept old code after an upgrade). A proven-stale one
+    # goes through `install`, whose skip branch restarts it onto the new build;
+    # an unproven one is left to `lop mobile install`, so a tunnel restart does
+    # not also bounce the phone's relay on a guess.
+    stale = bool(serving) and _mobile_build_is_stale()
+    if serving and not stale:
+        return ""
     result = mobile_install.install(port=mobile["port"])
     if not result.get("ok"):
+        if stale and result.get("error"):
+            # The build restart itself was refused: its keyed line names
+            # `lop mobile restart`, which is the fix — not a re-install.
+            raise ValueError(str(result["error"]))
         raise ValueError(
             "Mobile relay installation failed. Run lop mobile install; "
             "on Linux run lop mobile serve first."
         )
+    return str(result.get("build") or "") if stale else ""
 
 
 async def dispatch(args: argparse.Namespace) -> str:
@@ -740,9 +778,27 @@ async def dispatch(args: argparse.Namespace) -> str:
         payload["requests"] = request_log.read_tail(
             config.directory() / request_log.REQUEST_LOG_NAME
         )
+        from local_operator.services import (
+            stale_background_daemons,
+            stale_daemon_status_line,
+        )
+
+        # ONE census read serves both forms, so `--json` (the TUI and report's
+        # reader) cannot disagree with the human line (review R1-5). Additive
+        # key: the generation the connector is PROVEN to still run, else null.
+        rows = await asyncio.to_thread(stale_background_daemons)
+        payload["running_build_stale"] = next(
+            (d.generation for d in rows if d.name == "tunnel"), None
+        )
         if getattr(args, "json", False):
             return json.dumps(payload, allow_nan=False)
-        return _status_text(payload, record, source, stopped=bool(value.get("stopped")))
+        return _status_text(
+            payload,
+            record,
+            source,
+            stopped=bool(value.get("stopped")),
+            stale_build=stale_daemon_status_line("tunnel", "lop tunnel restart", daemons=rows),
+        )
     if action == "stop":
         value["stopped"] = True
         config.save(value)
@@ -801,7 +857,7 @@ async def dispatch(args: argparse.Namespace) -> str:
             # service uses when present, not a prerequisite for installing.
             if not await asyncio.to_thread(config.relay_offered):
                 raise
-        await asyncio.to_thread(_prepare_mobile, value)
+        mobile_note = await asyncio.to_thread(_prepare_mobile, value)
         # User services do not inherit the terminal's environment. An explicit
         # foreground/Linux origin password stays in private local config;
         # Keychain-backed macOS installs need no redundant password copy.
@@ -809,14 +865,21 @@ async def dispatch(args: argparse.Namespace) -> str:
             value["mobile_password"] = os.environ["LOP_MOBILE_PASSWORD"]
         value["stopped"] = False
         config.save(value)
+        # The install's note: a connector that was restarted onto the new build,
+        # or whose running build could not be confirmed (it used to be silent).
+        note = ""
         if action == "install":
-            await asyncio.to_thread(install.install)
+            note = await asyncio.to_thread(install.install)
         else:
             await asyncio.to_thread(install.action, action)
-        return (
+        started = (
             "Tunnel service started. Run lop tunnel status, then open your harness URL "
             "and log in with Radient."
         )
+        # The mobile line is bare keyed copy naming "the running service"; the
+        # "mobile:" prefix says which one, since the tunnel's own note may follow.
+        notes = [f"mobile: {mobile_note}" if mobile_note else "", note]
+        return "\n".join([*(n for n in notes if n), started])
     raise ValueError(
         "Use lop tunnel --help to create, configure, start, stop, or revoke remote access."
     )

@@ -175,6 +175,46 @@ class TransferSession(_Input):
     #: Optional: when present the move is at-most-once per id (a retried request
     #: replays the recorded outcome instead of moving twice).
     request_id: RequestID | None = None
+    #: THE USER'S WORKING-SET CONSENT (docs/design/move-working-set.md §11.1): the
+    #: ``working_set.scope_digest`` the preflight returned and the dialog showed. The
+    #: owner refuses a session with git worktrees unless this matches the scope it
+    #: computes for THIS destination (``working_set_unconfirmed``/``_changed``). Absent
+    #: on an older renderer, which therefore gets the refusal rather than a silent move.
+    confirm_working_set: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")] | None = None
+    #: The explicit "move the conversation, leave its working files on this device".
+    without_working_set: StrictBool = False
+    # NO ``include_history_secrets`` in v1, by the security ruling (2026-11-18): a
+    # worktree whose unpushed history holds secret-shaped material is withheld and
+    # listed, with no opt-in. ``extra="forbid"`` makes a client that sends it a 422.
+
+
+class TransferPreflightRequest(_Input):
+    """``POST …/transfer/preflight``: what moving to ``to`` would leave behind."""
+
+    to: MeshId
+
+
+class TransferPreflight(BaseModel):
+    """The owner's read-only working-set manifest for one destination. Nothing moved.
+
+    ``working_set`` is the §3.4 block verbatim (``lop://session_move/working_set/v1``):
+    ``scope_digest``, ``state`` (``preflight``/``unsupported``), ``carries_files``,
+    ``destination {device_id, name}``, ``totals``, ``worktrees[]``, ``excluded[]``,
+    ``left_behind[]``. Kept as a mapping, not a nested model, so a field the transfer
+    half adds reaches the renderer without a second server change — as the
+    destination probe's do (``session_transfer_working_set_probe``): per row
+    ``clone_check``, ``clone_detail``, ``https_rewrite {url, fetch, push}``,
+    ``remedy {run_on, command}``, ``missing_tools[]``, ``markers[]``; per block
+    ``destination_probe {state, missing_tools[], team_bridge?, import_granted?}`` and,
+    when the destination has not granted this device ``workset_import`` (#4245 round
+    2), ``import {granted: false, remedy}`` — the files stay and ``remedy`` is the
+    grant command to run on the destination.
+    """
+
+    session_id: str
+    #: False → the manifest is empty and the move dialog is the one it always was.
+    confirmation_required: bool
+    working_set: dict[str, Any]
 
 
 class TransferPhase(BaseModel):
@@ -207,3 +247,21 @@ class TransferReceipt(BaseModel):
     #: handoff the destination has not adopted yet.
     state: Literal["completed", "in_progress"]
     replayed: bool = False
+    #: The move's working-set block, ABSENT (``None``) when the session had none.
+    #: Until the transfer half lands it reports ``transferred: false``.
+    working_set: dict[str, Any] | None = None
+    #: What the destination did about arriving live (``mobility.MoveEngagement``):
+    #: ``engaged``, ``reason: "active"`` when an ACTIVE conversation was resumed there
+    #: by default, and ``arrival_note`` (``delivered`` / ``already_delivered`` /
+    #: ``failed``). ``None`` when the receipt carries none (a cold move, or an offload
+    #: that settled before the destination engaged). Verbatim, so the dialog can say
+    #: "it resumed on <device> with a note about what stayed behind" — the CLI's
+    #: ``receipt_resumed`` line — rather than leave the user to guess.
+    engagement: dict[str, Any] | None = None
+    #: OFFLOAD ONLY: the resume this device REQUESTED of the destination
+    #: (``mobility.MoveResumeRequested``: ``reason`` ``"active"`` | ``"asked"`` and the
+    #: ``session_id`` it engages). An offload's ``engagement`` is ``None`` because the
+    #: destination's engage runs after ``done`` and its outcome never comes back, so
+    #: ``None`` there means "unknown", not "nothing is running" (UI #1978 QA Q-1); this
+    #: is what the source honestly knows. ``None`` when no resume was requested.
+    resume_requested: dict[str, Any] | None = None

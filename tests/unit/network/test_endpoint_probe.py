@@ -47,6 +47,7 @@ import ast
 import inspect
 import re
 import socket
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -198,6 +199,379 @@ def test_a_candidate_that_never_reported_is_named_rather_than_dropped() -> None:
     assert probe.attempts[0].detail == "not_attempted"
     assert probe.complete is False
     assert probe.reason == probe.attempts[0].detail
+
+
+class _FakeDialSocket:
+    """The literal-address dial socket (``relay._new_dial_socket``) with a scripted
+    ``connect``: no packet leaves the host, and each test picks the outcome."""
+
+    def __init__(self, connect: Any) -> None:
+        self._connect = connect
+        self.timeout: float | None = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def connect(self, _address: Any) -> None:
+        self._connect(self)
+
+    def close(self) -> None:
+        pass
+
+
+def _dial_with(monkeypatch: pytest.MonkeyPatch, connect: Any) -> None:
+    monkeypatch.setattr(relay, "_new_dial_socket", lambda _family: _FakeDialSocket(connect))
+
+
+def _time_out_after(seconds: float | None) -> Any:
+    """A blackholed SYN: nothing answers for ``seconds`` (None: the whole budget)."""
+
+    def connect(sock: _FakeDialSocket) -> None:
+        time.sleep((sock.timeout or 0.0) if seconds is None else seconds)
+        raise TimeoutError("timed out")
+
+    return connect
+
+
+def test_a_local_connect_error_is_never_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U3 (PR #4260): an OSError the local stack raises is no silence."""
+    import errno
+
+    def refuse_locally(_sock: Any) -> None:
+        raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+
+    _dial_with(monkeypatch, refuse_locally)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9"], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:OSError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_a_socket_creation_error_is_never_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U3b: a socket that could not even be built was never an issued dial."""
+    import errno
+
+    def no_socket(_family: int) -> Any:
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(relay, "_new_dial_socket", no_socket)
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.0)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9"], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:OSError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_the_connects_own_timeout_is_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A patched floor keeps the run fast; the connect waits past it (R3-1).
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.05)
+    _dial_with(monkeypatch, _time_out_after(0.06))
+
+    def time_out(*_args: Any, **_kwargs: Any) -> socket.socket:
+        time.sleep(0.06)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(relay.socket, "create_connection", time_out)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9", "peer.example:9"],
+        deadline=time.monotonic() + 5.0,
+        connect_cap=2.0,
+        wait_all=True,
+    )
+    by_endpoint = {row.endpoint: row for row in probe.attempts}
+    assert by_endpoint["203.0.113.9:9"].dial_silent is True
+    # A hostname's blocked call may be the resolver: never dial evidence.
+    assert by_endpoint["peer.example:9"].dial_silent is False
+
+
+def test_a_timeout_on_a_sliver_of_the_deadline_is_not_dial_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3-1 (PR #4260): 2 ms left of a shared deadline is not attempted long enough.
+
+    The budget is ``min(connect_cap, deadline - now)``, so a late peer under one
+    shared deadline times out at once; that keeps the base diagnostic, no evidence.
+
+    WHY THE CLOCK IS CONTROLLED: with the real clock this cell raced the
+    scheduler. ``deadline=time.monotonic() + 0.002`` left 2 ms of WALL time
+    between building the deadline and the worker's budget read; a loaded runner
+    lost those 2 ms (gate run 44661304902, job 136040160777, ``test (3.12, 5)``),
+    the budget read came out ``<= 0`` and the worker recorded ``not_attempted``
+    without dialling — so the R3-1 path this test names was never exercised.
+    Accepting ``not_attempted`` would stop testing that path, and a wider sliver
+    is still a race, so instead ``relay.time`` (the module ``probe_candidates``
+    reads ``time.monotonic`` through) is replaced by a fake clock that stands
+    still until the dial: the budget is exactly the 2 ms sliver on every run.
+
+    The fake connect then advances the clock by the timeout it was GIVEN, as a
+    real 2 ms SYN timeout would, so ``waited`` is the sliver, not zero. The
+    collector's ``results.get(timeout=remaining)`` still blocks on REAL time
+    (``queue`` is untouched), so a clock frozen at T cannot spin its loop: at
+    worst it stops waiting after a real 2 ms and reports ``no_answer``, which
+    the assertion allows. Only ``relay.time`` is patched — threading, queue and
+    pytest keep the real clock.
+    """
+    clock = _Clock()
+    sliver = 0.002
+    dialled = threading.Event()
+    given: list[float | None] = []
+
+    def time_out_after_the_given_timeout(sock: _FakeDialSocket) -> None:
+        given.append(sock.timeout)
+        clock.now += sock.timeout or 0.0
+        dialled.set()
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(relay, "time", clock)
+    _dial_with(monkeypatch, time_out_after_the_given_timeout)
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9"], deadline=clock.now + sliver, connect_cap=3.0, wait_all=True
+    )
+    # The worker may still be dialling when a frozen-clock collector stops
+    # waiting; wait for the dial itself so "the sliver was really attempted"
+    # is asserted, not assumed.
+    assert dialled.wait(5.0), "rig: the sliver budget never reached the dial"
+    assert given == [pytest.approx(sliver)]
+    assert probe.attempts[0].detail in {"connect_failed:TimeoutError", "no_answer"}
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_a_timeout_after_the_full_floor_is_dial_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3-1: a connect that waited the whole floor unanswered is silence.
+
+    The cap is below the real floor, so the effective floor is the cap, and the
+    connect that spends all of it counts — no real 1 s sleep needed.
+    """
+    assert relay.SILENT_MIN_WAIT_S > 0.05
+    _dial_with(monkeypatch, _time_out_after(None))
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9"], deadline=time.monotonic() + 5.0, connect_cap=0.05, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+    assert probe.attempts[0].dial_silent is True
+
+
+def test_an_issued_connect_pending_at_the_cutoff_is_not_dial_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3b: an issued connect still pending at the cutoff is ambiguous.
+
+    It supports only "no answer during this check", so it keeps the base
+    ``no_answer`` — even when it has been pending longer than the floor.
+    """
+    import threading
+
+    release = threading.Event()
+    issued = threading.Event()
+
+    def black_hole(_sock: Any) -> None:
+        issued.set()
+        release.wait(5.0)
+        raise TimeoutError("timed out")
+
+    _dial_with(monkeypatch, black_hole)
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.05)
+    try:
+        probe = relay.probe_candidates(
+            ["192.0.2.1:9"], deadline=time.monotonic() + 0.2, connect_cap=30.0, wait_all=True
+        )
+    finally:
+        release.set()
+    assert issued.is_set(), "rig: the connect was never issued"
+    assert [row.detail for row in probe.attempts] == ["no_answer"]
+    assert probe.attempts[0].dial_silent is False
+
+
+class _Clock:
+    """A ``time`` stand-in for ``relay`` whose monotonic clock only the fake
+    socket moves, so a silence-floor case is decided by arithmetic, not sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _timed_dial(
+    monkeypatch: pytest.MonkeyPatch, *, connect_takes: float, close_takes: float
+) -> _Clock:
+    """Install a fake clock and a dial socket whose connect times out after
+    ``connect_takes`` and whose close then takes ``close_takes`` (U4)."""
+    clock = _Clock()
+
+    class TimedSocket(_FakeDialSocket):
+        def close(self) -> None:
+            clock.now += close_takes
+
+    def connect(_sock: Any) -> None:
+        clock.now += connect_takes
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(relay, "time", clock)
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 1.0)
+    monkeypatch.setattr(relay, "_new_dial_socket", lambda _family: TimedSocket(connect))
+    return clock
+
+
+def test_a_completed_short_timeout_is_not_silence_however_the_clock_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U4 control (PR #4260): a connect GIVEN 0.2 s that timed out is no proof of
+    a 1 s wait — even when the measured clock (and a slow close) read past the
+    floor. Only the assigned-budget check can reject this one."""
+    clock = _timed_dial(monkeypatch, connect_takes=1.5, close_takes=2.0)
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9"], deadline=clock.now + 0.2, connect_cap=3.0, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_a_long_timeout_that_gave_up_early_is_not_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U4: a 3 s assignment whose connect gave up after 0.3 s waited 0.3 s."""
+    _timed_dial(monkeypatch, connect_takes=0.3, close_takes=0.0)
+    probe = relay.probe_candidates(["192.0.2.1:9"], deadline=None, connect_cap=3.0, wait_all=True)
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+def test_a_full_assignment_and_a_full_measured_wait_is_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U4: both halves reach the floor — the one case that counts."""
+    _timed_dial(monkeypatch, connect_takes=1.2, close_takes=0.0)
+    probe = relay.probe_candidates(["192.0.2.1:9"], deadline=None, connect_cap=3.0, wait_all=True)
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+    assert probe.attempts[0].dial_silent is True
+
+
+def test_a_slow_close_never_inflates_the_measured_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U4: elapsed is stamped when connect gives up, BEFORE the socket is closed,
+    so a 2 s close after a 0.3 s wait still reads as 0.3 s."""
+    _timed_dial(monkeypatch, connect_takes=0.3, close_takes=2.0)
+    probe = relay.probe_candidates(["192.0.2.1:9"], deadline=None, connect_cap=3.0, wait_all=True)
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+    assert probe.attempts[0].dial_silent is False
+
+
+class _RecordingDialSocket:
+    """A literal dial socket that connects at once and remembers what it was
+    asked to dial and whether it was closed."""
+
+    made: list[_RecordingDialSocket] = []
+
+    def __init__(self, family: int) -> None:
+        self.family = family
+        self.address: Any = None
+        self.closed = False
+        _RecordingDialSocket.made.append(self)
+
+    def settimeout(self, _timeout: float) -> None:
+        pass
+
+    def connect(self, address: Any) -> None:
+        self.address = address
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_success_at_the_cutoff_becomes_the_winner_and_stays_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4-2 (PR #4260): connects that finished before the cutoff but were never
+    dequeued are read from the snapshot — the first declared one wins and keeps
+    its socket, the rest are closed, and ``complete`` stays False."""
+    import queue as queue_mod
+
+    class LosingQueue(queue_mod.Queue):  # type: ignore[type-arg]
+        def get(self, block: bool = True, timeout: float | None = None) -> Any:
+            time.sleep(timeout or 0.0)
+            raise queue_mod.Empty
+
+    _RecordingDialSocket.made = []
+    monkeypatch.setattr(relay.queue, "Queue", LosingQueue)
+    monkeypatch.setattr(relay, "_new_dial_socket", _RecordingDialSocket)
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9", "192.0.2.2:9"],
+        deadline=time.monotonic() + 0.3,
+        connect_cap=3.0,
+        wait_all=False,
+    )
+    by_host = {sock.address[0]: sock for sock in _RecordingDialSocket.made}
+    assert probe.winner == "192.0.2.1:9"
+    assert probe.sock is by_host["192.0.2.1"]
+    assert by_host["192.0.2.1"].closed is False
+    assert by_host["192.0.2.2"].closed is True
+    assert probe.complete is False
+    assert probe.reason == ""
+
+
+def test_a_bracketed_ipv6_endpoint_dials_the_bare_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4-3: ``[::1]:p`` dials ``::1`` on an AF_INET6 socket — brackets are
+    endpoint syntax, not part of the address."""
+    _RecordingDialSocket.made = []
+    monkeypatch.setattr(relay, "_new_dial_socket", _RecordingDialSocket)
+    probe = relay.probe_candidates(
+        ["[::1]:4711"], deadline=time.monotonic() + 5.0, connect_cap=2.0, wait_all=True
+    )
+    assert [(s.family, s.address) for s in _RecordingDialSocket.made] == [
+        (socket.AF_INET6, ("::1", 4711))
+    ]
+    assert probe.winner == "[::1]:4711"
+    probe.sock.close()  # type: ignore[union-attr]
+
+
+def test_a_timeout_completed_before_the_cutoff_is_never_lost_to_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3b: a terminal outcome written before the cutoff is that endpoint's answer.
+
+    The collector is made to lose the race deterministically — its queue read
+    waits out the deadline and reports empty — so only the state the worker
+    wrote under the lock can carry the completed timeout to the report.
+    """
+    import queue as queue_mod
+
+    class LosingQueue(queue_mod.Queue):  # type: ignore[type-arg]
+        def get(self, block: bool = True, timeout: float | None = None) -> Any:
+            time.sleep(timeout or 0.0)
+            raise queue_mod.Empty
+
+    monkeypatch.setattr(relay.queue, "Queue", LosingQueue)
+    monkeypatch.setattr(relay, "SILENT_MIN_WAIT_S", 0.05)
+    _dial_with(monkeypatch, _time_out_after(0.06))
+    probe = relay.probe_candidates(
+        ["192.0.2.1:9"], deadline=time.monotonic() + 0.3, connect_cap=3.0, wait_all=True
+    )
+    assert [row.detail for row in probe.attempts] == ["connect_failed:TimeoutError"]
+    assert probe.attempts[0].dial_silent is True
+
+
+def test_a_worker_the_report_deadline_beat_is_not_dial_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3: the report deadline expiring before a worker runs proves no dial began.
+
+    The worker thread is never started (a queued worker), so the closing pass
+    names the endpoint ``no_answer`` exactly as before — and carries no evidence.
+    """
+    dialled: list[Any] = []
+    monkeypatch.setattr(relay.socket, "create_connection", lambda *a, **k: dialled.append(a))
+    monkeypatch.setattr(relay.threading.Thread, "start", lambda self: None)
+    probe = relay.probe_candidates(
+        ["203.0.113.9:9"], deadline=time.monotonic() + 0.1, connect_cap=2.0, wait_all=True
+    )
+    assert dialled == []
+    assert [row.detail for row in probe.attempts] == ["no_answer"]
+    assert probe.attempts[0].dial_silent is False
 
 
 def test_the_probe_keeps_only_the_winner_and_closes_the_rest() -> None:
@@ -370,6 +744,11 @@ def test_every_code_the_doctor_can_print_has_a_reading_too() -> None:
     reasons = {value for name, value in vars(handshake).items() if name.startswith("REASON_")}
     assert len(reasons) >= 10, reasons  # a truncated enumeration is not evidence
     for code in sorted(reasons | {"pair_phase_requires_the_ceremony"}):
+        if code in resume.DOCTOR_DETAIL_WORDS:
+            # A refusal with its OWN stated per-address reading (the dialer's listener
+            # refusals, mesh-listener-auth): the table entry, never the fallback.
+            assert resume.doctor_detail_words(code) == resume.DOCTOR_DETAIL_WORDS[code], code
+            continue
         assert resume.doctor_detail_words(code) == resume._BARE_CODE_WORDS, code  # noqa: SLF001
     # THE STATE Q-R24-2 IS ABOUT. An address that ANSWERED while the doctor's own
     # budget expired: this build's spelling, from the listing's own producer with the
@@ -585,7 +964,9 @@ def _row(
 
 def test_a_member_a_peer_knows_is_adopted() -> None:
     record = _record(SELF)
-    changed, added = relay.adopt_members(record, [_row(PEER)], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [_row(PEER)], sender_device_id=SELF, supplier_verified=True
+    )
     assert changed is True
     assert added == [PEER]
     assert record.member(PEER) is not None
@@ -597,7 +978,9 @@ def test_a_tombstoned_device_is_never_revived_by_a_peers_table() -> None:
     next asks somebody for their table."""
     record = _record(SELF)
     record.removed_ids.append(PEER)
-    changed, added = relay.adopt_members(record, [_row(PEER)], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [_row(PEER)], sender_device_id=SELF, supplier_verified=True
+    )
     assert (changed, added) == (False, [])
     assert record.member(PEER) is None
 
@@ -618,6 +1001,7 @@ def test_a_row_we_already_hold_keeps_its_local_authority() -> None:
         record,
         [_row(PEER, role="admin", endpoints=["10.0.0.9:9", "10.0.0.9:10"])],
         sender_device_id=SELF,
+        supplier_verified=True,
     )
     held = record.member(PEER)
     assert held is not None
@@ -636,7 +1020,9 @@ def test_a_peers_older_table_never_shrinks_ours() -> None:
     record.members.append(
         types.MemberRecord(device_id=PEER, public_key=wire.b64u(b"b" * 32), role="drive")
     )
-    changed, added = relay.adopt_members(record, [_row(SELF)], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [_row(SELF)], sender_device_id=SELF, supplier_verified=True
+    )
     assert (changed, added) == (False, [])
     assert record.member(PEER) is not None
 
@@ -692,10 +1078,14 @@ def test_a_nonadmin_can_assert_only_its_proven_rotation_with_admitted_standing(r
     record = _record(SELF)
     held, published, _statement, old, new = _rotated(record, root)
     # The signature binds identity continuity, not a larger capability grant.
-    assert relay.adopt_members(record, [published], sender_device_id=old.device_id) == (False, [])
+    assert relay.adopt_members(
+        record, [published], sender_device_id=old.device_id, supplier_verified=True
+    ) == (False, [])
     published["role"] = held.role
     published["capabilities"] = list(held.capabilities)
-    assert relay.adopt_members(record, [published], sender_device_id=old.device_id) == (
+    assert relay.adopt_members(
+        record, [published], sender_device_id=old.device_id, supplier_verified=True
+    ) == (
         True,
         [new.device_id],
     )
@@ -720,7 +1110,9 @@ def test_a_row_carrying_the_rotation_statement_retires_the_row_it_succeeded(root
     record = _record(SELF)
     held, published, statement, _old, _new = _rotated(record, root)
 
-    changed, added = relay.adopt_members(record, [published], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [published], sender_device_id=SELF, supplier_verified=True
+    )
 
     assert (changed, added) == (True, [published["device_id"]])
     surviving = record.member(published["device_id"])
@@ -765,7 +1157,9 @@ def test_a_rotation_claim_this_record_cannot_verify_retires_nothing(
     else:
         published["rotation_proof"] = {**statement, "sig_old": wire.b64u(b"0" * 64)}
 
-    changed, added = relay.adopt_members(record, [published], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [published], sender_device_id=SELF, supplier_verified=True
+    )
 
     assert (changed, added) == (False, []), f"{tamper} moved a row"
     assert record.member(held.device_id) is held
@@ -805,7 +1199,12 @@ def test_the_dialler_learns_the_member_table_from_the_peer_it_dialled(
     _add_member(server_a.root, record.network_id, NEWCOMER)
     assert store.load(record.network_id, server_b.root).member(NEWCOMER) is None
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     learned = store.load(record.network_id, server_b.root)
     newcomer_row = learned.member(NEWCOMER)
@@ -827,7 +1226,12 @@ def test_the_listener_learns_the_member_table_from_the_peer_that_dialled_it(
     _add_member(server_b.root, record.network_id, NEWCOMER)
     assert store.load(record.network_id, server_a.root).member(NEWCOMER) is None
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     # The listener's pull runs on its own handshake thread — `dial` returns when
     # THIS side's handshake is done, and the peer may not have finished its end — so
@@ -852,7 +1256,12 @@ def test_learning_a_member_is_audited(peer_pair: Devices, monkeypatch: pytest.Mo
     record, _host, _port = _pair(peer_pair, monkeypatch, role="admin")
     _add_member(server_a.root, record.network_id, NEWCOMER)
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     events = [
         row

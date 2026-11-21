@@ -1453,6 +1453,30 @@ def memory_guard_title() -> Msg:
     return Msg("wire.settings.memory_guard.title", {})
 
 
+def mesh_move_working_set_max_bytes_help() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_max_bytes.help", {})
+
+
+def mesh_move_working_set_max_bytes_label() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_max_bytes.label", {})
+
+
+def mesh_move_working_set_roots_help() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_roots.help", {})
+
+
+def mesh_move_working_set_roots_label() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_roots.label", {})
+
+
+def mesh_moves_description() -> Msg:
+    return Msg("wire.settings.mesh_moves.description", {})
+
+
+def mesh_moves_title() -> Msg:
+    return Msg("wire.settings.mesh_moves.title", {})
+
+
 def mesh_updates_description() -> Msg:
     return Msg("wire.settings.mesh_updates.description", {})
 
@@ -1853,6 +1877,22 @@ def providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_label() -> Msg:
         "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label",
         {},
     )
+
+
+def providers_bedrock_auth_help() -> Msg:
+    return Msg("wire.settings.providers_bedrock_auth.help", {})
+
+
+def providers_bedrock_auth_label() -> Msg:
+    return Msg("wire.settings.providers_bedrock_auth.label", {})
+
+
+def providers_bedrock_region_help() -> Msg:
+    return Msg("wire.settings.providers_bedrock_region.help", {})
+
+
+def providers_bedrock_region_label() -> Msg:
+    return Msg("wire.settings.providers_bedrock_region.label", {})
 
 
 def providers_openai_api_choice_chat_completions_description() -> Msg:
@@ -3047,6 +3087,14 @@ def team_bridge_enabled_help() -> Msg:
 
 def team_bridge_enabled_label() -> Msg:
     return Msg("wire.settings.team_bridge_enabled.label", {})
+
+
+def team_bridge_hold_release_help() -> Msg:
+    return Msg("wire.settings.team_bridge_hold_release.help", {})
+
+
+def team_bridge_hold_release_label() -> Msg:
+    return Msg("wire.settings.team_bridge_hold_release.label", {})
 
 
 def team_bridge_screening_ambient_budget_per_hour_help() -> Msg:

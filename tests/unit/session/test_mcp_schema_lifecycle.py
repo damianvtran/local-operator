@@ -428,3 +428,103 @@ async def test_an_invalid_call_to_a_deferred_mcp_tool_hints_a_tool_doc_that_serv
     assert SMALL_NAME not in session._activated_tools
     assert SMALL_NAME not in session._deferred_now()
     await session.dispose()
+
+
+# -- grants share the activation bookkeeping (PR #4349 review round 1, R1) ---
+#
+# ``Session.wait_for_tools`` grants a lazy MCP tool the caller named. Installed
+# straight into the inventory it sat outside the wiring's ``installed_mcp`` /
+# ``enabled_origins``: a later over-cap ``mcp://`` read selected it again (two
+# tools of one name, which Anthropic refuses with a 400 on every later
+# request), it was never demoted, and it outlived a ``tools/list_changed`` that
+# removed it. Each test below fails with exactly one of the two fixes reverted.
+
+
+async def _granted_big(tmp_path, monkeypatch):
+    """An undeclared session whose over-cap tool came from ``wait_for_tools``."""
+    executed: list[str] = []
+    manager = _manager(executed)
+    stream = ScriptedStream([])
+    session = _session(
+        tmp_path,
+        stream,
+        [_tool("read", executed)],
+        compaction_settings=CompactionSettings(keep_recent_tokens=40),
+    )
+    hooks = await _wire(session, manager, monkeypatch)
+    readiness = await session.wait_for_tools([BIG_NAME])
+    assert readiness.status == "ready", readiness
+    return session, stream, manager, hooks
+
+
+@pytest.mark.asyncio
+async def test_a_wait_for_tools_grant_is_demoted_at_a_cold_boundary_like_an_activation(
+    tmp_path, monkeypatch
+) -> None:
+    """Mutation check: fails with the grant installed directly (the bypass)."""
+    session, stream, _, _ = await _granted_big(tmp_path, monkeypatch)
+    await session.prompt("first " + "detail " * 30)
+    assert _last_sent(stream) == [BIG_NAME]
+
+    await _idle_runs(session, MCP_DEMOTE_AFTER_IDLE_RUNS)
+    assert (await session.compact_now()).ran is True
+    before = len(stream.requests)
+    await session.prompt("after compaction")
+    assert BIG_NAME not in _sent(stream, before)
+    assert (SERVER, BIG) in _deferred(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_wait_for_tools_grant_leaves_with_a_tools_list_changed_that_drops_it(
+    tmp_path, monkeypatch
+) -> None:
+    """Mutation check: fails with the grant installed directly (the bypass)."""
+    session, _, manager, _ = await _granted_big(tmp_path, monkeypatch)
+    assert BIG_NAME in session.tool_inventory
+    manager.tools = [tool for tool in manager.tools if tool.name != BIG_NAME]
+    assert manager.callback is not None
+    manager.callback(manager.get_tools())
+    assert BIG_NAME not in session.tool_inventory
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_wait_for_tools_grant_then_an_over_cap_read_keeps_one_copy(
+    tmp_path, monkeypatch
+) -> None:
+    """The reviewer's shape: grant, then the model's read of the same tool."""
+    session, stream, _, hooks = await _granted_big(tmp_path, monkeypatch)
+    assert hooks.mcp_resolver is not None
+    reply = hooks.mcp_resolver(f"mcp://{SERVER}/{BIG}")
+    assert reply is not None and "too large to show inline" in reply
+    assert session.tool_inventory.count(BIG_NAME) == 1
+    await session.prompt("first " + "detail " * 30)
+    await session.prompt("second " + "detail " * 30)
+    assert [_sent(stream, i).count(BIG_NAME) for i in range(len(stream.requests))] == [1] * len(
+        stream.requests
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_declared_grant_then_an_over_cap_read_keeps_one_copy(tmp_path, monkeypatch) -> None:
+    """The pre-existing route: a declaration that holds ``read`` grants the tool
+    directly (it stays outside demotion on purpose), and the model's read then
+    publishes it through ``activate``. Mutation check: fails with
+    ``refresh_selected``'s one-copy-per-name step reverted."""
+    executed: list[str] = []
+    manager = _manager(executed)
+    stream = ScriptedStream([])
+    session = _session(tmp_path, stream, [_tool("read", executed)])
+    hooks = await _wire(session, manager, monkeypatch)
+    # The declaration grants its MCP tool itself (``materialize_declared_tools``).
+    session.set_tool_inventory(["read", BIG_NAME])
+    assert session.tool_inventory.count(BIG_NAME) == 1, session.tool_inventory
+    assert hooks.mcp_resolver is not None
+    reply = hooks.mcp_resolver(f"mcp://{SERVER}/{BIG}")
+    assert reply is not None and "too large to show inline" in reply
+    assert session.tool_inventory.count(BIG_NAME) == 1, session.tool_inventory
+    await session.prompt("first " + "detail " * 30)
+    assert _last_sent(stream) == [BIG_NAME]
+    await session.dispose()

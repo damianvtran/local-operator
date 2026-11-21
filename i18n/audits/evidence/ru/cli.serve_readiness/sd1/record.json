@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "independent-ru-auditor",
+    "session": "b8c027b19533",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager task instruction"
+  },
+  "source_audit_revision": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+  "working_copy": "Uncommitted new namespace in assigned worktree; no claim that this evidence or catalogue is on main",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.serve_readiness.json",
+      "sha256": "892e251984ddf40978a06ef7cb5e558455ed788b2a15f959c5a84f9ebf8a2968"
+    }
+  },
+  "policy_input_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/report.md",
+      "sha256": "3636b414411c5e86078c74713312db079571e5a5f020341d68413e9cf778109f"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/audit.log",
+      "sha256": "a66946f19e2c037273d36aa3be790b4509aaf06ede27a534778efcd40e9d5710"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/mechanical.py.txt",
+      "sha256": "a9484a6c1216e6531a954b756b6f63569a7f9b8603c36466389b99453b415aae"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/ledger-receipt.json",
+      "sha256": "121f8cebdcf2ee3cbe93c89265480cd6b40b2725d09a735f6a211be953194fe7"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/append-validation.log",
+      "sha256": "3c96942a210c0333a0c3e63633b072f0808b5633089d8fab88039f3018621af1"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 2,
+    "finding_ids": [
+      "RU-SD1-01",
+      "RU-SD1-02",
+      "RU-SD1-03"
+    ],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 2,
+      "MINOR": 1,
+      "NIT": 0
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "audit_notes_not_execution_log": {
+    "coverage": "All 11 keys semantically and mechanically assessed; findings and per-key coverage in report.md",
+    "execution_evidence": "audit.log and append-validation.log contain actual captured commands, stdout, stderr and exit codes",
+    "initial_interpreter_failure": "System python3 help invocation lacked tomllib; recovered with existing .venv. Original failed-command output is in session transcript, not audit.log",
+    "limitations": [
+      "One independent pass only; no invented second independent auditor approval",
+      "Plain-text parser renders and cell-width measurements, not live app frames or terminal wrapping proof",
+      "No Urdu RTL claim: ru is LTR",
+      "No translation edits, commits or audit-history appends; parent owns append"
+    ],
+    "no_mt_service": true,
+    "no_installs_or_heavy_tests_or_live_providers": true
+  },
+  "ledger_handoff": {
+    "receipt": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/ledger-receipt.json",
+    "validated_with": "scripts/i18n/ledger.py append --dry-run",
+    "history_appended": false,
+    "note_characters": 187
+  }
+}

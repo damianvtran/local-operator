@@ -1,0 +1,101 @@
+{
+ "schema": 1,
+ "audit_id": "sd2-es",
+ "audit_kind": "independent first-slot semantic audit (PR #4378 final deps_* status keys; round 3 deps_header delta, 19 values carried byte-identical from round 2)",
+ "locale": "es",
+ "audit_date": "2026-11-21",
+ "audited_head": "70878bbaf42c537b0b591349388a8d052681e382",
+ "delta_base": "792c7e57e",
+ "rounds": {
+  "r2": {
+   "head": "71cbd4d79917537f459cc280c36f49a8f4d52fc1",
+   "comment": "https://github.com/damianvtran/local-operator/pull/4378#issuecomment-7058908380"
+  },
+  "r3": {
+   "scope": "71cbd4d79..70878bbaf"
+  }
+ },
+ "source_sha256": "b7035a7cb1a90ea2227bb8617f5a4825b58a40e58149e16ad4264854843b6ceb",
+ "context_sha256": "31a1b4e5147f7a9786e3e78da498ce2d9db3275d6e5c6402cad4dddcc2abf2d4",
+ "target_sha256": "4f02ae061b0114480781df5ffda4fbf24a5852548e68d077d44ae68bc81adf0d",
+ "new_key_value_digest": "4a510498f111bc7ef288422baf59b7f77ea0d39db37413c47db1914c67a5b39a",
+ "keys_audited": {
+  "cli.sessions_move_workset": [
+   "cli.sessions_move_workset.deps_help",
+   "cli.sessions_move_workset.deps_description",
+   "cli.sessions_move_workset.deps_session_help",
+   "cli.sessions_move_workset.deps_status_help",
+   "cli.sessions_move_workset.deps_header",
+   "cli.sessions_move_workset.deps_row",
+   "cli.sessions_move_workset.deps_row_plain",
+   "cli.sessions_move_workset.deps_state_pending",
+   "cli.sessions_move_workset.deps_state_present_unverified",
+   "cli.sessions_move_workset.deps_state_unknown",
+   "cli.sessions_move_workset.deps_state_refused",
+   "cli.sessions_move_workset.deps_state_manual",
+   "cli.sessions_move_workset.deps_state_not_needed",
+   "cli.sessions_move_workset.deps_not_restored",
+   "cli.sessions_move_workset.deps_missing_tool",
+   "cli.sessions_move_workset.deps_summary_pending",
+   "cli.sessions_move_workset.deps_summary_unknown",
+   "cli.sessions_move_workset.deps_summary_present_unverified",
+   "cli.sessions_move_workset.deps_summary_nothing_needed",
+   "cli.sessions_move_workset.deps_none"
+  ]
+ },
+ "scope_proof": {
+  "19_unchanged_vs_71": true,
+  "87_base_identical": true,
+  "keyset_order_same": true,
+  "only_changed": [
+   "cli.sessions_move_workset.deps_header"
+  ],
+  "diff_lines": 2
+ },
+ "carried": "87 base keys byte-identical to 792c7e57e; last receipt passed at base source 6ba71eab… (second safety audit)",
+ "auditor": {
+  "agent": "translation-auditor (lopdev)",
+  "session": "e507d894afb3",
+  "model": "anthropic/claude-opus-5-5",
+  "actual_model_source": "session model header",
+  "fallback": "none",
+  "model_independent": false
+ },
+ "translator": [
+  {
+   "agent": "coder (lopdev)",
+   "session": "8910d769897e",
+   "keys": "19 deps_* values except deps_header",
+   "model": "anthropic/claude-opus-5-5",
+   "fallback": "none",
+   "source": "session transcript (provider anthropic, model claude-opus-5-5 only)"
+  },
+  {
+   "agent": "coder (lopdev)",
+   "session": "28260efb8cc9",
+   "keys": "deps_header",
+   "model": "anthropic/claude-opus-5-5",
+   "fallback": "none",
+   "source": "session transcript (provider anthropic, model claude-opus-5-5 only; header strings present)"
+  }
+ ],
+ "result": "passed",
+ "findings_deferred": [],
+ "unresolved_blocker_major": 0,
+ "checks": [
+  "git diff -U0 one-line delta per catalogue",
+  "19 values identical to 71cbd4d79",
+  "87 base identical to 792c7e57e",
+  "placeholder parity",
+  "no Cf/Cc",
+  "fr U+202F n/a (no junction)",
+  "zh no CJK/Latin spaces",
+  "resolver render 8 locales",
+  "check.py --catalogues-only 0"
+ ],
+ "limitations": [
+  "no native-speaker review",
+  "no rendered terminal frame",
+  "second independent safety audit required (I18N.md step 3)"
+ ]
+}

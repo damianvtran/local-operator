@@ -1,0 +1,121 @@
+{
+  "tui.settings_view.editor.contract": {
+    "note": "Inline hint after the value being edited. {save_key} and {cancel_key} are key names (enter, esc) inserted verbatim; do not translate them. Painted after two spaces of indent.",
+    "role": "key hint",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.editor.contract_unset": {
+    "maxCells": 23,
+    "note": "Longer editor hint for settings where an empty value means 'unset': clearing the field and saving removes the setting. {save_key}/{cancel_key} are key names inserted verbatim. The settings list is ~100 cells wide at a common terminal; the value column starts at a fixed cell, so this hint gets only the room right of the typed value (about 23 cells at 100 columns). A wider form is dropped, not cropped, when it does not fit.",
+    "role": "key hint",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.editor.suggest_long": {
+    "note": "Widest editor hint while a suggestion dropdown is open: arrows browse suggestions, tab completes, enter saves, esc (cancel). {browse_keys} (↑↓), {complete_key} (tab), {save_key} (enter), {cancel_key} (esc) are key names inserted verbatim. The settings list is ~100 cells wide at a common terminal; the value column starts at a fixed cell, so this hint gets only the room right of the typed value (about 23 cells at 100 columns). A wider form is dropped, not cropped, when it does not fit.",
+    "role": "key hint",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.editor.suggest_medium": {
+    "note": "Medium editor hint while a suggestion dropdown is open. Placeholders are key names inserted verbatim. The settings list is ~100 cells wide at a common terminal; the value column starts at a fixed cell, so this hint gets only the room right of the typed value (about 23 cells at 100 columns). A wider form is dropped, not cropped, when it does not fit.",
+    "role": "key hint",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.editor.suggest_short": {
+    "maxCells": 23,
+    "note": "Shortest editor hint while a suggestion dropdown is open; only the last key gets a verb. Placeholders are key names inserted verbatim. The settings list is ~100 cells wide at a common terminal; the value column starts at a fixed cell, so this hint gets only the room right of the typed value (about 23 cells at 100 columns). A wider form is dropped, not cropped, when it does not fit.",
+    "role": "key hint",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.agents_empty": {
+    "maxCells": 38,
+    "note": "Agents tab body when no agent profile is configured. Cropped to the pane width minus a two-space indent.",
+    "role": "empty state",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.empty_hint": {
+    "maxCells": 38,
+    "note": "Second line under the empty teams/agents state, naming the command that lists and attaches teams or agents. {command} is '/team' or '/agent', inserted verbatim. 'them' refers to the teams or agents. Cropped to the pane width minus a two-space indent.",
+    "role": "empty state hint",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.more": {
+    "maxCells": 16,
+    "note": "Spill count under the providers list or the teams/agents roster when some entries do not fit the pane's height: '… 3 more' means three more entries exist but are not shown. A statement of fact, not a button. {count} selects the plural; {shown} is the same number pre-formatted as raw digits — insert {shown}, do not localise digits. Keep the leading ellipsis glyph. Painted after a two-space indent.",
+    "role": "overflow count",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.providers_empty": {
+    "maxCells": 38,
+    "note": "Right-hand pane, under the providers header, when no model provider account is logged in. {command} is the literal command '/login <provider>' inserted verbatim. Cropped to the pane width (about 30–40 cells) minus a two-space indent.",
+    "role": "empty state",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.providers_header": {
+    "maxCells": 20,
+    "note": "Header over the right-hand pane's list of logged-in model provider accounts. Lower-case, terse, like the teams/agents tabs. When the section collapses it shares its line with the '… N more' count.",
+    "role": "section heading",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.tab_agents": {
+    "maxCells": 10,
+    "note": "Tab in the right-hand pane listing configured agent profiles (read-only). Lower-case, terse.",
+    "role": "tab label",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.tab_teams": {
+    "maxCells": 10,
+    "note": "Tab in the right-hand pane listing configured agent teams (read-only). Lower-case, terse; sits beside the agents tab and '(←→)'.",
+    "role": "tab label",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.pane.teams_empty": {
+    "maxCells": 38,
+    "note": "Teams tab body when no team is configured. Cropped to the pane width minus a two-space indent.",
+    "role": "empty state",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.row.add_chain": {
+    "note": "Selectable row at the end of the failover cascade that adds a new chain of model hops. Leading '+' is part of the label. Cropped to the list width.",
+    "role": "action row",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.row.add_hop": {
+    "note": "Selectable row at the end of a failover chain that adds another model 'hop' (fallback step) to that chain. Leading '+' is part of the label. Cropped to the list width.",
+    "role": "action row",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.scope.live": {
+    "maxCells": 14,
+    "note": "Scope word: a change applies immediately in every running session. Shown after 'takes effect:' or alone on a narrow header.",
+    "role": "scope word",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.scope.never": {
+    "maxCells": 14,
+    "note": "Scope word for the 'retired' section: its keys are inert, so a change never takes effect. Shown after 'takes effect:' or alone on a narrow header.",
+    "role": "scope word",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.scope.new_launch": {
+    "maxCells": 14,
+    "note": "Scope word: a change applies after the app is relaunched. Shown after 'takes effect:' or alone on a narrow header.",
+    "role": "scope word",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.scope.new_sessions": {
+    "maxCells": 14,
+    "note": "Scope word: a change applies to sessions started after it. Shown after 'takes effect:' or alone on a narrow header.",
+    "role": "scope word",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.section.takes_effect": {
+    "note": "Dim tag on each settings SECTION header saying when a change in that section takes effect. {scope} is one of the tui.settings_view.scope.* words, already localised. Painted in the value column only if it fits; otherwise the bare scope word is shown instead.",
+    "role": "section tag",
+    "tone": "plain, terse"
+  },
+  "tui.settings_view.too_short": {
+    "note": "Replaces the settings page's one-line detail row when the terminal is too short (≲14 rows) to show even one settings row. Tells the user to make the window taller. Cropped at the terminal width.",
+    "role": "constraint notice",
+    "tone": "plain, terse"
+  }
+}

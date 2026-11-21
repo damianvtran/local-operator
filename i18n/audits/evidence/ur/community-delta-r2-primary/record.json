@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "audit_id": "delta-r2-primary-837443aac8da-ur",
+  "audit_kind": "delta_independent_semantic_audit",
+  "locale": "ur",
+  "namespaces": [
+    "tui.community"
+  ],
+  "audit_date": "2026-11-18",
+  "audited_revision": {
+    "head": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+    "patch": "pr4221-d-r1-i18n.patch (held, b9ae8b63, applied on head)",
+    "patch_sha256": "9b00194c5f960523fc2e0c0092050f725b93b52b7e84755a320c36cd7093cd36",
+    "pr": "https://github.com/damianvtran/local-operator/pull/4221",
+    "previous_audit": "i18n/audits/evidence/ur/community-primary/record.json"
+  },
+  "key_count": {
+    "tui.community": 3
+  },
+  "keys": [
+    "tui.community.page_error",
+    "tui.community.post_allow_unread",
+    "tui.community.post_card_cut"
+  ],
+  "auditor": {
+    "agent": "reviewer / i18n-auditor",
+    "session": "837443aac8da",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header; no fallback",
+    "independent_from_translator_session": true,
+    "independence": "Different session from the translator (06c3529d8318) and from the round-1 auditor (c739715f0519). Same model as the translator: agent-independent, not model-independent."
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "guides": [
+    "i18n/style-guides/ur.md",
+    "i18n/glossary.md"
+  ],
+  "input_hashes": {
+    "en": {
+      "tui.community": "67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616"
+    },
+    "context": {
+      "tui.community": "d3030886a774ad2ed4cdb2f14e9969e8eb2c3afb2b9cd416c116d20cfa9abd88"
+    },
+    "target": {
+      "tui.community": {
+        "path": "local_operator/i18n/catalogues/ur/tui.community.json",
+        "sha256": "52879691abde0db4649268bb9b02350cfdd10a5eaa75924c9011a721eef0297f"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/community-delta-r2-primary/report.md",
+      "sha256": "3d619ff1426cc5218fa5b93be19fb9cf62a084902de180edc555fdee65c7abf2"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/community-delta-r2-primary/audit.log",
+      "sha256": "370b8f985744b619e2178df49c10de0e255673c29ef90b5997f8b7e3b9cd87c0"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "A2-ur-M1"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    }
+  }
+}

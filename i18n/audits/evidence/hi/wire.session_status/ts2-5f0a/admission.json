@@ -1,0 +1,31 @@
+{
+  "command": [
+    "/Users/damian/local-operator/.venv/bin/python",
+    "scripts/i18n/ledger.py",
+    "append",
+    "--receipt",
+    "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/hi/receipt.json",
+    "--expected-history-sha",
+    "43c34b478b3d80f858f5ab83018d14e2b6d41cf84844d38d19b5e6be8cb522eb",
+    "--dry-run"
+  ],
+  "expected_history_sha": "43c34b478b3d80f858f5ab83018d14e2b6d41cf84844d38d19b5e6be8cb522eb",
+  "exit_code": 0,
+  "stdout": "i18n/audit-history/hi/wire.session_status.json\n",
+  "stderr": "",
+  "receipt_sha256": "529a63d7dce05e00ba48bced015aae0f14b072e09a76b209fc25972c853ae16c",
+  "record_sha256": "5b6332863b8d2117fa7d797ec7968a586420eabdb5971796be459de38aa3878b",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-vi-hi-ur-second-audit",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "8c6e64f5562b",
+    "independent_from_first_auditor_session": "a7fd23e84898",
+    "independent_from_translator": true
+  },
+  "record_reference": "i18n/audits/evidence/hi/wire.session_status/ts2-5f0a/record.json",
+  "retention": "staged alongside immutable bundle; not applied"
+}

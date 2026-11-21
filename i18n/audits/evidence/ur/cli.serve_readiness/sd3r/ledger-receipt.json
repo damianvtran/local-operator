@@ -1,0 +1,31 @@
+{
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+  "status": "passed",
+  "auditor": {
+    "agent": "i18n-auditor / Audit daemon Urdu",
+    "session": "c736f176af6f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translation_job": "7f2b030d2636",
+    "actual_model_source": "Current session runtime declaration openai/gpt-6.1-sol; no fallback reported.",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "job": "7f2b030d2636",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager states same original translator; original delegation disclosed actual openai/gpt-6.1-sol. No new job fallback trace was supplied; none is assumed."
+  },
+  "audit_date": "2026-11-16",
+  "note": "i18n/audits/evidence/ur/cli.serve_readiness/sd3r/record.json; number-neutral PID reuse accepted; 14 unchanged values byte-proven; all 15 checked; passed, 0 unresolved blocker/major.",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "cross_locale_trigger_disposition": {
+    "finding_id": "RU-SD3-01",
+    "status": "fixed_in_ur_target",
+    "russian_signoff_claimed": false
+  }
+}

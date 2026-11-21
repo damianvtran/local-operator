@@ -13,5 +13,6 @@
   "tui.chrome.remote_park.approval_hint_there": "在{device}上运行 — 在该设备上允许；此处可拒绝",
   "tui.chrome.remote_park.approval_hint_floor": "在{device}上运行",
   "tui.chrome.remote_park.ask_hint_answer": "在{device}上运行 — 可在此回答",
-  "tui.chrome.remote_park.ask_hint_floor": "在{device}上运行"
+  "tui.chrome.remote_park.ask_hint_floor": "在{device}上运行",
+  "tui.chrome.remote_park.ask_agent_started": "在{device}上运行 · 由{agent_device}上的智能体启动"
 }

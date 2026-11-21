@@ -1,0 +1,161 @@
+{
+  "locale": "fr",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "613c1954fbfbee9b15e66372d2ae3d4363a1e6f527ad7e3c1c4b4d73a41d08a5",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "delegator-supplied"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": [
+    "tui.settings_view.editor.suggest_short",
+    "tui.settings_view.row.add_hop",
+    "tui.settings_view.too_short"
+  ],
+  "head": "56781d884f27cb85551746e9bccf7a3c81a17ab6",
+  "keys_read": 21,
+  "changed_keys_audited": 3,
+  "findings": [],
+  "checks": [
+    {
+      "key": "tui.settings_view.editor.contract",
+      "en": "enter saves · esc cancels",
+      "fr": "enter enregistrer · esc annuler",
+      "cells": 31,
+      "maxCells": null,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "en": "enter saves · esc cancels · clear to unset",
+      "fr": "enter enregistrer · esc annuler · vider = non défini",
+      "cells": 52,
+      "maxCells": 23,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "en": "↑↓ suggestions · tab completes · enter saves · esc",
+      "fr": "↑↓ suggestions · tab compléter · enter enregistrer · esc",
+      "cells": 56,
+      "maxCells": null,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "en": "↑↓ browse · tab complete · enter saves",
+      "fr": "↑↓ parcourir · tab compléter · enter enregistrer",
+      "cells": 48,
+      "maxCells": null,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "en": "↑↓ · tab · enter saves",
+      "fr": "↑↓ · tab · enter enreg.",
+      "cells": 23,
+      "maxCells": 23,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.row.add_chain",
+      "en": "+ add a chain",
+      "fr": "+ ajouter une chaîne",
+      "cells": 20,
+      "maxCells": null,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.row.add_hop",
+      "en": "+ add a hop",
+      "fr": "+ ajouter une étape",
+      "cells": 19,
+      "maxCells": null,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.scope.live",
+      "en": "live",
+      "fr": "immédiat",
+      "cells": 8,
+      "maxCells": 14,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.scope.never",
+      "en": "never",
+      "fr": "jamais",
+      "cells": 6,
+      "maxCells": 14,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.scope.new_launch",
+      "en": "new launch",
+      "fr": "relancement",
+      "cells": 11,
+      "maxCells": 14,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.scope.new_sessions",
+      "en": "new sessions",
+      "fr": "nouv. sessions",
+      "cells": 14,
+      "maxCells": 14,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.section.takes_effect",
+      "en": "takes effect: immédiat",
+      "fr": "prise d’effet : immédiat",
+      "cells": 24,
+      "maxCells": null,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.too_short",
+      "en": "terminal too short for settings — make it taller",
+      "fr": "terminal trop bas pour les paramètres — augmentez sa hauteur",
+      "cells": 60,
+      "maxCells": null,
+      "arguments_parity": true
+    }
+  ],
+  "scope_compositions": [
+    {
+      "scope": "live",
+      "text": "prise d’effet : immédiat",
+      "cells": 24
+    },
+    {
+      "scope": "never",
+      "text": "prise d’effet : jamais",
+      "cells": 22
+    },
+    {
+      "scope": "new_launch",
+      "text": "prise d’effet : relancement",
+      "cells": 27
+    },
+    {
+      "scope": "new_sessions",
+      "text": "prise d’effet : nouv. sessions",
+      "cells": 30
+    }
+  ],
+  "note": "Independent scoped round-2 re-audit; entire 21-key catalogue read for neighbour composition, only three changed keys re-adjudicated. Exact message_arguments parity verified all 21 keys; catalogue ICU render and public render verified for changed keys. suggest_short 23 cells before two-space paint indent (25 painted), matching declared 23-cell text budget; widest-fit ladder accounts for indentation. contract_unset fallback verified in settings_view.py:4465-4470; not rejected for nominal maxCells overflow. No rendered application-frame claim. No repo edits."
+}

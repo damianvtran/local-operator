@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "audit_id": "a4",
+  "audit_kind": "independent_translation_audit_new_keys",
+  "locale": "ru",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-18",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #4216: 4 changed + 2 new mobile.doctor.watches keys judged side by side with English and en/mobile.doctor.context.json; other keys unchanged from the base and not re-audited",
+  "key_count": 37,
+  "keys_audited": 6,
+  "changed_keys": [
+    "mobile.doctor.watches.ok",
+    "mobile.doctor.watches.near",
+    "mobile.doctor.watches.at_limit",
+    "mobile.doctor.watches.unknown",
+    "mobile.doctor.watches.instances_near",
+    "mobile.doctor.watches.instances_at_limit"
+  ],
+  "source_sha256": "322230f946a1ac493499986fba909735071e13415791de3dbbbb1c686e83c9fb",
+  "target_sha256": "5b31269b7f3ad47eaa1d8c8bc49775e8bc02401747289482ccc9dcc2df7683cb",
+  "source_audit_revision": "4e6a954306b5bf8e42778e24b389007ced2ca6ae",
+  "branch": "fix/inotify-followups",
+  "worktree": "~/local-operator/.worktrees/inotify-followups",
+  "translator": {
+    "agent": "coder subagent of PR #4216 (commit 4e6a95430; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-18"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n auditor, lopdev team member (`task` subagent), session 760414253f82; did not write the translations; corrected the values listed in findings",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-18",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "322230f946a1ac493499986fba909735071e13415791de3dbbbb1c686e83c9fb",
+    "context": "95ebf1639cad50331de63d0401956a13535d7ae1ad0e9cd11ba959dae1397ce5",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guide": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "checks": [
+    "placeholder multiset identical to English for all 6 keys (runtime message_arguments)",
+    "{how} select parsed by local_operator.i18n.runtime and rendered in both arms (command, other) with synthetic params; no unrendered braces",
+    "fs.inotify.max_user_watches / fs.inotify.max_user_instances, {command} and the OS errors “No space left on device” / “Too many open files” byte-identical English inside the locale's quotation marks, as the existing #4193 rows treat them",
+    "'file watch' term unchanged from #4193; 'watch handle' term used identically in ok, instances_near and instances_at_limit and distinct from it",
+    "NFC, no bidi control characters",
+    "copy_scan.py (design-qa): 0 findings"
+  ],
+  "limits": "LLM audit, same model family as the translator (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}

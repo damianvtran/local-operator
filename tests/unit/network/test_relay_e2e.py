@@ -444,6 +444,46 @@ def test_a_mistype_burns_the_invite_once_the_forgiving_budget_is_spent(
     assert not store.record_path(record.network_id, server_b.root).exists()
 
 
+def test_joining_through_an_inviter_that_cannot_prove_itself_names_the_inviters_update(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #4179 L4 (UX U2, security S-5, review N2/N-2): an OLD inviter is a dead end.
+
+    The inviter's welcome carries no proof (every build before listener proofs), so a
+    current joiner refuses ``listener_unproven``. The joiner is not a member, so the
+    only way forward is ``lop update`` ON THE INVITER and a new invite from there; the
+    generic token tail ("mint a fresh one") would loop, because a fresh token from the
+    same old inviter fails the same way. Nothing may be written on the joiner.
+
+    RED before round 1: the sentence named ``lop network update <name>`` (a literal
+    placeholder a joiner cannot run) and the token tail followed it.
+    """
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    original = Handshake.welcome_frame
+
+    def old_build_welcome(self: Handshake, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        frame = original(self, *args, **kwargs)
+        frame.pop("proof", None)
+        return frame
+
+    monkeypatch.setattr(Handshake, "welcome_frame", old_build_welcome)
+    _type_the_code(monkeypatch)
+    reason = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    assert isinstance(reason, str)
+    assert getattr(reason, "code", "") == "listener_unproven", reason
+    failure = net_cli._join_failure(reason)  # noqa: SLF001 — the message the CLI raises
+    assert failure.code == "join_failed"
+    message = failure.sentence
+    assert "On the inviting device, run `lop update`" in message, message
+    assert "nothing was shared" in message, message
+    assert "<name>" not in message and "mint a fresh one" not in message, message
+    assert "lop network update" not in message, message
+    assert not store.record_path(record.network_id, server_b.root).exists()
+
+
 def test_a_joiner_slower_than_the_handshake_timeout_still_pairs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1278,7 +1318,12 @@ def test_a_member_dials_and_gets_a_catalogue_reply(
     gets an answer, over mutually-authenticated records."""
     server_a, server_b, host, port = devices
     record, _host, _port = _pair(devices, monkeypatch)
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, f"the member handshake failed: {reason}"
     reply = link.request({"op": "net_catalog", "req": 41, "locality": "remote"})
     assert reply is not None, "no reply to net_catalog"
@@ -1335,7 +1380,12 @@ def test_a_link_that_has_begun_closing_is_never_handed_out(
     # event (``_pair_settled``), and without it the pairing's link can still be in the
     # table and answering ``_link_for`` for the right reason.
     record, _host, _port = _pair_settled(devices, monkeypatch, settings=server_b.settings)
-    link_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link_b, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link_b is not None, reason
     # THE LINK THIS DIAL INSTALLED, named by the id both ends carry — not "the link A
     # holds for B", which the pairing's own join link may still be at this moment.
@@ -1442,7 +1492,12 @@ def test_a_frame_queued_before_its_link_closed_is_still_written(
     """
     server_a, server_b, host, port = devices
     record, _host, _port = _pair_settled(devices, monkeypatch)
-    link_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link_b, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link_b is not None, reason
     link_a = server_a.links.get(link_b.link_id)  # noqa: SLF001 — the table under test
     assert link_a is not None, "the peer's dial did not install a link on this side"
@@ -1510,7 +1565,12 @@ def test_a_link_that_dies_answers_the_requests_it_was_carrying(
     # THE JOIN LINK IS SETTLED FIRST — see the cell above for why: the pairing's own link
     # outlives its ceremony, and this cell's subject is the death of ITS OWN link.
     record, _host, _port = _pair_settled(devices, monkeypatch)
-    link_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link_b, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link_b is not None, reason
     link_a = server_a.links.get(link_b.link_id)  # noqa: SLF001
     assert link_a is not None, "the peer's dial did not install a link on this side"
@@ -1539,7 +1599,12 @@ def test_a_read_member_cannot_prompt_through_the_link(
 ) -> None:
     server_a, server_b, host, port = devices
     record, _host, _port = _pair(devices, monkeypatch, role="read")
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     reply = link.request(
         {
@@ -1562,7 +1627,12 @@ def test_a_frame_claiming_local_locality_is_refused_over_the_link(
 ) -> None:
     server_a, server_b, host, port = devices
     record, _host, _port = _pair(devices, monkeypatch)
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     reply = link.request({"op": "net_catalog", "req": 43, "locality": "local"})
     assert reply is not None and reply["op"] == "error"
@@ -1577,7 +1647,12 @@ def test_a_forwarded_session_op_is_refused_with_a_named_sentence(
     silently pretending to have carried the frame."""
     server_a, server_b, host, port = devices
     record, _host, _port = _pair(devices, monkeypatch, role="admin")
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     reply = link.request(
         {
@@ -1629,9 +1704,20 @@ def test_revocation_rotates_the_epoch_and_refuses_the_removed_device_afterwards(
     # is what this protocol's refusal looks like (QA round 3, Q-R3-2). The transport
     # class stays in the suffix: `handshake_refused:TimeoutError` is a peer that never
     # answered, which is a different incident.
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=1,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is None
-    assert reason.startswith("handshake_refused") or reason in ("not_a_member", "epoch_stale")
+    # G9-B: the removed device dialled with its OWN, genuine key, so it proves the
+    # key stored on its tombstone and is told — once, signed, over this handshake —
+    # that its membership ended; it marks itself removed. Dialers that prove nothing
+    # still get the silent refusal (tests/unit/network/test_removed_member_notice.py).
+    assert reason == "membership_ended", reason
+    b_self = store.load(record.network_id, server_b.root).self_member()
+    assert b_self is not None and not b_self.active
     assert "member_removed" in _events(server_a)
     assert "handshake_refused" in _events(server_a)
 
@@ -1663,7 +1749,12 @@ def test_an_untrusted_network_refuses_a_fresh_connection(
     record, _host, _port = _pair(devices, monkeypatch)
     server_a._ctl_panic({"network": record.network_id})  # noqa: SLF001
     assert store.load(record.network_id, server_a.root).trust == "untrusted"
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is None
     assert "untrusted" not in reason  # never told why: the refusal is a closed socket
     assert "handshake_refused" in _events(server_a)
@@ -2383,7 +2474,12 @@ def _live_link(
     """A paired pair with B holding a live link to A, and the record."""
     server_a, server_b, host, port = devices
     record = _dialable_devices(devices, monkeypatch)
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, f"the member handshake failed: {reason}"
     return record, link
 
@@ -2477,7 +2573,12 @@ def test_a_panic_reaches_a_real_peer_and_the_receipt_says_what_it_did(
         )
     assert store.load(record.network_id, server_a.root).trust == "active"
     assert store.load(record.network_id, server_b.root).trust == "active"
-    again, reason = server_b.dial(record.network_id, host=f"{_host}:{_port}", epoch=2)
+    again, reason = server_b.dial(
+        record.network_id,
+        host=f"{_host}:{_port}",
+        epoch=2,
+        expected_device=server_a.identity.device_id,
+    )
     assert again is not None, f"the post-panic handshake failed: {reason}"
     assert again.epoch == 2, again.epoch
     again.close("test")
@@ -2671,7 +2772,12 @@ def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
             root=server_a.root,
         )
     boundary.arm(server_b, record.network_id, f"{host}:{port}")
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=1,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, f"the reconcile handshake failed: {reason}"
     receiving = boundary.selected_pair(link)
     assert receiving.link_id == link.link_id and receiving.phase == "reconcile"
@@ -2727,7 +2833,14 @@ def test_refusal_boundary_waits_past_welcome_and_records_swallowed_dial_errors(
 
     def dial() -> None:
         try:
-            result.append(server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1))
+            result.append(
+                server_b.dial(
+                    record.network_id,
+                    host=f"{host}:{port}",
+                    epoch=1,
+                    expected_device=server_a.identity.device_id,
+                )
+            )
         except BaseException as exc:
             failures.append(exc)
         finally:
@@ -2760,7 +2873,12 @@ def test_refusal_boundary_waits_past_welcome_and_records_swallowed_dial_errors(
     # can). The persistent ledger still has to fail, BEFORE any socket is opened.
     before = len(boundary.dials)
     try:
-        server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1)
+        server_b.dial(
+            record.network_id,
+            host=f"{host}:{port}",
+            epoch=1,
+            expected_device=server_a.identity.device_id,
+        )
     except AssertionError:
         pass
     with pytest.raises(AssertionError, match="unexpected post-fence dial"):

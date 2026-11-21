@@ -1,0 +1,80 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.settings_view.chrome",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers",
+  "head": "3c1b6a24f035",
+  "target_committed": false,
+  "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+  "target_sha256": "4f439575dd8bc9bd9a16a627400f408f87dbbd2a4f759aa2161fd94b209ee5b1",
+  "keys_read": 49,
+  "keys_total": 49,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "anthropic/claude-opus-5-5 (per brief; not verified by auditor)"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, session 9c6499ecd07c; independent of translator)",
+    "session": "9c6499ecd07c",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "session pinned openai/gpt-6.1-sol hit HTTP 429 quota; host switched to anthropic/claude-opus-5-5 after the first read-only command — all judgement made on anthropic/claude-opus-5-5 (same model family as translator)",
+    "date": "2026-11-21",
+    "result": "failed",
+    "findings": 4,
+    "unresolved_blocker_major": 1,
+    "blocker": 1,
+    "major": 0,
+    "minor": 1,
+    "nit": 2
+  },
+  "checks": {
+    "key_set_and_order": "identical to en (49/49)",
+    "message_arguments_parity": "FAIL 1 key — capture.takes_from order (victim, shortcut) != en (shortcut, victim); scripts/i18n/check.py --catalogues-only reports it for zh-CN (also hi, ur)",
+    "plurals": "3 plural keys use other-only, no one arm, no =N (value.chains, confirm.ask, clause.would_remove)",
+    "render_message": "all 49 render for count 1/3/12 with sample params",
+    "cell_len_vs_maxCells": "rendered with real params (esc/enter/d/r, '/approvals auto', ctrl+k): 0 over budget, 0 exactly at cap",
+    "nfc_bidi_ascii_ellipsis": "NFC, no bidi controls, no '...'",
+    "unsanctioned_english": "none outside placeholders",
+    "register": "你-free verb-forward; 请 only on directive clauses (capture.press_another, cascade.reset_refused); 。 only on full-sentence help lines matching en",
+    "glossary": "级联/跳/链/快捷键/桌面应用/清除 match shipped wire.settings, tui.small, tui.settings_view"
+  },
+  "findings_detail": [
+    {
+      "id": "T1",
+      "severity": "blocker",
+      "key": "capture.takes_from",
+      "current": "将从“{victim}”接管{shortcut}",
+      "proposed": "{shortcut}将从“{victim}”改绑到此处",
+      "reason": "Placeholder order differs from en; the repo's catalogue parity check (scripts/i18n/check.py) and glossary §placeholders ('never rename or reorder') reject it, so CI goes red. Proposal keeps meaning, renders 'ctrl+k将从“新建会话”改绑到此处' (30 cells ≤ 48)."
+    },
+    {
+      "id": "T2",
+      "severity": "minor",
+      "key": "value.auto",
+      "current": "自动",
+      "proposed": "auto",
+      "reason": "Collapsed value for display.nerd_icons would read 自动 while its expanded choice (wire.settings.display_nerd_icons.choice.none.label) and help text ship as 'auto' in zh-CN; settings_view._render_value's stated contract is that collapsed value and expanded choice never disagree. Alternative: retranslate the wire.settings auto labels in a separate pass."
+    },
+    {
+      "id": "T3",
+      "severity": "nit",
+      "key": "footer.suggestions",
+      "current": "浏览建议",
+      "proposed": "浏览建议 (keep) or align tui.settings_view.editor.suggest_long '选建议'",
+      "reason": "Same ↑↓-over-suggestions action reads 浏览建议 in the footer and 选建议 in the shipped editor hint; minor wording drift, both understandable."
+    },
+    {
+      "id": "T4",
+      "severity": "nit",
+      "key": "notice.discarded",
+      "current": "已丢弃 — {save_key}保存，{cancel_key}或移开即取消",
+      "proposed": "已丢弃 — {save_key}保存，{cancel_key}或移动光标即取消",
+      "reason": "移开 is vague about what moves; footer.move_cancel already says 移动即取消, so naming the cursor matches the footer. Fits 74 cells."
+    }
+  ],
+  "verdict": {
+    "tui.settings_view.chrome": "fail",
+    "overall": "fail"
+  },
+  "note": "Read-only audit; no repo edits. Fail is driven solely by T1 (mechanical, one-key reorder). All other 48 keys accurate and idiomatic."
+}

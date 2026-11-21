@@ -802,6 +802,7 @@ readings.
 | GET `.../{id}/user-attachments` | — | `{state:ready\|unsupported\|unavailable,items,truncated}` — every document and picture the USER attached, oldest first, metadata only (`session_attachments`); see §"The user-attachment inventory" |
 | POST `.../{id}/user-attachments/{digest}/materialise` | — | `{path,name,size_bytes,created}`; copies a user attachment's retained bytes to `<session scratchpad>/generated/` so open/reveal/copy-path have a real, correctly named file (`session_attachments`) |
 | POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
+| GET `.../{id}/bridge-cards/{entry_id}/body` | — | `{v:1,items:[{message_id,conversation_id,state:admitted\|pending\|held\|refused\|not_admitted\|unavailable,body?,source?:local\|hub,hold?:{class:awaiting_review\|transient,held_for_s},reason?:signed_out\|other_account\|not_member\|deleted\|hub_unsupported\|offline}],more}` (**read envelope**) — what one inbound Team Bridge card's messages are to THIS viewer (`team_bridge_card_body`; relay twin `/api/sessions/{id}/bridge-cards/{entry_id}/body`). Keyed by a `team_bridge_message` row (404 otherwise); `body` is UNTRUSTED markdown; ≤20 items, rest counted in `more`. Sources: the local display store, local hold/reservation state, then the hub's admitted-only history read — never the classification fetch |
 | GET `.../{id}/files/{file_id}/content` | optional `Range` | raw bytes (200, or 206 for a `Range`) of one row of a PEER's conversation, fetched from the owner on miss and streamed; local sessions answer 404 (`remote_files`); see §"Remote files" |
 | POST `.../{id}/files/{file_id}/download` | — | `{path,name,bytes,sha256,created,origin_device}`; lands one row of a PEER's conversation on THIS device (`remote_files`); see §"Remote files" |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
@@ -1675,6 +1676,93 @@ a wire row the daemon cannot stamp comes back `ts: null`,
 changes: the row keeps the serve-stamp it has always received and carries
 `ts_source: "served"`. The matching capability key is `entry_ts` in
 `GET /v1/capabilities`' `features`, so a renderer can check before asking.
+
+### Clipped rows: `truncated` and `GET .../{id}/history/rows/{ref}`
+
+The renderer refuses any single IPC record over 8 MiB, and the opening reads —
+the open frame, the bare `/history` page, and the snapshot that embeds either
+(including every in-band resync snapshot) — used to serve journal rows whole:
+one 12.58 MB tool result made a 12.59 MB opening snapshot and the conversation
+could not open. Rows are now bounded per row, and the bare page in total
+(`local_operator/session/row_clip.py`):
+
+| read | per-row budget | page budget | `reason` |
+| --- | --- | --- | --- |
+| open frame (`open_frame=1`) | 1.5 MiB (`OPEN_FRAME_MAX_BYTES`) | 1.5 MiB (unchanged; the newest row is always admitted) | `"open_frame_cap"` |
+| bare `/history` | 1.5 MiB | 4 MiB, newest rows first; older rows go to the next page and `has_more` is `true`. With `around_id` the page grows outward from the anchor, which is always kept; rows left out on the newer side set `has_newer: true` | `"history_cap"` |
+
+**Every budget counts WIRE bytes**: the row's compact JSON with non-ASCII
+escaped (`\uXXXX`), i.e. exactly its bytes inside the SSE `data:` record the
+snapshot travels in (`row_clip.wire_json`, which the event stream itself
+uses). A 2-byte character costs 6 wire bytes and an emoji 12, so a budget in
+UTF-8 bytes would let a non-Latin page reach ~3x its bound on the wire. The
+per-row budget INCLUDES the `truncated` marker. Plain-JSON HTTP answers are
+never larger than the wire form, so they are bounded too.
+
+A row over its budget stays on the page, at its position, with its id, and
+carries an ADDITIVE field (absent on every row that fits, so unclipped pages
+keep today's bytes). Both of its byte counts are UTF-8 (compact JSON, not
+escaped), so `shown_bytes < bytes_total` on every clipped row; only the
+budgets above are measured in wire bytes:
+
+```
+truncated: {
+  bytes_total: int,   // UTF-8 bytes of the FULL row: exactly what the rows route reassembles to
+  shown_bytes: int,   // UTF-8 bytes (same unit as bytes_total) of the row as served, without `truncated`
+  ref: str | null,    // opaque, bound to this session; null = not fetchable here
+  reason: "open_frame_cap" | "history_cap",
+  omitted?: true      // payload WITHHELD rather than cut (see below)
+}
+```
+
+**Message rows are cut, other rows are withheld.** A `message` row keeps its
+shape; every string leaf longer than one shared ceiling is cut to it, so every
+part keeps its start. A non-message row (a `frontend_state_checkpoint_v1`, a
+spend receipt) cannot be meaningfully half-present: it keeps its envelope and
+`payload.custom_type` only, with `omitted: true`. Most such rows are never
+painted, but the desktop UI does paint `supplement_v1` custom rows, so a
+withheld one would render as an empty block: a reader that paints a row
+carrying `truncated.omitted` should render its own placeholder for it (or fetch
+the full row by `ref`) rather than paint the empty payload.
+A peer's row clipped by its owner carries `ref: null` — this device has no mesh
+lane that fetches one.
+
+**The rows route.** `GET /v1/desktop/sessions/{id}/history/rows/{ref}?offset=&limit=`
+answers `{bytes_total, offset, limit, length, eof, data}`, where `data` is
+standard base64 of bytes `[offset, offset+length)` of the full row's compact
+JSON (UTF-8, the desktop wire envelope `{id, ts, type, payload, ts_source}`).
+Concatenate the decoded ranges, then decode UTF-8 once (a range may split a
+character). `limit` defaults to and is CLAMPED at 1 MiB (the answer's `limit`
+states the applied value); `offset == bytes_total` is an empty `eof` range;
+`offset > bytes_total` is 416 `row_offset_past_end`.
+
+**Authority and threat model.** The route passes the same door as `/history`
+(bearer auth, the same read-mode session admission, the same remote-owner and
+draft handling), so a full row is never reachable where its page is not. The
+`ref` is `r1.<base64url row id>.<base64url HMAC-SHA256(session_id NUL row_id)
+truncated to 128 bits>` under a per-process secret: a ref from another session,
+a forged or guessed one, and one minted by an earlier serve process all answer
+404 — the same answer as a row that no longer exists.
+
+**Reading a clipped row back (client procedure).**
+
+1. `ref: null` means the row is not fetchable from this serve (a peer's row
+   clipped by its owner, or a producer with no session): show the clipped
+   preview as final; do not call the rows route.
+2. Page `offset=0, 1 MiB, 2 MiB, …` and on EVERY answer compare its
+   `bytes_total` with the marker's `bytes_total`. If they differ the row
+   changed under you: discard the bytes collected so far and restart from
+   `offset=0` with the new total.
+3. Concatenate the base64-decoded `data` of each range until `eof`. Decode
+   UTF-8 only AFTER joining all ranges — a range boundary may fall inside a
+   multi-byte character, so decoding range by range corrupts text. The joined
+   length equals `bytes_total` exactly.
+4. A 404 on a `ref` (most often a serve restart: the ref secret is per
+   process, by design) is recovered ONCE: re-read
+   `GET .../history?around_id=<row id>&before=0&after=0` to mint a fresh ref
+   for that row, and retry the procedure from step 2 with it. If that read
+   does not return the row clipped with a ref, or the retry fails again, show
+   the clipped preview as final.
 
 ### The open frame: a turn-aligned, paint-only page (`open_frame: 1`)
 
@@ -3018,6 +3106,100 @@ with this surface's own sentences (`wire.errors.notifications.*`, the
 `store_busy`, a full volume `507` `store_out_of_space`, and a store this process
 cannot read or open `500` `store_unavailable`.
 
+## Mesh pairing cards (`features.mesh_pairing`)
+
+Pairing two mesh devices from the app's Mesh approvals instead of a terminal. Both
+routes sit behind the desktop bearer (`require_desktop`) on their own router
+(`server/routes/desktop_mesh_pairings.py`); the logic is
+`server/utils/desktop_mesh_pairings.py`.
+
+**`GET /v1/desktop/mesh/pairings`** → `{pairings: [row, …]}`, oldest first, read-only
+(it never clears, quarantines or creates anything, and never asks the relay: inviter
+rows are read from the relay's own files). One row per open ceremony on THIS device:
+
+```json
+{"id": "inviter:<invite_id>", "side": "inviter|joiner",
+ "stage": "awaiting_joiner|awaiting_confirmation|waiting_for_other_device",
+ "invite_id": "…", "network_id": "…", "network_name": "…",
+ "peer_device_id": "…", "peer_name": "…", "role": "drive",
+ "code": "481926", "fingerprint": "…",
+ "offers": {"state": "listed|empty|absent|skipped_peer_unsupported|…", "items": [{"key","label","kind","share"}]},
+ "expires_at": 1763500000.0, "seconds_left": 512, "attempts_left": 3,
+ "nonce": "<hex>", "can_answer_here": false, "answer_unavailable": "unsupported_host"}
+```
+
+- `offers.state` is one vocabulary on both sides: `listed` (items to show) or `empty`
+  (nothing offered); `absent`/`skipped_peer_unsupported` mean one build cannot carry a
+  list. `peer_name` is the other device's name, `""` when an older token carried only
+  its id; `role` is the invite's role on both sides (`""` from an older joiner record).
+- `code` is THIS device's own derivation, shown for the person on the OTHER device to
+  type there. It is not a secret (it is in the park JSON already); the boundary is the
+  attestation below.
+- Inviter stages: `awaiting_joiner` (show the code, nothing to answer — answers are
+  refused `pairing_not_ready`), then `awaiting_confirmation` once the joiner's
+  transcription arrived and matched. Joiner stages: `awaiting_confirmation`, then
+  `waiting_for_other_device` after a local match. The card disappears when the
+  ceremony ends (answer, expiry, abandonment).
+- `attempts_left`: inviter = the invite's shared 3-attempt budget
+  (`invite.attempts`, also spent by wire mismatches and reconnects); joiner = the
+  card's own strike count (in-process, no security value).
+- `can_answer_here` is true only on a host with the app-attestation listener AND a
+  row in an answerable stage. `answer_unavailable`: `""`, `unsupported_host`
+  (not macOS), or `no_app_attestation` (macOS, listener failed to bind).
+- The window is `min(invite remaining, 600 s)` (`handshake.PAIR_PARK_CEILING_S`),
+  fixed ONCE when the ceremony starts: both inviter stages carry the same `expires_at`,
+  which also caps the attestation `deadline`. At
+  most 4 inviter ceremonies park per relay; a 5th joiner is refused `pairing_busy`,
+  which spends nothing.
+
+**`POST /v1/desktop/mesh/pairings/{side}/{invite_id}/answer`**
+body `{decision: "admit"|"decline", code, shares, nonce, deadline}` (strict). `shares`
+is REQUIRED on an inviter admit — exactly the keys to serve, `[]` serves none; there is
+no "absent = the whole offer" — and absent or `[]` on every other answer; anything else
+is `400 bad_request` before the attestation is spent.
+Order of checks — the order is the security property:
+
+1. the card must be live (`404 no_pending_pairing`); its `nonce` must match
+   (`409 pairing_expired`); an inviter card must be `awaiting_confirmation`
+   (`409 pairing_not_ready`);
+2. `deadline` (integer wall-clock seconds) must be in the future and no later than
+   the ceremony's `expires_at`;
+3. a matching **app attestation** must be consumed: key `("mesh-pairing",
+   "<side>:<invite_id>:<nonce>", respond|decline)`, content `{code: [code], shares:
+   sorted, deadline: [str]}`. None → `403 pairing_needs_app`, with NO attempt spent
+   and NO decision written. Single use; a non-matching body consumes nothing.
+4. inviter: the relay's `net_pair_confirm` with `code` — the RELAY compares against
+   its own derivation (caller `matched` is ignored), spends one attempt on a mismatch
+   inside the same lock as the stage check, and declines/consumes when the budget is
+   spent. Once the ceremony has a decision, or its budget is spent, every later answer
+   (card or terminal) is `409 pairing_answered` (outcome-neutral: the first answer
+   may have admitted the device) or, once the budget is spent, `409 pairing_expired`,
+   and nothing is overwritten. Only a decision stamped with the live ceremony
+   answers it; the stage-2 flip clears every other one. An onboarding run's
+   pre-approval is a separate one-shot record bound to the invite and the joiner's
+   mesh id, consumed at the flip after the wire code compare; a brand-new host (no
+   mesh id before its join) gets none and parks a normal card. Joiner: `network.pairing_answers.answer_card` (the CLI's own writer); it
+   never blocks on the other device.
+
+200 → `{status: "sent"|"waiting_for_other_device"|"refused", attempts_left}`.
+`409 sas_mismatch` carries `attempts_left` and leaves the card open. `503
+relay_unavailable` when the inviter relay cannot be asked. Messages are keyed
+(`network.pairing`); key on `code`.
+
+**Attestation (macOS only).** `lop serve` binds ONE listener at
+`<config>/run/attest/mesh-pairing.sock` (`network.pairing_attest`, #4132's verifier
+with a frame validator). The signed app's main process sends `{"op":
+"mesh_pairing_attest", side, invite_id, nonce, act, code, shares, deadline}` after its
+click-provenance gate, then forwards the POST. This is **desktop-API protection
+only**: it means an agent holding only the desktop bearer cannot answer a pairing
+through the app. It is not relay-level proof of a human — the same-user terminal
+fallback (`lop network confirm`, `lop network join --confirm`) remains and the relay
+cannot tell the two apart. Non-macOS hosts never downgrade: every answer is 403.
+
+Feed: the `approvals` frame ORs open pairing cards into `pending` and adds
+`pairing_id` (the oldest card's `id`, or `null`); the `open` frame adds
+`approvals_pairing_id`.
+
 ## The machine-wide event feed
 
 `GET /v1/desktop/events` — authenticated SSE, the same bearer/Origin boundary as
@@ -3626,6 +3808,52 @@ something alive or ready until then.
   because it opens unfocused), and ignored after 30 days. A remembered terminal
   that is no longer installed falls through to Terminal.app.
 
+## Voice mode (`voice: 2`)
+
+Hands-free talk with ONE conversation at a time. Every route is under the desktop
+bearer token, and every refusal is the i18n envelope `{code, params, text}`: a
+client classifies by `detail.code` and shows `detail.text`. The server never
+answers a gate by voice (the operator approves on screen), and never speaks text a
+client supplied: it re-resolves every source itself.
+
+| Route | Body | 200 | Refusals (`detail.code`) |
+|---|---|---|---|
+| `GET /v1/desktop/voice` | | `{active: {session_id, enabled_at} \| null, settings: {max_spoken_chars}, provider, providers: {radient, elevenlabs: {ready, reason}}, byok}` | |
+| `POST /v1/desktop/voice` | `{op: "enable" \| "disable", session_id}` | `{active, replaced}`; a `disable` for a session that does not hold the slot changes nothing | 404 `unknown_session`; 409 `voice_store_busy` |
+| `POST /v1/desktop/voice/utterance` | form: `session_id`, `request_id` (dashed UUID), EXACTLY ONE of `file` (a recording) or `text`; `text_origin?` (`qwen_s2s`, text door only) | `{text, path, admission}`; the words are admitted as a `dictated` prompt, or a steer while the turn is streaming | 402 `stt_unavailable` (an out-of-credit provider); 409 `voice_not_enabled`, `voice_provider_unset`, `approval_pending`, `session_syncing`, `stt_unavailable`; 413 `voice_upload_too_large`; 422 `invalid_voice_request`, `empty_transcript`; 429 `voice_rate_limited`; 502 `stt_unavailable` (every rung failed) |
+| `POST /v1/desktop/voice/text` | `{session_id, source}` where `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated, segments}` | 404 `unknown_source`; 409 `voice_not_enabled` |
+| `POST /v1/desktop/voice/speech` | `{session_id, source, segment}`; `source` adds `{kind: "phrase", key}` (one fixed phrase, `segment` 0) | `audio/mpeg` or `audio/wav`; headers `X-Voice-Path`, `X-Voice-Spoken-Chars`, and `X-Voice-Cache: hit` for a cached phrase | 404 `unknown_source`, `unknown_segment`; 409 `voice_not_enabled`, `voice_provider_unset`, `voice_unavailable`; 402 `voice_credit_low`; 429 `voice_rate_limited`; 502 `voice_provider_rejected`, `voice_upstream_failed`; 503 `voice_temporarily_unavailable` |
+
+- **The provider is the user's choice.** `speech.provider` is `radient` or
+  `elevenlabs`; with none chosen every route that would hear or speak refuses
+  `voice_provider_unset` before any credential is read, and the chosen provider is
+  the only one tried: it never falls through to another.
+- **A rejected provider key is 502, never 401.** `401` from a desktop route means
+  the APP token was refused; a client must not read it as "sign in again".
+  `voice_provider_rejected` is the provider refusing its own key.
+- **`voice_rate_limited`** carries `{scope: "day" \| "minute" \| null,
+  retry_after_s, remaining_requests, rung}` and a `Retry-After` header when a
+  number is known. `scope` is `null` when the provider named no window, and the
+  `text` then quotes the provider. Both numbers are finite and non-negative, or
+  `null`.
+- **`approval_pending`** is refused while the conversation has a pending approval
+  or a blocking question, because a steer would cancel that card. When the app
+  cannot yet tell whether one is waiting the answer is `session_syncing`: nothing
+  was sent, retry in a moment.
+- **Retries replay.** The utterance shares `/messages`'s receipt journal under
+  `session_id:request_id`, and the steer-or-prompt choice is not part of what it
+  compares, so a retry of the same `request_id` replays its outcome
+  (`admission.replayed: true`) whatever the turn is doing now. The same id with
+  different words is 409 "Request ID was already used with different input".
+- **`segments`** are what `/voice/speech` addresses: each is one paid synthesis,
+  capped at `settings.max_spoken_chars` (the cap includes the closing sentence
+  when a reply is cut, `truncated: true`). Code blocks and links are never spoken.
+- **The feed frame.** `GET /v1/desktop/events` publishes `{"type": "voice",
+  "payload": {"active": {session_id, enabled_at} | null}}` whenever the slot
+  moves, as a level (the slot as it is now, not an edge). The open snapshot's
+  baseline is the slot at connect.
+
+
 ## Capability keys
 
 | Key | Version | Advertises | Absent means |
@@ -3648,6 +3876,7 @@ something alive or ready until then.
 | `profile_scope` | 1 | `scope: "global" \| "session"` on the rows of `GET /v1/desktop/profiles`, `GET /v1/desktop/profiles/{name}`, `GET /v1/desktop/teams`, `GET /v1/desktop/teams/{name}` and the `agent`/`team` rows of `GET /v1/desktop/sessions/{id}/command-entities` | the renderer paints no scope badge and sends no session id to a picker route; the fields are additive, so an older reader parses the same payload it did before |
 | `profile_promote` | 1 | `POST /v1/desktop/sessions/{session_id}/promote` — copy one CONVERSATION-scoped role or team into the account. Body `{request_id, kind: "agent" \| "team", name, as_name?, confirm_replace?, dry_run?}`; a confirmed call answers the new ACCOUNT detail row (`GET /v1/desktop/profiles/{name}` / `/teams/{name}` shape) plus an additive `promoted` object naming what was created, expanded and replaced; a `dry_run` answers `{dry_run: true, promoted}` with the same plan and writes nothing | the renderer offers no "use in all conversations" action on conversation-scoped rows and calls nothing. On a backend that does not advertise the key the session rows are still rendered, only without that action — do not send a `session_id` to any profile route to approximate it |
 | `remote_files` | 1 | a PEER's conversation answers like a local one: transcript bytes fetched on miss (504 retryable, 409 permanent), `…/files` and `…/user-attachments` listed by the owner with `remote`/`origin_device`/`remote_read`/`remote_unreadable`, plus the peer-only `…/files/{file_id}/content` and `POST …/files/{file_id}/download`; see §"Remote files" | a peer's Files panel is `state: "unsupported"` and transcript bytes of a peer answer 409 `attachment_on_peer`, as before |
+| `voice` | 2 | per-session voice mode: the `/v1/desktop/voice*` routes and the `type: "voice"` feed frame; see §"Voice mode". `2` adds `segments` on `/voice/text` and `/voice/speech` (one audio segment by `(source, segment)`) and `voice_rate_limited` 429s | the renderer shows no voice affordance and calls no voice route. A backend on `1` has no `/voice/speech`: do not approximate it with the Speak button's routes |
 | `session_files` | 1 | `GET /v1/desktop/sessions/{id}/files` and `POST …/files/{file_id}/materialise` — the authoritative per-session file inventory (written, edited, command outputs, screenshots, downloads, generated images/videos, subagent files, Highlights callouts), and the `details.artifacts` list the image/video tools now write | the Files view builds from its own transcript scan exactly as today, and the renderer MUST NOT call the route (an older backend answers 404). A 404 from a backend that DID advertise the key is a broken backend: treat it as definitive "unsupported" for the session |
 
 `profile_scope` STATES A ROW'S STORE, not a caller's permission. `GET /v1/desktop/profiles`,

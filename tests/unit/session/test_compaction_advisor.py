@@ -1346,9 +1346,13 @@ async def test_a_mid_sized_window_still_compacts_over_threshold(tmp_path, monkey
 
     assert captured, "find_cut_point was never reached"
     # 51,200 (the capacity term), not the 100,000 a flat multiple would give.
-    assert captured[-1] == threshold // 2
-    assert captured[-1] < 100_000, (
-        f"the preserve window is {captured[-1]:,} on a 128k model — a flat "
+    # The FIRST call is the one that carries the floor-derived budget, as in
+    # ``test_the_preserve_cap_bounds_the_task_boundary_floor``: a second call at
+    # the base ``keep_recent_tokens`` may follow (the dense-tail cut, or the
+    # preserve-floor retry), and it is not what the cap bounds.
+    assert captured[0] == threshold // 2
+    assert captured[0] < 100_000, (
+        f"the preserve window is {captured[0]:,} on a 128k model — a flat "
         "keep_recent multiple has come back and exceeds this model's headroom"
     )
     assert isinstance(planned, _CompactionPlan), (

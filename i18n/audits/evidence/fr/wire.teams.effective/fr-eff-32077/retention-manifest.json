@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original paths/provenance/verdicts remain unchanged. Integration-only retention mapping, not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/receipt.fr.json",
+      "original_path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/receipt.fr.json",
+      "sha256": "6bba5db37d9dd06098cb9e472beb506019b05396190516e892e54c34952009c7"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/record.fr.json",
+      "sha256": "b0d97076d73bc97f602f9ec9e1d1a5a95730aabe4a01861c89ce020a68e12e90"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/translator-receipt.fr.json",
+      "sha256": "23c5bab253b77d5f858781da77afcfa84a12db532bd1c2d3c6fb9ae1f1933dff"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/target.json",
+      "original_path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/wire.teams.effective.fr.json",
+      "sha256": "9c7ffd5f52a5ad10267d739074e19c56c90f532b6c79b15314e2256655038226"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/wire.teams.effective.fr.json",
+      "original_path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/wire.teams.effective.fr.json",
+      "sha256": "9c7ffd5f52a5ad10267d739074e19c56c90f532b6c79b15314e2256655038226"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/translator-receipt.fr.json",
+      "original_path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/translator-receipt.fr.json",
+      "sha256": "23c5bab253b77d5f858781da77afcfa84a12db532bd1c2d3c6fb9ae1f1933dff"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/audit-report.fr.md",
+      "original_path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit-report.fr.md",
+      "sha256": "1c11984112468ace0c4f2c8e6688af2298cdb6476aa98dfcde54187671cdbfef"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/audit.fr.log",
+      "original_path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit.fr.log",
+      "sha256": "c3ea2254181863a2da60a58c6b47e2f4a0ab9ebebd73bfbbfa0d7e4e0de3417f"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/mechanical-results.fr.json",
+      "original_path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/mechanical-results.fr.json",
+      "sha256": "6c3e0d1e9eeb2d4f72eda9b546323baeea522ce9eee6c48f87ca51cdb8022191"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/audit_fr.py",
+      "original_path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/audit_fr.py",
+      "sha256": "dda1af57b17880bb328851b4c09f1e97a0481a679656c34544dc5d37fc076ac0"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/fr/wire.teams.effective/fr-eff-32077/receipt-validation.fr.log",
+      "original_path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/receipt-validation.fr.log",
+      "sha256": "3589ccecf65b6ced4094a0e402fcb916a422b96e242905cb8b475d0145bcd97e"
+    }
+  ]
+}

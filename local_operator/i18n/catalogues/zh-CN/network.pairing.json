@@ -1,0 +1,8 @@
+{
+  "network.pairing.refusal.answered": "此配对已关闭。此回答未被记录。",
+  "network.pairing.refusal.expired": "此配对已关闭，未批准任何内容。请从另一台设备重新发起配对。",
+  "network.pairing.refusal.mismatch": "{count, plural, =0 {该代码与另一台设备上的代码不一致，且已没有剩余尝试次数。} other {该代码与另一台设备上的代码不一致。还剩 # 次尝试。}}",
+  "network.pairing.refusal.needs_app": "要在这里批准设备配对，需要在Mac上使用已签名的Local Operator应用。未批准任何内容。你仍可以在这台设备的终端中回应。",
+  "network.pairing.refusal.no_pending": "没有设备在用该邀请等待与这台设备配对。",
+  "network.pairing.refusal.not_ready": "另一台设备还没有输入这台设备的代码，因此暂时无需确认。请等它输入后再试。"
+}

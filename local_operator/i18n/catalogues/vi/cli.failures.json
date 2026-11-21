@@ -3,5 +3,6 @@
   "cli.failures.required": "thiếu đối số bắt buộc: {names}",
   "cli.failures.invalid_choice": "đối số {argument}: lựa chọn không hợp lệ: {value} (chọn trong {choices})",
   "cli.failures.invalid_command": "Lệnh {group} không hợp lệ: {command}",
- "cli.failures.github_borrow_timeout": "Chưa nhận được thông tin xác thực GitHub từ {owner} trong {seconds} giây; hãy chạy lại lệnh"
+ "cli.failures.github_borrow_timeout": "Chưa nhận được thông tin xác thực GitHub từ {owner} trong {seconds} giây; hãy chạy lại lệnh",
+ "cli.failures.github_owner_offline": "Đăng nhập GitHub được {owner} cho mượn, nhưng thiết bị đó hiện không phản hồi; phiên này không có quyền truy cập đã lưu để dùng trong lúc chờ"
 }

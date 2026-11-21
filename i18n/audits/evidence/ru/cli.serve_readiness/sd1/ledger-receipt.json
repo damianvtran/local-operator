@@ -1,0 +1,28 @@
+{
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+  "status": "changes_requested",
+  "translator": {
+    "agent": "acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager task instruction"
+  },
+  "auditor": {
+    "agent": "independent-ru-auditor",
+    "session": "b8c027b19533",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "audit_date": "2026-11-16",
+  "unresolved_blocker_major_count": 2,
+  "finding_ids": [
+    "RU-SD1-01",
+    "RU-SD1-02",
+    "RU-SD1-03"
+  ],
+  "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd1/record.json; 11 keys; 0 blocker, 2 major, 1 minor; independent ru audit sd1, actual openai/gpt-6.1-sol. History append delegated to parent."
+}

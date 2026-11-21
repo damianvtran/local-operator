@@ -737,6 +737,59 @@ def _same_tree(left: Path, right: Path) -> bool:
         return False
 
 
+#: What ``readlink /proc/self/fd/N`` returns for an inotify instance on Linux.
+INOTIFY_FD_TARGET = "anon_inode:inotify"
+
+
+def close_inotify_on_exec(proc_fd_dir: str = "/proc/self/fd") -> list[int]:
+    """Mark every inotify fd this process holds close-on-exec; return the fds marked.
+
+    WHY: an in-place ``execve`` keeps every fd without ``FD_CLOEXEC``, and an inotify
+    instance carries its WATCHES with it. Builds before #4193 (and watchdog's observer,
+    which calls plain ``inotify_init()``) opened inotify fds without the flag, so each
+    move onto a new build handed the old image's instances to an image that does not
+    know they exist and never closes them. Measured on node2: a serve that had re-exec'd
+    across two releases held 21 inotify fds and 176,515 watches; one fresh-pid restart
+    brought it to 1 fd and 428 watches. The watches count against the per-user
+    ``fs.inotify.max_user_watches`` limit, and once that is spent OTHER programs
+    (editors, file watchers, ``tail -f``) fail with ENOSPC.
+
+    WHY EVERY inotify fd, not only the stale ones: the successor image re-creates the
+    watchers it needs (the Library watcher, watchdog observers) from scratch, so no
+    inotify instance in this process is meant to cross the exec. Live watchers keep
+    working until the exec itself, because ``FD_CLOEXEC`` only acts at exec time.
+
+    ONLY inotify fds are touched (matched by their ``/proc`` link target), so the
+    listening socket and the bearer pipe the exec deliberately passes are left exactly
+    as they are. ``os.set_inheritable(fd, False)`` sets ``FD_CLOEXEC`` without a
+    module-level ``fcntl`` import, keeping this module importable on Windows.
+
+    Linux only (``/proc`` and inotify); a no-op returning ``[]`` elsewhere. Best
+    effort: an fd that closes between the listing and the flag (another thread) is
+    skipped, because failing the reload over a leak guard would be the worse outcome.
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    try:
+        names = os.listdir(proc_fd_dir)
+    except OSError:
+        return []
+    marked: list[int] = []
+    for name in names:
+        try:
+            fd = int(name)
+            if os.readlink(os.path.join(proc_fd_dir, name)) != INOTIFY_FD_TARGET:
+                continue
+            if os.get_inheritable(fd):
+                os.set_inheritable(fd, False)
+                marked.append(fd)
+        except (OSError, ValueError):
+            # The listing's own fd (closed by now) and any fd another thread closed
+            # mid-walk land here; neither is a reason to abandon the reload.
+            continue
+    return marked
+
+
 def _exec(plan: ReloadPlan) -> None:
     """Replace this process image. Separated so a test can observe the plan.
 
@@ -788,6 +841,13 @@ def _exec(plan: ReloadPlan) -> None:
     # ``add_signal_handler`` then installs the real handler. That closes the
     # window by construction rather than by timing.
     previous = _ignore_reload_signal()
+    # No inotify instance (or its watches) may cross into the new image; see
+    # ``close_inotify_on_exec`` for the measured leak this stops. Not undone on a
+    # failed exec: the flag only matters at exec time, so it costs a live watcher
+    # nothing.
+    marked = close_inotify_on_exec()
+    if marked:
+        logger.info("serve reload: %d inotify fd(s) set close-on-exec", len(marked))
     argv = [
         str(plan.interpreter),
         SAFE_PATH_FLAG,

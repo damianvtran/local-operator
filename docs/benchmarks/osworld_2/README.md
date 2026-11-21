@@ -23,7 +23,9 @@ a full-suite benchmark result.
 For the separate v2.1 campaign, see the dated
 [2026-10-25 takeover methods/status addendum](TAKEOVER_V21_2026_10_25.md).
 It preserves the historical v2.0 baseline here and distinguishes the measured
-main16 diagnostic from proposed, not-yet-run main17 work.
+main16 diagnostic from proposed, not-yet-run main17 work. See the
+[2026-11-20 o37 baseline](BASELINE_V21_O37_2026_11_20.md) for the completed
+77-attempt offline wave, its exact denominator and limits on comparison.
 
 ## 1. The benchmark
 
@@ -544,6 +546,52 @@ disclosure is a false statement sealed in a `verify_bundle`-valid bundle. Both
 the gate and the stamp derive from a single table
 (`DISCLOSED_INFRA_METADATA_KEYS` in `local_operator/evaluation/runner/episode.py`),
 so a future value cannot be gated without being disclosed or vice versa.
+
+### Declared evaluator tool path
+
+The adapter worker's environment is constructed from a closed allowlist and
+carries **no `PATH`**, so a task evaluator that shells out to a host tool
+resolves it only on the interpreter's default search path (`/bin:/usr/bin`).
+A tool installed anywhere else either raises or, where the evaluator swallows
+the failure, silently scores lower. Upstream runs evaluators under the
+operator's ordinary environment, so this is a harness-side fidelity gap.
+
+`--infra EVALUATOR_TOOL_PATH=<dir>[:<dir>...]` closes it explicitly. At
+`prepare` the worker's `PATH` becomes the default directories **followed by**
+the declared ones, in the order given (a declared directory can add a tool,
+never shadow a system one). Nothing else of the launching shell's environment
+reaches the worker, and the launching shell's own `PATH` is never read.
+
+The default directories are the interpreter's (`os.defpath`, `/bin:/usr/bin`),
+which is what a directly spawned tool already resolved against. An evaluator
+that goes through a shell (`shell=True`) is different: with no `PATH` the
+shell used its own, wider built-in default (on macOS
+`/usr/gnu/bin:/usr/local/bin:/bin:/usr/bin:.`), and once `PATH` is set it uses
+exactly what is set. So setting this value **removes** `/usr/local/bin` and
+the working directory from a shell-spawned evaluator's search path: declare
+`/usr/local/bin` explicitly if your evaluators relied on it.
+
+Each entry must be an absolute, already-normalised, existing directory, and
+must not be the adapter workspace or the episode's artifact root or sit under
+either (checked after resolving symlinks, at `prepare` and again at
+`reset_start`, both before allocation). Relative paths, empty entries, files
+and missing directories are refused by name.
+
+Omitting the value reproduces the previous behaviour exactly: no `PATH` key is
+written. When it **is** set, `scripts/run_episode.py` stamps the requested
+list as `evaluator_tool_path` in the evidence manifest's metadata, and the
+value is gated like the two above: an adapter build that does not declare it
+fails the episode before `prepare` with `UndeclaredDisclosedInfra`. Scores
+from a run that sets it are comparable to runs disclosing the same
+directories.
+
+A `--engagement session` run builds no evidence manifest, so its record
+carries the same disclosure itself: the `reset` row of `events.jsonl` has a
+`disclosed_infra` object keyed exactly like the manifest metadata
+(`evaluator_tool_path`, `aws_instance_type_override`,
+`aws_root_volume_size_override`, `osworld_enable_proxy_override`,
+`osworld_action_settle_policy`), holding only the overrides that were
+supplied -- `{}` when none were.
 
 ### Explicit system proxy policy
 

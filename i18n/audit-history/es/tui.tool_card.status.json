@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.tool_card.status",
+  "history_sha256": "37335cc6b8e412335b036c69531be91ce6ca239d1db3ef0d73a847017e1e2919",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.tool_card.status",
+      "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+      "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+      "target_sha256": "dd826c7d3f45c259b1fe79a9b84c7732348d4d31bb6688677d8feef381deae97",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "7e74b08f235c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "fail",
+        "findings": 1,
+        "unresolved_blocker_major": 1,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 1,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [
+          "ES-STATUS-01"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "failed",
+      "note": "Independent full audit (round 1) of the new tui.tool_card.status namespace (18 keys), source commit 66c87c0755e2. Auditor 7e74b08f235c (openai/gpt-6.1-sol) verdict fail: 0 blocker, 1 major, 0 minor, 0 nit (ES-STATUS-01). Superseded: target_sha256 is the round-1 file as hashed by the auditor; the translator then revised it and a round-2 audit (row st2) covers the current bytes. Record: i18n/audits/evidence/es/tui.tool_card.status/st1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/tui.tool_card.status/st1/record.json",
+      "round": "st1"
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.tool_card.status",
+      "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+      "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+      "target_sha256": "83d94835752f1e78126875f2ece3d6c733b0bec6a9f86bfc1f4daf5faca27e61",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "95be7ec633ed",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit (round 2, after the round-1 fixes) of the new tui.tool_card.status namespace (18 keys), source commit 66c87c0755e2. Auditor 95be7ec633ed (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. target_sha256 re-derived against the committed file at ledger-write time. Record: i18n/audits/evidence/es/tui.tool_card.status/st2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/tui.tool_card.status/st2/record.json",
+      "round": "st2"
+    }
+  ]
+}

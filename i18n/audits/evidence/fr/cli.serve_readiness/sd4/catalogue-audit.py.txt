@@ -1,0 +1,149 @@
+"""Bounded read-only catalogue audit; writes NEW sd4 evidence only.
+Run from worktree root with python3 -B <this .py.txt>. No fixtures, tests,
+services, history, generated output, source/translation edits or installs.
+"""
+from __future__ import annotations
+import datetime,hashlib,json,re,subprocess,sys,unicodedata
+from pathlib import Path
+R=Path.cwd().resolve();sys.path.insert(0,str(R))
+from local_operator.i18n import runtime
+from local_operator.i18n.format import plural_category,format_number
+NS='cli.serve_readiness'; LS=['fr','es','ru','vi','hi','ur','zh-CN']; B=R/'i18n/audits/evidence'; C=R/'local_operator/i18n/catalogues'; SH=B/'fr'/NS/'sd4'
+NOW=datetime.datetime.now(datetime.timezone.utc).isoformat(); HEAD=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+COUNTS=[0,1,2,3,4,5,11,21,22,25,1.5,1000000,1500000]
+CATS={'fr':{'one','many','other'},'es':{'one','many','other'},'ru':{'one','few','many','other'},'vi':{'other'},'hi':{'one','other'},'ur':{'one','other'},'zh-CN':{'other'}}
+UNCHANGED={'install_unknown','cgroup_unknown','stale','other_unit'}
+CONTROLS=set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+def h(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def rel(p):return str(p.relative_to(R))
+def load(p):
+ def pairs(items):
+  result={}
+  for k,v in items:
+   assert k not in result,('duplicate key',p,k)
+   result[k]=v
+  return result
+ return json.loads(p.read_text(encoding='utf-8'),object_pairs_hook=pairs)
+def put(p,text):
+ p.parent.mkdir(parents=True,exist_ok=True)
+ with p.open('x',encoding='utf-8') as f:f.write(text)
+def dump(p,obj):put(p,json.dumps(obj,ensure_ascii=False,indent=2)+'\n')
+source=C/'en'/(NS+'.json'); context=C/'en'/(NS+'.context.json');en=load(source);ctx=load(context)
+assert len(en)==15 and set(en)==set(ctx)
+inputs=[source,context,R/'i18n/glossary.md',R/'local_operator/network/readiness.py',R/'i18n/audits/evidence/README.md']
+inputs += [C/l/(NS+'.json') for l in LS]+[R/'i18n/style-guides'/(l+'.md') for l in LS]
+prior_files=[]
+for l in LS:
+ for lane in ['sd2','sd2r']:
+  prior_files += list((B/l/NS/lane).glob('*'))
+manifest={rel(p):h(p) for p in inputs};preserve={rel(p):h(p) for p in prior_files if p.is_file()}
+provenance={'agent':'Local Operator — independent SECOND i18n auditor, sd4','session':'85af124f4a9f','model':'openai/gpt-6.1-sol','actual_model_source':'Host-provided session runtime model declaration; same resumed independent auditor session.','fallback':'none observed or reported','independence':'Not translator 170903662c6e or prior translator acf0a84cd992. No source or translation contribution authored; no first-auditor sd3/sd4 reports consulted. Current source/context/targets independently read before verdict.','native_speaker_claim':False}
+notes={
+ 'unproven':'Neutral record fragment preserves missing identity proof and the unavailable start-time comparison; it does not certify whichever process holds the PID.',
+ 'not_reporting':'Record/nonresponse/ceased heartbeat remain diagnostic, without claiming confirmed process death or successful identity proof.',
+ 'not_this_daemon':'Record remains present; the PID belongs to another process. No instruction to act on that unrelated process is introduced.',
+ 'unknown_state':'Neutral recorded-state fragment does not add an actor or known diagnosis.',
+ 'install_unknown':'Retained exact prior value: unavailable installed-build comparison does not establish staleness.',
+ 'cgroup_unknown':'Retained exact prior value and prior classification assessment. Existing cgroup jargon N1 remains deferred, not silently closed or newly introduced.',
+ 'recorded_gap':'The record says build recorded; install is installed. No assertion about the live PID build, and no repeated identity-unproven qualifier (the preceding diagnosis supplies it).',
+ 'unknown':'Full daemon count selects number; localized reasons follow a neutral separator, not a repeated daemon grammatical subject. Current-build AND supervision status remain unknown.',
+ 'stale':'Retained exact prior value, describing confirmed running/installed mismatch and hosted remote sessions, not an unproven record.',
+ 'other_unit':'Retained exact prior value: another service holds the daemon, distinct from no supervision.',
+ 'identity_restart':'Literal lop services restart moves the recorded daemon to the installed build and checks every daemon before action. It does not promise identity proof; the caller selects this only for a reloadable recorded gap with no stale-neighbor duplicate.',
+ 'pid_reason':'Localizes PID labels and uses count-selected singular/plural for the group. One intact reason belongs to the listed PIDs; no English PID prose is injected by the parameter.',
+ 'and_more':'Localized keyed overflow preserves the formatted count through # in every branch; no invented omitted-PID identity or diagnosis.',
+ 'identity_no_action':'Only the unproven RECORD matches the installed build. No action applies to THIS non-required check; no live-process current-build/supervision proof or global no-action guarantee is asserted.',
+ 'identity_restart_manual':'Literal lop serve is restarted by hand to move the recorded daemon to the installed build, explicitly because in-place reload is unavailable. No new identity guarantee or automatic-reload promise.'}
+register={
+ 'fr':'Professional vous imperatives lancez/redémarrez; enregistrement présent is a neutral diagnostic fragment. The relative clause in identity_no_action ties unproven process identity to the record, not a verified live build. Identifiant(s) de processus correctly localizes PID groups. one/many/other are present; U+202F precedes prose semicolons; commands stay byte-identical.',
+ 'es':'Neutral tú ejecuta/reinicia; hay registro and registro con estado desconocido are neutral fragments. El registro cuya identidad de proceso no está comprobada keeps the matching-build assertion about the record; comprobación no obligatoria narrows no action. Identificador(es) de proceso and y # más localize grouping/overflow. one/many/other agree; daemon/daemons follows the style-guide decision.',
+ 'ru':'Respectful выполните/перезапустите, impersonal есть запись/ответа нет. Запись с неподтверждённой идентичностью процесса corresponds to the installed build, not a proved live process. Необязательной проверки narrows no action. Идентификатор/идентификаторы expresses group number without requiring quantified noun case, since pids is an ID list, not count. All one/few/many/other arms retain meaning; manual remedy preserves the in-place limitation.',
+ 'vi':'Pronoun-free developer register, bản ghi distinguishes a record from a proved process. Có danh tính tiến trình chưa được xác minh qualifies the record; lần kiểm tra không bắt buộc này narrows no action. Thủ công and không thể tự nạp lại distinguish manual restart from reload. Invariant other-only branches and mã định danh tiến trình are appropriate; NFC retained.',
+ 'hi':'Respectful चलाएँ/फिर शुरू करें; रिकॉर्ड मौजूद है is neutral. जिस रिकॉर्ड ... उसका बिल्ड / जिन रिकॉर्डों ... उनके बिल्ड clearly attributes installed-build matching to records with unproven identities, not live processes. इस गैर-अनिवार्य जाँच confines no action. प्रक्रिया ID / प्रक्रियाओं के ID has singular/plural agreement; 0 and 1 choose one. Manual and guarded remedies do not promise identity proof.',
+ 'ur':'Respectful چلائیں/دوبارہ شروع کریں; ریکارڈ موجود ہے avoids attaching an invented live subject to a PID diagnosis. جس ریکارڈ ... اس میں درج بلڈ / جن ریکارڈز ... ان میں درج بلڈ makes the matching build explicitly recorded; اس غیر لازمی جانچ limits no action. عمل کا شناختی نمبر / اعمال کے شناختی نمبر localizes group labels. one/other agreement preserved; raw logical order and Latin command/ID bytes remain intact with no catalogue bidi controls.',
+ 'zh-CN':'Concise neutral 记录存在/已有记录; 记录中注明构建 states record evidence, without repeating the identity qualifier. 记录中的构建与已安装的构建一致，但进程身份未经证实 explicitly prevents live-build proof, while 此项非必需检查 confines no action. 进程ID/以及另外#个 localize grouping and overflow. 请 heads each remedy directive; 手动 and 无法在当前进程内自行重新加载 distinguish manual remedy. other-only branches are correct.'}
+log=[f'$ python3 -B {rel(SH/"catalogue-audit.py.txt")}',f'cwd={R}',f'python={sys.version}',f'date={NOW}',f'HEAD={HEAD}','Scope: 11 changed/new + 4 byte-identical carried keys per locale; no tests/services; catalogue-only parser/render assertions.']
+results=[]
+for l in LS:
+ d=B/l/NS/'sd4';target=C/l/(NS+'.json');t=load(target);assert len(t)==15 and set(t)==set(en)
+ prior=B/l/NS/'sd2r/record.json';previous=load(prior)
+ oldbytes=subprocess.check_output(['git','show',HEAD+':'+rel(target)])
+ assert hashlib.sha256(oldbytes).hexdigest()==previous['input_hashes']['target']
+ old=json.loads(oldbytes);same={k.rsplit('.',1)[-1] for k in old if old[k]==t.get(k)};assert same==UNCHANGED,(l,same)
+ changed=[k for k in t if old.get(k)!=t[k]];assert len(changed)==11
+ rendered=[f'# sd4 current catalogue renders — {l}',f'UTC {NOW}; raw logical-order text, not terminal screenshots.','']
+ seen=set();n=0;opaque=0
+ params={'device':'host-sd4','pids':'4101, 4102','reason':'DIAG-opaque-α','reasons':'DIAGS-opaque-ß','recorded':'v0.99.0+recorded','install':'v0.99.2+installed','holders':'worker.service','builds':'v0.99.1+running'}
+ for key,text in t.items():
+  assert isinstance(text,str) and text and not set(text)&CONTROLS
+  assert not any(unicodedata.category(c)=='Cc' for c in text)
+  if l=='vi':assert unicodedata.normalize('NFC',text)==text
+  want=runtime.message_arguments(en[key]);got=runtime.message_arguments(text);assert want==got,(l,key,want,got)
+  plurals=runtime.plural_selectors(text)
+  for selectors in plurals:assert set(selectors)==CATS[l],(l,key,selectors)
+  for arg in runtime.plural_arguments(text):assert not any(b.empty for b in arg.branches)
+  commands=set(re.findall(r'`([^`]+)`',en[key]));assert set(re.findall(r'`([^`]+)`',text))==commands
+  for node in runtime.parse_message(text):
+   if getattr(node,'kind',None)=='plural':
+    expected={name for name,kind in want if kind!='plural'}
+    for selector,body in node.parts:
+     assert {x.name for x in body if hasattr(x,'name')}==expected,(l,key,selector)
+     literals=set()
+     for x in body:
+      if hasattr(x,'value'):literals.update(re.findall(r'`([^`]+)`',x.value))
+     assert literals==commands
+  for count in COUNTS if plurals else [1]:
+   p=dict(params,count=count);out=runtime.render_message(text,p,l);category=plural_category(l,count) if plurals else 'n/a'
+   if plurals:seen.add(category)
+   for name,kind in got:
+    if kind=='simple':assert p[name] in out
+   assert set(re.findall(r'`([^`]+)`',out))==commands
+   if key.endswith('.and_more'):assert format_number(count,l) in out
+   rendered += [f'## {key} | count={count} | CLDR={category}','',out,''];n+=1
+   pseudo={k:'[!!'+v+'!!]' for k,v in params.items()};pseudo['count']=count
+   stress=runtime.render_message(text,pseudo,l)
+   for name,kind in got:
+    if kind=='simple':assert pseudo[name] in stress
+   opaque+=1
+  log.append(f'PASS {l}/{key}: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders')
+ assert seen==CATS[l]
+ def tr(short,**p):return runtime.render_message(t[NS+'.'+short],dict(params,**p),l)
+ unproven=tr('unproven');gap=unproven+'; '+tr('recorded_gap')
+ one=tr('pid_reason',count=1,pids='4101',reason=unproven)
+ group=tr('pid_reason',count=2,reason=gap)
+ # Real-source composition shape, without invoking services or asserting guard execution.
+ examples={'current unproven record / non-required no-action':tr('unknown',count=1,reasons=one)+'; '+tr('identity_no_action',count=1),
+ 'grouped recorded gap / reloadable remedy':tr('unknown',count=2,reasons=group)+'; '+tr('identity_restart'),
+ 'grouped recorded gap / manual remedy':tr('unknown',count=2,reasons=group)+'; '+tr('identity_restart_manual'),
+ 'mixed PID groups and keyed overflow':tr('unknown',count=25,reasons=one+'; '+tr('pid_reason',count=2,pids='4102, 4103',reason=tr('not_this_daemon'))+' '+tr('and_more',count=22))}
+ for label,out in examples.items():rendered += ['## COMPOSED '+label,'',out,'']
+ assert group.count(unproven)==1 and group.count(tr('recorded_gap'))==1
+ log.append(f'PASS {l}: 15 keys, 11 changed/new, 4 exact retained; ordinary={n}, opaque={opaque}, composed=4; CLDR={sorted(seen)}; original sd2r target SHA matched HEAD')
+ delta={'prior_record':rel(prior),'prior_target_sha256':previous['input_hashes']['target'],'prior_catalogue_revision':HEAD,'unchanged_keys':[NS+'.'+k for k in sorted(UNCHANGED)],'changed_new_keys':changed,'before_after':{k:{'before':old.get(k),'after':t[k]} for k in changed}}
+ dump(d/'delta.json',delta);put(d/'rendered.txt','\n'.join(rendered)+'\n')
+ hashes={'en':h(source),'context':h(context),'target':h(target)}
+ report=[f'# sd4 independent SECOND audit — {l} / {NS}','', '**PASSED — current 15-key surface; zero new unresolved findings. Existing deferred N1 remains deferred.**','',
+ f'Auditor session `85af124f4a9f`, actual model `openai/gpt-6.1-sol` from host context; no fallback observed/reported. Independent of translator `170903662c6e`; no own-copy approval. UTC {NOW}; HEAD `{HEAD}` plus current uncommitted catalogue bytes. No other current first-auditor report was used to reach this verdict.','',
+ '## Current byte binding','',*[f'- {name}: `{digest}`' for name,digest in hashes.items()],'',
+ '## Scope and register','',register[l],'',
+ '11 changed/new keys were freshly assessed; 4 keys retained exact value bytes from HEAD, whose whole target-file hash matches the prior sd2r record. This proves the retained coverage binding rather than reusing stale whole-file approval. Source/context have changed, so this new record pins both anew.','',
+ '## Complete 15-key coverage','']
+ for key in en:
+  short=key.rsplit('.',1)[-1];report.append(f'- `{key}` — '+('RETAINED EXACT / direct neighbor checked' if short in UNCHANGED else 'FRESH PASS')+': '+notes[short])
+ report += ['', '## Dispositions and limits','',
+ 'The revised source requirements are satisfied: current-build unproven record gets no action only for this non-required check, remains unknown, and never becomes live-build proof. Record-gap explanation does not repeat the identity qualifier. The automatic/manual restart split remains guarded by the source caller and neither text promises identity recovery. Grouped reasons and keyed overflow compose once without moving a diagnosis to unrelated PIDs. Source was inspected; catalogue evidence does not claim execution of the service guards.', '',
+ 'Preexisting cgroup-jargon N1: deferred as directed; unchanged cgroup key does not reopen or close that concern. No newly discovered BLOCKER/MAJOR/MINOR/NIT. This is current-byte second-audit language approval, not a ledger write, overall PR approval, release eligibility, native-speaker sign-off, or terminal RTL/shaping proof.', '',
+ f'Validation: {n} ordinary renders + {opaque} opaque/pseudo renders + 4 composed samples; count matrix {COUNTS}. Full CLDR-category coverage, exact placeholder order/kinds and per-branch literal commands checked. Urdu has no stored bidi controls and preserves technical bytes; actual display isolation/shaping is not tested. No arbitrary width cap: source context declares none.', '',
+ 'Artifacts: local record.json, delta.json, rendered.txt and receipt.json; shared actual command output `i18n/audits/evidence/fr/cli.serve_readiness/sd4/audit.log`, input manifest and `.py.txt` reproducer. All old sd2/sd2r preserved. No source/translation/history edits, tests, services, installs, commits or daemon actions. Parent owns ledger appends.']
+ put(d/'report.md','\n'.join(report)+'\n')
+ record={'locale':l,'namespace':NS,'audit_date':NOW,'key_count':15,'auditor':provenance,'source_audit_revision':HEAD,'input_hashes':hashes,'input_paths':{'en':rel(source),'context':rel(context),'target':rel(target)},'current_bytes_match_audited_hashes':True,'current_report_verdict':'passed','unresolved_blocker_major_count':0,'findings':[],'deferred_findings':[{'id':'N1','subject':'preexisting cgroup jargon','disposition':'retained deferred, unchanged/outside current remediation'}],'all_keys_audited':list(en),'fresh_semantic_keys':changed,'retained_byte_identical_keys':delta['unchanged_keys'],'prior_second_pass_record':rel(prior),'retention_proof':'HEAD entire prior target SHA256 matches sd2r; exactly four current values equal HEAD values.','artifacts':{'report':rel(d/'report.md'),'rendered':rel(d/'rendered.txt'),'delta':rel(d/'delta.json'),'shared_log':rel(SH/'audit.log'),'input_manifest':rel(SH/'input-manifest.json'),'reproducer':rel(SH/'catalogue-audit.py.txt')},'validation':{'ordinary_renders':n,'opaque_pseudo_renders':opaque,'composed_samples':4,'categories':sorted(seen),'exit_code':0},'ledger_history_appended':False,'translation_edits':False}
+ dump(d/'record.json',record);results.append((l,d))
+assert all(h(R/p)==digest for p,digest in manifest.items()),'inputs changed'
+assert all(h(R/p)==digest for p,digest in preserve.items()),'prior evidence changed'
+dump(SH/'input-manifest.json',{'timestamp':NOW,'source_revision':HEAD,'current_input_sha256':manifest,'prior_sd2_sd2r_preservation_sha256':preserve})
+log += ['PASS 7 locales, 105 total key coverage, 77 changed/new fresh + 28 retained exact; source/current inputs stable; all prior sd2/sd2r bytes preserved.','EXIT_CODE=0']
+put(SH/'audit.log','\n'.join(log)+'\n')
+for l,d in results:
+ files=[d/n for n in ['record.json','report.md','rendered.txt','delta.json']]+[SH/'audit.log',SH/'input-manifest.json',SH/'catalogue-audit.py.txt']
+ dump(d/'receipt.json',{'locale':l,'namespace':NS,'audit_id':'sd4','sha256':{rel(p):h(p) for p in files}})
+for line in log:print(line)

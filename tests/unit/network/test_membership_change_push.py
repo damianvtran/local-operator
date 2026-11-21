@@ -562,7 +562,9 @@ def test_removal_and_epoch_still_reach_every_peer(
     assert _join(removed, inviter=c, monkeypatch=monkeypatch)["device_id"] == removed.device_id
     # Pairing uses a short-lived CLI connection. Establish the relay's own link
     # before removal, so the removed device can receive its epoch notification.
-    removed_link, reason = removed.server.dial(network_id, host=f"{c.host}:{c.port}", epoch=1)
+    removed_link, reason = removed.server.dial(
+        network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert removed_link is not None, reason
     assert net_fixtures.wait_for(
         lambda: (live := c.server._link_for(removed.device_id)) is not None and live.alive

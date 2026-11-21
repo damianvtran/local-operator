@@ -459,6 +459,10 @@
   "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label": "Anthropic 1h cache above (tokens)",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": "Context size (tokens) from which subagent requests use the 1-hour prompt-cache TTL. 0 adds no size rule, since 1 hour by size alone measured more expensive for subagents at every size. Separately, on a Claude subscription a subagent switches to 1 hour after a call that runs 4 minutes or longer; 0 in the main 1-hour setting turns that off.",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": "Anthropic subagent 1h cache",
+  "wire.settings.providers_bedrock_auth.help": "ambient: use this machine's AWS credentials (IAM role) for Bedrock.",
+  "wire.settings.providers_bedrock_auth.label": "Amazon Bedrock auth",
+  "wire.settings.providers_bedrock_region.help": "AWS Region for Bedrock when a connection has none. Empty: AWS_REGION.",
+  "wire.settings.providers_bedrock_region.label": "Amazon Bedrock Region",
   "wire.settings.providers_openai_api.choice.chat_completions.description": "explicit compatibility opt-out",
   "wire.settings.providers_openai_api.choice.chat_completions.label": "chat_completions",
   "wire.settings.providers_openai_api.choice.responses.description": "the public Responses API (default)",
@@ -762,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Unaddressed ceiling per hour",
   "wire.settings.team_bridge_session.help": "Session that may be woken for new messages; empty = badge only.",
   "wire.settings.team_bridge_session.label": "CoS session",
+  "wire.settings.team_bridge_hold_release.label": "Hold work requests for review",
+  "wire.settings.team_bridge_hold_release.help": "Some new-work requests are held for you to deliver or discard. Nothing reaches your agent unless you deliver it. Off rejects them.",
   "wire.settings.tool_approval_mode.choice.ask.description": "prompt before write/exec tools",
   "wire.settings.tool_approval_mode.choice.ask.label": "ask",
   "wire.settings.tool_approval_mode.choice.auto.description": "run them without asking",
@@ -881,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 hours",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 minutes",
   "wire.settings.session_cleanup_temporary_idle_minutes.help": "How long a temporary chat may sit idle before it is deleted. Time on screen, a running task or an open question does not count as idle.",
-  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Delete temporary chats after"
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Delete temporary chats after",
+  "wire.settings.mesh_moves.title": "Session moves",
+  "wire.settings.mesh_moves.description": "What a conversation moved to another device brings with it. Read at every move, so a change applies to the next one.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Working-files cap per move (bytes)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "The most working-file data (bundled commits plus staged, unstaged and untracked files) one move sends to, or accepts from, another device. Over it, the move is refused and nothing changes. Default 256 MiB.",
+  "wire.settings.mesh_move_working_set_roots.label": "Folders that may receive moved repositories",
+  "wire.settings.mesh_move_working_set_roots.help": "Where on this device a session move may create or restore a repository: folders under your home, written with ~ and separated by commas (for example ~/code, ~/work). Hidden, system, command (on PATH) and node_modules folders are never used. Unset: a repository is restored where it already is, and a missing one is cloned only into a folder that already holds your repositories; set this to allow other folders."
 }

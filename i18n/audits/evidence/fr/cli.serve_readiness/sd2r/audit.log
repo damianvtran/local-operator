@@ -1,0 +1,24 @@
+$ python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd2r/catalogue-check.py.txt
+cwd=/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+python=3.9.25 (main, Jul 15 2026, 00:00:00) 
+[GCC 11.5.0 20240719 (Red Hat 11.5.0-5)]
+date=2026-11-16T04:52:46.184602+00:00
+HEAD=e4a6b6e1d01ef269604fe6d005e6bce1453b66ca
+Scope: exact nine-key remediation, direct semantic neighbors and inherited unchanged sd2 coverage; bounded catalogue checks only.
+PASS fr: reconstructed full prior target SHA256=fa709445a56aaae44736e248854e28b4c87721a3d079be8710d7b1a92958ed44; changed keys=['not_reporting']; remaining 10 values and formatting unchanged
+PASS fr: 11 keys; 47 renders; 47 pseudo/opaque renders; categories=['many', 'one', 'other']; placeholders/literal commands in every branch; Unicode controls absent
+PASS es: reconstructed full prior target SHA256=11fe4d85d826ad5206ebbc4c2a379a9daa0ee529f831466ea9e363953cee6fcd; changed keys=['not_reporting']; remaining 10 values and formatting unchanged
+PASS es: 11 keys; 47 renders; 47 pseudo/opaque renders; categories=['many', 'one', 'other']; placeholders/literal commands in every branch; Unicode controls absent
+PASS ru: reconstructed full prior target SHA256=892e251984ddf40978a06ef7cb5e558455ed788b2a15f959c5a84f9ebf8a2968; changed keys=['not_reporting', 'cgroup_unknown', 'identity_restart']; remaining 8 values and formatting unchanged
+PASS ru: 11 keys; 47 renders; 47 pseudo/opaque renders; categories=['few', 'many', 'one', 'other']; placeholders/literal commands in every branch; Unicode controls absent
+PASS vi: reconstructed full prior target SHA256=76639bf0411f16c4c5a38c3f5ed852df89736e6cfb6c73658b6a7dcc1b261d1d; changed keys=['cgroup_unknown']; remaining 10 values and formatting unchanged
+PASS vi: 11 keys; 47 renders; 47 pseudo/opaque renders; categories=['other']; placeholders/literal commands in every branch; Unicode controls absent
+PASS hi: reconstructed full prior target SHA256=44980d359b70259062ec915d495235869e62996247beaa7e851e05b8a65ab439; changed keys=['cgroup_unknown']; remaining 10 values and formatting unchanged
+PASS hi: 11 keys; 47 renders; 47 pseudo/opaque renders; categories=['one', 'other']; placeholders/literal commands in every branch; Unicode controls absent
+PASS ur: reconstructed full prior target SHA256=07c4be789363310c6f1863fd643974ca7741f18c99b7fd6c9404872ed84d9674; changed keys=['cgroup_unknown']; remaining 10 values and formatting unchanged
+PASS ur: 11 keys; 47 renders; 47 pseudo/opaque renders; categories=['one', 'other']; placeholders/literal commands in every branch; Unicode controls absent
+PASS zh-CN: reconstructed full prior target SHA256=c02337dab4639daae2784f9b089be5f95cda30406d504dfa558d19a94b569828; changed keys=['cgroup_unknown']; remaining 10 values and formatting unchanged
+PASS zh-CN: 11 keys; 47 renders; 47 pseudo/opaque renders; categories=['other']; placeholders/literal commands in every branch; Unicode controls absent
+PASS exact delta: 9 changed values across 7 locales, 68 unchanged values proven; English/context unchanged.
+PASS source/target/glossary/style and prior sd2 evidence hashes unchanged throughout this run.
+EXIT_CODE=0

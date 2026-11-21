@@ -1,0 +1,70 @@
+{
+  "locale": "ru",
+  "namespace": "wire.teams.effective",
+  "audit_id": "ru-second-6fa3219b",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6fa3219bb25e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state model declaration",
+    "fallback": "none observed",
+    "independent_from_translator_session": "9588c120c894",
+    "independent_from_first_auditor_session": "18a5766f5b20"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    }
+  },
+  "artifacts": {
+    "report.json": {
+      "path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/report.json",
+      "sha256": "f7a8d6e5240f144d5b6d1bdac9f0e3a5dcc88966eeb592d9c452c92668591df3"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/audit.log",
+      "sha256": "eb6a22ab77ea94c1e1bc5798dceb0fdf6d7fa15329bcc45b74fe02dcc7f8ad2c"
+    },
+    "validate.py": {
+      "path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/validate.py",
+      "sha256": "187b73901938bbdb5138979728ca67a0b73f01e275792721b7ae4ff6b4aa52fd"
+    },
+    "en.original.json": {
+      "path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/en.original.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context.original.json": {
+      "path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/context.original.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ru.original.json": {
+      "path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/ru.original.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "prior_receipt_inspection": {
+    "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/receipt.json",
+    "sha256": "8e06df43849a1626952e5396195b4081d776089ba5ba3189ba5ed2bbe91fbe28",
+    "read_after_independent_semantic_verdict": true,
+    "reported_status": "passed",
+    "provenance": "First auditor receipt; independently hashed here. Translator model below is sourced from this receipt, not independently attested by this auditor."
+  },
+  "storage_status": "Original scratch evidence only; manager must retain in canonical tracked i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/ before ledger application. No repo modifications or ledger application performed.",
+  "audit_notes_not_execution_log": "Semantic judgments are in report.json. audit.log records actual checker execution and evaluated assertions; no rendered/runtime gate claimed."
+}

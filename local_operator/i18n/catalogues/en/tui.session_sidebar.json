@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "asks: {count}",
+  "tui.session_sidebar.footer.hub_note": "hub: {count}",
+  "tui.session_sidebar.footer.opening": "Opening…",
+  "tui.session_sidebar.footer.refresh_failed": "Refresh failed",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, one {+{shown} more pinned — scroll} other {+{shown} more pinned — scroll}}",
+  "tui.session_sidebar.row.untitled": "Untitled conversation",
+  "tui.session_sidebar.section.active": "Active Sessions",
+  "tui.session_sidebar.section.pinned": "Pinned",
+  "tui.session_sidebar.section.previous": "Previous Sessions",
+  "tui.session_sidebar.section.subagent": "Subagent Runs",
+  "tui.session_sidebar.state.empty": "No conversations yet",
+  "tui.session_sidebar.state.error": "Could not load conversations",
+  "tui.session_sidebar.state.loading": "Loading conversations…",
+  "tui.session_sidebar.title": "Sessions",
+  "tui.session_sidebar.tooltip.location": "on {device}",
+  "tui.session_sidebar.tooltip.location_network": "on {device} · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "on {device} · {network} (last known state)",
+  "tui.session_sidebar.tooltip.location_stale": "on {device} (last known state)",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · {command} if it stays silent",
+  "tui.session_sidebar.tooltip.unnamed_device": "unnamed device",
+  "tui.session_sidebar.tooltip.unreachable": "unreachable · {reason}"
+}

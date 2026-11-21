@@ -1,0 +1,141 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session-state explicitly names openai/gpt-6.1-sol; no provider fallback indicated in this auditor session.",
+    "fallback": {
+      "observed": false,
+      "requested_model": null,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "translator": {
+    "agent": "task acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Task assignment from requesting session; auditor did not independently inspect translator runtime."
+  },
+  "source_audit_revision": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca plus uncommitted copy; input_hashes bind reviewed bytes",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/cli.serve_readiness.json",
+      "sha256": "44980d359b70259062ec915d495235869e62996247beaa7e851e05b8a65ab439"
+    }
+  },
+  "reference_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    {
+      "path": "local_operator/network/readiness.py",
+      "sha256": "263973ba412aa3194a85accec36ce9861d79ec3ac25dcf48ac716f871e0ce29e"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/report.md",
+      "sha256": "71588dd2647a40ea08bec4b29a9d9eb99967dadc66efd106f9a91668c0595c8b"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/audit.log",
+      "sha256": "d4d91ca04e06a2a7c4ca6ae614642ea1beccec9b74a29a203b9d456cb6927734"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/receipt.json",
+      "sha256": "288cd740817cde66e73d14bb3d53094646bba61f7cc1526c5b6720da16593bc5"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/ledger-receipt.json",
+      "sha256": "a43ef005e589975a05b82ed62ddce17cb118bef762f0ede431e9534cbba0edd0"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "HI-SD1-01"
+    ],
+    "report_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/report.md",
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 1,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "coverage": {
+    "keys_reviewed": 11,
+    "plural_keys_reviewed": [
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.stale",
+      "cli.serve_readiness.other_unit"
+    ],
+    "all_plural_branches_reviewed": true,
+    "counts_rendered": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "hi_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "validator_command": ".venv/bin/python scripts/i18n/check.py --catalogues-only",
+    "validator_exit_code": 0,
+    "validator_problem_count": 0,
+    "independent_structural_verification_exit_code": 0,
+    "translation_or_mt_service_used": false,
+    "second_independent_pass_claimed": false,
+    "rtl": "not applicable: Hindi LTR",
+    "rendered_frame_evidence": false,
+    "maxCells_or_maxChars_hints_present": false
+  },
+  "evidence_classification": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "receipt.json": "companion_hash_receipt_with_record_reference",
+    "ledger-receipt.json": "schema-valid proposed ledger append receipt; dry-run only"
+  },
+  "ledger": {
+    "receipt_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/ledger-receipt.json",
+    "note": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/record.json; HI-SD1-01 MAJOR: cgroup wording confuses supervision classification with location; 11/11 audited.",
+    "note_characters": 158,
+    "append_dry_run_exit_code": 0,
+    "applied": false,
+    "parent_appends_history": true
+  },
+  "retention": {
+    "canonical_root": "i18n/audits/evidence",
+    "repo_only_not_shipped": true,
+    "no_commit_by_auditor": true,
+    "git_tracking_at_handoff": "new untracked evidence files; parent must add/commit; not on main"
+  },
+  "limitations": [
+    "No full tests, installation, live providers, real diagnostic execution, daemon/service operations or rendered frame capture.",
+    "This is one independent Hindi pass; additional safety/high-visibility pass, if required, is managed by parent."
+  ]
+}

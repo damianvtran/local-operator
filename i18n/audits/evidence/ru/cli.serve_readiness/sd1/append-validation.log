@@ -1,0 +1,18 @@
+Actual CLI output for ledger-receipt.json; provenance: i18n/audits/evidence/ru/cli.serve_readiness/sd1/record.json
+UTC started: 2026-11-16T04:42:00.916250+00:00
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ru --namespace cli.serve_readiness
+STDOUT:
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/ru/cli.serve_readiness/sd1/ledger-receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run
+STDOUT:
+i18n/audit-history/ru/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE: 0

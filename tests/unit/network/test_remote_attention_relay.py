@@ -441,7 +441,12 @@ def test_a_node_started_ask_and_notify_reach_the_operator_bound_by_its_signature
         device_id=server_a.identity.device_id,
     )
     # A fresh link: B's link-up hook presents the proof by itself.
-    link = server_b.dial(network.network_id, host=f"{_host}:{_port}", epoch=network.epoch)[0]
+    link = server_b.dial(
+        network.network_id,
+        host=f"{_host}:{_port}",
+        epoch=network.epoch,
+        expected_device=server_a.identity.device_id,
+    )[0]
     assert link is not None
     try:
         stored = None
@@ -608,7 +613,12 @@ def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
                 presented.set()
 
     monkeypatch.setattr(ob, "present", watched)
-    link = server_b.dial(network.network_id, host=f"{_host}:{_port}", epoch=network.epoch)[0]
+    link = server_b.dial(
+        network.network_id,
+        host=f"{_host}:{_port}",
+        epoch=network.epoch,
+        expected_device=server_a.identity.device_id,
+    )[0]
     assert link is not None
     try:
         assert wire.OPERATOR_BINDING_V1 in link.capabilities

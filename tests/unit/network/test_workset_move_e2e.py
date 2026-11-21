@@ -1,0 +1,623 @@
+"""The session move CARRIES its working set (design ``move-working-set.md`` §4, §10, PR B).
+
+The operator's request (2026-11-18): "we should be able to move the session and its
+working data, worktrees, etc. all to a remote device … Otherwise people could use the
+move function and then realize all the work is not available."
+
+Each cell drives the move the way the CLI does — ``mobility.request_move`` over the
+in-process two-relay rig from ``test_mobility`` — with a REAL git worktree as the
+session's cwd and DIFFERENT homes per device (``server.workset_home``), so the
+``~/``-relative remap is exercised for real:
+
+* a confirmed move lands the unpushed commit, the staged, unstaged and untracked
+  changes as such on the destination, registered in ``git worktree list``; the
+  secret-shaped ``.env.local`` and the ignored ``node_modules/`` do not travel; the
+  source worktree is byte-identical and marked; the owner audited the serve;
+* a worktree whose outgoing history carries a secret-shaped file is left behind;
+* the recall (``--to local``) brings the destination's new work back IN PLACE;
+* over the cap → ``working_set_over_cap``, ``changed: False``, nothing moved;
+* a transfer failure rolls the move back and sweeps both stagings;
+* an older destination (protocol 1) keeps PR A's "confirmed, files stay" behaviour.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.network import mobility, workset, workset_move
+from local_operator.session.placement import read_handoff_journal
+from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a fixture
+    SESSION,
+    Devices,
+    _owned_session,
+    devices,
+)
+from tests.unit.network.test_relay_e2e import _pair_settled
+from tests.unit.network.workset_git_fixtures import serve_origin_as_https
+from tests.unit.network.workset_rig import GIT_ENV, Rig, git, make_rig, point_session_at
+
+
+@pytest.fixture()
+def pair(request: pytest.FixtureRequest) -> Devices:
+    value: Devices = request.getfixturevalue("devices")
+    _server_a, server_b, _host, _port = value
+    server_b.bind_control()
+    server_b.start()
+    return value
+
+
+@pytest.fixture()
+def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
+    for key, value in GIT_ENV.items():
+        monkeypatch.setenv(key, value)
+    built = make_rig(tmp_path / "ws")
+    monkeypatch.setenv("HOME", str(built.home))
+    return built
+
+
+@pytest.fixture()
+def bhome(tmp_path: Path, rig: Rig) -> Path:
+    """The destination's own home: a clone of the same origin at ``~/proj``."""
+    home = tmp_path / "bhome"
+    home.mkdir()
+    git(home, "clone", "-q", str(rig.origin), str(home / "proj"))
+    return home
+
+
+def _setup(pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path) -> Path:
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    server_a.workset_home = rig.home  # type: ignore[attr-defined]
+    server_b.workset_home = bhome  # type: ignore[attr-defined]
+    source = _owned_session(server_a)
+    point_session_at(source, rig.feat)
+    return source
+
+
+def _move(server: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, Any]:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server.root))
+    return dict(mobility.request_move(SESSION, root=server.root, **kwargs))
+
+
+def _confirmed(server: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    preflight = _move(server, monkeypatch, to="local", dry_run=True)
+    assert preflight["ok"] is True, preflight
+    return dict(preflight["working_set"])
+
+
+def _state(tree: Path) -> dict[str, Any]:
+    return {
+        "head": git(tree, "rev-parse", "HEAD"),
+        "branch": git(tree, "symbolic-ref", "--short", "HEAD"),
+        "staged": git(tree, "diff", "--cached", "--name-status"),
+        "unstaged": git(tree, "diff", "--name-status"),
+        "untracked": sorted(git(tree, "ls-files", "--others", "--exclude-standard").split()),
+    }
+
+
+def _grant_import(dest: Any, src: Any, *, revoke: bool = False) -> None:
+    """``lop network member grant <net> <src> workset_import`` run ON ``dest``."""
+    from local_operator.network import relay, store
+
+    change = {"revoke" if revoke else "grant": [workset_move.IMPORT_CAPABILITY]}
+    for record in store.list_networks(dest.root):
+        with store.mutate(record.network_id, dest.root) as fresh:
+            relay.set_member_capabilities(fresh, device_id=src.identity.device_id, **change)
+            store.save(fresh, dest.root)
+
+
+def _audit_events(root: Path) -> list[dict[str, Any]]:
+    path = root / "network" / "audit.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]
+
+
+def test_a_confirmed_move_carries_the_working_set(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    server_a, server_b, _host, _port = pair
+    source = _setup(pair, monkeypatch, rig, bhome)
+    block = _confirmed(server_b, monkeypatch)
+    assert block["carries_files"] is True
+    before = _state(rig.feat)
+    feat_bytes = {p.name: p.read_bytes() for p in rig.feat.iterdir() if p.is_file()}
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    assert not source.exists()
+    ws = moved["working_set"]
+    assert ws["transferred"] is True and ws["state"] == "restored", ws
+    (row,) = [r for r in ws["worktrees"] if r["path"] == "~/proj/.worktrees/feat"]
+    assert row["state"] == "restored", row
+    assert row["dest_path"] == "~/proj/.worktrees/feat"
+    landed = bhome / "proj" / ".worktrees" / "feat"
+    after = _state(landed)
+    # The untracked secret-shaped file is withheld; everything else arrives as such.
+    assert ".env.local" in before["untracked"]
+    assert after == {**before, "untracked": [n for n in before["untracked"] if n != ".env.local"]}
+    assert not (landed / ".env.local").exists()
+    assert not (landed / "node_modules").exists()
+    assert "unpushed work" in git(landed, "log", "-1", "--format=%s")
+    assert str(landed) in git(bhome / "proj", "worktree", "list")
+    # The arrived session opens IN the restored tree, not the other device's path.
+    marker = json.loads((server_b.root / "sessions" / SESSION / "desktop.json").read_text("utf-8"))
+    assert marker["cwd"] == str(landed)
+    # THE SOURCE NEVER DELETES: the worktree is byte-identical and marked departed.
+    assert {p.name: p.read_bytes() for p in rig.feat.iterdir() if p.is_file()} == feat_bytes
+    assert _state(rig.feat) == before
+    git_dir = Path(git(rig.feat, "rev-parse", "--absolute-git-dir"))
+    marker = json.loads((git_dir / "lop-moved.json").read_text("utf-8"))
+    assert marker["to_device"] == server_b.identity.device_id
+    assert (server_a.root / "network" / "workset-departed" / f"{SESSION}.json").is_file()
+    # The owner audited the serve; its served artifacts are gone after ``done``.
+    serves = [e for e in _audit_events(server_a.root) if e.get("event") == "session.workset.serve"]
+    assert serves, "no session.workset.serve audit row"
+    assert all(e["detail"]["to_device"] == server_b.identity.device_id for e in serves), serves
+    assert not workset_move.outgoing_dir(server_a.root, SESSION).exists()
+    assert read_handoff_journal(server_a.root) == {}
+
+
+def test_a_history_secret_worktree_is_left_behind(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    (rig.feat / ".env").write_text("TOKEN=x\n", encoding="utf-8")
+    git(rig.feat, "add", "-f", ".env")
+    git(rig.feat, "commit", "-q", "-m", "oops", "--", ".env")
+    block = _confirmed(server_b, monkeypatch)
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    (row,) = [r for r in moved["working_set"]["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "left_behind" and row["reason"].startswith("history_"), row
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+    assert (rig.feat / ".env").is_file()
+
+
+def test_the_recall_brings_new_work_back_in_place(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    block = _confirmed(server_b, monkeypatch)
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+    assert moved["ok"] is True, moved
+    landed = bhome / "proj" / ".worktrees" / "feat"
+    # Work on B: a new commit and a new untracked file.
+    (landed / "a.txt").write_text("a\nmore\nfrom b\n", encoding="utf-8")
+    git(landed, "commit", "-q", "-am", "work on b")
+    (landed / "b-notes.txt").write_text("from b\n", encoding="utf-8")
+    on_b = _state(landed)
+    # A recalls it (A runs the destination path; B is now the owner).
+    monkeypatch.setenv("HOME", str(bhome))
+    back_block = _confirmed(server_a, monkeypatch)
+    assert back_block["carries_files"] is True, back_block
+
+    back = _move(server_a, monkeypatch, to="local", confirm_working_set=back_block["scope_digest"])
+
+    assert back["ok"] is True, back
+    (row,) = [r for r in back["working_set"]["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "restored", back["working_set"]
+    assert row["dest_path"] == "~/proj/.worktrees/feat" and row["mode"] == "in_place", row
+    # B's commit, index and files are back; A's own withheld ``.env.local`` (never sent,
+    # never deleted) is still there beside them.
+    assert _state(rig.feat) == {**on_b, "untracked": sorted([*on_b["untracked"], ".env.local"])}
+    assert (rig.feat / ".env.local").is_file()
+
+
+def test_a_recall_confirmed_without_a_dry_run_still_carries_the_files(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245 round 4, M1: the recall's compatibility preflight no longer records, so on
+    the no-dry-run path the record is the owner's ``working_set_unconfirmed`` refusal —
+    the block the operator copies the digest from. The confirmed retry still lands."""
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+
+    first = _move(server_b, monkeypatch, to="local")
+    assert first["ok"] is False and first["code"] == "working_set_unconfirmed", first
+    digest = first["working_set"]["scope_digest"]
+    assert workset_move.confirmed_rows(server_b.root, SESSION, digest), "refusal not recorded"
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=digest)
+
+    assert moved["ok"] is True, moved
+    (row,) = [r for r in moved["working_set"]["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "restored", moved["working_set"]
+    assert (bhome / "proj" / ".worktrees" / "feat" / "a.txt").is_file()
+
+
+def test_the_confirmed_recalls_hidden_preflight_cannot_widen_what_was_confirmed(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245 security round 4, S13/M1 on the real recall path. The operator dry-runs
+    and confirms digest D; the owner answers every LATER preflight (the one ``_recall``
+    sends before ``_destination_move``, whose answer nobody reads) with D over one
+    more planned row. Before: that answer replaced the record, so the transfer took
+    ``~/src/other`` as confirmed. Now the record is exactly what the dry run showed."""
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    block = _confirmed(server_b, monkeypatch)
+    digest = block["scope_digest"]
+    shown = workset_move.confirmed_rows(server_b.root, SESSION, digest)
+    assert shown and ("~/src/other", "~/src/other") not in shown
+    real = mobility._source_workset_preflight  # noqa: SLF001
+    hostile_answers = 0
+
+    def widening(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal hostile_answers
+        answer = real(*args, **kwargs)
+        hostile_answers += 1
+        answer["working_set"]["worktrees"].append(
+            {"path": "~/src/other", "repo": "~/src/other", "state": "planned"}
+        )
+        return answer
+
+    monkeypatch.setattr(mobility, "_source_workset_preflight", widening)
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=digest)
+
+    assert hostile_answers >= 1, "the hidden preflight was never asked"
+    assert moved["ok"] is True, moved
+    assert workset_move.confirmed_rows(server_b.root, SESSION, digest) == shown
+    assert not (bhome / "src" / "other").exists()
+
+
+def test_over_the_cap_is_refused_and_nothing_moves(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    server_a, server_b, _host, _port = pair
+    source = _setup(pair, monkeypatch, rig, bhome)
+    block = _confirmed(server_b, monkeypatch)
+    # The DESTINATION's cap (the owner's manifest-time cap passed): 1 byte.
+    monkeypatch.setattr(workset, "cap_bytes", lambda root=None: 1)
+
+    refused = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert refused["ok"] is False and refused["code"] == "working_set_over_cap", refused
+    assert refused["changed"] is False
+    assert source.is_dir()
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    assert not workset_move.incoming_staging(server_b.root, SESSION).exists()
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+    assert read_handoff_journal(server_a.root) == {}
+
+
+def test_a_transfer_failure_rolls_back_and_sweeps_staging(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    server_a, server_b, _host, _port = pair
+    source = _setup(pair, monkeypatch, rig, bhome)
+    block = _confirmed(server_b, monkeypatch)
+    real = workset_move._fetch_artifact
+    seen: list[Path] = []
+
+    def broken(transport: Any, **kw: Any) -> Path:
+        # Leave a partial ``.part`` behind, then fail as a dropped link would.
+        part = kw["into"] / (kw["digest"].removeprefix("sha256:") + ".part")
+        part.write_bytes(b"partial")
+        seen.append(part)
+        raise workset_move.WorksetTransferRefused("working_set_transfer_failed", "link dropped")
+
+    monkeypatch.setattr(workset_move, "_fetch_artifact", broken)
+    refused = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+    monkeypatch.setattr(workset_move, "_fetch_artifact", real)
+
+    assert refused["ok"] is False and refused["code"] == "working_set_transfer_failed", refused
+    assert refused["changed"] is False
+    assert seen and not seen[0].exists()
+    assert not workset_move.incoming_staging(server_b.root, SESSION).exists()
+    assert not (server_b.root / "network" / "staging" / SESSION).exists()
+    assert source.is_dir()
+    # The owner heard the rollback: no parked ``prepared``, no served artifacts left.
+    assert read_handoff_journal(server_a.root) == {}
+    assert not workset_move.outgoing_dir(server_a.root, SESSION).exists()
+
+
+def test_an_older_destination_keeps_the_files_on_the_source(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    # The destination speaks protocol 1 (PR A): its prepare and preflight say so.
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
+    block = _confirmed(server_b, monkeypatch)
+    assert block["carries_files"] is False
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is False
+    assert [r["reason"] for r in moved["working_set"]["worktrees"]] == ["unsupported_by_peer"]
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+
+
+def test_a_destination_without_the_repository_clones_it_with_its_own_credentials(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, tmp_path: Path
+) -> None:
+    """W1's clone path: B has no ``~/proj`` at all, so it clones the origin itself
+    (its own credentials, never the owner's) and the worktree lands registered there.
+    The origin is an https address (S2: a local path is never cloned), served from the
+    rig's bare repository through the engine's test seam."""
+    url = serve_origin_as_https(monkeypatch, rig.origin, rig.primary)
+    empty_home = tmp_path / "empty-bhome"
+    empty_home.mkdir()
+    # The default clone policy (S9, round 2): B clones a missing repository only into a
+    # folder that already holds one of its repositories, which ``~`` does here.
+    git(empty_home, "init", "-q", str(empty_home / "mine"))
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, empty_home)
+    block = _confirmed(server_b, monkeypatch)
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    (row,) = [r for r in moved["working_set"]["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "restored", moved["working_set"]
+    landed = empty_home / "proj" / ".worktrees" / "feat"
+    assert git(landed, "log", "-1", "--format=%s") == "unpushed work"
+    assert git(empty_home / "proj", "remote", "get-url", "origin") == url
+    assert str(landed) in git(empty_home / "proj", "worktree", "list")
+
+
+def test_an_offload_to_an_older_destination_is_shown_as_staying(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """The OFFLOAD preflight asks the destination (its probe answer states the protocol
+    it speaks): one below the transfer protocol gets the "they stay here" manifest, so
+    the user is never asked to confirm a send that will not happen."""
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    target = server_b.identity.device_id
+    _grant_import(server_b, server_a)
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    assert sends["carries_files"] is True, sends
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
+
+    stays = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+
+    assert stays["carries_files"] is False, stays
+    assert stays["scope_digest"] != sends["scope_digest"]
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=stays["scope_digest"])
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is False
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+
+
+def test_a_refused_move_removes_the_clone_it_made_and_nothing_else(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, tmp_path: Path
+) -> None:
+    """Security review #4245 S1(c) / review N3, over the real two-relay path: B clones
+    the absent ``~/proj`` in W1, then refuses the move on its own cap. Before, the
+    rollback swept only ``staging/`` and the fresh clone stayed in B's home. Now the
+    clone THIS move made (its marker names the session and lease) goes with it, while
+    a repository B already had at another path is untouched."""
+    serve_origin_as_https(monkeypatch, rig.origin, rig.primary)
+    empty_home = tmp_path / "empty-bhome"
+    empty_home.mkdir()
+    own = empty_home / "mine"
+    git(empty_home, "init", "-q", str(own))
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, empty_home)
+    block = _confirmed(server_b, monkeypatch)
+    cloned: list[Path] = []
+    real_clone = workset_move_engine().clone_primary
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        got = real_clone(*args, **kwargs)
+        cloned.append(Path(got.path))
+        # From here on B's own cap is 1 byte, so the plan that follows the clone is
+        # refused (the owner's manifest-time cap already passed).
+        monkeypatch.setattr(workset, "cap_bytes", lambda root=None: 1)
+        return got
+
+    monkeypatch.setattr(workset_move_engine(), "clone_primary", spy)
+
+    refused = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert refused["ok"] is False and refused["code"] == "working_set_over_cap", refused
+    assert cloned == [empty_home / "proj"]  # the clone really happened first
+    assert not (empty_home / "proj").exists()
+    assert (own / ".git").is_dir()
+    assert not workset_move.incoming_staging(server_b.root, SESSION).exists()
+
+
+def workset_move_engine() -> Any:
+    from local_operator.network import workset_transfer
+
+    return workset_transfer
+
+
+def test_dirty_bytes_crossing_a_size_bucket_after_consent_still_carry_the_files(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """Reviewer R11 on #4241: the scope digest binds ``carries_files`` but NO size. An
+    active session keeps editing between the confirm and the send (a queued or
+    ``--wait`` move), and growing its dirty bytes several powers of two must not turn
+    the confirmed move into ``working_set_changed``; the cap bounds the size instead."""
+    _setup(pair, monkeypatch, rig, bhome)
+    _server_a, server_b, _host, _port = pair
+    block = _confirmed(server_b, monkeypatch)
+    before = int(block["totals"]["bytes"])
+    # The session keeps working: an untracked file 64x the confirmed payload.
+    (rig.feat / "grown.txt").write_text("x" * max(before, 1024) * 64, encoding="utf-8")
+    again = _confirmed(server_b, monkeypatch)
+    assert int(again["totals"]["bytes"]) > 32 * max(before, 1)
+    assert again["scope_digest"] == block["scope_digest"]
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is True, moved["working_set"]
+    landed = bhome / "proj" / ".worktrees" / "feat"
+    assert (landed / "grown.txt").stat().st_size == (rig.feat / "grown.txt").stat().st_size
+
+
+def test_an_offload_without_the_import_grant_moves_only_the_conversation(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """Security-lead ruling (#4245 round 2): ``move`` alone never lets a source write
+    files on the destination. Without ``workset_import`` on B for A, the dry run says
+    the files stay (with the exact grant command, run on B), the move carries the
+    conversation only, and nothing lands in B's home. After the grant, they travel."""
+    from local_operator.network import store
+
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    target = server_b.identity.device_id
+    (record,) = store.list_networks(server_b.root)
+
+    stays = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+
+    assert stays["carries_files"] is False, stays
+    assert stays["destination_probe"]["import_granted"] is False
+    assert stays["import"] == {
+        "granted": False,
+        "remedy": (
+            f"lop network member grant {record.network_id} "
+            f"{server_a.identity.device_id} workset_import"
+        ),
+    }
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=stays["scope_digest"])
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is False
+    assert "side" not in moved["working_set"]
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+
+
+def test_the_grant_makes_the_offload_carry_the_files(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    assert sends["carries_files"] is True, sends
+    assert sends["destination_probe"]["import_granted"] is True
+    assert "import" not in sends
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    # A'S RECEIPT REPORTS B'S ANSWER (#4245 receipt fix): before, it carried A's
+    # pre-invite block (``transferred: false``) and said the files stayed.
+    ws = moved["working_set"]
+    assert ws["side"] == "source" and ws["transferred"] is True, ws
+    (row,) = [r for r in ws["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] in ("transferred", "restored"), ws
+    from local_operator.network import workset_text
+
+    text = "\n".join(workset_text.receipt_lines(ws, source="A"))
+    assert "went to" in text and "stays" not in text and "stayed" not in text, text
+    # B restores after ``done`` on its own pull thread, so A's answer can come first.
+    import time
+
+    landed = bhome / "proj" / ".worktrees" / "feat"
+    deadline = time.monotonic() + 30
+    while not (landed / ".git").exists() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert "unpushed work" in git(landed, "log", "-1", "--format=%s")
+
+
+def test_a_row_the_destination_declines_reads_as_stayed_on_the_source(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245 agent review round 3, B2: B declined a row (here by name, the N2
+    over-the-bound path) yet A's receipt said "Sent <path> to B" — the done-frame
+    outcome turned every planned row into ``transferred``. It now carries B's
+    decline as ``left_behind`` with the coarse code A was already told."""
+    from local_operator.network import workset_text
+
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    # In-process rig: only B's ``destination_transfer`` reads this bound.
+    monkeypatch.setattr(workset_move, "MAX_OFFER_ROWS", 0)
+
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    ws = moved["working_set"]
+    assert ws["side"] == "source" and ws["transferred"] is True, ws
+    (row,) = [r for r in ws["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "left_behind" and row["reason"] == "too_many_worktrees", ws
+    text = "\n".join(workset_text.receipt_lines(ws, source="A"))
+    assert "Sent" not in text and "received there" not in text, text
+    assert "stays on" in text and "~/proj/.worktrees/feat stayed on" in text, text
+    assert not (bhome / "proj" / ".worktrees" / "feat" / ".git").exists()
+
+
+def test_an_offload_whose_destination_answer_is_lost_says_check_there(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245: the files were sent but B's ``done`` carried no outcome (an older peer,
+    a lost frame): A's receipt says "check on B", never that the files stayed."""
+    from local_operator.network import workset_text
+
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    monkeypatch.setattr(workset_move, "destination_outcome", lambda block, left=None: None)
+
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    ws = moved["working_set"]
+    assert ws["side"] == "source" and ws["state"] == "outcome_unknown", ws
+    text = "\n".join(workset_text.receipt_lines(ws, source="A"))
+    assert "check on" in text and "stay" not in text, text
+
+
+def test_a_grant_revoked_after_consent_refuses_the_transfer_on_the_destination(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """The DESTINATION enforces the grant, whatever its prepare said: the owner is made
+    to offer anyway (a stale prepare, or a hostile owner), and B, re-reading its own
+    member row before the first clone or plan, refuses. Nothing moves."""
+    server_a, server_b, _host, _port = pair
+    source = _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    assert sends["carries_files"] is True, sends
+    _grant_import(server_b, server_a, revoke=True)
+    monkeypatch.setattr(
+        workset_move, "import_authority", lambda *_a, **_k: workset_move.IMPORT_BY_GRANT
+    )
+
+    refused = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert refused["ok"] is False and refused["code"] == "working_set_import_not_granted", refused
+    assert source.exists()
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+    assert not workset_move.incoming_staging(server_b.root, SESSION).exists()
+
+
+def test_without_the_working_set_the_receipt_says_they_stayed_as_asked(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """QA Q3 (#4245): ``--without-working-set`` on a build that transfers used to say
+    "this version of lop does not transfer working files yet"."""
+    from local_operator.network import workset_text
+
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+
+    moved = _move(server_b, monkeypatch, to="local", without_working_set=True)
+
+    assert moved["ok"] is True, moved
+    assert {r["reason"] for r in moved["working_set"]["worktrees"]} == {"kept_as_confirmed"}
+    assert "does not transfer" not in workset_text.reason_text("kept_as_confirmed")

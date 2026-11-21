@@ -1,0 +1,19 @@
+INPUT en /Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501 MATCH
+INPUT context /Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json 01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417 MATCH
+INPUT zh-CN /Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json 6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454 MATCH
+INPUT translator_receipt /Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.translator-receipt.json cd670459e27140ac60a009c72ef40ddb90485c5e9a1deb82a7af241974432f4a MATCH
+REPOSITORY check.check_catalogues(), isolated namespace fixture: []
+SELF CHECK: strict JSON, 9/9 key parity, 9/9 context coverage PASS
+KEY PASS wire.teams.effective.team_missing ARGS (('role', 'simple'),) FORMATTED 未找到名为demo-team的团队。
+KEY PASS wire.teams.effective.registry_unreadable ARGS () FORMATTED 无法读取智能体注册表。请检查智能体定义后重试。
+KEY PASS wire.teams.effective.config_unreadable ARGS () FORMATTED 无法读取模型配置。请检查配置后重试。
+KEY PASS wire.teams.effective.tier_invalid_value ARGS (('tier', 'simple'),) FORMATTED subagents.models.hi的值无效。请将其设为provider/model格式的模型选择器或模型映射对象。
+KEY PASS wire.teams.effective.tier_invalid_mapping ARGS (('tier', 'simple'),) FORMATTED subagents.models.hi的映射对象无效。请将model设为provider/model格式的模型选择器；effort可选，填写时请设为受支持的推理强度。
+KEY PASS wire.teams.effective.tier_unconfigured ARGS (('tier', 'simple'),) FORMATTED subagents.models.hi未配置模型。
+KEY PASS wire.teams.effective.tier_invalid_selector ARGS (('tier', 'simple'),) FORMATTED subagents.models.hi的模型选择器无效。请使用provider/model格式。
+KEY PASS wire.teams.effective.model_unresolvable ARGS (('selector', 'simple'),) FORMATTED 无法解析模型provider/model。请检查模型选择器和提供商配置。
+KEY PASS wire.teams.effective.unavailable ARGS () FORMATTED 此团队成员不可用。请检查其模型配置和智能体定义。
+CLDR zh-CN: no plural/select expressions, no arms required; other-only rule is not exercised
+No markup, backtick code, commands, flags, bidi controls or fixed maxCells budgets in these inputs
+NOT EXECUTED: full check.py/generate.py, ledger append, pseudo-localization, GUI/fallback/RTL rendering
+RESULT PASS: scoped mechanical + formatting only; formatting strings is NOT rendered visual evidence

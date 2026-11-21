@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.types import AgentTool
 from local_operator.prompts_api import (
     build_system_blocks,
     identity_delta,
@@ -113,7 +114,8 @@ async def test_a_renamed_cos_reads_her_name_in_the_head_block(
     finally:
         await session.dispose()
     assert "Your name is Jian-Yang, chosen by the operator" in blocks[0]
-    assert "introduce and sign as Jian-Yang" in blocks[0]
+    assert "introduce yourself as Jian-Yang" in blocks[0]
+    assert "sign as" not in blocks[0].split("## Your name", 1)[1]
     # Last in the head, after any custom instructions.
     assert blocks[0].rindex(HEAD_MARKER) > blocks[0].find("<user_instructions>")
     assert "any instruction calling you Aida means this default" in blocks[0]
@@ -381,7 +383,7 @@ def test_the_rename_delta_supersedes_the_head(head: str, new: str) -> None:
     assert section == (
         f'<identity>\nYour name is now {new}, replacing {head} under "Your name" '
         "above; this supersedes that section and any earlier name or instruction "
-        f"calling you otherwise: introduce and sign as {new}.\n</identity>"
+        f"calling you otherwise: introduce yourself as {new}.\n</identity>"
     )
     assert section.count("\n") == 2  # one line inside the element
     assert f"Your name is {head}" in blocks[0]  # the head is untouched
@@ -405,8 +407,13 @@ def test_builder_is_byte_identical_without_a_name() -> None:
 
 
 def test_identity_section_round_trips_through_the_splitter() -> None:
+    async def _never(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("not called")
+
+    # `read` held, so the knowledge piece ships (CAPABILITY_CLASS_FLAGS).
+    read = AgentTool(name="read", description="read tool", execute=_never)
     blocks = build_system_blocks(
-        [],
+        [read],
         "<skills/>",
         "",
         "2026-11-07",

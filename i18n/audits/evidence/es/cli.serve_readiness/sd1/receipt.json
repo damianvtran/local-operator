@@ -1,0 +1,37 @@
+{
+  "locale": "es",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+  "status": "passed",
+  "audit_date": "2026-11-16",
+  "translator": {
+    "agent": "task acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requester-provided translator identity"
+  },
+  "auditor": {
+    "agent": "Audit daemon Spanish",
+    "session": "e68b64992930",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session-state Model: openai/gpt-6.1-sol; no fallback recorded or observed",
+    "fallback": null
+  },
+  "note": "record: i18n/audits/evidence/es/cli.serve_readiness/sd1/record.json; sd1 independent 11-key es audit; 0 blocker/major; ES-SD1-01 MINOR.",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+    "ES-SD1-01"
+  ],
+  "record_reference": "i18n/audits/evidence/es/cli.serve_readiness/sd1/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/audit.log",
+      "sha256": "ac79167a64f3b5a798a2ebc11e2cb702b25acff492102f7ee804714a3902689b"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1/report.md",
+      "sha256": "afc26d87a5f249748d542cd7e231a723c9de95c7dde105dd654519f4438d402c"
+    }
+  ]
+}

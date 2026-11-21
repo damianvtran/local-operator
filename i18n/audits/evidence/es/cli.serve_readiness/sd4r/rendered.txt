@@ -1,0 +1,372 @@
+# Current sd4r catalogue renders — es
+
+Offline production ICU rendering only, not terminal shaping/service execution.
+
+## cli.serve_readiness.unproven count=1
+
+hay registro, pero no se puede comprobar la identidad del proceso (no se pudo comparar ninguna marca de tiempo de inicio)
+
+## cli.serve_readiness.not_reporting count=1
+
+hay registro, pero no hay respuesta (ya no se reciben señales de actividad)
+
+## cli.serve_readiness.not_this_daemon count=1
+
+hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.unknown_state count=1
+
+registro con estado desconocido
+
+## cli.serve_readiness.install_unknown count=1
+
+ejecuta una compilación que no se puede comparar con la instalación
+
+## cli.serve_readiness.cgroup_unknown count=1
+
+se ejecuta en un cgroup que esta comprobación no puede ubicar
+
+## cli.serve_readiness.recorded_gap count=1
+
+el registro indica la compilación v0.99.0+recorded; está instalada la compilación v0.99.2+installed
+
+## cli.serve_readiness.unknown count=0
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=1
+
+el daemon `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coincide con la instalación y está supervisado
+
+## cli.serve_readiness.unknown count=2
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=3
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=4
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=5
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=11
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=21
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=22
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=25
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=1.5
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=1000000
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.unknown count=1500000
+
+los daemons `lop serve` en host-sd4r — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## cli.serve_readiness.stale count=0
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=1
+
+el daemon `lop serve` en host-sd4r (4102, 4103) ejecuta v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que aloja ejecutan esa otra compilación
+
+## cli.serve_readiness.stale count=2
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=3
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=4
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=5
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=11
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=21
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=22
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=25
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=1.5
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=1000000
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.stale count=1500000
+
+los daemons `lop serve` en host-sd4r (4102, 4103) ejecutan v0.99.1+running, pero la instalación es v0.99.2+installed: las sesiones remotas que alojan ejecutan esas otras compilaciones
+
+## cli.serve_readiness.other_unit count=0
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=1
+
+el daemon `lop serve` en host-sd4r está a cargo de otro servicio (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=2
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=3
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=4
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=5
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=11
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=21
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=22
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=25
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=1.5
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=1000000
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.other_unit count=1500000
+
+los daemons `lop serve` en host-sd4r están a cargo de otros servicios (worker.service), no de una unidad lop serve
+
+## cli.serve_readiness.identity_restart count=1
+
+en host-sd4r, ejecuta `lop services restart` para pasar el daemon registrado a la compilación instalada; el reinicio comprueba cada daemon antes de actuar
+
+## cli.serve_readiness.pid_reason count=0
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=1
+
+identificador de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=2
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=3
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=4
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=5
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=11
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=21
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=22
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=25
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=1.5
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=1000000
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.pid_reason count=1500000
+
+identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID
+
+## cli.serve_readiness.and_more count=0
+
+y 0 más
+
+## cli.serve_readiness.and_more count=1
+
+y 1 más
+
+## cli.serve_readiness.and_more count=2
+
+y 2 más
+
+## cli.serve_readiness.and_more count=3
+
+y 3 más
+
+## cli.serve_readiness.and_more count=4
+
+y 4 más
+
+## cli.serve_readiness.and_more count=5
+
+y 5 más
+
+## cli.serve_readiness.and_more count=11
+
+y 11 más
+
+## cli.serve_readiness.and_more count=21
+
+y 21 más
+
+## cli.serve_readiness.and_more count=22
+
+y 22 más
+
+## cli.serve_readiness.and_more count=25
+
+y 25 más
+
+## cli.serve_readiness.and_more count=1.5
+
+y 1,5 más
+
+## cli.serve_readiness.and_more count=1000000
+
+y 1.000.000 más
+
+## cli.serve_readiness.and_more count=1500000
+
+y 1.500.000 más
+
+## cli.serve_readiness.identity_no_action count=0
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=1
+
+el registro cuya identidad de proceso no está comprobada coincide con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=2
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=3
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=4
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=5
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=11
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=21
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=22
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=25
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=1.5
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=1000000
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_no_action count=1500000
+
+los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+
+## cli.serve_readiness.identity_restart_manual count=1
+
+en host-sd4r, reinicia `lop serve` manualmente para pasar el daemon registrado a la compilación instalada; no puede recargarse en el mismo proceso
+
+## COMPOSED PID reuse count=1
+
+el daemon `lop serve` en host-sd4r — identificador de proceso 4101 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coincide con la instalación y está supervisado
+
+## COMPOSED PID reuse count=2
+
+los daemons `lop serve` en host-sd4r — identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## COMPOSED PID reuse count=3
+
+los daemons `lop serve` en host-sd4r — identificadores de proceso 4104, 4105, 4106 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## COMPOSED PID reuse count=21
+
+los daemons `lop serve` en host-sd4r — identificadores de proceso 4110, 4111 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+
+## COMPOSED disjoint diagnoses plus overflow
+
+los daemons `lop serve` en host-sd4r — identificador de proceso 4101 — hay registro, pero no se puede comprobar la identidad del proceso (no se pudo comparar ninguna marca de tiempo de inicio); identificadores de proceso 4102, 4103 — hay registro, pero se detectó reutilización de PID y 22 más, por lo que no se sabe si coinciden con la instalación y están supervisados
+

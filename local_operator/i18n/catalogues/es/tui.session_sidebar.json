@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "preg.: {count}",
+  "tui.session_sidebar.footer.hub_note": "vínc.: {count}",
+  "tui.session_sidebar.footer.opening": "Abriendo…",
+  "tui.session_sidebar.footer.refresh_failed": "Error al actualizar",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, one {+{shown} fijada más — desplázate} many {+{shown} fijadas más — desplázate} other {+{shown} fijadas más — desplázate}}",
+  "tui.session_sidebar.row.untitled": "Sin título",
+  "tui.session_sidebar.section.active": "Sesiones activas",
+  "tui.session_sidebar.section.pinned": "Fijadas",
+  "tui.session_sidebar.section.previous": "Sesiones anteriores",
+  "tui.session_sidebar.section.subagent": "Ejecuciones de subagentes",
+  "tui.session_sidebar.state.empty": "Aún no hay conversaciones",
+  "tui.session_sidebar.state.error": "No se pudo cargar la lista",
+  "tui.session_sidebar.state.loading": "Cargando conversaciones…",
+  "tui.session_sidebar.title": "Sesiones",
+  "tui.session_sidebar.tooltip.location": "en {device}",
+  "tui.session_sidebar.tooltip.location_network": "en {device} · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "en {device} · {network} (último estado conocido)",
+  "tui.session_sidebar.tooltip.location_stale": "en {device} (último estado conocido)",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · {command} si sigue en silencio",
+  "tui.session_sidebar.tooltip.unnamed_device": "dispositivo sin nombre",
+  "tui.session_sidebar.tooltip.unreachable": "inaccesible · {reason}"
+}

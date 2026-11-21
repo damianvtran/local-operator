@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "audit_id": "mw1",
+  "audit_round": 3,
+  "audit_kind": "independent full-namespace audit across three same-history rounds (4076391bc, 347e70114/2125f497b, ca98f3789)",
+  "locale": "vi",
+  "audit_date": "2026-11-18",
+  "audited_head": "ca98f378922f65363815ab2d4c27e93e73b66f1e",
+  "auditor": {
+    "agent": "i18n auditor (lopdev task 482db48afe47)",
+    "session": "482db48afe47",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator": true,
+    "same_model_as_translator": true,
+    "fallback_used": false
+  },
+  "translator": {
+    "agent": "coder",
+    "model": "anthropic/claude-opus-5-5",
+    "sessions": [
+      "dc12534ff2ca",
+      "8966047148fb",
+      "ddcac83c68a5"
+    ],
+    "source": "lopdev manager brief 2026-11-18"
+  },
+  "input_hashes": {
+    "cli.sessions_move_workset": {
+      "en": "36523ab68a809138158b8530cf502be76b67de6c5b557835b25dd66e7c928df3",
+      "context": "3319039021cfb5d67440dee390a42986af6a6f7c8be57d4de6e3d3dc56f21bce",
+      "target": "6f2cd11ee763496b8ab0fb4565e1817fdc60de4a413b9a7718344a4d3d154040"
+    },
+    "tui.session_move_workset": {
+      "en": "3642654e8391378afe0454ceaa2b31fb416302ebad3c43463fd4d49d2c2e59a8",
+      "context": "4110dcee6c6db14e948c2f9e58cd34303263501ae151275ef102939ffb3628ef",
+      "target": "8dd3b2b88af3142701169ba7dc1357308b9147449d008639d72e825fcaf2a771"
+    },
+    "tui.session_move": {
+      "en": "6ae6b80caee5646d17edfec168e25857e56a596ef8cbeb0f4f043401fc16ac5d",
+      "context": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573",
+      "target": "10f86e952184dd3b85c5f400b50482d157f1c2031a05c6230fd4eba7e08d4fe4"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1,
+    "unresolved_blocker_major_count": 0
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "bf792210a941eb46d7ed322ee5cba3ee9059437eb9246b5dc41a0fe0c524dce9"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "dca225b29f51ee3d74fda00dfd94bce3ed34bc4f9cd7b8b867a69a42c8fbc3ca"
+    }
+  ]
+}

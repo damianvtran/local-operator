@@ -1,0 +1,37 @@
+{
+  "locale": "vi",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "audit_pass": "second independent high-visibility linguistic and mechanical pass",
+  "scope": "All 9 frozen keys at e70bc818b8553dca1fad007705257817be49ee37; English, sidecar, then target read before consulting first auditor verdict.",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "0bb39ba82ecb",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Current session host model declaration",
+    "fallback": "none observed",
+    "independent_from_translator_session": "bdce0d00e792",
+    "independent_from_first_auditor_session": "cef644ceab2f"
+  },
+  "per_key": [
+    {"key": "wire.teams.effective.team_missing", "verdict": "passed", "reason": "Natural impersonal missing-team warning. Nhóm matches glossary; có tên preserves named-team meaning; opaque {role} untouched."},
+    {"key": "wire.teams.effective.registry_unreadable", "verdict": "passed", "reason": "Danh mục tác nhân denotes the agent registry in this context, not a transcript. Tác nhân follows glossary. Inability to read and inspect-definitions/retry remedy retained, without invented corruption or raw exception detail."},
+    {"key": "wire.teams.effective.config_unreadable", "verdict": "passed", "reason": "Concise idiomatic inability-to-read model configuration warning with inspect-configuration then retry; no polarity shift or extra detail."},
+    {"key": "wire.teams.effective.tier_invalid_value", "verdict": "passed", "reason": "Chuỗi định danh dạng provider/model is a clear selector in this configuration context. Đối tượng cấu hình mô hình correctly conveys a mapping object, not a model name/map diagram. Both allowed alternatives and literal path preserved."},
+    {"key": "wire.teams.effective.tier_invalid_mapping", "verdict": "passed", "reason": "Required model instruction precedes the semicolon; có thể đặt thêm effort clearly makes only effort optional. Supported reasoning level retained as mức suy luận được hỗ trợ. Mapping is consistently đối tượng cấu hình, and model, effort, provider/model, subagents.models.{tier} remain literal."},
+    {"key": "wire.teams.effective.tier_unconfigured", "verdict": "passed", "reason": "Chưa cấu hình mô hình naturally conveys no configured model at the exact path. Does not conflate unset with invalid or unavailable."},
+    {"key": "wire.teams.effective.tier_invalid_selector", "verdict": "passed", "reason": "Selector invalidity and provider/model format remedy are explicit and consistent with selector terminology elsewhere; no raw invalid value is exposed."},
+    {"key": "wire.teams.effective.model_unresolvable", "verdict": "passed", "reason": "Không xác định được mô hình is natural resolution-failure wording, not denial of permission or execution failure. Model selector and provider-configuration remedy both retained; opaque {selector} unchanged."},
+    {"key": "wire.teams.effective.unavailable", "verdict": "passed", "reason": "Neutral unavailable-member warning with member-specific model configuration and agent definition checks. No implication that a member was launched; hiện does not change availability polarity."}
+  ],
+  "mechanical_evidence": "mechanical.json and actual execution audit.log; validate.py invokes the repository check_catalogues function against only the scratch namespace fixture, plus explicit token/NFC checks. Five negative controls rejected and restored candidate passed.",
+  "fit": "All nine context entries explicitly allow natural wrapping without a fixed cell-width limit. No maxCells/maxChars hint, button, tab or pinned status label exists in this group. NFC verified. No overflow finding derived; actual rendered fit not exercised.",
+  "icu_markup": "Valid JSON with exactly nine keys, source/context/target key parity; simple argument names and types identical. No plural/select expressions, Rich tags, backtick spans, commands, flags or arrows in these source strings. Literal configuration syntax preserved.",
+  "excluded_gates": ["pseudo-localization", "runtime fallback", "bidi rendering", "HTTP", "UI visual/layout proof", "ledger append/dry-run/apply", "full build/install/test suite"],
+  "limitations": "This is independent model-based Vietnamese linguistic review, not a human native-speaker attestation. No translation/MT service used. No repo or target edits made. Scratch deliverables require manager retention under canonical tracked evidence root; no ledger publication claimed.",
+  "report_type": "audit_notes_not_execution_log",
+  "first_auditor_verdict_consulted_when_report_written": false
+}

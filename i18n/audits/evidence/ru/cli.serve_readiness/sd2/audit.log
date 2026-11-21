@@ -1,0 +1,26 @@
+$ python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd2/reproduce.py.txt
+cwd=/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+python=3.9.25 (main, Jul 15 2026, 00:00:00) 
+[GCC 11.5.0 20240719 (Red Hat 11.5.0-5)]
+HEAD=e4a6b6e1d01ef269604fe6d005e6bce1453b66ca
+locale=ru; namespace=cli.serve_readiness; date=2026-11-16T04:47:17.143000+00:00
+No installs, pytest, daemon actions, translation edits, history writes or commits.
+Validator: production runtime parser + argument/branch/command/Unicode assertions.
+This is a bounded namespace check, not whole-repository CI or ledger eligibility.
+PASS cli.serve_readiness.unproven: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS cli.serve_readiness.not_reporting: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS cli.serve_readiness.not_this_daemon: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS cli.serve_readiness.unknown_state: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS cli.serve_readiness.install_unknown: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS cli.serve_readiness.cgroup_unknown: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS cli.serve_readiness.recorded_gap: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS cli.serve_readiness.unknown: key/ICU/argument-order/branch-values/commands/Unicode; selectors=(('one', 'few', 'many', 'other'),)
+PASS cli.serve_readiness.stale: key/ICU/argument-order/branch-values/commands/Unicode; selectors=(('one', 'few', 'many', 'other'),)
+PASS cli.serve_readiness.other_unit: key/ICU/argument-order/branch-values/commands/Unicode; selectors=(('one', 'few', 'many', 'other'),)
+PASS cli.serve_readiness.identity_restart: key/ICU/argument-order/branch-values/commands/Unicode; selectors=()
+PASS CLDR branch coverage: ['few', 'many', 'one', 'other']; counts=[0, 1, 2, 3, 4, 5, 11, 21, 22, 25, 1.5, 1000000, 1500000]
+PASS literal commands preserved in every applicable branch
+PASS raw catalogue has no bidi controls; Latin digit/token samples unchanged
+PASS opaque/pseudo parameter preservation: 47 renders
+PASS rendered text samples: 47; keys=11/11
+EXIT_CODE=0

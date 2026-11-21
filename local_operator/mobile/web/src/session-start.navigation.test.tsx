@@ -27,7 +27,7 @@ beforeEach(() => {
 	startBodies = [];
 
 	vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
-		if (input.endsWith("/events")) return new Stream(input, init?.signal).response;
+		if (input.split("?")[0]!.endsWith("/events")) return new Stream(input, init?.signal).response;
 		let body: unknown;
 		if (input === "/api/directories") body = { home: "/tmp/fixture", recent: [], default: "/tmp/fixture" };
 		else if (input === "/api/models") body = { models: [] };
@@ -58,7 +58,7 @@ afterEach(async () => {
 async function publishProjection(conversationName = "Ready conversation") {
 	const stream = await waitFor(() => {
 		const source = Stream.instances.find((candidate) =>
-			candidate.url === `/api/sessions/${sessionId}/events`);
+			candidate.url === `/api/sessions/${sessionId}/events?steer_journal_order=1`);
 		expect(source).toBeTruthy();
 		return source!;
 	});

@@ -459,6 +459,10 @@
   "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label": "Cache 1 h d’Anthropic au-delà (tokens)",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": "Taille de contexte (tokens) à partir de laquelle les requêtes des sous-agents utilisent le TTL d’une heure du cache de prompt. 0 n’ajoute aucune règle de taille : d’après les mesures, 1 heure sur le seul critère de la taille coûte plus cher aux sous-agents, quelle que soit la taille. Par ailleurs, avec un abonnement Claude, un sous-agent passe à 1 heure après un appel de 4 minutes ou plus ; la valeur 0 dans le réglage principal du TTL d’une heure le désactive.",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": "TTL 1 h sous-agents Anthropic",
+  "wire.settings.providers_bedrock_auth.help": "ambient : identifiants AWS de cette machine (rôle IAM) pour Bedrock.",
+  "wire.settings.providers_bedrock_auth.label": "Authentification Bedrock",
+  "wire.settings.providers_bedrock_region.help": "Région AWS pour Bedrock si la connexion n’en définit pas. Vide : AWS_REGION.",
+  "wire.settings.providers_bedrock_region.label": "Région Amazon Bedrock",
   "wire.settings.providers_openai_api.choice.chat_completions.description": "désactivation explicite de la compatibilité",
   "wire.settings.providers_openai_api.choice.chat_completions.label": "chat_completions",
   "wire.settings.providers_openai_api.choice.responses.description": "l’API Responses publique (par défaut)",
@@ -762,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Plafond non adressés / heure",
   "wire.settings.team_bridge_session.help": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
   "wire.settings.team_bridge_session.label": "Session CoS",
+  "wire.settings.team_bridge_hold_release.label": "Retenir les demandes de tâche",
+  "wire.settings.team_bridge_hold_release.help": "Certaines demandes de nouveau travail sont retenues pour que vous les transmettiez ou les écartiez. Rien n’atteint votre agent sans transmission. Désactivé, elles sont refusées.",
   "wire.settings.tool_approval_mode.choice.ask.description": "demander avant les outils d’écriture/exécution",
   "wire.settings.tool_approval_mode.choice.ask.label": "demander",
   "wire.settings.tool_approval_mode.choice.auto.description": "les exécuter sans demander",
@@ -881,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 heures",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 heures",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "Supprimer les conversations temporaires après",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Durée d’inactivité d’une conversation temporaire avant sa suppression. Le temps à l’écran, une tâche en cours ou une question ouverte ne comptent pas comme inactivité."
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Durée d’inactivité d’une conversation temporaire avant sa suppression. Le temps à l’écran, une tâche en cours ou une question ouverte ne comptent pas comme inactivité.",
+  "wire.settings.mesh_moves.title": "Déplacements de session",
+  "wire.settings.mesh_moves.description": "Ce qu’une conversation déplacée vers un autre appareil emporte avec elle. Lu à chaque déplacement : une modification s’applique au suivant.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Plafond des fichiers de travail par déplacement (octets)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "Le volume maximal de fichiers de travail (commits empaquetés plus fichiers indexés, non indexés et non suivis) qu’un déplacement envoie à un autre appareil ou en accepte. Au-delà, le déplacement est refusé et rien ne change. Par défaut : 256 Mio.",
+  "wire.settings.mesh_move_working_set_roots.label": "Dossiers pouvant recevoir des dépôts déplacés",
+  "wire.settings.mesh_move_working_set_roots.help": "Où, sur cet appareil, un déplacement de session peut créer ou restaurer un dépôt : des dossiers de votre répertoire personnel, écrits avec ~ et séparés par des virgules (par exemple ~/code, ~/work). Les dossiers cachés, système, de commandes (dans le PATH) et node_modules ne sont jamais utilisés. Non défini : un dépôt est restauré là où il se trouve déjà, et un dépôt manquant n’est cloné que dans un dossier qui contient déjà vos dépôts ; définissez-le pour autoriser d’autres dossiers."
 }
