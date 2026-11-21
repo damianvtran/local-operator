@@ -67,6 +67,7 @@ from local_operator.secrets.protocol import (
     ensure_runtime_dir,
     lock_path,
     recv_frame,
+    rolling_path,
     send_frame,
     socket_path,
 )
@@ -203,6 +204,41 @@ class BrokerDenied(SecretStoreError):
 
 class BrokerLocked(SecretStoreError):
     """The store is hardened and this boot has not been unlocked yet."""
+
+
+class BrokerRolling(SecretStoreError):
+    """A broker roll is in progress and the retrieval could not be served in time.
+
+    Deliberately NOT a :class:`BrokerUnavailable` or :class:`BrokerDenied`
+    subclass: those two are exactly what ``access.retrieve_secret`` catches to
+    fall back to the UNNOTIFIED local decrypt, and a roll window must never
+    reach that fallback (security R1). This class propagates instead.
+    """
+
+
+#: Ceiling on how long a retrieval waits out a roll before failing closed
+#: (security R1: "waits (bounded, ≤8 s) or fails"). Matches the successor's
+#: own hold, ``broker.ROLL_GRACE_S``.
+ROLL_WAIT_S = 8.0
+
+
+def rolling_in_progress(base: Path | None = None) -> bool:
+    """Is a broker roll under way for this store right now?
+
+    The sentinel carries its own deadline, so one left behind by a roller that
+    died does not hold retrievals hostage: past its deadline it is ignored.
+    Unreadable or malformed counts as NOT rolling — the sentinel can only make
+    a caller wait, so ignoring a bad one restores today's behaviour, never a
+    looser one.
+    """
+    import json
+
+    try:
+        payload = json.loads(rolling_path(base).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    deadline = payload.get("deadline") if isinstance(payload, dict) else None
+    return isinstance(deadline, (int, float)) and time.time() < deadline
 
 
 def is_running(base: Path | None = None) -> bool:
@@ -548,7 +584,7 @@ def settle_spawned_broker(
     return SpawnedBrokerStop("stopped", live)
 
 
-def _spawn_broker(base: Path | None) -> int:
+def _spawn_broker(base: Path | None, extra_args: tuple[str, ...] = ()) -> int:
     """Launch a detached broker process.
 
     ``start_new_session`` detaches it from this process group so the daemon
@@ -606,7 +642,9 @@ def _spawn_broker(base: Path | None) -> int:
             # with costs the child its ``sys.executable`` on Linux (the #1162
             # blocker, measured — see ``_broker_identity``), and ``executable=``
             # is the only thing that lets ``argv[0]`` stop being a path at all.
-            [argv0, "-m", "local_operator.secrets.brokerd"],
+            # ``extra_args`` is the roller's successor switches (``secrets.roll``);
+            # empty for every ordinary lazy start.
+            [argv0, "-m", "local_operator.secrets.brokerd", *extra_args],
             executable=executable,
             stdin=devnull_in,
             stdout=devnull_out,
@@ -710,11 +748,40 @@ def retrieve(name: str, base: Path | None = None, *, role: str = "agent") -> byt
     check that lived only in the client would be decoration for anyone who
     spoke the protocol directly.
     """
-    reply = request("retrieve", base, name=name, role=role)
+    reply = _retrieve_through_roll(name, base, role=role)
     value = reply.get("value")
     if not isinstance(value, str):
         raise SecretStoreError("the broker returned no value")
     return decode_bytes(value)
+
+
+def _retrieve_through_roll(name: str, base: Path | None, *, role: str) -> dict[str, Any]:
+    """One ``retrieve`` request that WAITS OUT a broker roll instead of failing open.
+
+    **Why (security R1).** During a roll a descendant can meet a broker that
+    does not yet know its session (it has not re-registered) or, at worst, no
+    answer at all. Either becomes ``BrokerDenied``/``BrokerUnavailable``, and
+    ``access.retrieve_secret`` turns both into an UNNOTIFIED local decrypt in
+    the keyfile tier — the transcript leak §6 exists to prevent. So while
+    the roll sentinel is present the request is retried for up to
+    :data:`ROLL_WAIT_S`; once the sentinel is gone the next answer is final
+    (the successor's own hold covers the tail), and if the roll outlasts the
+    budget the caller gets :class:`BrokerRolling`, which no fallback catches.
+    Outside a roll this is exactly one ``request`` — no behaviour change.
+    """
+    deadline = time.monotonic() + ROLL_WAIT_S
+    while True:
+        try:
+            return request("retrieve", base, name=name, role=role)
+        except (BrokerUnavailable, BrokerDenied) as exc:
+            if not rolling_in_progress(base):
+                raise
+            if time.monotonic() >= deadline:
+                raise BrokerRolling(
+                    "the secret broker is being replaced by an update and did not finish "
+                    f"within {ROLL_WAIT_S:g}s; retry in a moment"
+                ) from exc
+            time.sleep(0.1)
 
 
 def unlock(passphrase: str, base: Path | None = None) -> None:
@@ -722,10 +789,31 @@ def unlock(passphrase: str, base: Path | None = None) -> None:
     request("unlock", base, passphrase=passphrase)
 
 
+#: What this client declares at registration (see ``broker.KNOWN_CAPS``).
+#: ``reroll``: :class:`~local_operator.secrets.session.SessionRegistration`
+#: re-registers with a successor broker on its own when its channel closes.
+REGISTRATION_CAPS = ("reroll",)
+
+
 def register_session(
     base: Path | None = None, *, session_id: str | None = None
 ) -> socket.socket | None:
     """Register this process as a live lop session; returns the channel.
+
+    The channel-only form, kept for callers that do not re-register; see
+    :func:`register_session_channel` for the full contract.
+    """
+    registered = register_session_channel(base, session_id=session_id)
+    return registered[0] if registered is not None else None
+
+
+def register_session_channel(
+    base: Path | None = None,
+    *,
+    session_id: str | None = None,
+    ensure: bool = True,
+) -> tuple[socket.socket, int | None] | None:
+    """Register this process as a live lop session; returns ``(channel, broker pid)``.
 
     The returned socket is the session's notification channel and MUST be kept
     open: closing it deregisters the session, at which point its descendants
@@ -739,8 +827,16 @@ def register_session(
     presented here; a caller that cannot read it is not entitled to register
     (review R1). Failing to read it returns ``None`` for the same reason a
     missing broker does: no store this boot, but the session still starts.
+
+    The second element is the answering broker's pid (``None`` from a broker
+    too old to report it), which is how a re-registering session tells a
+    successor from the broker that revoked it.
+
+    ``ensure=False`` is the RE-registration path: it never starts a broker, so
+    ``lop secret broker stop`` still means stop — a session whose broker was
+    stopped on purpose must not resurrect one.
     """
-    if not ensure_broker(base):
+    if ensure and not ensure_broker(base):
         return None
     try:
         from local_operator.secrets.keys import registration_ticket
@@ -760,6 +856,7 @@ def register_session(
                 "op": "register",
                 "session_id": session_id,
                 "ticket": encode_bytes(ticket),
+                "caps": list(REGISTRATION_CAPS),
             },
         )
         reply = recv_frame(connection)
@@ -795,7 +892,8 @@ def register_session(
     # No timeout on the channel afterwards: it is long-lived and mostly idle,
     # and a timeout here would tear down a healthy session's registration.
     connection.settimeout(None)
-    return connection
+    pid = reply.get("pid")
+    return connection, pid if isinstance(pid, int) else None
 
 
 def read_notification(connection: socket.socket) -> tuple[str, bytes] | None:
@@ -830,6 +928,7 @@ def acknowledge(connection: socket.socket) -> None:
 __all__ = [
     "BrokerDenied",
     "BrokerLocked",
+    "BrokerRolling",
     "BrokerUnavailable",
     "acknowledge",
     "broker_status",
@@ -838,6 +937,8 @@ __all__ = [
     "is_running",
     "read_notification",
     "register_session",
+    "register_session_channel",
+    "rolling_in_progress",
     "retrieve",
     "settle_spawned_broker",
     "spawned_brokers",

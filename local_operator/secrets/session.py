@@ -37,6 +37,13 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+#: Back-off before each re-registration attempt after the channel closes: three
+#: attempts within ~2 s. A roll renames the successor into place BEFORE the old
+#: broker is told to stop, so the first attempt normally finds it; the bound
+#: keeps a broker that was stopped on purpose from being polled for long, and
+#: stays well inside the successor's ``broker.ROLL_GRACE_S`` hold.
+_REREGISTER_DELAYS_S = (0.2, 0.6, 1.2)
+
 
 class SessionRegistration:
     """A live registration plus the thread that answers redaction notices.
@@ -50,9 +57,25 @@ class SessionRegistration:
         self,
         channel: socket.socket,
         on_secret: Callable[[str, bytes], None],
+        *,
+        base: Path | None = None,
+        session_id: str | None = None,
+        broker_pid: int | None = None,
     ) -> None:
+        """``broker_pid`` enables re-registration; ``None`` keeps the old one-shot life.
+
+        Only :func:`register_session` knows which broker answered, so only a
+        registration made there re-registers; a channel handed in by a caller
+        that cannot say which broker it belongs to keeps today's behaviour.
+        """
         self._channel = channel
         self._on_secret = on_secret
+        self._base = base
+        self._session_id = session_id
+        self._broker_pid = broker_pid
+        #: Guards the channel SWAP against ``close()``: a re-registration that
+        #: completes after close began must not leave a live channel behind.
+        self._swap_lock = threading.Lock()
         self._stopping = threading.Event()
         self._thread = threading.Thread(
             target=self._read_loop,
@@ -75,9 +98,16 @@ class SessionRegistration:
             try:
                 notice = client.read_notification(self._channel)
             except OSError:
-                return
+                notice = None
             if notice is None:
-                return
+                # The channel closed. That used to end the registration for
+                # the session's whole life: no reconnect, so after any broker
+                # restart this session's descendants were denied and, in the
+                # keyfile tier, served by the UNNOTIFIED local decrypt. A roll
+                # (`secrets.roll`) now relies on this re-registering.
+                if self._stopping.is_set() or not self._reregister():
+                    return
+                continue
             name, value = notice
             try:
                 self._on_secret(name, value)
@@ -93,6 +123,57 @@ class SessionRegistration:
             except OSError:
                 return
 
+    def _reregister(self) -> bool:
+        """Register afresh with a SUCCESSOR broker, if one took over. True on success.
+
+        **A fresh registration, never a resumed one (security R2).** The new
+        broker authenticates this process from the kernel's peer credentials
+        and the ticket exactly as on first boot; nothing carries over from the
+        old channel.
+
+        **Never starts a broker** (``ensure=False``): a channel closed by
+        ``lop secret broker stop`` must stay closed, so no answer means give up.
+        **Never fights a revocation**: if the SAME broker pid still answers, it
+        closed this channel on purpose (a granting terminal died, §Q8) and
+        re-registering would undo that decision.
+
+        Only reached after the old channel reported EOF, i.e. after the old
+        broker finished every in-flight notify/ack it had (its ``stop()`` joins
+        request workers before closing session channels), so the ack ordering
+        of :meth:`_read_loop` is never cut mid-notice (security R3).
+        """
+        if self._broker_pid is None:
+            return False
+        from local_operator.secrets import client
+        from local_operator.secrets.errors import SecretStoreError
+
+        for delay in _REREGISTER_DELAYS_S:
+            if self._stopping.wait(delay):
+                return False
+            try:
+                answering = client.request("ping", self._base).get("pid")
+            except SecretStoreError:
+                continue
+            if answering == self._broker_pid:
+                return False
+            registered = _open_registration(self._base, self._session_id, ensure=False)
+            if registered is None:
+                return False
+            channel, pid = registered
+            with self._swap_lock:
+                if self._stopping.is_set():
+                    channel.close()
+                    return False
+                old, self._channel = self._channel, channel
+                self._broker_pid = pid if pid is not None else answering
+            try:
+                old.close()
+            except OSError:  # pragma: no cover - already gone
+                pass
+            logger.info("re-registered this session with secret broker pid %s", self._broker_pid)
+            return True
+        return False
+
     def close(self) -> None:
         """Deregister this session and stop answering notices.
 
@@ -107,16 +188,34 @@ class SessionRegistration:
         liveness peek see ``b""`` immediately and wakes the parked read; the
         ``close`` afterwards only releases the descriptor.
         """
-        self._stopping.set()
+        with self._swap_lock:
+            self._stopping.set()
+            channel = self._channel
         try:
-            self._channel.shutdown(socket.SHUT_RDWR)
+            channel.shutdown(socket.SHUT_RDWR)
         except OSError:  # pragma: no cover - already gone
             pass
         try:
-            self._channel.close()
+            channel.close()
         except OSError:  # pragma: no cover - already gone
             pass
         self._thread.join(timeout=2)
+
+
+def _open_registration(
+    base: Path | None, session_id: str | None, *, ensure: bool
+) -> tuple[socket.socket, int | None] | None:
+    """THE one place this module opens a registration, first or re-registration.
+
+    Both :func:`register_session` and :meth:`SessionRegistration._reregister`
+    go through here, so anything that must accompany EVERY registration (e.g.
+    the live-session lineage marker the fail-closed access PR #4388 publishes
+    from ``register_session``) has a single home and a re-registration after a
+    broker roll can never skip it.
+    """
+    from local_operator.secrets import client
+
+    return client.register_session_channel(base, session_id=session_id, ensure=ensure)
 
 
 def register_session(
@@ -141,13 +240,23 @@ def register_session(
     try:
         from local_operator.secrets import client
 
-        channel = client.register_session(base, session_id=session_id)
+        registered = _open_registration(base, session_id, ensure=True)
     except Exception:  # noqa: BLE001 — the store is optional; boot must not fail on it
         logger.debug("secret broker registration failed", exc_info=True)
         return None
-    if channel is None:
+    if registered is None:
         return None
-    return SessionRegistration(channel, on_secret)
+    channel, broker_pid = registered
+    if broker_pid is None:
+        # A broker too old to name itself on the register reply: ask once, so a
+        # later roll can still be told apart from a revocation.
+        try:
+            broker_pid = client.request("ping", base).get("pid")
+        except Exception:  # noqa: BLE001 — re-registration is best effort
+            broker_pid = None
+    return SessionRegistration(
+        channel, on_secret, base=base, session_id=session_id, broker_pid=broker_pid
+    )
 
 
 def register_variable_store_session(

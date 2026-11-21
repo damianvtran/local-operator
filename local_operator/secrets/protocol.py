@@ -51,6 +51,27 @@ SOCKET_FILENAME = "broker.sock"
 #: Filename of the lock that serialises lazy broker startup.
 LOCK_FILENAME = "broker.lock"
 
+#: The successor's temporary rendezvous during a roll (``secrets.roll``). BESIDE
+#: the canonical socket, so the hand-off is a same-directory, same-filesystem
+#: ``rename`` (atomic) and inherits the same 0700 directory (security R4).
+#:
+#: **Exactly as long as ``SOCKET_FILENAME``, and that is load-bearing.**
+#: ``socket_path`` picks the natural directory whenever ``broker.sock`` fits
+#: ``MAX_SOCKET_PATH``; the plan's ``broker.sock.next`` was five bytes longer, so
+#: a config dir whose canonical socket sat at 99-103 bytes could never bind its
+#: successor (measured: a 108-byte temp path beside a 103-byte canonical one in
+#: ``test_cli.py``'s tmp dir, every restart refused). Equal length means the
+#: temp name fits wherever the canonical one does, without moving the
+#: rendezvous rule older builds also follow.
+SUCCESSOR_SOCKET_FILENAME = "broker.next"
+
+#: The "a roll is in progress" sentinel (security R1). Written by the roller
+#: before anything moves and removed when it is done; it holds no secret, only
+#: the old pid and a deadline. A client whose retrieval meets an unreachable or
+#: refusing broker while it exists WAITS instead of degrading to the unnotified
+#: local decrypt (``client.retrieve``).
+ROLLING_FILENAME = "broker.rolling"
+
 #: macOS ``sockaddr_un.sun_path`` is 104 bytes and ``bind()`` fails silently
 #: past it. Measured on this machine: a 103-byte path binds, 104 fails. The
 #: config dir is operator-controlled (``LOCAL_OPERATOR_CONFIG_DIR``, and tests
@@ -186,6 +207,16 @@ def lock_path(base: Path | None = None) -> Path:
     thing.
     """
     return socket_path(base).parent / LOCK_FILENAME
+
+
+def successor_socket_path(base: Path | None = None) -> Path:
+    """Where a successor broker listens until the roll renames it into place."""
+    return socket_path(base).parent / SUCCESSOR_SOCKET_FILENAME
+
+
+def rolling_path(base: Path | None = None) -> Path:
+    """The roll-in-progress sentinel, beside the socket it describes."""
+    return socket_path(base).parent / ROLLING_FILENAME
 
 
 def encode_bytes(raw: bytes) -> str:

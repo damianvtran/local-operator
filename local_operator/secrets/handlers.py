@@ -1527,22 +1527,12 @@ def _broker(args: argparse.Namespace) -> int:
         _err(broker_unsupported_reason() or "Could not start the secret broker.")
         return 2
 
-    if command in ("stop", "restart"):
+    if command == "restart":
+        return _restart_broker(client)
+
+    if command == "stop":
         stopped = _stop_broker(client)
-        if stopped is False:
-            return 2
-        if command == "stop":
-            return 0
-        # restart: the reason this verb exists is version skew, which
-        # AGENTS.md calls routine here because `lop-update` runs under live
-        # sessions. The broker's own protocol-mismatch error names it, so it
-        # has to exist (QA Q4).
-        if client.ensure_broker(None):
-            status = client.broker_status(None) or {}
-            _err(f"secret broker restarted (pid {status.get('pid', '?')})")
-            return 0
-        _err(broker_unsupported_reason() or "Could not start the secret broker.")
-        return 2
+        return 2 if stopped is False else 0
 
     status = client.broker_status(None)
     if getattr(args, "json", False):
@@ -1556,3 +1546,60 @@ def _broker(args: argparse.Namespace) -> int:
     print(f"locked      {status.get('locked')}")
     print(f"sessions    {len(status.get('sessions') or [])} registered")
     return 0
+
+
+def _restart_broker(client: Any) -> int:
+    """``lop secret broker restart``: a ROLL, never a bare stop-then-start.
+
+    The reason this verb exists is version skew, which AGENTS.md calls routine
+    because `lop-update` runs under live sessions (QA Q4). It used to be
+    ``_stop_broker`` then ``ensure_broker``: a window with no broker, every
+    session's registration dropped for good (sessions did not reconnect), and
+    in the keyfile tier each of their descendants then served by the
+    UNNOTIFIED local decrypt (``access.retrieve_secret``) — a §6 leak an
+    operator could trigger by following the broker's own advice. It now goes
+    through ``secrets.roll.roll_broker`` and REFUSES whenever a roll cannot
+    keep every session covered (security R7: no restart route re-creates that).
+
+    The one stop-then-start left is an UNLOCKED PASSPHRASE-tier broker, because
+    the operator asked for it by name and accepts the re-unlock. It cannot hit
+    the unnotified fallback: that path needs a plaintext key on disk, and
+    ``key_mode == "passphrase"`` means there is none — ``retrieve_secret``
+    re-raises every broker refusal in that tier (pinned by
+    ``test_broker_roll.py::test_passphrase_restart_never_serves_unnotified``).
+    """
+    from local_operator.secrets.keys import key_mode
+    from local_operator.secrets.peer import broker_unsupported_reason
+    from local_operator.secrets.roll import roll_broker
+
+    result = roll_broker(None, force=True)
+    if result.status == "rolled":
+        _err(f"secret broker restarted (pid {result.new_pid}, was {result.old_pid})")
+        if result.warning:
+            _err(f"warning: {result.warning}")
+        return 0
+    if result.status == "failed":
+        _err(f"Could not restart the secret broker; the running one was left in place: {result.reason}")
+        return 2
+    if result.status == "deferred" and not (
+        result.code == "passphrase" and key_mode(None) == "passphrase"
+    ):
+        _err(f"Not restarting the secret broker: {result.reason}")
+        return 2
+    if result.status == "deferred":
+        stopped = _stop_broker(client)
+        if stopped is False:
+            return 2
+    # Nothing was running (or the passphrase-tier broker was just stopped):
+    # start one, as this verb always has.
+    try:
+        started = client.ensure_broker(None)
+    except BrokerIncompatible as exc:
+        _err(str(exc))
+        return 2
+    if started:
+        status = client.broker_status(None) or {}
+        _err(f"secret broker restarted (pid {status.get('pid', '?')})")
+        return 0
+    _err(broker_unsupported_reason() or "Could not start the secret broker.")
+    return 2

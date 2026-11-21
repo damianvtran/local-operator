@@ -109,6 +109,62 @@ MAX_SESSIONS = 32
 UNLOCK_BACKOFF_BASE_S = 0.25
 UNLOCK_BACKOFF_MAX_S = 8.0
 
+#: How long a SUCCESSOR broker (one started by ``secrets.roll.roll_broker``)
+#: HOLDS a data request whose ancestry reaches a session that was registered with
+#: its predecessor but has not re-registered here yet.
+#:
+#: WHY A HOLD EXISTS AT ALL. Between the atomic rename that makes the successor
+#: authoritative and the moment each live session notices its old channel closed
+#: and registers afresh, a session's descendant may ask the NEW broker for a
+#: value. Deciding immediately would deny it (no registered ancestor yet), and in
+#: the keyfile tier ``access.retrieve_secret`` turns a denial into an UNNOTIFIED
+#: local decrypt — the §6 redaction ordering lost exactly at an update. Holding
+#: closes that window without trusting anything from the old broker: the hold
+#: never grants, it only waits for the session to authenticate itself afresh.
+#:
+#: 8 s because it must stay under the client's 10 s ``REQUEST_TIMEOUT_S`` (a
+#: longer hold would surface as a timeout instead of an answer) and above the
+#: re-registration path's own worst case: the old broker's ``stop()`` closes
+#: session channels after its ≤1 s watcher tick, and the session retries over
+#: ≤2 s (``session._REREGISTER_DELAYS_S``).
+ROLL_GRACE_S = 8.0
+
+#: A successor that has not been renamed onto the canonical path within this
+#: long exits by itself. The roller kills a successor whose hand-off failed, but
+#: a roller that itself died mid-roll would otherwise leave an orphan listening
+#: on ``broker.next`` forever. Generous against the roller's own 5 s
+#: readiness bound so a slow but healthy roll is never cut.
+ROLL_HANDOVER_TIMEOUT_S = 30.0
+
+#: How long the successor waits to SEE its predecessor exit before writing the
+#: one ``roll`` audit row anyway. The row is written once either way; waiting is
+#: only so that, in the normal case, the chain records the roll after the old
+#: broker can no longer append rows of its own.
+PREDECESSOR_EXIT_WAIT_S = 30.0
+
+#: Capabilities a registrant may declare. ``reroll``: the client re-registers
+#: on its own when its channel closes and a DIFFERENT broker answers (see
+#: ``session.SessionRegistration``). The roller refuses to roll while any
+#: registered session lacks it, because such a session would silently stay
+#: unregistered for life and its descendants would hit the unnotified fallback.
+KNOWN_CAPS = frozenset({"reroll"})
+
+
+def _install_version() -> str:
+    """This interpreter's installed ``local-operator`` version, or ``""``.
+
+    Reported in ``status`` so a roller can prove its successor runs the SAME
+    build it does (security requirement R5) and so the ``roll`` audit row can
+    name both versions. Metadata only — never a gate on its own; ``""`` on a
+    source checkout with no install metadata.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("local-operator")
+    except Exception:  # noqa: BLE001 - a version string is evidence, not a dependency
+        return ""
+
 
 class BrokerError(SecretStoreError):
     """The broker refused a request, with a reason meant for the operator."""
@@ -137,6 +193,10 @@ class _Session:
     #: retrievals attributed to the same session would otherwise interleave
     #: their notify frames on one stream and each read the other's ack.
     write_lock: threading.Lock = field(default_factory=threading.Lock)
+    #: What the registrant declared it can do (:data:`KNOWN_CAPS` only). Reported
+    #: in ``status`` so a roller can tell a session that will re-register with a
+    #: successor from one that would be stranded by the roll.
+    caps: tuple[str, ...] = ()
 
 
 class SecretBroker:
@@ -154,9 +214,33 @@ class SecretBroker:
         key_provider: Callable[[], bytes] | None = None,
         idle_shutdown_s: float = IDLE_SHUTDOWN_S,
         notify_ack_timeout_s: float = NOTIFY_ACK_TIMEOUT_S,
+        bind_path: Path | None = None,
+        predecessor: ProcessIdentity | None = None,
+        expected_sessions: dict[int, ProcessIdentity] | None = None,
+        roll_grace_s: float = ROLL_GRACE_S,
     ) -> None:
+        """``bind_path``/``predecessor``/``expected_sessions`` make a SUCCESSOR.
+
+        A successor binds beside the live broker (``broker.next``) and is
+        renamed onto the canonical path by ``secrets.roll.roll_broker``; it learns
+        that it was renamed by watching the canonical path's inode, never by a
+        message, so the old broker hands it nothing. ``expected_sessions`` is
+        METADATA ONLY — pids pinned with their start times (security R2) — and
+        is used solely to HOLD, never to grant: see :data:`ROLL_GRACE_S`.
+        """
         self._base = base
-        self._path = socket_path(base)
+        #: Where every client connects. A successor binds elsewhere first and
+        #: only reaches this path through the roller's atomic rename.
+        self._canonical = socket_path(base)
+        self._path = bind_path if bind_path is not None else self._canonical
+        self._predecessor = predecessor
+        self._expected: dict[int, ProcessIdentity] = dict(expected_sessions or {})
+        self._roll_grace_s = roll_grace_s
+        #: Set when the rename onto the canonical path is observed; until then a
+        #: hold is bounded per request by ``roll_grace_s`` alone.
+        self._grace_deadline: float | None = None
+        #: Exactly one ``roll`` audit row per successor (security R6).
+        self._roll_audited = False
         self._key_provider = key_provider
         self._idle_shutdown_s = idle_shutdown_s
         self._notify_ack_timeout_s = notify_ack_timeout_s
@@ -267,6 +351,111 @@ class SecretBroker:
             target=self._accept_loop, name="secret-broker-accept", daemon=True
         )
         self._accept_thread.start()
+        if self._predecessor is not None:
+            threading.Thread(
+                target=self._await_handover, name="secret-broker-handover", daemon=True
+            ).start()
+
+    def _await_handover(self) -> None:
+        """A successor's half of the roll: notice the rename, start grace, audit once.
+
+        Nothing here talks to the predecessor. The commit point is the roller's
+        rename, observed as the canonical path taking this broker's inode; the
+        predecessor's exit is observed as its pinned identity disappearing. The
+        old broker therefore hands over no secret, key or token (security
+        constraint: pids only), and remains authoritative until the rename.
+
+        A successor that is never renamed exits on its own after
+        :data:`ROLL_HANDOVER_TIMEOUT_S`, so a roller that died mid-roll cannot
+        leave an orphan holding ``broker.next``.
+        """
+        deadline = time.monotonic() + ROLL_HANDOVER_TIMEOUT_S
+        while not self._stopping.is_set() and not self._adopt_canonical_if_renamed():
+            if time.monotonic() >= deadline:
+                logger.warning("secrets: successor broker was never handed the socket; exiting")
+                self._stopping.set()
+                return
+            self._stopping.wait(0.05)
+        if self._stopping.is_set():
+            return
+        self._grace_deadline = time.monotonic() + self._roll_grace_s
+        predecessor = self._predecessor
+        assert predecessor is not None
+        exit_deadline = time.monotonic() + PREDECESSOR_EXIT_WAIT_S
+        while not self._stopping.is_set() and time.monotonic() < exit_deadline:
+            current = process_info(predecessor.pid)
+            if current is None or not current.same_process_as(predecessor):
+                break
+            self._stopping.wait(0.1)
+        self._audit_roll(predecessor.pid)
+
+    def _audit_roll(self, old_pid: int) -> None:
+        """The ONE ``roll`` row a successful roll leaves in the chain (security R6).
+
+        Old and new pid plus this build's version ride in ``outcome``, the same
+        free-text slot the revocation rows use; no secret name or value is ever
+        part of it. Flag-guarded so a repeated call cannot write a second row.
+        A locked passphrase-tier broker has no key and so no chain to append to
+        (see :meth:`_audit`); there the update report is the record.
+        """
+        if self._roll_audited:
+            return
+        self._roll_audited = True
+        me = process_info(os.getpid())
+        if me is None:  # pragma: no cover - our own pid is always readable
+            return
+        version = _install_version() or "unknown"
+        self._audit(me, "roll", f"allow:old pid {old_pid} -> new pid {me.pid} ({version})")
+
+    def _expected_unregistered_ancestor(self, identity: ProcessIdentity) -> int | None:
+        """The predecessor's session this caller descends from, if it has not re-registered.
+
+        Walks the caller's ancestry and stops at the FIRST ancestor that is
+        either registered here (then the ordinary path decides, nothing to hold)
+        or expected from the predecessor. Expected entries are keyed by pid AND
+        start time (``ProcessIdentity.same_process_as``, security R2), so a
+        recycled pid never matches.
+        """
+        if not self._expected:
+            return None
+        from local_operator.secrets.peer import _walk
+
+        with self._lock:
+            sessions = {pid: s.identity for pid, s in self._sessions.items()}
+            expected = dict(self._expected)
+        for ancestor in _walk(identity.pid):
+            registered = sessions.get(ancestor.pid)
+            if registered is not None and registered.same_process_as(ancestor):
+                return None
+            pinned = expected.get(ancestor.pid)
+            if pinned is not None and pinned.same_process_as(ancestor):
+                return ancestor.pid
+        return None
+
+    def _hold_for_reregistration(self, identity: ProcessIdentity) -> int | None:
+        """HOLD (never grant) a request whose session has not re-registered yet.
+
+        Returns the still-unregistered session's pid when the hold ran out, else
+        ``None`` (no hold applied, or the session came back in time and the
+        ORDINARY authorization path decides). The successor waits at most
+        :data:`ROLL_GRACE_S` past the observed rename, and never longer than that
+        from the request's own arrival.
+        """
+        pending = self._expected_unregistered_ancestor(identity)
+        if pending is None:
+            return None
+        own_deadline = time.monotonic() + self._roll_grace_s
+        while not self._stopping.is_set():
+            deadline = own_deadline
+            if self._grace_deadline is not None:
+                deadline = min(deadline, self._grace_deadline)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+            pending = self._expected_unregistered_ancestor(identity)
+            if pending is None:
+                return None
+        return self._expected_unregistered_ancestor(identity)
 
     def _reap_stale_socket(self) -> None:
         """Remove a socket file left behind by a broker that died.
@@ -291,6 +480,24 @@ class SecretBroker:
         finally:
             probe.close()
 
+    def _adopt_canonical_if_renamed(self) -> bool:
+        """Point ``_path`` at the canonical socket once the roller renamed us there.
+
+        A rename keeps the inode, so "the canonical path now has OUR bound
+        inode" is exactly "the hand-off committed". Adopting it is what keeps
+        :meth:`_unlink_own_socket` correct for a successor: it must remove the
+        canonical file on exit, not look for the temp name that no longer exists.
+        """
+        if self._path == self._canonical or self._bound_inode is None:
+            return self._path == self._canonical
+        try:
+            renamed = os.lstat(self._canonical).st_ino == self._bound_inode
+        except OSError:
+            return False
+        if renamed:
+            self._path = self._canonical
+        return renamed
+
     def _unlink_own_socket(self) -> None:
         """Remove the socket file only if it is still the one we bound.
 
@@ -299,6 +506,9 @@ class SecretBroker:
         removing it would strand a live daemon behind a missing rendezvous
         point.
         """
+        # A successor stopped between the rename and its monitor's next tick
+        # still owns the canonical file; adopt it first so this removes it.
+        self._adopt_canonical_if_renamed()
         if self._bound_inode is not None:
             try:
                 if self._path.stat().st_ino != self._bound_inode:
@@ -581,6 +791,26 @@ class SecretBroker:
         # passphrase (`_grant_terminal`) in the hardened tier, and by
         # `access.py`'s key-file fallback in the keyfile tier, where §8 already
         # concedes the broker is not the boundary.
+        # **A successor holds its predecessor's sessions' descendants (§6).** See
+        # ROLL_GRACE_S. If the session never comes back, the answer is the
+        # `unredactable` refusal, NOT `unauthorized`: `access.retrieve_secret`
+        # turns a denial into an unnotified local decrypt in the keyfile tier,
+        # and that is precisely the leak a roll must not create (security R1).
+        # `unredactable` reaches the caller as a bare SecretStoreError, which no
+        # fallback catches. Only `retrieve` carries a value a session must scrub;
+        # `key` is held for the same window and then decided as it always was.
+        if operation in ("key", "retrieve"):
+            stranded = self._hold_for_reregistration(identity)
+            if stranded is not None and operation == "retrieve":
+                reason = (
+                    f"session {stranded} was registered with the previous secret broker and "
+                    "has not re-registered with this one, so this value cannot be kept out "
+                    "of its transcript and was not served"
+                )
+                self._audit_denial(identity, operation, reason)
+                self._reply_error(connection, "unredactable", reason)
+                return False
+
         allowed, reason = self._authorize(identity)
         if not allowed:
             self._audit_denial(identity, operation, reason)
@@ -780,6 +1010,7 @@ class SecretBroker:
             # keyfile tier admitted it on the ticket alone — in which case no
             # terminal's death should revoke it.
             granting_terminal=granting_terminal,
+            caps=_declared_caps(request.get("caps")),
         )
         with self._lock:
             previous = self._sessions.get(identity.pid)
@@ -804,7 +1035,10 @@ class SecretBroker:
         if previous is not None:
             self._close_quietly(previous.connection)
         self._audit(identity, "register", "allow")
-        send_frame(connection, {"ok": True, "registered": identity.pid})
+        # `pid` lets the client tell, when this channel later closes, whether a
+        # DIFFERENT broker took over (re-register) or this one revoked it (do
+        # not fight a revocation). Extra fields are ignored by older clients.
+        send_frame(connection, {"ok": True, "registered": identity.pid, "pid": os.getpid()})
 
         watcher = threading.Thread(
             target=self._watch_session,
@@ -871,8 +1105,26 @@ class SecretBroker:
                 self._watchers.discard(threading.current_thread())
 
     def _handle_status(self, connection: socket.socket) -> None:
+        """Pre-gate metadata: who is registered, and which build is answering.
+
+        ``session_lineage`` (pid, start time, declared caps) is the ONLY thing a
+        successor or roller learns about sessions from this broker — metadata,
+        never a value, key or ticket (security R2). ``version`` and ``prefix``
+        let a roller prove its successor runs its own install (security R5).
+        All are extra fields, so an older client reading ``status`` is unaffected.
+        """
+        import sys as _sys
+
         with self._lock:
             sessions = sorted(self._sessions)
+            lineage = [
+                {
+                    "pid": pid,
+                    "start_time": self._sessions[pid].identity.start_time,
+                    "caps": list(self._sessions[pid].caps),
+                }
+                for pid in sessions
+            ]
         send_frame(
             connection,
             {
@@ -881,6 +1133,9 @@ class SecretBroker:
                 "locked": self._key is None and self._key_provider is None,
                 "sessions": sessions,
                 "protocol": PROTOCOL_VERSION,
+                "session_lineage": lineage,
+                "version": _install_version(),
+                "prefix": _sys.prefix,
             },
         )
 
@@ -1239,6 +1494,17 @@ class SecretBroker:
             pass
 
 
+def _declared_caps(raw: Any) -> tuple[str, ...]:
+    """The registrant's declared capabilities, filtered to :data:`KNOWN_CAPS`.
+
+    Bounded and filtered because it arrives over the wire: an unknown or junk
+    entry is dropped rather than stored and echoed back through ``status``.
+    """
+    if not isinstance(raw, list):
+        return ()
+    return tuple(sorted({cap for cap in raw[:8] if isinstance(cap, str) and cap in KNOWN_CAPS}))
+
+
 def executable_path(pid: int) -> str | None:
     """The peer's executable path, for the audit trail (§12).
 
@@ -1271,7 +1537,60 @@ def executable_path(pid: int) -> str | None:
     return None
 
 
-def run_broker(base: Path | None = None, *, idle_shutdown_s: float = IDLE_SHUTDOWN_S) -> int:
+def _successor_inputs(
+    base: Path | None, predecessor_pid: int
+) -> tuple[ProcessIdentity, dict[int, ProcessIdentity]] | None:
+    """What a successor learns about the broker it replaces: identities, nothing else.
+
+    Read from the predecessor's pre-gate ``status`` on the canonical path:
+    session pids and their start times (security R2). Each expected session is
+    re-pinned HERE from this process's own reading of the kernel and kept only
+    when its start time matches the predecessor's report, so a pid recycled
+    between the two readings is never held for. ``None`` when the canonical
+    path is not answered by the named predecessor — the roll aborts rather
+    than guessing which broker it is replacing.
+    """
+    from local_operator.secrets import client
+
+    try:
+        status = client.request("status", base)
+    except SecretStoreError:
+        return None
+    if status.get("pid") != predecessor_pid:
+        return None
+    predecessor = process_info(predecessor_pid)
+    if predecessor is None:
+        return None
+    expected: dict[int, ProcessIdentity] = {}
+    lineage = status.get("session_lineage")
+    if isinstance(lineage, list):
+        reported = {
+            entry.get("pid"): entry.get("start_time")
+            for entry in lineage
+            if isinstance(entry, dict) and isinstance(entry.get("pid"), int)
+        }
+    else:
+        # A predecessor too old to report start times: pin what the kernel says
+        # now. The window between its registration and this read is the same
+        # one every ancestry check already lives with.
+        reported = {pid: None for pid in status.get("sessions") or () if isinstance(pid, int)}
+    for pid, start_time in reported.items():
+        identity = process_info(pid)
+        if identity is None:
+            continue
+        if start_time is not None and identity.start_time != start_time:
+            continue
+        expected[pid] = identity
+    return predecessor, expected
+
+
+def run_broker(
+    base: Path | None = None,
+    *,
+    idle_shutdown_s: float = IDLE_SHUTDOWN_S,
+    bind_path: Path | None = None,
+    predecessor_pid: int | None = None,
+) -> int:
     """Run a broker in the foreground until it stops. The daemon entry point.
 
     In ``keyfile`` mode the key is read eagerly through a provider so the first
@@ -1298,7 +1617,22 @@ def run_broker(base: Path | None = None, *, idle_shutdown_s: float = IDLE_SHUTDO
     if key_mode(base) == "keyfile":
         provider = lambda: load_master_key(base)  # noqa: E731 - a def here shadows the annotation
 
-    broker = SecretBroker(base, key_provider=provider, idle_shutdown_s=idle_shutdown_s)
+    predecessor: ProcessIdentity | None = None
+    expected: dict[int, ProcessIdentity] = {}
+    if predecessor_pid is not None:
+        inputs = _successor_inputs(base, predecessor_pid)
+        if inputs is None:
+            logger.warning("secrets: the broker to be replaced is not serving; not starting")
+            return 2
+        predecessor, expected = inputs
+    broker = SecretBroker(
+        base,
+        key_provider=provider,
+        idle_shutdown_s=idle_shutdown_s,
+        bind_path=bind_path,
+        predecessor=predecessor,
+        expected_sessions=expected,
+    )
     broker.start()
     try:
         broker.serve_forever()

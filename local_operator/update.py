@@ -8910,7 +8910,11 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
     installed = _installed_daemon_plists()
     if not installed:
         if not _DAEMONS_ARE_LAUNCHD_AGENTS:
-            if not (_linux_relay_unit_installed() or _linux_restart_units_installed()):
+            if not (
+                _linux_relay_unit_installed()
+                or _linux_restart_units_installed()
+                or _secret_broker_socket_present()
+            ):
                 return DaemonRefresh(
                     name,
                     lines=(
@@ -8926,7 +8930,7 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
             # let the child's platform step table pick the rows
             # (``_linux_refresh_steps``). The A24 sentence above stays for
             # every host that still has nothing this child may refresh.
-        else:
+        elif not _secret_broker_socket_present():
             return DaemonRefresh(name)
     import subprocess
 
@@ -9341,6 +9345,7 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
             "lop team-bridge receiver install",
             connector_install.refresh_plist_if_stale,
         ),
+        _SECRET_BROKER_STEP,
     )
 
 
@@ -9789,7 +9794,85 @@ def _linux_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRe
             )
 
         steps.append((name, recovery, step))
+    # Unconditional, like the macOS row: the broker is not a systemd unit (it is
+    # spawned on demand), so there is no unit file to gate on, and the step
+    # answers "current" by itself when no broker is running.
+    steps.append(_SECRET_BROKER_STEP)
     return tuple(steps)
+
+
+def _refresh_secret_broker() -> launchd.PlistRefresh:
+    """Roll the secret broker onto this child's build, or say exactly why not.
+
+    WHY THE BROKER JOINED THE REFRESH TABLES (2026-11-21). It used to be
+    report-only on the theory that "it moves when it idles out" — false on any
+    node with a long-lived serve runtime, because the broker never idles out
+    while a session is registered (node2: 7+ days on 0.102.2). This child runs
+    on the NEW generation's interpreter, so ``secrets.roll.roll_broker`` starts
+    the successor from the new build; one step here covers the head and every
+    mesh node, each rolling only its own broker (security R6).
+
+    The vocabulary maps onto the existing outcome kinds so the report and
+    ``_reconcile_with_processes`` need nothing new: ``rolled`` → ``restarted``
+    (→ refreshed); ``already`` → ``current``; ``deferred`` → ``stale`` (→
+    ``pending`` WITH the deferral reason, which reconcile keeps); ``failed`` →
+    ``failed``; a rolled broker whose old process did not exit → ``unverified``.
+    """
+    try:
+        from local_operator.secrets.roll import roll_broker
+
+        result = roll_broker(None)
+    except Exception as exc:  # noqa: BLE001 — a refresher never raises
+        return launchd.PlistRefresh(name="secret broker", kind="failed", detail=str(exc))
+    return _broker_roll_refresh(result)
+
+
+def _secret_broker_socket_present() -> bool:
+    """Is there a broker socket the refresh child's "secret broker" step could roll?
+
+    The child is otherwise spawned only for installed plists/units, and a host
+    with a long-lived session but no supervised daemon still has a broker that
+    never idles out. A FILE check, deliberately, not a connection: this runs in
+    the updating parent, and the child's roll asks the broker itself.
+    """
+    try:
+        from local_operator.secrets.protocol import socket_path
+
+        return socket_path(None).exists()
+    except Exception:  # noqa: BLE001 — a gate input, never a failure
+        return False
+
+
+def _broker_roll_refresh(result: Any) -> launchd.PlistRefresh:
+    """``RollResult`` → ``PlistRefresh`` (see :func:`_refresh_secret_broker`)."""
+    name = "secret broker"
+    if result.status == "rolled":
+        if result.warning:
+            return launchd.PlistRefresh(name=name, kind="unverified", detail=result.warning)
+        return launchd.PlistRefresh(
+            name=name, kind="restarted", detail=f"pid {result.old_pid}, now pid {result.new_pid}"
+        )
+    if result.status == "deferred":
+        return launchd.PlistRefresh(name=name, kind="stale", detail=result.reason)
+    if result.status == "failed":
+        return launchd.PlistRefresh(
+            name=name,
+            kind="failed",
+            detail=f"{result.reason}; the running broker was left in place",
+        )
+    return launchd.PlistRefresh(name=name, kind="current")
+
+
+#: The one row both platform tables carry: (name, recovery, step). The name is
+#: ``services._DAEMON_MODULES``'s, so a stale-process row and this step's status
+#: reconcile by name.
+#: The repair is looked up BY NAME at call time (the lambda) so a test can
+#: replace ``_refresh_secret_broker`` without a live broker roll.
+_SECRET_BROKER_STEP: tuple[str, str, Callable[[], launchd.PlistRefresh]] = (
+    "secret broker",
+    "lop secret broker restart",
+    lambda: _refresh_secret_broker(),
+)
 
 
 def _platform_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
