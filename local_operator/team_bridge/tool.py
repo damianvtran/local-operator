@@ -8,10 +8,13 @@ WHAT THE COS MAY DO with a delivered bridge message, per contract:
   proves the fetched message IS the screened one. A mismatch is a typed HOLD:
   nothing is acked, nothing is handed to the model.
 - **ack** — ``working`` claims the message for THIS session (the §13.6 local
-  claim/lease, so a second session cannot also wake it); ``done`` releases
-  that claim (a claim releases on ack done, §13.6/N2). Claim tokens are held
-  by the runtime for the session's lifetime; a lost token refuses rather than
-  stealing a successor's claim.
+  claim/lease, so a second session cannot also wake it) and then posts
+  ``working`` to the hub; ``done`` posts ``done`` and then releases that claim
+  (a claim releases on ack done, §13.6/N2). Both posts are write-intent-first
+  with a stored ``client_ref`` (``_post_progress_ack``), so the hub's delivery
+  audit reads read → working → done. Claim tokens are held by the runtime for
+  the session's lifetime; a lost token refuses rather than stealing a
+  successor's claim. ``bcmsg_`` ids are refused (conversation lane).
 - **send / reply** — outbound notes/questions/requests through the durable
   outbox (write-intent-first, §6.2). ``reply`` is the §13.5 pairing: thread_id
   AND to always together. ``state=sent`` means server acceptance into the
@@ -2784,6 +2787,54 @@ def _name_taken(failure: BaseException) -> tuple[str, str] | None:
     return conversation_id, stored if isinstance(stored, str) else ""
 
 
+async def _post_progress_ack(
+    runtime: BridgeRuntime, message_id: str, target: Literal["working", "done"]
+) -> dict[str, Any]:
+    """Post the agent's own ``working``/``done`` to the hub, write-intent-first.
+
+    WHY: the tool's ack used to be a local SQLite claim only, so the hub row
+    stayed at ``read`` and its append-only ``state_events`` audit never showed
+    the request being worked or finished (Team Bridge requirements #2/#4).
+    Same discipline as the connector's read ack (``pull.ack``): the
+    write-once intent and its ``client_ref`` are durable BEFORE the POST, the
+    stored ref is reused on every replay (a crash between intent and POST
+    re-sends the identical request, never a fresh identity), and the outcome
+    mapping is ``pull.ack``'s. No screening rides the request:
+    the hub gates ``working`` on the allow verdict it stored at ``read``.
+
+    Returns ``hub_ack`` = ``confirmed`` | ``pending`` (ambiguous, replayable)
+    | ``conflict`` (a known 409, terminal) | ``refused`` (a local guard), with
+    ``code`` naming the reason; no message text ever appears in it.
+    """
+
+    from . import pull as _pull
+    from .store import ACK_CONFIRMED, ACK_CONFLICT, StoreRefused
+
+    try:
+        # Resolve ONCE and pass the pin through pull's exact-owner guard and
+        # the POST. A sign-in switch must never attribute another account's
+        # acknowledgement to this session's enrolled owner.
+        access = await runtime.client.current_access()
+        outcome = await _pull.ack(
+            runtime.owner,
+            message_id,
+            target,
+            None,
+            config_dir=Path(runtime.config_dir),
+            access=access,
+            client=runtime.client,
+        )
+    except (_pull.PullRefused, StoreRefused) as failure:
+        return {"hub_ack": "refused", "code": failure.code}
+    except Exception as failure:
+        return {"hub_ack": "refused", "code": getattr(failure, "code", "ack_failed")}
+    if outcome.state == ACK_CONFIRMED:
+        return {"hub_ack": "confirmed", "code": None}
+    if outcome.state == ACK_CONFLICT:
+        return {"hub_ack": "conflict", "code": outcome.error_code or "conflict"}
+    return {"hub_ack": "pending", "code": outcome.error_code}
+
+
 async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
@@ -3000,31 +3051,78 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     if params.op == "ack":
         if not params.message_id or params.state is None:
             return _error("ack needs message_id and state (working|done)")
+        if is_conversation_message_id(params.message_id):
+            # Same refusal as take_up: a ``bcmsg_`` id has no pair-lane
+            # delivery row, so the hub would answer "no such message" and the
+            # local claim would guard nothing. Refused before any claim or
+            # POST so a conversation message never leaves a stray intent.
+            return _error(
+                "conversation messages (bcmsg_ ids) carry no working/done state here: "
+                "answer them in the conversation with channel_post or dm",
+                code="conversation_message",
+            )
         import time as _time
 
         from .store import Store, StoreRefused
 
         store = Store(Path(runtime.config_dir))
         if params.state == "working":
-            token = str(uuid.uuid4())
-            try:
-                store.claim(
-                    runtime.owner,
-                    params.message_id,
-                    runtime.session_id,
-                    token,
-                    _time.time() + CLAIM_TTL_S,
-                )
-            except StoreRefused as failure:
-                if failure.code == "claimed":
-                    return _error(
-                        "another session holds this message; do not duplicate the work",
-                        code="claimed",
+            claimed_now = False
+            if params.message_id not in runtime.claims:
+                token = str(uuid.uuid4())
+                try:
+                    store.claim(
+                        runtime.owner,
+                        params.message_id,
+                        runtime.session_id,
+                        token,
+                        _time.time() + CLAIM_TTL_S,
                     )
-                return _error(f"claim refused: {failure}", code=failure.code)
-            runtime.claims[params.message_id] = token
-            return {"ok": True, "state": "working", "message_id": params.message_id}
-        token = runtime.claims.pop(params.message_id, None)
+                except StoreRefused as failure:
+                    if failure.code == "claimed":
+                        return _error(
+                            "another session holds this message; do not duplicate the work",
+                            code="claimed",
+                        )
+                    return _error(f"claim refused: {failure}", code=failure.code)
+                runtime.claims[params.message_id] = token
+                claimed_now = True
+            else:
+                try:
+                    # A remembered token is not proof of a LIVE lease: a
+                    # successor may have claimed it after this turn expired.
+                    store.renew_claim(
+                        runtime.owner,
+                        params.message_id,
+                        runtime.claims[params.message_id],
+                        _time.time() + CLAIM_TTL_S,
+                    )
+                except StoreRefused as failure:
+                    return _error(f"claim refused: {failure}", code=failure.code)
+            # A repeat ``working`` from the claim holder is idempotent: it
+            # skips the claim (the store refuses a second live claim even for
+            # its own session) and replays the SAME stored client_ref, so a
+            # confirmed intent sends nothing and a pending one re-sends the
+            # exact request the hub answers as a no-op repeat.
+            hub = await _post_progress_ack(runtime, params.message_id, "working")
+            if hub["hub_ack"] == "conflict" or hub["hub_ack"] == "refused":
+                if claimed_now:
+                    # The hub definitively refused the move (e.g. the delivery
+                    # is not at ``read``), so this session is not working it as
+                    # far as the audit knows; do not leave a claim that would
+                    # block another session for an hour.
+                    token = runtime.claims[params.message_id]
+                    try:
+                        store.release_claim(runtime.owner, params.message_id, token)
+                    except StoreRefused as failure:
+                        return _error(f"release refused: {failure}", code=failure.code)
+                    runtime.claims.pop(params.message_id, None)
+                return _error(
+                    f"the hub refused 'working' ({hub['code']}); nothing was claimed",
+                    code=str(hub["code"]),
+                )
+            return {"ok": True, "state": "working", "message_id": params.message_id, **hub}
+        token = runtime.claims.get(params.message_id)
         if token is None:
             return _error(
                 "no claim held by this session for that message; 'done' releases only "
@@ -3032,10 +3130,46 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 code="not_holder",
             )
         try:
+            # Fence a stale token BEFORE posting done, not only at release:
+            # otherwise an expired session could finish a successor's work.
+            store.renew_claim(runtime.owner, params.message_id, token, _time.time() + CLAIM_TTL_S)
+        except StoreRefused as failure:
+            return _error(f"claim refused: {failure}", code=failure.code)
+        # The hub's machine is single-step (read→working→done): if this
+        # session's ``working`` never reached it (transport failure), replay
+        # that exact intent first, or ``done`` would be an illegal jump.
+        working = await _post_progress_ack(runtime, params.message_id, "working")
+        if working["hub_ack"] == "pending":
+            return _error(
+                "'working' has not reached the hub yet, so 'done' was not sent; the claim "
+                "is still held — retry ack done",
+                code=str(working["code"] or "hub_ack_pending"),
+            )
+        hub = (
+            await _post_progress_ack(runtime, params.message_id, "done")
+            if working["hub_ack"] == "confirmed"
+            else working
+        )
+        if hub["hub_ack"] == "pending":
+            # Ambiguous: keep the claim so a retry replays the same ref.
+            return _error(
+                "'done' has not reached the hub yet; the claim is still held — retry ack done",
+                code=str(hub["code"] or "hub_ack_pending"),
+            )
+        # Confirmed, or a definite refusal that replaying can never converge:
+        # either way the local work is over, so the claim is released (claim
+        # releases on ack done, §13.6/N2) and a refusal surfaces typed.
+        try:
             store.release_claim(runtime.owner, params.message_id, token)
         except StoreRefused as failure:
             return _error(f"release refused: {failure}", code=failure.code)
-        return {"ok": True, "state": "done", "message_id": params.message_id}
+        runtime.claims.pop(params.message_id, None)
+        if hub["hub_ack"] != "confirmed":
+            return _error(
+                f"the hub refused 'done' ({hub['code']}); the local claim was released",
+                code=str(hub["code"]),
+            )
+        return {"ok": True, "state": "done", "message_id": params.message_id, **hub}
 
     if params.op in ("send", "reply"):
         if not params.text.strip():

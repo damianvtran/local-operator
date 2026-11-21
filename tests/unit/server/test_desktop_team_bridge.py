@@ -936,7 +936,6 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
         # M1a: the detail read and the list excerpts EXIST on this build, and
         # both answer only through the shared admission predicate.
         "screened_detail": True,
-        "read_ack": False,
         "local_events": False,
     }
     assert result["surface_state"] == "B"

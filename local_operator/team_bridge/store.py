@@ -47,6 +47,7 @@ from local_operator.team_bridge.settings import (
 )
 from local_operator.team_bridge.types import (
     ACK_TARGETS,
+    RECEIPT_ACK_TARGETS,
     SCREENING_CATEGORIES,
     AckTarget,
     FeedSeq,
@@ -5746,17 +5747,31 @@ class Store:
         intent and dispatch replays identically — never a re-screen).
         Re-recording the same (owner, message, target) with the same tuple is
         idempotent; a DIFFERENT tuple is refused as a write-once conflict.
+
+        ``working``/``done`` (the receiving agent's own progress, posted by
+        ``bridge(op="ack")``) take NO receipt and refuse one: the hub checks
+        the allow verdict it stored at ``read``, so the intent is just the
+        write-once (message, target, client_ref) row whose ref a crash replay
+        must reuse. Their tuple columns stay NULL, which ``_intent_dict``
+        reads back as ``receipt=None``.
         """
 
         if target not in ACK_TARGETS:
             raise StoreRefused("invalid_target", f"ack target {target!r}")
-        if receipt is None or receipt.verdict != ("allow" if target == "read" else "reject"):
+        if target not in RECEIPT_ACK_TARGETS:
+            if receipt is not None:
+                raise StoreRefused(
+                    "receipt_not_allowed",
+                    f"{target} carries no screening receipt; the hub checks its stored verdict",
+                )
+        elif receipt is None or receipt.verdict != ("allow" if target == "read" else "reject"):
             raise StoreRefused("receipt_required", f"{target} needs a matching screening receipt")
         try:
             # The FULL immutable tuple is validated before anything is
             # persisted: a malformed hash/model/prompt is not "evidence with
             # gaps", it is not evidence (QA H2-Q7).
-            receipt.validated()
+            if receipt is not None:
+                receipt.validated()
         except TeamBridgeTypeError as error:
             raise StoreRefused("invalid_receipt", str(error)) from error
         if not isinstance(client_ref, str) or not client_ref:
@@ -5779,7 +5794,9 @@ class Store:
                 # Comparing only a subset let a changed template/model reuse
                 # the old intent silently (QA H2-Q7 / reviewer R2).
                 same = (
-                    existing["verdict"] == receipt.verdict
+                    existing["verdict"] is None and existing["client_ref"] == client_ref
+                    if receipt is None
+                    else existing["verdict"] == receipt.verdict
                     and existing["model"] == receipt.model
                     and existing["prompt_version"] == receipt.prompt_version
                     and existing["template_sha256"] == receipt.template_sha256
@@ -5812,12 +5829,12 @@ class Store:
                     message_id,
                     target,
                     client_ref,
-                    receipt.verdict,
-                    receipt.model,
-                    receipt.prompt_version,
-                    receipt.template_sha256,
-                    receipt.body_sha256,
-                    json.dumps(sorted(receipt.categories)),
+                    receipt.verdict if receipt is not None else None,
+                    receipt.model if receipt is not None else None,
+                    receipt.prompt_version if receipt is not None else None,
+                    receipt.template_sha256 if receipt is not None else None,
+                    receipt.body_sha256 if receipt is not None else None,
+                    json.dumps(sorted(receipt.categories)) if receipt is not None else None,
                     ACK_PENDING,
                     time.time(),
                     owner.enrollment_generation,
