@@ -978,6 +978,9 @@ def transfer(
             confirm_working_set=confirm_working_set,
             without_working_set=without_working_set,
             dry_run=dry_run,
+            # Attribution for the owner's consent audit row: the digest here is the
+            # one the desktop move card showed (its ``confirmedDigest``).
+            consent_surface="desktop",
         )
     )
 
