@@ -21,5 +21,5 @@
   "tui.bridge_card.context.dm": "Tin nhắn trực tiếp",
   "tui.bridge_card.context.channel": "Kênh",
   "tui.bridge_card.context.group": "Cuộc trò chuyện nhóm",
-  "tui.bridge_card.context.thread_reply": "Trả lời trong chuỗi"
+  "tui.bridge_card.context.thread_reply": "Trả lời trong luồng"
 }

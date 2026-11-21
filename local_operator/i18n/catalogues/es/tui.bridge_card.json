@@ -21,5 +21,5 @@
   "tui.bridge_card.context.dm": "Mensaje directo",
   "tui.bridge_card.context.channel": "Canal",
   "tui.bridge_card.context.group": "Conversación de grupo",
-  "tui.bridge_card.context.thread_reply": "Respuesta en hilo"
+  "tui.bridge_card.context.thread_reply": "Respuesta en un hilo"
 }

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tui.bridge_card",
-  "history_sha256": "e3bf018b34a8ff5983316d8c035eb071550bd67fe8a7055410b1df76dc15604a",
+  "history_sha256": "e068be690bbc3533137d1b7495ffdf33c36df18f4e7adf7e9bc65ac9f8ff6b2c",
   "entries": [
     {
       "locale": "ur",
@@ -72,6 +72,25 @@
       },
       "status": "passed",
       "note": "r3: 1 key added (tui.bridge_card.header.offline, design D8 follow-up to PR #4238). Independent audit PASS on all 7 locales, 0 blocker/major; one overflow minor (fr/es length) and one ru nit deferred, no action. Target ur/tui.bridge_card.json sha256 4a94b139649ebd483490122f69200d208928e5e6d539e35c091a209a04cbcf11. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "ce30b56df340bed5983e447aecc4fa5832b900eb5860f6aade93181891ac4301",
+      "target_sha256": "94bf442c717ca3b4edf4dabc0a39c43e8ea34660bb5767ca18ef4d217c4c0d9b",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "not-performed"
+      },
+      "status": "pending",
+      "note": "Translation-only scoped pass; independent audit required. i18n/receipts/bridge-card-reread-translator-ur-e896d2db9139.json"
     }
   ]
 }
