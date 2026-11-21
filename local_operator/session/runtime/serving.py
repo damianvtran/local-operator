@@ -13491,6 +13491,7 @@ def attach_language_config_watch(config_directory: Path) -> None:
     key = str(config_directory)
     if key in _language_watch_attached:
         return
+    unsubscribe = None
     try:
         from local_operator.config_watch import process_watcher
         from local_operator.i18n.boot import follow_language
@@ -13504,8 +13505,19 @@ def attach_language_config_watch(config_directory: Path) -> None:
             follow_language(raw if isinstance(raw, str) else "auto")
 
         watcher = process_watcher(config_directory)
+        # Subscribe BEFORE start: start's synchronous poll may deliver a write
+        # since construction. Then reconcile the latest snapshot, since a write
+        # since boot may already be the watcher's baseline (no delta to deliver).
+        # All three steps run on this loop without yielding, so later ticks use
+        # the listener and cannot be overwritten by an older captured snapshot.
+        unsubscribe = watcher.subscribe(_on_change)
         watcher.start(asyncio.get_running_loop())
-        watcher.subscribe(_on_change)
+        raw = watcher.values.get("language")
+        follow_language(raw if isinstance(raw, str) else "auto")
         _language_watch_attached.add(key)
     except Exception:  # noqa: BLE001 — the runtime keeps its boot locale
+        # A failed attachment must not leave a listener behind for the retry.
+        # The watcher is shared with other consumers; do not stop it here.
+        if unsubscribe is not None:
+            unsubscribe()
         logger.warning("config watcher could not be attached to the runtime locale", exc_info=True)

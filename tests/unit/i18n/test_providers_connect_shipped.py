@@ -24,6 +24,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from local_operator import settings_io
+from local_operator.config import ConfigManager
 from local_operator.i18n import resolve, text
 from local_operator.model import defaults
 from local_operator.providers import key_check
@@ -46,12 +48,25 @@ def _fill(template: str, **params: str) -> str:
 
 
 @pytest.fixture
-def shipped_locale(monkeypatch: pytest.MonkeyPatch):
+def shipped_locale(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(text, "_active_locale", "en")
     monkeypatch.setattr(text, "_refreshers", [])
     monkeypatch.delenv("LOP_I18N", raising=False)
     text._sources.cache_clear()
-    yield
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+    setting = settings_io.resolve_key("language")
+    assert setting is not None
+
+    def select(locale: str) -> None:
+        # These consumers resolve config per call, not the UI's active locale.
+        # Exercise the real setting store so English fallback cannot look French.
+        settings_io._store(ConfigManager(config_dir), setting.path, locale)
+        assert resolve.resolve_language() == locale
+        text.set_active_locale(locale)
+
+    yield select
     text.set_active_locale("en")
     text._sources.cache_clear()
 
@@ -89,7 +104,7 @@ def test_shipped_fr_renders_every_provider_connect_key(shipped_locale) -> None:
     }
     expected = {key: _fill(value, **params.get(key, {})) for key, value in fr.items()}
 
-    text.set_active_locale("fr")
+    shipped_locale("fr")
     rendered = _render_every_key()
 
     assert rendered.keys() == fr.keys(), "every shipped key is exercised"
@@ -98,9 +113,9 @@ def test_shipped_fr_renders_every_provider_connect_key(shipped_locale) -> None:
 
 def test_negative_control_english_differs_for_every_key(shipped_locale) -> None:
     """Without this, the fr test above could pass on a vacuous fallback."""
-    text.set_active_locale("en")
+    shipped_locale("en")
     english = _render_every_key()
-    text.set_active_locale("fr")
+    shipped_locale("fr")
     french = _render_every_key()
 
     assert english[f"{NS}.suggested_automatic"] == "Automatic"

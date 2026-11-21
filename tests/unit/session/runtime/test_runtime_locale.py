@@ -131,6 +131,106 @@ def _fresh_watchers(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_fresh_watchers")
+@pytest.mark.parametrize(
+    "checkpoint", ["before_create", "before_start", "during_start", "during_subscribe"]
+)
+async def test_attachment_catches_a_language_change_since_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+) -> None:
+    """No poll delta is owed for a snapshot already French at attachment."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    setting = settings_io.resolve_key("language")
+    assert setting is not None
+    settings_io._store(ConfigManager(config_dir), setting.path, "en")
+    set_active_locale("en")
+
+    def write_french() -> None:
+        settings_io._store(ConfigManager(config_dir), setting.path, "fr")
+
+    if checkpoint == "before_create":
+        write_french()
+    watcher = process_watcher(config_dir)
+    if checkpoint == "before_start":
+        write_french()
+    if checkpoint in {"during_start", "during_subscribe"}:
+        method = "start" if checkpoint == "during_start" else "subscribe"
+        original = getattr(watcher, method)
+
+        def change_at_registration(*args: Any, **kwargs: Any) -> Any:
+            write_french()
+            watcher.poll_now()
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(watcher, method, change_at_registration)
+    try:
+        serving.attach_language_config_watch(config_dir)
+        assert active_locale() == "fr"
+        frames, handler = _relay()
+        handler(_incomplete_notice())
+        assert frames[-1]["text"] == _FR
+        # The correction is immediate, not a later poll or arbitrary sleep.
+        assert watcher.poll_now() is None
+    finally:
+        await watcher.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_fresh_watchers")
+async def test_failed_attachment_unsubscribes_without_stopping_a_shared_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_dir = tmp_path / "config"
+    watcher = process_watcher(config_dir)
+    watcher.start()
+    other_changes: list[Any] = []
+    unsubscribe_other = watcher.subscribe(other_changes.append)
+    start = watcher.start
+
+    def failed_start(*args: Any) -> None:
+        raise RuntimeError("synthetic start failure")
+
+    monkeypatch.setattr(watcher, "start", failed_start)
+    try:
+        serving.attach_language_config_watch(config_dir)
+        assert "synthetic start failure" in caplog.text
+        assert str(config_dir) not in serving._language_watch_attached
+        assert watcher._listeners == [other_changes.append]
+        assert watcher.is_polling  # Other consumers still own the shared watcher.
+        monkeypatch.setattr(watcher, "start", start)
+        serving.attach_language_config_watch(config_dir)
+        serving.attach_language_config_watch(config_dir)
+        assert len(watcher._listeners) == 2  # Other consumer + one locale listener.
+    finally:
+        unsubscribe_other()
+        await watcher.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_fresh_watchers")
+@pytest.mark.parametrize("configured", [None, "auto"])
+async def test_attachment_preserves_automatic_language_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: str | None
+) -> None:
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LOP_LANG", "fr")
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    if configured is not None:
+        setting = settings_io.resolve_key("language")
+        assert setting is not None
+        settings_io._store(ConfigManager(config_dir), setting.path, configured)
+    set_active_locale("en")
+    try:
+        serving.attach_language_config_watch(config_dir)
+        assert active_locale() == "fr"
+    finally:
+        await process_watcher(config_dir).stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_fresh_watchers")
 async def test_a_language_switch_from_another_process_moves_a_running_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -162,3 +262,4 @@ async def test_a_language_switch_from_another_process_moves_a_running_runtime(
     settings_io._store(ConfigManager(config_dir), other.path, True)
     assert process_watcher(config_dir).poll_now() is not None
     assert active_locale() == "en"
+    await process_watcher(config_dir).stop()
