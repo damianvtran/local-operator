@@ -28,7 +28,7 @@
   "relay.transcript.bridge.provenance": "Tin nhắn bên ngoài · nội dung không đáng tin",
   "relay.transcript.bridge.loading": "Đang tải tin nhắn…",
   "relay.transcript.bridge.pending": "Đang chờ chuyển đến tác nhân của bạn",
-  "relay.transcript.bridge.held": "Bị kiểm duyệt giữ lại",
+  "relay.transcript.bridge.held": "Đang được giữ lại để xem xét",
   "relay.transcript.bridge.held_transient": "Đang chờ sàng lọc — chưa hiển thị cho tác nhân của bạn",
   "relay.transcript.bridge.refused": "Bị kiểm duyệt từ chối",
   "relay.transcript.bridge.not_admitted": "Không được chuyển đến tác nhân của bạn",
@@ -36,7 +36,8 @@
   "relay.transcript.bridge.signed_out": "Hãy đăng nhập Radient để xem tin nhắn này",
   "relay.transcript.bridge.other_account": "Đã nhận bằng một tài khoản Radient khác",
   "relay.transcript.bridge.not_member": "Bạn không còn tham gia cuộc trò chuyện này",
-  "relay.transcript.bridge.offline": "Không thể kết nối Radient — mở lại cuộc trò chuyện để thử lại",
+  "relay.transcript.bridge.offline": "Không thể kết nối Radient — đang thử lại",
   "relay.transcript.bridge.deleted": "Tin nhắn này đã bị xóa",
-  "relay.transcript.bridge.more_messages": "{count, plural, other {Còn # tin nhắn khác trong thẻ này}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, other {Còn # tin nhắn khác trong thẻ này}}",
+  "relay.transcript.bridge.thread_reply": "Trả lời trong chuỗi"
 }

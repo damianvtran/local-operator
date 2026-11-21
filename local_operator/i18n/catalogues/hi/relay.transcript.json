@@ -28,7 +28,7 @@
   "relay.transcript.bridge.provenance": "बाहरी संदेश · अविश्वसनीय सामग्री",
   "relay.transcript.bridge.loading": "संदेश लोड हो रहा है…",
   "relay.transcript.bridge.pending": "आपके एजेंट तक पहुँचाए जाने का इंतज़ार है",
-  "relay.transcript.bridge.held": "मॉडरेशन ने रोक रखा है",
+  "relay.transcript.bridge.held": "समीक्षा के लिए रोका गया",
   "relay.transcript.bridge.held_transient": "स्क्रीनिंग का इंतज़ार है — अभी आपके एजेंट को नहीं दिखाया गया",
   "relay.transcript.bridge.refused": "मॉडरेशन ने अस्वीकार किया",
   "relay.transcript.bridge.not_admitted": "आपके एजेंट तक नहीं पहुँचाया गया",
@@ -36,7 +36,8 @@
   "relay.transcript.bridge.signed_out": "यह संदेश देखने के लिए Radient में साइन इन करें",
   "relay.transcript.bridge.other_account": "किसी दूसरे Radient खाते में प्राप्त हुआ",
   "relay.transcript.bridge.not_member": "अब आप इस बातचीत में शामिल नहीं हैं",
-  "relay.transcript.bridge.offline": "Radient से संपर्क नहीं हुआ — दोबारा कोशिश के लिए बातचीत फिर से खोलें",
+  "relay.transcript.bridge.offline": "Radient से संपर्क नहीं हुआ — फिर से कोशिश की जा रही है",
   "relay.transcript.bridge.deleted": "यह संदेश हटा दिया गया",
-  "relay.transcript.bridge.more_messages": "{count, plural, one {इस कार्ड में # और संदेश} other {इस कार्ड में # और संदेश}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, one {इस कार्ड में # और संदेश} other {इस कार्ड में # और संदेश}}",
+  "relay.transcript.bridge.thread_reply": "थ्रेड में जवाब"
 }
