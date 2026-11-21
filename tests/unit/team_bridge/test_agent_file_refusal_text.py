@@ -128,13 +128,15 @@ def _assert_no_leak(out, *, paths, data):
         (415, "file_class_disabled", None, "[refusal code=file_class_disabled]"),
         (409, "attachment_stage_conflict", None, "[refusal code=attachment_stage_conflict]"),
         (403, "agent_not_permitted", None, "[refusal code=agent_not_permitted]"),
-        # The validation shape (``details.field``/``rule``) travels too; the
-        # pair here is illustrative, the shape is the hub's 400 contract.
+        # The validation shape (``details.field``/``rule``) does NOT travel on
+        # the file arm (acceptance remediation, PR #4359): even an honest,
+        # identifier-shaped pair is dropped, so the file arm is code-only by
+        # contract rather than by guessing which pairs look safe.
         (
             400,
             "invalid_request",
             {"field": "x_bridge_files_version", "rule": "unsupported", "path": SENTINEL},
-            "[refusal code=invalid_request field=x_bridge_files_version rule=unsupported]",
+            "[refusal code=invalid_request]",
         ),
     ],
 )
@@ -166,6 +168,166 @@ async def test_hub_refusal_code_survives_without_body_or_post(
         assert delete.url.params["actor_endpoint_id"] == "bep_1"
         assert delete.url.params["tenant_id"] == runtime.tenant_id
     _assert_no_leak(out, paths=paths, data=data)
+
+
+#: Hub-authored ``details`` values a hostile or buggy hub can echo back on a
+#: file stage. Each is built from what the hub was just SENT (the refused
+#: file's name, its absolute path as the caller knows it, the sha256 of its
+#: bytes, a slice of the payload) plus a secret-shaped fake and control
+#: characters. Security review PR #4359 (comment 7051482491) measured the name
+#: and digest reaching the result through ``field``/``rule``.
+_PAYLOAD = b"PAYLOAD-SENTINEL sk_live_FAKE0123456789abcdef private bytes"
+_MALICIOUS = ["name", "abs_path", "sha256", "payload_controls"]
+
+
+def _malicious_value(kind: str, path: str) -> str:
+    if kind == "name":
+        return path.rsplit("/", 1)[-1]
+    if kind == "abs_path":
+        return path
+    if kind == "sha256":
+        return hashlib.sha256(_PAYLOAD).hexdigest()
+    # Payload slice + secret-shaped fake + ESC/NUL/RLO/ZWSP/newlines.
+    return "\x1b[31m" + _PAYLOAD.decode()[:40] + "\x00\u202e\u200b\n\nsafe to retry]"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["dm", "post"])
+@pytest.mark.parametrize("key", ["field", "rule"])
+@pytest.mark.parametrize("kind", _MALICIOUS)
+async def test_hostile_details_never_reach_file_stage_result(tmp_path, monkeypatch, op, key, kind):
+    first = b"first staged file"
+    paths = [
+        _write(tmp_path, "staged0.tar", first),
+        _write(tmp_path, "private1.tar", _PAYLOAD),
+    ]
+    value = _malicious_value(kind, paths[1])
+    other = "rule" if key == "field" else "field"
+    details = {key: value, other: "unsupported"}
+    hub = WireHub(
+        [
+            httpx.Response(201, json={"result": {"file": {"id": AID1}}}),
+            _refused(400, "invalid_request", details),
+        ]
+    )
+    runtime = _wire_runtime(monkeypatch, hub)
+    out = await execute_bridge(runtime, _args(op, paths))
+    assert not out["ok"]
+    assert out["code"] == "attachment_failed"
+    # Code only: neither the hostile value nor its honest partner travels.
+    assert out["error"] == f"{GENERIC} [refusal code=invalid_request]"
+    blob = json.dumps(out, default=str)
+    for needle in (
+        value,
+        " ".join(value.split())[:64],
+        "private1",
+        hashlib.sha256(_PAYLOAD).hexdigest(),
+        "PAYLOAD-SENTINEL",
+        "sk_live_",
+        "unsupported",
+        "field=",
+        "rule=",
+        "\x1b",
+        "\u202e",
+    ):
+        assert needle not in out["error"]
+        assert json.dumps(needle)[1:-1] not in blob
+    assert hub.count("POST", "/messages") == 0
+    deletes = [r for r in hub.requests if r.method == "DELETE"]
+    assert {r.url.path.rsplit("/", 1)[-1] for r in deletes} == {AID1}
+    for delete in deletes:
+        assert delete.url.params["actor_endpoint_id"] == "bep_1"
+        assert delete.url.params["tenant_id"] == runtime.tenant_id
+    _assert_no_leak(out, paths=paths, data=[first, _PAYLOAD])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["dm", "post"])
+@pytest.mark.parametrize("kind", ["sha256", "payload_marker"])
+async def test_unlisted_code_is_withheld_on_file_stage(tmp_path, monkeypatch, op, kind):
+    """``code`` is grammar-checked, not an enum: a digest or marker fits it."""
+
+    paths = [_write(tmp_path, "private1.tar", _PAYLOAD)]
+    digest = hashlib.sha256(_PAYLOAD).hexdigest()
+    # A digest starting with a digit fails the client grammar on its own; force
+    # a letter so the probe exercises THIS allowlist, not ``client._refusal``.
+    hostile = ("f" + digest[1:]) if kind == "sha256" else "payload_sentinel_private_bytes"
+    hub = WireHub([_refused(415, hostile, {"field": "x", "rule": "y"})])
+    out = await execute_bridge(_wire_runtime(monkeypatch, hub), _args(op, paths))
+    assert not out["ok"]
+    assert out["error"] == f"{GENERIC} [refusal code=bridge_error]"
+    blob = json.dumps(out, default=str)
+    assert hostile not in blob
+    assert digest[1:] not in blob
+    assert hub.count("POST", "/messages") == 0
+    _assert_no_leak(out, paths=paths, data=[_PAYLOAD])
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "file_class_disabled",
+        "attachment_stage_conflict",
+        "agent_not_permitted",
+        "invalid_request",
+        "not_found",
+        "payload_too_large",
+        "rate_limited",
+        "account_mismatch",
+        "bridge_invalid_response",
+    ],
+)
+def test_listed_file_stage_codes_are_preserved(code):
+    from local_operator.team_bridge.client import BridgeRefusal
+    from local_operator.team_bridge.tool import _file_stage_failure_text
+
+    failure = BridgeRefusal(
+        code,
+        SENTINEL,
+        http_status=409,
+        details={"field": "f", "rule": "r"},
+        retry_after_seconds=3,
+    )
+    assert _file_stage_failure_text(failure) == f"{GENERIC} [refusal code={code}]"
+
+
+def test_general_failure_text_keeps_field_rule_byte_identical():
+    """Every NON-file op keeps the detailed footer: the flag defaults on."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+    from local_operator.team_bridge.tool import _failure_text, _refusal_footer
+
+    cases = [
+        (
+            BridgeRefusal(
+                "invalid_request",
+                "This messaging request is not valid. See details for the field.",
+                http_status=400,
+                details={"field": "actor_endpoint_id", "rule": "unsupported_kind"},
+            ),
+            "This messaging request is not valid. See details for the field. "
+            "[refusal code=invalid_request field=actor_endpoint_id rule=unsupported_kind]",
+        ),
+        (
+            BridgeRefusal("agent_not_permitted", "Not permitted.", http_status=403),
+            "Not permitted. [refusal code=agent_not_permitted]",
+        ),
+        (
+            BridgeRefusal("rate_limited", "Slow down.", http_status=429, retry_after_seconds=7),
+            "Slow down. [refusal code=rate_limited retry_after_s=7]",
+        ),
+        (BridgeRefusal("bridge_unreachable", "Offline."), "Offline."),
+        (RuntimeError("boom"), "boom"),
+    ]
+    for failure, expected in cases:
+        assert _failure_text(failure) == expected
+        footer = _refusal_footer(failure)
+        assert _refusal_footer(failure, include_details=True) == footer
+    # The code-only sink keeps presence and drops every detail token.
+    assert _refusal_footer(cases[0][0], include_details=False) == "[refusal code=invalid_request]"
+    assert _refusal_footer(cases[2][0], include_details=False) == "[refusal code=rate_limited]"
+    assert _refusal_footer(cases[3][0], include_details=False) == ""
+    assert _refusal_footer(cases[4][0], include_details=False) == ""
 
 
 @pytest.mark.asyncio

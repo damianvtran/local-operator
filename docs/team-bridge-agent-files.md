@@ -63,16 +63,26 @@ be refused until expiry/sweep. Stage authorization expiry is not a physical-eras
 SLA, and the existing quota/sweeper semantics are unchanged.
 
 A failed stage (before any message POST) reads "the file upload did not
-confirm; nothing was sent". When the hub answered, the result also carries its
-closed refusal footer, e.g. `[refusal code=file_class_disabled]`,
-`code=attachment_stage_conflict` or `code=agent_not_permitted`, built only from
-the code and `details.field`/`rule`: never the hub's free-text sentence, a file
-name, path, bytes or digest. Each code needs a different human decision (class
-policy, a stale staged twin expiring, membership), so none of them is a cue to
+confirm; nothing was sent". When the client holds a coded refusal for that
+stage, the result also carries a code-only footer, e.g.
+`[refusal code=file_class_disabled]`, `code=attachment_stage_conflict` or
+`code=agent_not_permitted`. Only the code travels: never `details.field`/`rule`
+(hub-authored free text that could echo the file name, its digest or payload
+bytes the hub was just sent), never the hub's free-text sentence, a path or the
+bytes. The code itself is quoted only from a finite list of the codes the
+stage route and this client publish; any other code is withheld and shown as
+`code=bridge_error`, because the client's own code check is a pattern
+(`[a-z][a-z0-9_]{0,63}`) that a lowercase digest also fits. The raw hub code is
+therefore not always retained.
+A footer also does not prove the hub refused: the client synthesizes 502
+`bridge_invalid_response` (a malformed answer) and 409 `account_mismatch` with
+the same footer. Each hub code needs a different human decision (class policy,
+a stale staged twin expiring, membership), so none of them is a cue to
 re-upload. A timeout or lost answer carries no footer and stays "did not
 confirm". The batch's own local refusals (`owner_changed`, a duplicate staged
-id, an unconfirmed receipt) keep their own code in both `dm` and
-`channel_post`.
+id, an unconfirmed receipt) keep their own code or sentence in both `dm` and
+`channel_post`. Other bridge operations keep their existing
+`[refusal code=… field=… rule=…]` footer unchanged.
 
 After a physical send starts, a missing/unconfirmed answer may hide a commit.
 The call replays at most once with the **same client reference, body, ordered

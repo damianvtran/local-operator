@@ -727,7 +727,7 @@ def _failure_text(failure: BaseException) -> str:
     return f"{failure} {footer}" if footer else str(failure)
 
 
-def _refusal_footer(failure: BaseException) -> str:
+def _refusal_footer(failure: BaseException, *, include_details: bool = True) -> str:
     """The closed ``[refusal code=… field=… rule=…]`` footer, or ``""``.
 
     Split out of :func:`_failure_text` (unchanged output) so a caller that must
@@ -735,6 +735,20 @@ def _refusal_footer(failure: BaseException) -> str:
     user paths — can still carry the coded half. Every rule documented on
     :func:`_failure_text` about when a footer appears and what it may hold
     lives here.
+
+    ``include_details=False`` is the CODE-ONLY sink (``[refusal code=…]``):
+    nothing read from ``details`` (``field``/``rule``, the edge's
+    ``server``/``content_type``/``trace``/``cf_ray``) and no ``retry_after_s``
+    or ``status`` is appended. ``code`` is the one value the client already
+    fullmatches against an identifier GRAMMAR (``client._refusal``) — a
+    pattern, not an enum, so a caller needing a finite vocabulary maps it
+    itself (:func:`_file_stage_failure_text` does); ``details`` values are only
+    whitespace-flattened and cut at 64 characters, so a hub can write anything
+    into them — including the file name and the sha256 of the bytes it was just
+    sent (security review PR #4359, comment 7051482491, measured). WHEN a
+    footer appears is decided exactly as with details included, so a caller
+    switching the flag changes content, never presence. The default keeps every
+    other caller byte-identical.
     """
 
     field_rule: list[str] = []
@@ -753,6 +767,9 @@ def _refusal_footer(failure: BaseException) -> str:
     code = _refusal_token(getattr(failure, "code", ""))
     if code:
         pairs.append(f"code={code}")
+    if not include_details:
+        # Code-only sink: stop before any details-derived or edge token.
+        return f"[refusal {pairs[0]}]" if pairs else ""
     pairs.extend(field_rule)
     # A throttle's WAIT is the one actionable half (incident 2026-11-17): an
     # agent that retries at once keeps a per-address edge block alive for every
@@ -812,10 +829,25 @@ def _file_stage_failure_text(failure: BaseException) -> str:
     the hub's free-text ``error`` sentence for a refusal, and for anything
     else an arbitrary exception string (a transport error, a local ``OSError``
     that can name a path). File sends carry user file names and paths, so this
-    arm quotes ONLY the closed footer (:func:`_refusal_footer`) built from
-    ``code`` and ``details.field``/``rule`` (``[refusal code=… …]``), and only
-    under the same rule that makes it print one at all: the hub answered
+    arm quotes ONLY the code-only footer ``[refusal code=…]``
+    (:func:`_refusal_footer` with ``include_details=False``), and only under
+    the same rule that makes it print one at all: the hub answered
     (``http_status``) or named a field/rule pair.
+
+    WHY CODE ONLY, NOT field/rule. Hub metadata is untrusted, and on this arm
+    the hub has just received the file's name and bytes, so ``details`` can
+    echo either back (a name, a 64-hex digest, an encoded slice of the
+    payload; measured in PR #4359 review). File payload and its identity must
+    not reach the agent's context through this result. The same holds for
+    ``code`` itself: the client checks it against a grammar, which a lowercase
+    digest or payload marker fits, so this arm quotes it only when it is in
+    the finite :data:`_FILE_STAGE_REFUSAL_CODES` vocabulary and otherwise
+    WITHHOLDS it as ``code=bridge_error``. A typed vocabulary is the contract,
+    not a pattern guessing which values look safe (a digest fits any
+    identifier shape).
+    The client also synthesizes two coded refusals with no hub answer — 502
+    ``bridge_invalid_response`` and 409 ``account_mismatch`` — so a footer
+    names the code the client holds; it does not prove the hub refused.
 
     WHAT STAYS EXACT. A timeout, a lost response or any exception without a
     hub answer reads byte-identically to before: still "did not confirm",
@@ -825,8 +857,50 @@ def _file_stage_failure_text(failure: BaseException) -> str:
     """
 
     sentence = "the file upload did not confirm; nothing was sent"
-    footer = _refusal_footer(failure)
+    footer = _refusal_footer(failure, include_details=False)
+    if footer and getattr(failure, "code", None) not in _FILE_STAGE_REFUSAL_CODES:
+        # The client's code check is a GRAMMAR, not an enum: a 64-character
+        # lowercase digest of the file, or a lowercase payload marker, fits it.
+        # An unknown code is withheld and read as the generic one, never quoted.
+        footer = "[refusal code=bridge_error]"
     return f"{sentence} {footer}" if footer else sentence
+
+
+#: The finite vocabulary a file-STAGE footer may quote (data minimization for
+#: :func:`_file_stage_failure_text`; every other op keeps the grammar-checked
+#: code of :func:`_refusal_footer`). Hub codes are the ones read in
+#: agent-server origin/main 0e35bd0a for ``POST /messaging/conversations/{id}/
+#: attachments``: ``messaging_attachments.go`` (controller),
+#: ``bridge_attachment_service.go`` and ``bridge_file_name.go`` (stage), and
+#: ``loadForMember``/``conversationTenant`` (conversation guards); plus the
+#: generic 404 ``not_found`` and the throttle ``rate_limited`` (the edge's
+#: nested WAF code, incident 2026-11-17). Client codes are the refusals this
+#: client attaches to a stage with an ``http_status``. A code missing here
+#: (e.g. an auth middleware code not traced) reads as ``bridge_error``; add it
+#: when the hub publishes it, never by widening the check to a pattern.
+_FILE_STAGE_REFUSAL_CODES: frozenset[str] = frozenset(
+    {
+        # hub, stage route
+        "agent_not_permitted",
+        "attachment_invalid",
+        "attachment_quota_exceeded",
+        "attachment_stage_conflict",
+        "attachment_type_unsupported",
+        "bridge_not_available",
+        "conversation_not_found",
+        "file_class_disabled",
+        "invalid_request",
+        "invalid_tenant",
+        "not_found",
+        "payload_too_large",
+        "rate_limited",
+        # client-synthesized (no hub refusal proven by these)
+        "account_mismatch",
+        "bridge_error",
+        "bridge_invalid_response",
+        "edge_blocked",
+    }
+)
 
 
 #: The conversation id family, shared with the desktop routes' S-RSA-5 guard:
