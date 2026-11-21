@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "tui.chrome.remote_park",
-  "history_sha256": "61b7671a2a45cd46f606104cf6f3cc9c9927eca288b6399be4ddabbf8490ad76",
+  "history_sha256": "9703cbd1813577d23f19b5282e2a00716c07ba41eb09217be0cef65324585f7c",
   "entries": [
     {
       "locale": "hi",
@@ -76,6 +76,41 @@
       "status": "passed",
       "round": "pr4372-r1",
       "note": "PR #4372 round 1: independent audit of the one new key tui.chrome.remote_park.ask_agent_started (commit b1550a814) against en 8d3cce5ad16b with context sidecar f34bf588287f (meaning: an agent running on {agent_device} started the session, which runs on {device}; agent = AI agent). Mechanical: key set equals en; placeholders {agent_device} and {device} preserved exactly; NFC; no format/bidi control characters; no final punctuation, matching en. Semantic: '{agent_device} पर एक एजेंट द्वारा {device} पर शुरू किए गए सत्र का प्रश्न': द्वारा marks the agent, the two पर phrases attach correctly (agent on X; started on Y); glossary सत्र/एजेंट; no danda (en has no full stop). hi-I1 (minor): 'प्रश्न' for the ask, where the TUI ask surfaces say 'सवाल' (tui.asks.*, tui.app.temporary_hold_open_ask; 'सवाल' 60 vs 'प्रश्न' 3 occurrences catalogue-wide) — same object named two ways; suggested '…शुरू किए गए सत्र का सवाल'; meaning intact, deferred, non-gating. Carry-forward: the other 15 keys are byte-identical — removing the new key from current en, the en context sidecar and this locale and re-serialising reproduces the base 1a8dae591 bytes exactly, and those base file hashes equal the previous receipt's source/context/target hashes — so that audit carries onto the new en hash. Native-speaker review and rendered-frame certification not claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.chrome.remote_park",
+      "source_sha256": "b7026931018e80d7acc612f4344d10fecf7c741359cc1fc7572d70e23d220e2f",
+      "context_sha256": "a895de8f5d0355eb30ea68150d74db9172f6124bc84f2c9d5945ecf36d4a1f31",
+      "target_sha256": "9acd8780fa7b632b771b685ce0bb108e48cf7aa231fb67e6c6878abacdf34644",
+      "translator": {
+        "agent": "coder (team lopdev), commit 943d47ac3 (PR #4372 round-1 remediation)",
+        "session": "not relayed",
+        "session_kind": "translator session id was not relayed to the auditor; identified by commit",
+        "model": "not relayed to the auditor",
+        "date": "2026-11-21",
+        "fallback": "unknown (not relayed)"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, task role, independent i18n auditor of PR #4372 round 2; did not author the English or these translations and read no translator scratchpad), session 732c95203da0",
+        "session": "732c95203da0",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-21",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "round": "pr4372-r2",
+      "note": "PR #4372 round 2: independent re-audit of the one changed key tui.chrome.remote_park.ask_agent_started (commit 943d47ac3) against en b7026931018e ('runs on {device} · started by an agent on {agent_device}') with context sidecar a895de8f5d03 (prefix must equal ask_hint_floor; implied subject the session). Mechanical: key set and order equal en; placeholders {device} and {agent_device} exactly once each; the text before ' · ' is byte-identical to this locale's ask_hint_floor; separator U+0020 U+00B7 U+0020; no format/bidi control characters; no final punctuation, matching en. Semantic: '{device} पर चल रहा है · {agent_device} पर एक एजेंट ने शुरू किया': prefix byte-identical to ask_hint_floor '{device} पर चल रहा है'; ergative 'एजेंट ने … शुरू किया' with the masculine perfective agreeing with the implied object सत्र (masculine), consistent with the prefix's masculine 'चल रहा है'; 'एजेंट' per glossary. Round-1 hi-I1 (minor, 'प्रश्न' vs 'सवाल') is moot: the new string names no question. Carry-forward: c5b1f1dc2..943d47ac3 changes only this key in en, the en context sidecar and this locale (key-by-key comparison, order unchanged), so the round-1 audit of the other 15 keys carries onto the new hashes. Native-speaker review and rendered-frame certification not claimed."
     }
   ]
 }
