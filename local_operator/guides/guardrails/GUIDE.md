@@ -196,14 +196,14 @@ session made. Everything CRITICAL is still refused.
   cleans up does not count as an "owning session running". Two narrower rules:
   a sibling's or cousin's linked worktree (same subagent tree) is yours only
   for `git worktree remove <exact path>` without `--force`, when it is clean
-  (ignored files allowed), no PR/MR is open or unreadable, and neither its
-  creator nor any other session is running in it — git refuses a dirty tree
-  and keeps the branch, so that removal loses nothing; `rm -rf`, `--force` or
-  any other delete of it stays HIGH and names the creator. And `rm -rf` or a
-  forced removal of an ANCESTOR's tree still counts its non-regenerable
-  ignored files (an ignored `.env` you did not make) as dirty, so the judge
-  sees them; a plain `git worktree remove` follows git's own rule. An
-  unrelated session's tree is never yours.
+  (only verified ignored output allowed), no PR/MR is open or unreadable, and
+  neither its creator nor any other session is running in it. Git refuses
+  ordinary uncommitted changes and keeps the branch; `rm -rf`, `--force` or
+  any other delete of it stays HIGH and names the creator. A raw `rm -rf` of
+  an ancestor's tree still goes to the judge if it contains non-regenerable
+  ignored files, such as an ignored `.env` you did not make. Exact plain
+  `git worktree remove` holds unverified ignored files even in a family-owned
+  tree: Git can delete them. An unrelated session's tree is never yours.
   A later delete of exactly that path, or anything inside it, ranks LOW —
   unless another session's ledger row sits at or under the target, or the
   target is or holds a git work tree or repository this session's ledger does
@@ -239,11 +239,47 @@ session made. Everything CRITICAL is still refused.
   origin advertised just now and only when your local `origin/<default>`
   already equalled it; a path main changed again, an error or a stale ref is
   not a proof. The facts say which
-  proof was used ("merged by content …"). An interrupted delete can leave a half-removed tree
-  (tracked files gone, registration still present), so treat a failed
-  removal as damage to report, not a step to retry. Anything else takes the
-  ordinary ranking. Prefer this to
-  `rm -rf .worktrees/<name>`.
+  proof was used ("merged by content …").
+
+- **Interrupted registered worktree.** Before any removal attempt, use
+  `preview_tool_call` on one standalone `git -C <absolute-repo> worktree remove
+  [--force] -- <absolute-worktree>` with exact canonical paths (quote paths with
+  spaces). An interrupted removal can leave tracked deletions and a live Git
+  registration. If preview reports that the remaining tracked deletions need
+  `--force`, preview that exact planned invocation, too. Proceed only on ALLOW
+  or WARN and only if there is no standing refusal for the same effect and path.
+  For large worktrees, choose a sufficiently long timeout before dispatch and
+  run in the background if needed; wait for the job and read its final output.
+  A timeout is not evidence that removal completed.
+
+  The strict forced route requires an idle, unlocked registration and a
+  preserved commit on origin (merged on origin for someone else's finished
+  worktree). It verifies that the directory, Git registration, branch, HEAD
+  and ownership still match after the remote check. Exact plain removal of an
+  otherwise clean, branch-backed own checkout (including an ancestor's) does
+  not require origin proof, but it still holds if ignored files cannot be
+  verified. For both routes, no ignored directory name or package manifest
+  proves its contents disposable. The only supported ignored output is
+  the reproducible `../../node_modules` link under `.worktrees/` with matching
+  lockfile bytes and a primary dependency directory outside the removal; the
+  link goes, not the dependencies. Real dependency directories, stores,
+  virtualenvs, Cargo targets, build outputs and Python caches remain unverified.
+
+  The hold names the condition that failed. Ignored files the guard cannot
+  prove regenerable (the reason counts them, never lists them): there is
+  nothing to commit, stash or push for that hold, and it is not the open-PR
+  refusal (that one is CRITICAL and says "has open PR"). Copy or move what
+  you need out of the checkout; whether the rest may be deleted is the
+  operator's decision. Ignored files that could not be read: the guard could
+  not verify them; check the path and registration. Otherwise (tracked or
+  untracked changes, tracked deletions): preserve unknown files, commit or
+  stash edits, push commits that must survive, and verify the canonical path
+  and Git registration with `git worktree list --porcelain`. Report the hold for your own checkout rather
+  than asking the operator. These steps neither authorize a retry nor change
+  the two refusal exceptions above. This route excludes unregistered residue:
+  it cannot verify durable prior registered identity, a reachable preserved
+  commit, and preservation of the directory's current contents and work. A
+  ledger row or reflog alone is not that proof. Do not switch to raw deletion.
 
   Before you `ask` to remove a worktree, preview `git worktree remove <exact path>`
   with `preview_tool_call` and quote its worktree facts verbatim in the ask: branch,
@@ -251,7 +287,8 @@ session made. Everything CRITICAL is still refused.
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **Your own worktree.** A linked worktree the ledger records for this session
-  or its family (above) is yours to remove, by `git worktree remove
+  or its family (above) is yours to maintain. Outside the exact removal
+  routes above, the existing ranking also covers `git worktree remove
   [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
   reaches only your own trees (up to 16 per command; their checks run in
   parallel under one deadline, and any past either bound goes to the judge). It ranks LOW, with no judge call, only when it is
@@ -292,7 +329,7 @@ session made. Everything CRITICAL is still refused.
   `fd/` and `maps` sit behind the same kernel check, so such a process with
   only its cwd inside a tree is not seen — an accepted residual risk: these
   are system and sandbox processes, not agent work. An unreadable `/proc`
-  still fails closed. Ignored
+  still fails closed. Outside the exact removal routes above, ignored
   entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
   or local config) never count against your own tree: removing it deletes them
   with no judge call, exactly as `git worktree remove` does — move a secret you
@@ -300,8 +337,8 @@ session made. Everything CRITICAL is still refused.
   whose brief carries the ledger row (creator, kind, time, creating command)
   and the exact `git status` entries; it may answer `ALLOW ledger`, which the
   checkpoint re-verifies against the ledger. Never ask the operator about your
-  own worktrees or scratch; commit or push what you want to keep, then remove
-  it by exact path. `ask` is for paths you did not create, and it names a path
+  own worktrees or scratch; commit or push what you want to keep and preview
+  the exact planned removal before dispatch. `ask` is for paths you did not create, and it names a path
   only when the question or the picked option's label spells it in full
   (`~/repo/.worktrees/{a,b}` works); a relative `.worktrees/a`, or a path only
   in an option's description, names nothing (live ask a-1d54, 2026-11-11). Another session's

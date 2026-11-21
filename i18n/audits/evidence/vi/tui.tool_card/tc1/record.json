@@ -1,0 +1,101 @@
+{
+  "locale": "vi",
+  "namespace": "tui.tool_card",
+  "date": "2026-11-20",
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "870ee77f45a7",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "files": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.json",
+      "sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/tui.tool_card.json",
+      "sha256": "e59953ab43867cf5ff36b942d6056da80fab3fbef30948a68c50e0b86840db8e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.context.json",
+      "sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087"
+    }
+  },
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Delegation brief; not independently re-derived."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "870ee77f45a7",
+    "date": "2026-11-20",
+    "result": "failed",
+    "findings": 2
+  },
+  "status": "failed",
+  "verdict": "fail",
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "VI-01",
+        "key": "tui.tool_card.more.diff_lines",
+        "current": "{count, plural, other {còn {shown} dòng diff}}",
+        "proposed": "{count, plural, other {còn {shown} dòng thay đổi}}",
+        "reason": "diff is untranslated English prose, not a tool invocation or machine token. It is absent from the keep-English decisions in i18n/glossary.md and i18n/style-guides/vi.md:21-25. Existing occurrences in cli.hub_shared_help.publish_preview_only and wire.skill_adoption.preview_required were checked but do not constitute an explicit sanctioned exception."
+      }
+    ],
+    "minor": [
+      {
+        "id": "VI-02",
+        "key": "tui.tool_card.imagegen.requests_ahead",
+        "current": "{count, plural, other {{shown} yêu cầu phía trước}}",
+        "proposed": "Retain wording subject to rendered narrow-card check.",
+        "reason": "At count=1 this is 20 Rich cells versus English 15 (33% expansion); at count=21 it is 21 versus 17. No maxCells is declared, so this is a rendered-fit check, not a demonstrated overflow."
+      }
+    ],
+    "nit": []
+  },
+  "keys_read": 16,
+  "checks": {
+    "key_parity": true,
+    "message_arguments_parity": "16/16 via runtime.message_arguments",
+    "plural_categories": [
+      "other"
+    ],
+    "plural_keys": 5,
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "exact_number_selectors": false,
+    "runtime_render_message": "All 16 keys; count keys at 0,1,2,5,21; URL https://example.com; state miss; chord ctrl+c. Passed.",
+    "maxCells": {
+      "chip.you": "4/4",
+      "hint.collapse": "7/10",
+      "hint.expand": "7/10",
+      "hint.interrupt": "14/24",
+      "status.stop_unconfirmed": "18/18"
+    },
+    "NFC": true,
+    "manual_bidi_controls": false,
+    "rendered_frame": "Not captured; VI-02 explicitly requests a rendered fit check.",
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "PYTHONPATH": "/Users/damian/local-operator/.worktrees/i18n-tool-card"
+  },
+  "notes": [
+    "Read English, Vietnamese and context side by side for all 16 keys.",
+    "bạn: correctly labels the user-authored bang-command row, not agent self-attribution; guide vi.md:8-14.",
+    "mở rộng / thu gọn match tui.small.todo_panel.expand / collapse and tui.small.subagent_panel.ctrl_g_expand. đang chạy matches tui.small.network_panel.relay_running.",
+    "chưa xác nhận dừng preserves unconfirmed stop meaning and is consistent with wire.tool_rows.bridge.outcome.unconfirmed / expanded.unconfirmed_bare, which specify unconfirmed sending.",
+    "cache explicitly sanctioned by vi.md:23-25; miss is a literal state token per English sidecar.",
+    "Fetched/final URL and literal chord unchanged; surrounding parentheses preserved. All five count messages preserve plural count plus raw-digit shown.",
+    "RTL is not applicable to Vietnamese; no manual bidi controls found.",
+    "Target was new and uncommitted; HEAD 4e164d26c8ecc5a8f5fe8d510526277efc4fdd0e. No repository file modified."
+  ]
+}

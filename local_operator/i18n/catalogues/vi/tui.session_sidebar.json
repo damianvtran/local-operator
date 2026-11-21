@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "{count} câu hỏi",
+  "tui.session_sidebar.footer.hub_note": "{count} l.kết",
+  "tui.session_sidebar.footer.opening": "Đang mở…",
+  "tui.session_sidebar.footer.refresh_failed": "Không làm mới được",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, other {+{shown} mục ghim nữa — cuộn xem}}",
+  "tui.session_sidebar.row.untitled": "Chưa đặt tên",
+  "tui.session_sidebar.section.active": "Phiên đang chạy",
+  "tui.session_sidebar.section.pinned": "Đã ghim",
+  "tui.session_sidebar.section.previous": "Phiên trước",
+  "tui.session_sidebar.section.subagent": "Lượt chạy tác nhân con",
+  "tui.session_sidebar.state.empty": "Chưa có cuộc trò chuyện nào",
+  "tui.session_sidebar.state.error": "Lỗi tải cuộc trò chuyện",
+  "tui.session_sidebar.state.loading": "Đang tải cuộc trò chuyện…",
+  "tui.session_sidebar.title": "Phiên",
+  "tui.session_sidebar.tooltip.location": "trên {device}",
+  "tui.session_sidebar.tooltip.location_network": "trên {device} · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "trên {device} · {network} (trạng thái gần nhất đã biết)",
+  "tui.session_sidebar.tooltip.location_stale": "trên {device} (trạng thái gần nhất đã biết)",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · chạy {command} nếu phiên vẫn im lặng",
+  "tui.session_sidebar.tooltip.unnamed_device": "thiết bị chưa đặt tên",
+  "tui.session_sidebar.tooltip.unreachable": "không kết nối được · {reason}"
+}

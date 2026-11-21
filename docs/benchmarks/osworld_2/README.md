@@ -23,7 +23,9 @@ a full-suite benchmark result.
 For the separate v2.1 campaign, see the dated
 [2026-10-25 takeover methods/status addendum](TAKEOVER_V21_2026_10_25.md).
 It preserves the historical v2.0 baseline here and distinguishes the measured
-main16 diagnostic from proposed, not-yet-run main17 work.
+main16 diagnostic from proposed, not-yet-run main17 work. See the
+[2026-11-20 o37 baseline](BASELINE_V21_O37_2026_11_20.md) for the completed
+77-attempt offline wave, its exact denominator and limits on comparison.
 
 ## 1. The benchmark
 

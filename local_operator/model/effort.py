@@ -49,14 +49,28 @@ being unable to see or change effort was the reported problem — but a level is
 worth choosing once and leaving, and that is why nothing here nudges the user to
 cycle mid-task.
 
+- Google Gemini 3 and later. ``generateContent`` takes a named tier as
+  ``generationConfig.thinkingConfig.thinkingLevel`` (an earlier revision of this
+  docstring said the named tiers were Interactions-API only; that is false).
+  Probed live on Vertex 2026-11-19: ``gemini-4-neon`` accepts
+  low|medium|high|xhigh and answers 400 ``Thinking level is unsupported:
+  THINKING_LEVEL_MINIMAL`` for ``minimal``; ``gemini-3.8-flash`` accepts
+  low|medium|high and refuses both ``minimal`` and ``xhigh``. The ladders
+  differ per model, so the LIVE source is models.dev's
+  ``reasoning_options`` (projected by ``model.prices``, which carried exactly
+  those two ladders on the probe date), and this table holds only the
+  conservative rung set every probed Gemini 3+ model accepted, so a model too
+  new for the catalogue still gets a working dial. No default is seeded: the
+  model's own default applies until the user picks. A rung a model refuses is
+  shed by ``GoogleClient`` (one retry without the key), never a failed turn.
+
 Families NOT here offer nothing, which is the honest answer rather than a gap:
 
-- Google. Our ``GoogleClient`` speaks ``generateContent`` with a
-  ``generationConfig``, and the named ``thinking_level`` tiers Gemini documents
-  belong to the Interactions API; the shipped 2.5-series registry rows express
-  thinking as a token budget instead. Offering "medium" with no name-to-wire
-  mapping would put a level on the band that never reaches the request, so
-  Gemini reports ``reasoning`` and ``/effort`` says there is nothing to pick.
+- Google Gemini 2.x. Those models express thinking as a token budget
+  (``thinkingBudget``), not a named tier, and this client sends no budget, so
+  offering "medium" would put a level on the band that never reaches the
+  request. They report ``reasoning`` and ``/effort`` says there is nothing to
+  pick.
 - DeepSeek's reasoner, xAI. They reason at a depth the API does not expose as
   a named tier, or expose it under a key we have not verified against a live
   request. An unverified key is a 400 on a turn the user did not ask to risk.
@@ -246,6 +260,16 @@ class EffortSupport:
 
     levels: tuple[str, ...]
     default: str | None = None
+    #: The provider routes this arm was VERIFIED on, or ``None`` for every
+    #: route. Most arms are a model family whose effort key every client we
+    #: ship spells the same way, so they apply wherever the id appears. An arm
+    #: whose wire key was probed on specific hostings only (Gemini's
+    #: ``thinkingLevel``, verified on ``google``/``google-vertex``) names them,
+    #: so a reseller route (``github-copilot/gemini-3-pro``,
+    #: ``radient/google/gemini-3-pro``) keeps offering nothing rather than a
+    #: level its client sends under a key nobody verified there. A caller that
+    #: passes no provider gets the provider-agnostic answer, unchanged.
+    hostings: frozenset[str] | None = None
 
 
 # Anthropic's three ladders (see the doc link above). Written as generation
@@ -256,11 +280,21 @@ class EffortSupport:
 _ANTHROPIC_FULL = EffortSupport(("low", "medium", "high", "xhigh", "max"), default="high")
 _ANTHROPIC_NO_XHIGH = EffortSupport(("low", "medium", "high", "max"), default="high")
 _ANTHROPIC_BASE = EffortSupport(("low", "medium", "high"), default="high")
-# Opus 5.5 is the one Anthropic model whose documented default is NOT `high`:
-# "The API defaults to `high` (`medium` on Claude Opus 5.5)" (effort doc, read
-# 2026-09-24). The seed is sent as `output_config.effort`, so seeding `high`
-# here would silently run every turn one rung above the model's own default.
-_ANTHROPIC_OPUS_5_5 = EffortSupport(("low", "medium", "high", "xhigh", "max"), default="medium")
+# Opus 5.5 and Haiku 5.5 are the Anthropic models whose documented default is
+# NOT `high`: "Claude Opus 5.5 and Claude Haiku 5.5 default to medium ...
+# Setting `effort` to the model's default (`"medium"` on Claude Opus 5.5 and
+# Claude Haiku 5.5, `"high"` on other models) produces exactly the same
+# behavior as omitting the `effort` parameter entirely" (effort doc, Opus read
+# 2026-09-24, Haiku 2026-11-21; both "support all five effort levels"). The seed
+# is SENT as `output_config.effort`, so seeding `high` here runs every turn one
+# rung above the model's own default. Haiku 5.5 did exactly that until
+# 2026-11-21 by falling through to the 5+ arm: on Bedrock research tasks (n=8,
+# lop v0.110.0) `high` cost 1.78x Claude Code where `medium` cost 1.19x, with
+# accuracy indistinguishable (list-task F1 0.906 high vs 0.861 medium vs CC
+# 0.891, p>0.5, no wrong values) -- the cost of a level nobody chose.
+_ANTHROPIC_MEDIUM_DEFAULT = EffortSupport(
+    ("low", "medium", "high", "xhigh", "max"), default="medium"
+)
 
 # OpenAI. The GPT-5 and GPT-6 ladders are not interchangeable: choosing the
 # cheapest rung for a naming errand sent `none` to GPT-6 and got HTTP 400,
@@ -281,6 +315,15 @@ _OPENAI_O_SERIES = EffortSupport(("low", "medium", "high"))
 # measured omission settles neither, so seeding one would guess at the depth of
 # every turn nobody touched the dial.
 _KIMI_K3 = EffortSupport(("low", "high", "max"))
+
+# Gemini 3+ (see the Google bullet in the module docstring for the probes).
+# The INTERSECTION of the probed ladders, not the union: ``xhigh`` is a 400 on
+# gemini-3.8-flash, so offering it family-wide would break one model to serve
+# another. Richer ladders (gemini-4-neon's ``xhigh``) arrive live from
+# models.dev, which outranks this offline fallback in ``build_model_spec``.
+_GEMINI_3_PLUS = EffortSupport(
+    ("low", "medium", "high"), hostings=frozenset({"google", "google-vertex"})
+)
 
 #: First match wins, so the narrower Anthropic generations are listed before the
 #: forward-reading ``5 and above`` arm. Patterns are ``search``ed against the
@@ -332,10 +375,11 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # `output_config: {"effort": "high"}` on every request. Three digits is
     # generous for a generation number and cannot swallow a date.
     (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
-    # Ahead of the 5+ arm, which would otherwise claim it with `high`. `(?!\d)`
-    # stops `5-55` and deliberately lets a punctuated suffix through
+    # Ahead of the 5+ arm, which would otherwise claim them with `high`. Exact
+    # tiers, not a 5.5 widening: Sonnet 5.5 documents `high`. `(?!\d)` stops
+    # `5-55` and deliberately lets a punctuated suffix through
     # (`claude-opus-5-5-1`, a dated snapshot): same generation, same default.
-    (re.compile(r"claude-opus-5[.-]5(?!\d)"), _ANTHROPIC_OPUS_5_5),
+    (re.compile(r"claude-(?:opus|haiku)-5[.-]5(?!\d)"), _ANTHROPIC_MEDIUM_DEFAULT),
     (re.compile(r"claude-[a-z]+-(?:[5-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"gpt-5(?!\d)"), _OPENAI_GPT5),
     (re.compile(r"gpt-(?:[6-9]|\d{2,})"), _OPENAI_GPT6),
@@ -356,39 +400,59 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
         re.compile(r"(?:^|/)(?:kimi-for-coding|(?:kimi-)?k3(?:[.:-]|$))"),
         _KIMI_K3,
     ),
+    # Gemini generation 3 and above, forward-reading so ``gemini-5-*`` works the
+    # day it ships. ``(?:^|/)`` anchors on the id (bare, ``models/``-prefixed,
+    # or an aggregator's ``google/``, matching how the other arms treat a
+    # vendor prefix). ``[1-9]\d{1,2}`` admits two- and three-digit generations
+    # and ``(?!\d)`` keeps a run of digits from being read piecemeal; Gemini
+    # 2.x (``gemini-2.5-pro``) is excluded on purpose: it takes
+    # ``thinkingBudget``, which this client does not send.
+    (re.compile(r"(?:^|/)gemini-(?:[3-9]|[1-9]\d{1,2})(?!\d)"), _GEMINI_3_PLUS),
 )
 
 
-def effort_support(model_id: str) -> EffortSupport | None:
-    """What ``model_id`` accepts, or ``None`` when it exposes no effort knob."""
+def effort_support(model_id: str, provider: str | None = None) -> EffortSupport | None:
+    """What ``model_id`` accepts, or ``None`` when it exposes no effort knob.
+
+    ``provider`` is the canonical route. When given, an arm restricted to other
+    hostings (see :attr:`EffortSupport.hostings`) answers ``None`` -- first
+    match still wins, so a restricted arm never falls through to a broader one.
+    """
     lowered = model_id.lower()
     for pattern, support in _EFFORT_TABLE:
         if pattern.search(lowered):
+            if (
+                provider is not None
+                and support.hostings is not None
+                and provider not in support.hostings
+            ):
+                return None
             return support
     return None
 
 
-def supported_efforts(model_id: str) -> tuple[str, ...]:
+def supported_efforts(model_id: str, provider: str | None = None) -> tuple[str, ...]:
     """The levels ``model_id`` accepts, ascending; empty when it accepts none.
 
     Empty is what makes the control honest on a non-reasoning model: there is
     nothing to cycle, ``/effort`` says so, and no key reaches the wire.
+    ``provider`` gates hosting-restricted arms (see :func:`effort_support`).
     """
-    support = effort_support(model_id)
+    support = effort_support(model_id, provider)
     return support.levels if support is not None else ()
 
 
-def default_effort(model_id: str) -> str | None:
+def default_effort(model_id: str, provider: str | None = None) -> str | None:
     """The level ``model_id`` runs at when nothing is set, if it documents one.
 
     Seeded onto the spec so the band can state a real level from boot rather
     than the word "reasoning". Only safe because the provider says so: for
     Anthropic, sending the model's documented default (``high``, or ``medium``
-    on Opus 5.5) and sending nothing are the same request, so the seed changes
-    no behaviour and only stops the band from understating what is already
-    happening.
+    on Opus 5.5 and Haiku 5.5) and sending nothing are the same request, so the
+    seed changes no behaviour and only stops the band from understating what is
+    already happening.
     """
-    support = effort_support(model_id)
+    support = effort_support(model_id, provider)
     return support.default if support is not None else None
 
 

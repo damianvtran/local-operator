@@ -165,9 +165,19 @@ def clock_names(fn: ast.AST) -> set[str]:
         if isinstance(target, ast.Name):
             parts.append(target.id)
         dotted = ".".join(reversed(parts))
+        # `thread_time` too: `_is_clock_call` already counts it as CPU, and a
+        # name assigned from it is as much a measurement as one from
+        # `process_time` -- without it a thread-CPU ceiling filed as "no clock".
         return any(
             marker in dotted
-            for marker in ("perf_counter", "monotonic", "time.time", "process_time", "loop.time")
+            for marker in (
+                "perf_counter",
+                "monotonic",
+                "time.time",
+                "process_time",
+                "thread_time",
+                "loop.time",
+            )
         )
 
     names: set[str] = set()
@@ -450,8 +460,12 @@ def findings(root: pathlib.Path) -> list[Finding]:
                             "why": "",
                         }
                     )
+    kept = {(node, expr): why for node, expr, why in REVIEWED_KEPT}
     for row in rows:
         row["bucket"], row["why"] = classify(row)
+        verdict = kept.get((f"{row['file']}::{row['fn']}", row["expr"]))
+        if row["bucket"] == "B" and verdict is not None:
+            row["bucket"], row["why"] = "A", f"reviewed and kept — {verdict}"
     return rows
 
 
@@ -532,6 +546,120 @@ CONVERTED: tuple[tuple[str, str, str], ...] = (
         "the repaint resolved no model on its own thread (a 10 s listing there would be "
         "a blocked paint)",
     ),
+    # Batch 1 (the highest-risk rows: CI sightings first, then the tightest).
+    (
+        "tests/unit/server/test_desktop_open_frame.py"
+        "::test_the_first_frame_spends_only_what_is_left_of_its_budget",
+        "elapsed < 1.0; elapsed_deadline < 0.5",
+        "the frame answered `building` while its GATED scan was still unfinished, and the "
+        "spent-budget read finished on its first coroutine step (no await reached)",
+    ),
+    (
+        "tests/unit/server/test_desktop_open_frame.py"
+        "::test_a_warm_reopen_does_not_wait_on_its_own_paused_scan",
+        "elapsed < 0.5",
+        "the read finished on its first coroutine step against a scan pinned in flight "
+        "and paused (gated scan, hold kept young) — the old fixture raced the real scan",
+    ),
+    (
+        "tests/unit/mcp/test_manager.py::test_prompt_child_costs_no_polling_tick",
+        "elapsed < 0.09",
+        "no positive `anyio.sleep`/`asyncio.sleep` during stdio teardown — the polling "
+        "tick is a sleep, the event-driven stop takes none",
+    ),
+    (
+        "tests/unit/mcp/test_oauth_401_detached_persist.py"
+        "::test_persist_wait_is_per_server_and_cut_at_the_deadline",
+        "time.monotonic() - start < 0.1; 0.2 <= time.monotonic() - start < 0.6",
+        "an unrelated server's call finishes on its first step; only this server's "
+        "exchange is awaited, and the wait's loop-clock cut sits at deadline − lock bound "
+        "(30 s from a cut at the deadline)",
+    ),
+    (
+        "tests/unit/saver/test_round1_remediation.py"
+        "::test_r1_a_hung_availability_read_adds_nothing_to_the_turn",
+        "elapsed < 0.1",
+        "`_apply_saver` finished on its first coroutine step: the turn reached no await",
+    ),
+    (
+        "tests/unit/notifications/test_inbox_performance.py"
+        "::test_a_read_after_the_interval_serves_the_snapshot_and_refreshes_off_thread",
+        "elapsed < 0.3",
+        "the read answered while the GATED reload had not finished (plus the existing "
+        "off-thread identity check)",
+    ),
+    (
+        "tests/unit/notifications/test_inbox_performance.py"
+        "::test_server_startup_warms_the_registry_without_blocking",
+        "time.monotonic() - t0 < 0.2",
+        "the warm returned before its GATED build finished",
+    ),
+    (
+        "tests/unit/test_session_factory_classification.py"
+        "::test_the_provider_probe_is_inside_the_wait_budget",
+        "elapsed < 0.2",
+        "the selection returned while the GATED probe had not answered, its task " "still pending",
+    ),
+    (
+        "tests/unit/mobile/test_tui_bridge.py"
+        "::test_tui_stop_receipt_does_not_wait_for_the_app_loop",
+        "elapsed < 0.3",
+        "the receipt arrived before the GATED app ran the stop hop",
+    ),
+    (
+        "tests/unit/mobile/test_tui_bridge.py::test_tui_hop_is_bounded_by_one_budget",
+        "elapsed < 0.9",
+        "the budget's `TimeoutError` arrived before the GATED app ran the callback",
+    ),
+)
+
+
+#: Bucket-B rows that were READ, measured and deliberately left as they are, by
+#: (pytest node id, the exact assertion source): why the number is safe where the
+#: sweep alone cannot tell. Filed as bucket A by :func:`findings` so they leave the
+#: to-convert table, and listed with their evidence under "Reviewed and kept".
+#: Keyed on the expression as well as the node, so an edit to the assertion drops
+#: the row back into B for a fresh look rather than inheriting a stale verdict.
+REVIEWED_KEPT: tuple[tuple[str, str, str], ...] = (
+    (
+        "tests/unit/classification/test_live_openrouter.py"
+        "::test_the_local_overhead_is_a_small_fraction_of_a_real_call",
+        "local_ms < 10.0",
+        "never reached by CI: the module skips without `OPENROUTER_API_KEY(_DEV)`, and "
+        "`ci.yml` passes that secret only to the cli/server sanity steps, not to a test "
+        "shard; it is a manual live benchmark",
+    ),
+    (
+        "tests/unit/secrets/test_credential_shapes.py"
+        "::test_a_numeric_row_inside_an_open_block_is_not_charged_per_line",
+        "cpu < 0.5",
+        "THREAD CPU since batch 1 (was `process_time`, which also bills every other "
+        "thread in the worker); the bound is ~3 orders over the linear path and an order "
+        "under the regressed walk (6.7-12.5 s), and single-thread CPU is not inflated by "
+        "host load",
+    ),
+    (
+        "tests/unit/secrets/test_credential_shapes.py"
+        "::test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap",
+        "cpu < 0.05",
+        "THREAD CPU since batch 1: 0.4-0.5 ms measured for the 8-column row with and "
+        "without four busy threads (100x margin); the released spelling costs 222 ms",
+    ),
+    (
+        "tests/unit/secrets/test_credential_shapes.py"
+        "::test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap",
+        "cpu < 0.5",
+        "THREAD CPU since batch 1: 18.4 ms measured for the 140-row payload with and "
+        "without four busy threads (27x margin), where `process_time` read 112 ms beside "
+        "them",
+    ),
+    (
+        "tests/unit/secrets/test_credential_shapes.py"
+        "::test_the_short_arms_lookahead_is_load_bearing_on_its_own_population",
+        "cpu < 0.05",
+        "THREAD CPU since batch 1: 0.2-0.6 ms measured (80x margin); the released "
+        "lookahead costs 18.6 s on this payload",
+    ),
 )
 
 
@@ -579,7 +707,7 @@ def render(rows: list[Finding], settles: list[SettleNode], label: str) -> str:
         "The counts describe the tree this document is committed with; every",
         "count in this file is computed by the sweep, none is typed in.",
         "",
-        "## Converted in this PR",
+        "## Converted",
         "",
         f"{len(CONVERTED)} bucket-B ceilings were replaced by the property behind them.",
         "None had its number raised: a wider constant moves the failure rather than",
@@ -609,6 +737,15 @@ def render(rows: list[Finding], settles: list[SettleNode], label: str) -> str:
             + ", ".join(f"`{n}`" for n in still_b)
             + "."
         ),
+        "",
+        "## Reviewed and kept",
+        "",
+        f"{len(REVIEWED_KEPT)} bucket-B rows were read, measured and left as they are, "
+        "filed under A:",
+        "",
+        "| node | assertion | why it stays |",
+        "| --- | --- | --- |",
+        *(f"| `{node}` | `{expr}` | {why} |" for node, expr, why in REVIEWED_KEPT),
         "",
         "## Still to convert",
         "",

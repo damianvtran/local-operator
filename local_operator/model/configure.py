@@ -83,6 +83,11 @@ from local_operator.session.request_observation import (
 
 logger = logging.getLogger("local_operator.model.configure")
 
+#: Quota-latch token of the one-shot "sign in again" notice
+#: (``SessionStreamFn._announce_sign_in_required``); discarded when the route
+#: returns to the primary so a later expiry in the same session re-announces.
+SIGN_IN_REQUIRED_TOKEN = "auth:sign-in-required"
+
 if TYPE_CHECKING:
     # Import-time cost only for type checkers: the listing clients pull in the
     # whole requests/provider surface, and this module is on the CLI startup
@@ -999,6 +1004,16 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # stops offering `none`/`low` on the OpenRouter route, because the router
     # says those rungs 400 there. A rung we cannot send is not a rung.
     listing_levels = _listing_effort(canonical, model_name)
+    if listing_levels is None:
+        # Google's listings state no thinking ladder, and a registry-complete
+        # Gemini row never reaches discovery (so the memo above stays cold for
+        # it). models.dev's projection is the live second source: it is what
+        # lets a model released after this build offer its real ladder
+        # (``gemini-4-neon``'s ``xhigh``) instead of the table's conservative
+        # family rung set. Same precedence as a listing ladder — it outranks
+        # the table — and gated to the providers whose client sends the level
+        # (``prices.CATALOGUE_EFFORT_PROVIDERS``).
+        listing_levels = _catalogue_effort(canonical, model_name)
     # The native endpoint documents none/low/high/max, high by default. Scope
     # this to the route: aggregators own their own effort gate (and defaults).
     # Both the ladder and the echo rule come from ``model.configure``'s own
@@ -1020,7 +1035,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # aggregator's and why this route seeds a default where every other
     # aggregator id must not.
     router_levels = aggregator_router_effort_ladder(canonical, model_name)
-    fallback_levels = router_levels or direct_levels or supported_efforts(model_name)
+    # ``canonical`` gates hosting-restricted table arms: the Gemini 3+ arm's
+    # ``thinkingLevel`` key was verified on google/google-vertex only, so a
+    # reseller route serving the same id keeps its previous (empty) ladder
+    # unless its own listing states one (``EffortSupport.hostings``).
+    fallback_levels = router_levels or direct_levels or supported_efforts(model_name, canonical)
     # Whether requests to this model must echo reasoning back on every
     # assistant turn. Keyed on the MODEL FAMILY, on every route, and NOT on
     # ``direct_deepseek`` -- that flag also decides the effort ladder, and the
@@ -1150,7 +1169,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # membership guard is for a listing that NARROWS below the table's
         # default; seed nothing rather than clamping to a neighbouring rung no
         # source stated.
-        table_default = "high" if direct_deepseek else default_effort(model_name)
+        table_default = "high" if direct_deepseek else default_effort(model_name, canonical)
         if canonical == "deepseek" and info is not None and info.reasoning_default_effort:
             table_default = info.reasoning_default_effort
         reasoning_effort = table_default if table_default in effort_levels else None
@@ -3114,6 +3133,74 @@ def _listing_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
         return None
 
 
+#: ``(provider, model_id, document identity) -> ladder or None`` for
+#: :func:`_catalogue_effort`. Separate from :data:`_effort_memo` because it must
+#: remember a MISS too (``None`` there reads as "never looked"), or every repaint
+#: of a model models.dev does not list would re-walk the projection.
+#:
+#: Keyed on the DOCUMENT (``prices.models_dev_document_identity``), not on a TTL
+#: bucket: an earlier revision memoised ``None`` for the whole 24 h bucket even
+#: when the ``None`` meant "no usable document yet" -- exactly the state right
+#: after a capture bump -- so a long-lived desktop/TUI process pinned the
+#: offline table ladder for the day while the picker already showed ``xhigh``.
+#: Only an answer read from a usable document is memoised now.
+_catalogue_effort_memo: dict[
+    tuple[str, str, tuple[str, int, int, int] | None], tuple[str, ...] | None
+] = {}
+
+
+def _catalogue_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
+    """models.dev's ladder for ``provider/model_id``, memoised per document.
+
+    Total and non-raising like :func:`_listing_effort`, and DISK ONLY
+    (``prices.catalogue_effort_ladder`` never fetches): ``build_model_spec``
+    runs on paint paths. A provider outside ``CATALOGUE_EFFORT_PROVIDERS``
+    returns ``None`` before any read, so no other provider's spec changes. An
+    absent, unreadable or wrong-capture document returns ``None`` WITHOUT being
+    remembered, so the first spec built after the document lands is live.
+    """
+    try:
+        from local_operator.model.prices import (
+            CATALOGUE_EFFORT_PROVIDERS,
+            catalogue_effort_ladder,
+            models_dev_document_identity,
+            models_dev_providers,
+        )
+
+        if provider not in CATALOGUE_EFFORT_PROVIDERS:
+            return None
+        # Identity BEFORE content: if the document is replaced between the two
+        # reads, the memo holds a newer ladder under the older key, which the
+        # next identity change retires -- never an older ladder that outlives
+        # its document.
+        identity = models_dev_document_identity()
+        key = (provider, model_id, identity)
+        if identity is not None and key in _catalogue_effort_memo:
+            return _catalogue_effort_memo[key]
+        # Itself memoised on the same identity (a stat per call), so this costs
+        # a parse only when the document changed.
+        providers = models_dev_providers()
+        if providers is None or identity is None:
+            # No usable document (absent, unreadable, or a stale capture
+            # awaiting its off-loop repair): a transient miss, not an answer
+            # about the model, so it is NOT memoised -- the first spec built
+            # after the document lands gets the live ladder.
+            return (
+                catalogue_effort_ladder(provider, model_id, models_dev=providers)
+                if providers is not None
+                else None
+            )
+        ladder = catalogue_effort_ladder(provider, model_id, models_dev=providers)
+        if len(_catalogue_effort_memo) >= _EFFORT_MEMO_MAX:
+            # Same leak ceiling as the listing memo; a dropped entry costs one
+            # projection walk on the next spec build.
+            _catalogue_effort_memo.clear()
+        _catalogue_effort_memo[key] = ladder
+        return ladder
+    except Exception:  # noqa: BLE001 — a display dial is never worth a failed start
+        return None
+
+
 #: Hard ceiling on :data:`_effort_memo`. Bucket eviction alone does not bound a
 #: dict that is written once per model per resolve: a long-lived process (the
 #: server, a scheduler worker) resolving hundreds of models inside ONE TTL
@@ -4082,6 +4169,9 @@ class SessionStreamFn:
         # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
         # transcript FORK ignores the rows it copied and starts at ``None``.
         self._cache_diagnostics_previous_id: str | None = None
+        # A wire client is rebuilt per attempt; a local stream identity keeps
+        # Google comparisons per conversation (not per inherited routing key).
+        self._cache_diagnostics_chain = uuid.uuid4().hex
         # The credential that served the response ``_cache_diagnostics_previous_id``
         # names. Anthropic keeps diagnostics fingerprints per account, so after
         # a mid-session switch to another credential the old id cannot be found
@@ -5698,6 +5788,54 @@ class SessionStreamFn:
     async def _on_route_change(self, target: Any, reason: str) -> None:
         effort = f" ({target.effort} effort)" if target.effort else ""
         await self._notice(f"{reason} — falling back to {target.selector}{effort}")
+        # On EVERY route change, not only when ``reason`` reads ``auth``: the
+        # reason names the walk's highest-ranked error, and quota outranks auth,
+        # so a dead primary followed by a hop answering 429 settles as "quota"
+        # and would hide the one remedy. The announce checks the store's own
+        # dead-grant verdict itself and dedupes on its latch token, so a live
+        # primary stays silent and a multi-hop walk still speaks once.
+        await self._announce_sign_in_required()
+
+    async def _announce_sign_in_required(self) -> None:
+        """Tell the user ONCE, in their language, that the primary needs a sign-in.
+
+        The fallback line above only says ``provider failure: auth``. When the
+        primary's every stored login is a grant its IdP refused for good (a dead
+        refresh token, or Google Cloud session control forcing a Vertex sign-in
+        to expire), that is not a failure the user can wait out, and the turn
+        silently serving from another model is exactly what made the expired
+        Vertex sign-in look like a quota problem. So the exact next step is
+        named here, from the store's persisted verdict (no refresh is sent).
+
+        Deduped through the quota latch on its own ``auth:`` token, so a sticky
+        fallback does not repeat it every message; the route returning to the
+        primary (``_on_route_settle``) discards the token, so a real recurrence
+        later in the same session announces again. Never fails the turn: a
+        notice is advisory.
+        """
+        primary = self._primary_selector
+        if not primary:
+            return
+        provider = primary.split("/", 1)[0]
+        try:
+            from local_operator.i18n.resolve import resolve_language
+            from local_operator.providers.failover import (
+                dead_grant_reason,
+                sign_in_required_text,
+            )
+
+            dead, cause = await asyncio.to_thread(dead_grant_reason, self._auth_store, provider)
+            if not dead:
+                return
+            # The CONFIGURED language, not ``text.active_locale``: only the TUI
+            # moves the process locale live, and this also runs in `serve` and
+            # `lop exec` (see ``messages.render_resolved``).
+            # ``display=True``: this is the copy a person reads, so the two
+            # commands are kept whole in an RTL (Urdu) paragraph.
+            text = sign_in_required_text(provider, cause, locale=resolve_language(), display=True)
+            await self._announce_quota_change(primary, SIGN_IN_REQUIRED_TOKEN, text)
+        except Exception as exc:  # noqa: BLE001 - a notice must never fail the turn
+            logger.debug("sign-in notice failed (%s)", type(exc).__name__)
 
     async def _on_route_settle(self, target: Any, reason: str) -> None:
         """Forward the effective-route edge (fallback pinned / primary back)."""
@@ -5709,6 +5847,16 @@ class SessionStreamFn:
             # "back to" — the failure edge's "falling back to" and this pair
             # off the same preposition (design D1).
             await self._notice(f"back to {self._primary_selector}", "info")
+            # Re-arm the sign-in notice. Its latch token is otherwise cleared
+            # only by a healthy usage reading, and providers without a usage
+            # fetcher (google-vertex) never produce one, so the NEXT expiry in
+            # this same long-lived session (Workspace session control repeats
+            # every 1-24 h) would fall back with no "sign in again" at all.
+            # The primary serving again is the proof the sign-in was repaired.
+            primary = self._primary_selector
+            announced = self._last_quota_state.get(primary) if primary else None
+            if announced is not None:
+                announced.discard(SIGN_IN_REQUIRED_TOKEN)
         if self._route_handler is None:
             return
         result = self._route_handler(target, reason)
@@ -7534,6 +7682,7 @@ class SessionStreamFn:
                 update={
                     "cache_diagnostics": True,
                     "cache_diagnostics_previous_id": self._cache_diagnostics_previous_id,
+                    "cache_diagnostics_chain": self._cache_diagnostics_chain,
                 }
             )
         if request.purpose == "turn" and not request.same_route_retry:
@@ -7830,6 +7979,11 @@ class SessionStreamFn:
                 if event_type == "start":
                     cache_miss_type = getattr(event, "cache_miss_type", None) or ""
                     cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
+                elif event_type == "end" and not cache_miss_type:
+                    # Gemini reports its cache read only at stream end. Keep a
+                    # start-frame diagnosis (Anthropic's contract) authoritative.
+                    cache_miss_type = getattr(event, "cache_miss_type", None) or ""
+                    cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
                 stop_reason = getattr(event, "stop_reason", None)
                 if stop_reason is not None:
                     outcome = str(stop_reason)
@@ -8084,7 +8238,9 @@ class SessionStreamFn:
         as ``estimated`` and ``usage_reported`` stays False, so no reader can
         mistake it for a provider receipt.
         """
-        self._log_cache_break(usage, cache_miss_type, cache_missed_tokens)
+        self._log_cache_break(
+            usage, cache_miss_type, cache_missed_tokens, provider=request.model.provider
+        )
         try:
             import time as _time
 
@@ -8236,7 +8392,9 @@ class SessionStreamFn:
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
 
-    def _log_cache_break(self, usage: Usage, miss_type: str, missed_tokens: int) -> None:
+    def _log_cache_break(
+        self, usage: Usage, miss_type: str, missed_tokens: int, *, provider: str = ""
+    ) -> None:
         """One ``[prompt cache break]`` INFO line for a costly diagnosed break.
 
         Called once per call from ``_record_usage``, so the line is emitted at
@@ -8247,10 +8405,13 @@ class SessionStreamFn:
         is the API's documented "rare, low impact" case and would be noise.
         The thresholds mirror the benchmark's break classifier (>= 20k written
         and >= half the context), so log counts and ledger analysis agree.
+        Google has no write counter: its local prefix comparison supplies the
+        loss, bounded by this call's uncached input (which includes cache reads).
         """
         try:
             from local_operator.providers.clients import (
                 ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK,
+                GOOGLE_CACHE_DIAGNOSIS_NO_BREAK,
             )
 
             if (
@@ -8259,6 +8420,32 @@ class SessionStreamFn:
                 or miss_type in ("previous_message_not_found", "unavailable")
             ):
                 return
+            if provider in ("google", "google-vertex"):
+                if miss_type in GOOGLE_CACHE_DIAGNOSIS_NO_BREAK:
+                    # Includes ``unchanged_block_tail``: a healthy read short
+                    # by Google's block granularity is never a break.
+                    return
+                # Google includes cache reads in input and reports no writes.
+                # A large NEW suffix is not a lost cache prefix: require both
+                # locally diagnosed loss and actual uncached input to qualify.
+                if not (miss_type.endswith("_changed") or miss_type == "evicted_or_rerouted"):
+                    return
+                context = int(usage.input_tokens)
+                uncached = max(0, context - int(usage.cache_read_tokens))
+                lost = min(uncached, max(0, missed_tokens))
+                if lost < 20_000 or lost * 2 < context:
+                    return
+                logger.info(
+                    "[prompt cache break] session=%s type=%s missed_tokens=%d "
+                    "uncached=%d context=%d",
+                    self._session_id or "-",
+                    miss_type,
+                    int(missed_tokens),
+                    uncached,
+                    context,
+                )
+                return
+            # Retain Anthropic's write-based threshold and log format verbatim.
             written = int(usage.cache_write_tokens)
             context = int(usage.input_tokens) + int(usage.cache_read_tokens) + written
             if written < 20_000 or written * 2 < context:
@@ -8279,6 +8466,11 @@ class SessionStreamFn:
         if self._closed:
             return
         self._closed = True
+        # This stream fn's Google comparison chain can never be used again;
+        # evict it now instead of leaving it to the module-level LRU bound.
+        from local_operator.providers.clients import forget_google_cache_chain
+
+        forget_google_cache_chain(self._cache_diagnostics_chain)
         self._transport.owners -= 1
         if self._transport.owners == 0:
             await self._http.aclose()

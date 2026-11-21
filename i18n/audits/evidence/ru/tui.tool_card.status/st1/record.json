@@ -1,0 +1,54 @@
+{
+  "locale": "ru",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "d24c88632d0f34a42f9902061fcc130111b6a3b394964642204c271bf59e36d2",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by delegator; not independently observed."
+  },
+  "auditor": {
+    "agent": "translation-auditor (status-audit-ru)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "keys_read": 18,
+  "findings": [
+    {
+      "id": "RU-1",
+      "severity": "minor",
+      "key": "tui.tool_card.status.send.receipt_reused",
+      "current": "старая квитанция",
+      "proposed": "квитанция та же",
+      "reason": "The current label describes the receipt as old rather than explicitly identifying reuse; the proposed 15-cell label identifies the same prior receipt and remains within the 16-cell budget."
+    }
+  ],
+  "verification": {
+    "worktree_head": "66c87c0755e264db07ea375c67242cffbe302bc0",
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "pythonpath": "/Users/damian/local-operator/.worktrees/i18n-tool-status",
+    "key_parity": "18/18",
+    "message_arguments": "18/18 identical empty argument sets; no plural branches, skeletons or markup tokens",
+    "render_message": "18/18 render identically to catalogue values using ru",
+    "latin": "No Latin letters in any target value",
+    "caps": "16 capped entries checked with rich.cells.cell_len; 16/16 within maxCells",
+    "consumers": "tool_card.py _status_runs sheds whole words; _outcome_runs truncates eligible reasons and otherwise sheds them; delivery and switch words lead summaries which truncate on the right. No over-cap exception required.",
+    "rendered_frame": "Not captured; width validation is cell-based, not visual proof."
+  },
+  "desktop_consistency": {
+    "ui.chat.trace.send.delivery.failed.word": "Exact match: не доставлено",
+    "ui.chat.trace.send.delivery.mailbox.word": "Exact match: пробуждение без ответа",
+    "ui.chat.trace.send.delivery.unconfirmed.word": "Desktop доставка не подтверждена is 24 cells, exceeding 22. Accept TUI доставка под вопросом (21): names delivery, expresses uncertainty rather than definite failure; justified width adaptation.",
+    "ui.chat.canonical.tool_row.outcome.interrupted": "Exact match: прервано",
+    "ui.chat.canonical.tool_row.outcome.never_ran": "Exact match: не запускался"
+  },
+  "note": "Read all 18 en/ru keys side by side and all context notes; no blocker/major. Running идёт states execution, not launched; waiting ожидает is the terse waiting state within 7 cells (approval context supplied by row); session reset сессия сброшена correctly states loss/reset. Russian tui.tool_card.json does not exist in filesystem or HEAD, so cross-namespace Russian consistency cannot be certified; English tui.tool_card.json was read. Namespace is clean-with-findings (one non-gating minor). No repo edits or commits."
+}

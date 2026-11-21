@@ -1171,6 +1171,79 @@ def _reconcile_frame_cap_memo(
                 del row_memo[key]
 
 
+#: The SSE query parameter a client sends to declare ``steer_journal_order``
+#: (advertised as ``capabilities.steer_journal_order``). Only this exact value
+#: opts in, so a typo or a ``0`` keeps the legacy frame.
+STEER_JOURNAL_ORDER_PARAM = "steer_journal_order"
+
+
+def steer_journal_order_frame(frame: dict[str, Any], *, declared: bool) -> dict[str, Any]:
+    """One client's copy of a shared projection frame, steer order resolved.
+
+    WHY PER CLIENT. A phone steer is painted at SEND time and upgraded in place
+    at delivery, while the journal (``/history``, a fresh mount, a resume)
+    records it at DELIVERY, so the live frame and the page disagree about
+    where it sits (``steer, tool, tool`` live vs ``tool, tool, user`` on the
+    page). Moving the row fixes that, but local-operator-mobile builds before
+    #359 mis-place a held row that moves later, and those are installed on
+    phones that will never update in step with this relay. So the move is
+    opt-in: ``declared`` is the stream's ``?steer_journal_order=1``.
+
+    - Not declared: the frame minus the relay-internal map, which is EXACTLY
+      the pre-capability frame (the key is popped from a shallow copy; every
+      other key keeps its position, so the bytes match).
+    - Declared: each delivered steer moves to just after its journal anchor and
+      takes the page's ``kind`` (``user`` \u2014 the journal has no steer marker, so
+      ``fold_messages_to_entries`` folds it as a user row). Ids are unchanged,
+      and both clients key user rows by id, so the kind flip is an in-place
+      repaint, never a second row. A steer whose anchor is not in this frame
+      (trimmed by a cap) keeps its slot; only its kind changes.
+
+    The input frame is shared by every subscriber of the session and is never
+    mutated. A frame with no map is returned AS IS \u2014 the common case costs one
+    dict lookup. Otherwise O(n): one pass to index, one to emit.
+    """
+    order = frame.get("steer_journal_order")
+    if order is None:
+        return frame
+    out = dict(frame)
+    del out["steer_journal_order"]
+    if not declared or not order:
+        return out
+    rows: list[dict[str, Any]] = list(out.get("transcript") or [])
+    present = {row.get("id") for row in rows}
+    delivered = {sid for sid in order if sid in present}
+    # A row moves only to an anchor that is in this frame and is not itself
+    # moving: the fold never anchors a steer to another delivered steer (it
+    # resolves to that steer's anchor), so this only guards a hand-built map
+    # against a cycle that would drop rows.
+    movers = {
+        sid: order[sid]
+        for sid in delivered
+        if order[sid] in present and order[sid] not in delivered
+    }
+
+    def settled(row: dict[str, Any]) -> dict[str, Any]:
+        if row.get("id") in delivered and row.get("kind") == "steer":
+            return {**row, "kind": "user"}
+        return row
+
+    after: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        anchor = movers.get(row.get("id"))  # type: ignore[arg-type]
+        if anchor is not None:
+            after.setdefault(anchor, []).append(settled(row))
+    emitted: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("id") in movers:
+            continue
+        emitted.append(settled(row))
+        # ``pop``: a duplicated anchor id must not emit its steers twice.
+        emitted.extend(after.pop(row.get("id"), ()))  # type: ignore[arg-type]
+    out["transcript"] = emitted
+    return out
+
+
 def cap_projection_frame(
     projection: SessionProjection, *, cap_bytes: int = PROJECTION_FRAME_SOFT_CAP_BYTES
 ) -> tuple[dict[str, Any], bool]:
@@ -2382,6 +2455,9 @@ class ProjectionFold:
         # message that was really delivered.
         self._open_message_id = None
         self._pending_user_echoes.clear()
+        # The rebuilt transcript IS journal order; a delivery slot recorded
+        # against the replaced rows has nothing left to describe.
+        self.projection.steer_journal_order = {}
         self.projection.transcript = self._cap_tail(entries)
         from local_operator.mobile.peer_cycles import retained_peer_graphs
 
@@ -2460,6 +2536,17 @@ class ProjectionFold:
             self._peer_join_key = None
         self._peer_records, self._peer_transcript = records, transcript
         self._join_peer_cycles()
+
+    def invalidate_peer_cycles(self) -> None:
+        """Forget the join memo so the next join re-validates the same inputs.
+
+        The memo keys on the records, rows and transcript generation; it cannot
+        see the transcript INDEX becoming current, which is what turns a
+        not-yet-provable record into a provable one (the validator never builds
+        an index on this loop). ``bind_owner_peer_cycles`` calls this when the
+        armed refresh lands.
+        """
+        self._peer_join_key = None
 
     def _join_peer_cycles(self) -> None:
         from local_operator.mobile.peer_cycles import project_peer_cycles
@@ -3304,6 +3391,14 @@ class ProjectionFold:
             # keeps its de-dup while a row with an exact event still coming is
             # never consumed by a colliding neighbour's words.
             owned = {held.id for held in self._pending_user_echoes.values()}
+            # REDELIVERY IS A NO-OP. A row already carrying this message id was
+            # reconciled by an earlier delivery of the same event (a relayed
+            # stream, a replayed seed); appending it again painted the message
+            # twice, and with ``steer_journal_order`` a second pass would also
+            # re-anchor the steer past rows that arrived since. Exact id, so a
+            # distinct message with the same words is never swallowed.
+            if any(row.id == message.id for row in self.projection.transcript):
+                return False
             for candidate in reversed(self.projection.transcript[-3:]):
                 if (
                     candidate.kind in ("user", "steer")
@@ -3334,6 +3429,8 @@ class ProjectionFold:
             # command id (or a synthetic one), and the message id is what later
             # history folds and the web client's list reconciliation agree on.
             entry.id = message.id
+            if entry.kind == "steer":
+                self._note_steer_delivery(entry)
             if marker_body is not None and marker_facts is not None:
                 # The echo captured the envelope verbatim; the marker carries
                 # the typed provenance, so the reconciled row matches what the
@@ -4516,6 +4613,44 @@ class ProjectionFold:
             return [first_user, *tail[1:]]
         self.projection.transcript_head_pinned = False
         return tail
+
+    def _note_steer_delivery(self, entry: TranscriptEntry) -> None:
+        """Record where a send-time steer row belongs in JOURNAL order.
+
+        The row stays where it was painted (every existing client keeps the
+        in-place upgrade, byte-identical); the relay moves it only for streams
+        that declared ``steer_journal_order`` (see ``steer_journal_order_frame``
+        and ``SessionProjection.steer_journal_order``). The fold records the
+        slot because only it knows the delivery MOMENT: the frame alone cannot
+        tell a delivered steer from a held one, both keep the same id.
+
+        The anchor is the newest row at delivery that is a settled journal
+        neighbour: undelivered echoes are skipped (they are not in the journal
+        yet), and an earlier delivered steer resolves to ITS anchor, so steers
+        drained at one boundary share it and keep their send order instead of
+        chaining through each other. First delivery wins (``setdefault``): a
+        replayed event must not re-anchor the row past rows that came since.
+        """
+        order = self.projection.steer_journal_order
+        if entry.id in order:
+            return
+        pending = {id(row) for row in self._pending_user_echoes.values()}
+        anchor: str | None = None
+        for row in reversed(self.projection.transcript):
+            if row is entry or id(row) in pending:
+                continue
+            anchor = order.get(row.id, row.id)
+            break
+        if anchor is None:
+            return
+        # Bound the map to rows still in the tail: a trimmed steer can no longer
+        # be moved, so its slot is dead weight. Pruned only here (a delivery is
+        # rare) rather than on every append.
+        live = {row.id for row in self.projection.transcript}
+        self.projection.steer_journal_order = {
+            **{k: v for k, v in order.items() if k in live},
+            entry.id: anchor,
+        }
 
     def _find(self, entry_id: str | None) -> TranscriptEntry | None:
         if not entry_id:

@@ -76,6 +76,10 @@ UNPINNED_TEXT_SITES: dict[str, int] = {
     # Route bodies the desktop paints.
     "local_operator/server/routes/desktop_tunnel_setup.py": 2,
     "local_operator/server/routes/desktop_sessions.py": 2,
+    # A fixed voice phrase is synthesised and spoken to the person at the
+    # desktop, so it follows the active locale; it is neither persisted nor
+    # read by a model (only the audio is cached, keyed by phrase).
+    "local_operator/server/routes/desktop_voice.py": 1,
 }
 
 

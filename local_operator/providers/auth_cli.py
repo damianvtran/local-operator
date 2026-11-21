@@ -667,9 +667,7 @@ def _consume_trailing_newline(fd: int, wait_s: float = 0.1) -> None:
     each within ``wait_s`` of the last: a paste's tail is one burst, and a
     human typing ahead is not waited for.
     """
-    import select
-
-    while select.select([fd], [], [], wait_s)[0]:
+    while _readable_within(fd, wait_s):
         try:
             byte = os.read(fd, 1)
         except OSError:
@@ -678,6 +676,48 @@ def _consume_trailing_newline(fd: int, wait_s: float = 0.1) -> None:
             return
         if byte not in b" \t\x1b[0123456789~":
             return
+
+
+# ``select()`` takes an fd_set bitmap of FD_SETSIZE bits (1024 on Linux and
+# macOS); CPython raises ValueError for any fd at or above it.
+_SELECT_FD_LIMIT = 1024
+
+
+def _readable_within(fd: int, wait_s: float) -> bool:
+    """Whether ``fd`` has a byte to read within ``wait_s`` seconds.
+
+    Why not just ``select.select``: it cannot represent an fd >= FD_SETSIZE and
+    raises ``ValueError``. Production reads stdin (fd 0), but a long-lived
+    process -- the test suite, which leaks sqlite connections and sockets --
+    can be handed a terminal at fd 1171 by ``pty.openpty()``, and the raise
+    then escaped the paste reader (CI job 136728521591).
+
+    Why not just ``select.poll``: on macOS ``poll()`` on ttys and other
+    character devices has historically been unreliable (POLLNVAL or never
+    ready), so ``select`` stays the path wherever it works and ``poll`` is only
+    the fallback for high fds. With neither usable, report "not readable":
+    the caller then swallows nothing, which is the safe failure (at worst a
+    stray newline reaches the next prompt) rather than losing the credential.
+    """
+    import select
+
+    if fd < _SELECT_FD_LIMIT:
+        try:
+            return bool(select.select([fd], [], [], wait_s)[0])
+        except ValueError:
+            pass  # a platform with a smaller FD_SETSIZE: try poll below
+        except OSError:
+            return False
+    poll_factory = getattr(select, "poll", None)
+    if poll_factory is None:
+        return False
+    try:
+        poller = poll_factory()
+        poller.register(fd, select.POLLIN)
+        events = poller.poll(max(0, int(wait_s * 1000)))
+    except (OSError, ValueError):
+        return False
+    return any(mask & select.POLLIN for _, mask in events)
 
 
 @contextlib.contextmanager
@@ -1261,6 +1301,19 @@ def format_retained_radient_logins(
     ]
 
 
+def _sign_in_required_state(reason: str | None) -> str:
+    """The ``login-status`` state word for a dead grant, in the user's language."""
+    from local_operator.i18n.keys import wire_providers_reauth as k
+    from local_operator.i18n.messages import render_resolved
+    from local_operator.providers.oauth.callback_server import (
+        REAUTH_REASON_SESSION_POLICY,
+    )
+
+    if reason == REAUTH_REASON_SESSION_POLICY:
+        return render_resolved(k.status_session_policy())
+    return render_resolved(k.status_sign_in_required())
+
+
 def format_logins(
     auth_store: "AuthStore",
     config_dir: "Path | None" = None,
@@ -1291,8 +1344,11 @@ def format_logins(
         auth_store.retained_radient_login_ids(), action=action
     )
     if rows:
+        from rich.cells import cell_len
+
         lines.append("Stored credentials:")
         now_ms = int(time.time() * 1000)
+        listed: list[tuple[Any, str, str]] = []
         for row in rows:
             # The ONE label derivation (``credential_identity`` -> row.data
             # email/account_id/org_name): a row whose payload carries no
@@ -1302,11 +1358,28 @@ def format_logins(
             if row.credential_type == "oauth":
                 expires = row.data.get("expires")
                 state = "expired" if expires is not None and int(expires) < now_ms else "active"
+                # "expired" is the ACCESS token's clock, which every OAuth row
+                # passes hourly and the next refresh fixes. A grant the IdP
+                # refused for good (tombstoned by the refresh path) is a
+                # different state that only a sign-in fixes, and Google Cloud
+                # session control is named because it explains why a working
+                # Vertex sign-in died with nothing revoked.
+                if auth_store.grant_is_dead(row.id):
+                    state = _sign_in_required_state(auth_store.grant_dead_reason(row.id))
                 detail = f"oauth, {state}"
             else:
                 source = row.data.get("source") or "stored"
                 detail = f"api_key ({source})"
-            lines.append(f"  [{row.id}] {row.provider:<14} {detail:<22} identity={identity}")
+            listed.append((row, detail, identity))
+        # Padded in terminal CELLS to the widest state actually listed (never
+        # narrower than the historic 22): the sign-in states are longer than
+        # 22, and CJK states are two cells per code point, so a code-point pad
+        # (`f"{detail:<22}"`) left `identity=` ragged on exactly the rows a user
+        # opens this command to read (design round 1, D1).
+        width = max([22, *(cell_len(detail) for _row, detail, _identity in listed)])
+        for row, detail, identity in listed:
+            pad = " " * (width - cell_len(detail))
+            lines.append(f"  [{row.id}] {row.provider:<14} {detail}{pad} identity={identity}")
     else:
         lines.append("No usable stored credentials." if retained else "No stored credentials.")
     if retained:

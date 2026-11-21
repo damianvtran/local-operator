@@ -1881,10 +1881,41 @@ def _heavy_job_lines() -> list[str]:
         settings = heavy_lease.configured_settings()
         if not settings.enabled:
             return ["heavy jobs: queue off (bash.heavy_jobs.enabled=false)"]
-        return [heavy_lease.status_line(heavy_lease.lease_dir(), settings.slots)]
+        directory = heavy_lease.lease_dir()
+        return [heavy_lease.status_line(directory, settings.slots), *_heavy_audit_row(directory)]
     except Exception:  # noqa: BLE001 - a status nicety must never fail the report
         logger.debug("heavy-job status unreadable", exc_info=True)
         return []
+
+
+def _heavy_audit_row(directory: Path) -> list[str]:
+    """One line: the heavy-lease audit trail's last event and where the trail is.
+
+    The readiness half of the audit trail (``local_operator/heavy_audit.py``):
+    it tells an operator the trail exists and is being written, and points at
+    the file that proves serialization. One line by contract — the event tail
+    lives in ``lop services heavy status``. No line before the first heavy job
+    ever ran (no file yet): an empty trail is not news on a fresh install.
+    """
+    from local_operator import heavy_audit
+    from local_operator.i18n.keys import cli_services_heavy as copy
+    from local_operator.i18n.text import tr
+
+    entry = heavy_audit.last_event(directory)
+    if entry is None:
+        return []
+    try:
+        age = max(0, int(time.time() - float(entry.get("ts") or 0)))
+    except (TypeError, ValueError):
+        age = 0
+    from local_operator.heavy_cli import _age
+
+    row = copy.audit_row(
+        record=heavy_audit.describe(entry),
+        age=_age(age),
+        path=str(heavy_audit.audit_path(directory)),
+    )
+    return [tr("cli.services_heavy")(row)]
 
 
 def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
@@ -2180,12 +2211,16 @@ def print_refreshes(refreshes: Sequence[ServiceRefresh]) -> None:
 #: reconcile by name. The reason is what ``lop services status`` and the
 #: update report print when the process is still on an older build.
 #:
-#: THE SECRET BROKER IS REPORT-ONLY, on purpose: it is not a supervised unit
-#: (``secrets.client.ensure_broker`` spawns it on demand), it holds live
-#: sessions' redaction registrations, and in the passphrase tier it holds the
-#: ONLY unwrapped copy of the master key — an update that stopped it would put
-#: a password dialog on the operator's screen. It exits on its own idle timer,
-#: and ``lop secret broker restart`` moves it on demand.
+#: THE SECRET BROKER IS ROLLED, NOT RESTARTED (2026-11-21): the refresh child's
+#: "secret broker" step (``update._refresh_secret_broker`` →
+#: ``secrets.roll.roll_broker``) replaces it with no credential gap when nothing
+#: would need the passphrase again and every registered session can
+#: re-register. It used to be report-only with "it moves when it idles out",
+#: which is false while any session is registered (``_should_idle_out``) — node2
+#: sat on 0.102.2 for 7+ days. When the roll defers, the step's own reason (the
+#: pids that must restart, or the unlocked passphrase tier) rides on the status
+#: and ``update._reconcile_with_processes`` keeps it; this text is the fallback
+#: ``lop services status`` prints for a stale broker process.
 _DAEMON_MODULES: dict[str, tuple[str, str]] = {
     "local_operator.wakes.supervisor": (
         "wakes supervisor",
@@ -2204,9 +2239,10 @@ _DAEMON_MODULES: dict[str, tuple[str, str]] = {
     ),
     "local_operator.secrets.brokerd": (
         "secret broker",
-        "not restarted by an update (it holds live sessions' registrations and, "
-        "in the passphrase tier, the unlocked key); it moves when it idles out, "
-        "or run `lop secret broker restart`",
+        "rolled by `lop update` only without a credential gap: it stays while the "
+        "hardened store is unlocked or while registered sessions run a build that "
+        "cannot re-register (the update report names them); `lop secret broker "
+        "restart` rolls it, or says why it cannot",
     ),
 }
 

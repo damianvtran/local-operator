@@ -49,6 +49,13 @@ def approval_title(*, device: str) -> Msg:
     return Msg("tui.chrome.remote_park.approval_title", {"device": device})
 
 
+def ask_agent_started(*, device: str, agent_device: str) -> Msg:
+    return Msg(
+        "tui.chrome.remote_park.ask_agent_started",
+        {"device": device, "agent_device": agent_device},
+    )
+
+
 def ask_banner(*, device: str) -> Msg:
     return Msg("tui.chrome.remote_park.ask_banner", {"device": device})
 

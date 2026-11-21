@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original paths/provenance/verdicts remain unchanged. Integration-only retention mapping, not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/receipt.json",
+      "sha256": "fc746e9e7a58f104a549f8db28953f2f4d09f4a00f116276c9acf45c2d3dad97"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/record.json",
+      "sha256": "b739b07a09ee27f642a7419cc3ee58ff9ec5eba5472ae3b706c6c42a017bf595"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.translator-receipt.json",
+      "sha256": "cd670459e27140ac60a009c72ef40ddb90485c5e9a1deb82a7af241974432f4a"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/target.json",
+      "original_path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json",
+      "sha256": "6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/zh-CN.wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json",
+      "sha256": "6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/zh-CN.wire.teams.effective.translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.translator-receipt.json",
+      "sha256": "cd670459e27140ac60a009c72ef40ddb90485c5e9a1deb82a7af241974432f4a"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/report.md",
+      "sha256": "2327b2c529a8acb67ec4c485e988fd86621202d3d8554f82aee13bd7f57103f3"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/audit.log",
+      "sha256": "c05c954aa7e8a06a0b1496d023290e841b4dde3414d0a85bffaea47065fbe983"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/validate_zh_effective.py",
+      "original_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/validate_zh_effective.py",
+      "sha256": "9141bd591243bd4c51c952e1ae72626e39ead5045dfc7c01823b2bde59f59479"
+    }
+  ]
+}

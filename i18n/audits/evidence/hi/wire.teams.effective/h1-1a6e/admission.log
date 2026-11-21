@@ -1,0 +1,3 @@
+Current core ledger._rows schema admission: PASS (1 row), no append/apply invoked.
+Readback input and artifact hashes: PASS; all match. Ledger note length: 209 characters.
+Provenance: companion to record.json, auditor session 1a6e70595b8d / openai/gpt-6.1-sol; actual stdout summary of receipt-parser/hash-readback command, 2026-11-19.

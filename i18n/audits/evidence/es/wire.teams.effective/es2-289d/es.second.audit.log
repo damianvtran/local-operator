@@ -1,0 +1,6 @@
+Repository validator: scripts.i18n.check.check_catalogues()
+Isolated catalogue root: /Users/damian/.local-operator/sessions/289d6604993c/scratchpad/es-second-fixture
+Validator problems: []
+Independent strict JSON/key/placeholder/type/token/control checks: PASS 9/9
+Plural/select expressions: 0; Spanish CLDR arms not applicable
+Sidecar fixed cell-width limits: 0; rendered wrapping NOT RUN

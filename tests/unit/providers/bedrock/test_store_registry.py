@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.bedrock import connection as bconn
 
@@ -151,8 +153,86 @@ def test_catalogue_prices_and_effort_on_prefixed_ids() -> None:
 def test_family_resolver_describes_discovered_unshipped_ids() -> None:
     from local_operator.model.configure import _FAMILY_MODEL_RESOLVERS
 
-    info = _FAMILY_MODEL_RESOLVERS["bedrock"]("us.anthropic.claude-haiku-5-5")
+    # A tier version NEWER than any shipped row: limits inherit, price stays
+    # unknown. (Was Haiku 5.5 until it gained a priced first-party row.)
+    info = _FAMILY_MODEL_RESOLVERS["bedrock"]("us.anthropic.claude-haiku-6")
     assert info is not None and info.input_price == 0.0 and (info.context_window or 0) > 0
+
+
+#: (input, output, 5m write, cache read) per MTok and the >100k tier, from
+#: Anthropic's pricing page and the AWS Price List (registry comment on the
+#: claude-haiku-5-5 row; both read 2026-11-20). Regional = 1.10x global.
+_HAIKU_55_GLOBAL = (0.10, 0.50, 0.125, 0.01)
+_HAIKU_55_GLOBAL_LONG = (0.50, 2.50, 0.625, 0.05)
+
+
+@pytest.mark.parametrize("prefix", ["global.", "us.", "eu.", "apac.", "jp.", "au.", "ca.", ""])
+def test_haiku_5_5_is_priced_on_every_prefix(prefix: str) -> None:
+    from local_operator.model.configure import _FAMILY_MODEL_RESOLVERS
+    from local_operator.model.registry import bedrock_models
+
+    model_id = f"{prefix}anthropic.claude-haiku-5-5"
+    # The runtime cost path's order: the static row, else the family resolver
+    # (``ca.`` has no static row; ``get_model_info`` is static-only).
+    info = bedrock_models.get(model_id) or _FAMILY_MODEL_RESOLVERS["bedrock"](model_id)
+    assert info is not None
+    factor = 1.0 if prefix == "global." else 1.10
+    got = (info.input_price, info.output_price, info.cache_writes_price, info.cache_reads_price)
+    assert got == pytest.approx(tuple(p * factor for p in _HAIKU_55_GLOBAL))
+    long = (
+        info.long_context_input_price,
+        info.long_context_output_price,
+        info.long_context_cache_writes_price,
+        info.long_context_cache_reads_price,
+    )
+    assert long == pytest.approx(tuple(p * factor for p in _HAIKU_55_GLOBAL_LONG))
+    assert info.long_context_threshold == 100_000
+    assert (info.context_window, info.max_tokens) == (1_000_000, 128_000)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "factor"),
+    [("global.anthropic.claude-haiku-5-5", 1.0), ("ca.anthropic.claude-haiku-5-5", 1.10)],
+)
+def test_haiku_5_5_turn_cost_is_not_null_and_bills_1h_and_long_context(
+    model_id: str, factor: float
+) -> None:
+    from local_operator.harness.types import Usage
+    from local_operator.model.costs import stamp_record_estimate
+
+    # <=100k prompt, every bucket, all writes on the 1h TTL (2x input).
+    short = Usage(
+        input_tokens=1_000,
+        output_tokens=500,
+        cache_read_tokens=2_000,
+        cache_write_tokens=4_000,
+        cache_write_1h_tokens=4_000,
+    )
+    expected_short = (1_000 * 0.10 + 500 * 0.50 + 2_000 * 0.01 + 4_000 * 0.20) / 1e6 * factor
+    cost = stamp_record_estimate(short, "bedrock", model_id).estimated_usd_cost
+    assert cost is not None and cost == pytest.approx(expected_short)
+
+    # Same receipt with 5m writes costs less: the 1h surcharge really applied.
+    five_min = short.model_copy(update={"cache_write_1h_tokens": 0})
+    cheaper = stamp_record_estimate(five_min, "bedrock", model_id).estimated_usd_cost
+    assert cheaper == pytest.approx(
+        (1_000 * 0.10 + 500 * 0.50 + 2_000 * 0.01 + 4_000 * 0.125) / 1e6 * factor
+    )
+
+    # >100k prompt (counting cache reads): the WHOLE request bills the high tier.
+    long = Usage(input_tokens=10_000, output_tokens=1_000, cache_read_tokens=95_000)
+    expected_long = (10_000 * 0.50 + 1_000 * 2.50 + 95_000 * 0.05) / 1e6 * factor
+    long_cost = stamp_record_estimate(long, "bedrock", model_id).estimated_usd_cost
+    assert long_cost == pytest.approx(expected_long)
+
+
+def test_haiku_5_5_first_party_row_is_anthropics_own_price() -> None:
+    from local_operator.model.registry import anthropic_models
+
+    row = anthropic_models["claude-haiku-5-5"]
+    assert (row.input_price, row.output_price, row.cache_writes_price, row.cache_reads_price) == (
+        _HAIKU_55_GLOBAL
+    )
 
 
 def test_importing_registry_and_clients_leaves_botocore_unloaded() -> None:

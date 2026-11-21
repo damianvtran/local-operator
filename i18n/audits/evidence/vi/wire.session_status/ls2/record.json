@@ -1,0 +1,242 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20T10:27:32.900162+00:00",
+  "round": 2,
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "c8e57a7de707",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/vi/wire.session_status.json",
+  "target_sha256": "9db262183a1f86eadcb3acb0e3197a8bd0a675bea501c54ba16f872d8632e406",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "c8e57a7de707",
+    "actual_model_source": "session host Model header",
+    "fallback_used": false,
+    "result": "clean",
+    "independent_from_translator": true,
+    "unresolved_blocker_major": 0
+  },
+  "scope": {
+    "type": "round-2 remediation delta only",
+    "keys": [
+      "wire.session_status.wedged_heartbeat",
+      "wire.session_status.delegating_queued",
+      "wire.session_status.delegating_queued_addend"
+    ],
+    "keys_read": 3,
+    "term_consistency_neighbors": [
+      "wire.session_status.delegating_running",
+      "wire.session_status.wedged"
+    ],
+    "not_full_namespace_reaudit": true
+  },
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "clean",
+  "status": "passed",
+  "resolved_round1": [
+    "major: wedged_heartbeat now translates heartbeat as tín hiệu sống, retaining duration and process-alive distinction",
+    "minor: queued labels shortened to tác nhân con chờ chạy / chờ chạy, consistent with running subagent terminology"
+  ],
+  "checks": {
+    "message_arguments": "exact parity for all 3 scoped keys",
+    "cldr_categories": [
+      "other"
+    ],
+    "renders": [
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "0m"
+        },
+        "en": "Not answering · process alive (last heartbeat 0m ago)",
+        "vi": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 0m)",
+        "en_cells": 53,
+        "vi_cells": 73
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "1m"
+        },
+        "en": "Not answering · process alive (last heartbeat 1m ago)",
+        "vi": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 1m)",
+        "en_cells": 53,
+        "vi_cells": 73
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "2m"
+        },
+        "en": "Not answering · process alive (last heartbeat 2m ago)",
+        "vi": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 2m)",
+        "en_cells": 53,
+        "vi_cells": 73
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "5m"
+        },
+        "en": "Not answering · process alive (last heartbeat 5m ago)",
+        "vi": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 5m)",
+        "en_cells": 53,
+        "vi_cells": 73
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "21m"
+        },
+        "en": "Not answering · process alive (last heartbeat 21m ago)",
+        "vi": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 21m)",
+        "en_cells": 54,
+        "vi_cells": 74
+      },
+      {
+        "key": "wire.session_status.wedged_heartbeat",
+        "params": {
+          "duration": "1000000m"
+        },
+        "en": "Not answering · process alive (last heartbeat 1000000m ago)",
+        "vi": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây 1000000m)",
+        "en_cells": 59,
+        "vi_cells": 79
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 0
+        },
+        "en": "0 subagents queued",
+        "vi": "0 tác nhân con chờ chạy",
+        "en_cells": 18,
+        "vi_cells": 23
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 1
+        },
+        "en": "1 subagent queued",
+        "vi": "1 tác nhân con chờ chạy",
+        "en_cells": 17,
+        "vi_cells": 23
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 2
+        },
+        "en": "2 subagents queued",
+        "vi": "2 tác nhân con chờ chạy",
+        "en_cells": 18,
+        "vi_cells": 23
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 5
+        },
+        "en": "5 subagents queued",
+        "vi": "5 tác nhân con chờ chạy",
+        "en_cells": 18,
+        "vi_cells": 23
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 21
+        },
+        "en": "21 subagents queued",
+        "vi": "21 tác nhân con chờ chạy",
+        "en_cells": 19,
+        "vi_cells": 24
+      },
+      {
+        "key": "wire.session_status.delegating_queued",
+        "params": {
+          "count": 1000000
+        },
+        "en": "1,000,000 subagents queued",
+        "vi": "1.000.000 tác nhân con chờ chạy",
+        "en_cells": 26,
+        "vi_cells": 31
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 0
+        },
+        "en": "0 queued",
+        "vi": "0 chờ chạy",
+        "en_cells": 8,
+        "vi_cells": 10
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 1
+        },
+        "en": "1 queued",
+        "vi": "1 chờ chạy",
+        "en_cells": 8,
+        "vi_cells": 10
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 2
+        },
+        "en": "2 queued",
+        "vi": "2 chờ chạy",
+        "en_cells": 8,
+        "vi_cells": 10
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 5
+        },
+        "en": "5 queued",
+        "vi": "5 chờ chạy",
+        "en_cells": 8,
+        "vi_cells": 10
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 21
+        },
+        "en": "21 queued",
+        "vi": "21 chờ chạy",
+        "en_cells": 9,
+        "vi_cells": 11
+      },
+      {
+        "key": "wire.session_status.delegating_queued_addend",
+        "params": {
+          "count": 1000000
+        },
+        "en": "1,000,000 queued",
+        "vi": "1.000.000 chờ chạy",
+        "en_cells": 16,
+        "vi_cells": 18
+      }
+    ],
+    "rtl": "not applicable: Vietnamese is LTR",
+    "overflow": "Source sidecar specifies no fixed cell cap. At count 1, queued is 23 cells (en 17), addend 10 (en 8). Heartbeat at duration 5m is 73 cells (en 53): longer copy remains, but no fixed-budget violation is established. No rendered UI check performed in this delta language audit."
+  },
+  "note": "Retains unchanged round-1 audit by delegation; certifies only the three remediation keys and directly touched term consistency, not a fresh audit of all namespace keys. Round-1 finding provenance and translator identity anthropic/claude-opus-5-5 supplied by manager."
+}

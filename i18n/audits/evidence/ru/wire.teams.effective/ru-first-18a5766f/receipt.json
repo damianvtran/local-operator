@@ -1,0 +1,36 @@
+{
+  "locale": "ru",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "context_sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417",
+  "target_sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "effective-reasons-ru",
+    "session": "9588c120c894",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state model declaration",
+    "fallback_used": false,
+    "date": "2026-11-19"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "effective-reasons-ru-audit",
+    "session": "18a5766f5b20",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "9588c120c894",
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "note": "First independent audit only: 9/9 passed, 0 findings. Scratch record: sessions/18a5766f5b20/scratchpad/ru-audit/record.json. Second independent audit and runtime/rendered gates remain; not shipped.",
+  "audit_record": {
+    "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/record.json",
+    "sha256": "b8e319ca2fe46021b9ec1a279898607bf7cf2f321123edfba7766e91b3ec160b"
+  }
+}

@@ -10,6 +10,7 @@
   "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock ने {region} में ये AWS क्रेडेंशियल्स अस्वीकार कर दिए।",
   "wire.errors.bedrock.iam_denied": "आपकी AWS पहचान {action} को {resource} पर कॉल करने के लिए अधिकृत नहीं है। अपने AWS एडमिन से IAM में यह अनुमति देने को कहें; दूसरे मॉडल अब भी काम कर सकते हैं।",
   "wire.errors.bedrock.input_invalid": "यह Amazon Bedrock कनेक्शन अनुरोध मान्य नहीं है: {field} मौजूद नहीं है या गलत फ़ॉर्मैट में है।",
+  "wire.errors.bedrock.invalid_api_key": "Amazon Bedrock ने {region} में API कुंजी अस्वीकार कर दी: यह गलत प्रारूप में है या अमान्य है। जाँचें कि पूरी कुंजी कॉपी हुई है, या नई कुंजी बनाएँ।",
   "wire.errors.bedrock.invalid_connection": "यह Amazon Bedrock कनेक्शन मान्य नहीं है ({detail})। Bedrock को फिर से कनेक्ट करें।",
   "wire.errors.bedrock.model_access": "इस AWS खाते के पास {model} की पहुँच {region} में नहीं है। Amazon Bedrock कंसोल में इस मॉडल की पहुँच चालू करें, या कोई दूसरा मॉडल चुनें।",
   "wire.errors.bedrock.model_unavailable": "{model} मॉडल {region} में उपलब्ध नहीं है। इसका global. या क्षेत्रीय इन्फ़रेंस प्रोफ़ाइल (जैसे us.) आज़माएँ, या कोई दूसरा क्षेत्र चुनें।",

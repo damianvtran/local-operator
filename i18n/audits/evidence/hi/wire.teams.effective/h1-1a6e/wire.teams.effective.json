@@ -1,0 +1,11 @@
+{
+  "wire.teams.effective.team_missing": "{role} नाम की कोई टीम नहीं मिली।",
+  "wire.teams.effective.registry_unreadable": "एजेंट रजिस्ट्री पढ़ी नहीं जा सकी। एजेंट की परिभाषाएँ जाँचें और फिर से कोशिश करें।",
+  "wire.teams.effective.config_unreadable": "मॉडल की सेटिंग पढ़ी नहीं जा सकीं। अपनी सेटिंग जाँचें और फिर से कोशिश करें।",
+  "wire.teams.effective.tier_invalid_value": "subagents.models.{tier} का मान अमान्य है। इसे provider/model के रूप में या मॉडल मैपिंग के तौर पर सेट करें।",
+  "wire.teams.effective.tier_invalid_mapping": "subagents.models.{tier} की मैपिंग अमान्य है। model में provider/model के रूप में मान दें और, चाहें तो, effort में समर्थित तर्क-प्रयास का स्तर दें।",
+  "wire.teams.effective.tier_unconfigured": "subagents.models.{tier} में कोई मॉडल सेट नहीं है।",
+  "wire.teams.effective.tier_invalid_selector": "subagents.models.{tier} में मॉडल चुनने के लिए दिया गया मान अमान्य है। provider/model के रूप में मान दें।",
+  "wire.teams.effective.model_unresolvable": "मॉडल {selector} पहचाना नहीं जा सका। मॉडल चुनने के लिए दिए गए मान और प्रोवाइडर की सेटिंग जाँचें।",
+  "wire.teams.effective.unavailable": "टीम का यह सदस्य उपलब्ध नहीं है। इसके मॉडल की सेटिंग और एजेंट की परिभाषा जाँचें।"
+}

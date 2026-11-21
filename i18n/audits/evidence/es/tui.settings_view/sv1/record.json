@@ -1,0 +1,213 @@
+{
+  "locale": "es",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "cae0a8dce39c885c9feed8550ab3fd193341c0f8b259e61ce7635f69307e6a73",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Identity supplied by delegation; not independently observed."
+  },
+  "auditor": {
+    "agent": "translation-auditor / settings-audit-es / 11339b9b9463",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "findings": 2,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "keys_read": 21,
+  "findings": [
+    {
+      "id": "ES-1",
+      "severity": "minor",
+      "key": "tui.settings_view.editor.contract_unset",
+      "current": "{save_key} guarda · {cancel_key} cancela · vacío lo quita",
+      "proposed": "{save_key} guarda · {cancel_key} cancela · borra para quitar",
+      "reason": "«Vacío lo quita» reads as an unnatural subject-predicate fragment; a direct tú instruction naturally communicates clearing the field. The longer clause is safe under the verified full-hint-to-contract fallback."
+    },
+    {
+      "id": "ES-2",
+      "severity": "minor",
+      "key": "tui.settings_view.too_short",
+      "current": "terminal demasiado baja para los ajustes — hazla más alta",
+      "proposed": "terminal muy baja — aumenta la altura",
+      "reason": "The warning expands from 48 to 57 cells and clips the resize instruction where English fits; the proposed 37-cell form preserves the height remedy."
+    }
+  ],
+  "verification": {
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "pythonpath": "/Users/damian/local-operator/.worktrees/i18n-settings-view",
+    "head": "56781d884f27cb85551746e9bccf7a3c81a17ab6",
+    "key_parity": true,
+    "argument_name_kind_order_parity": true,
+    "complete_cldr_categories": [
+      "many",
+      "one",
+      "other"
+    ],
+    "explicit_numeric_plural_selectors": false,
+    "render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "extra_many_count": 1000000,
+    "rendered_key_count_per_count": 21,
+    "parameters": {
+      "save_key": "enter",
+      "cancel_key": "esc",
+      "browse_keys": "↑↓",
+      "complete_key": "tab",
+      "command": "/team",
+      "scope": "al instante"
+    },
+    "bidi_controls": 0,
+    "rtl": "Not applicable: Spanish is LTR. No Urdu locale reviewed.",
+    "rendered_ui_check": false,
+    "maxCells": "All bounded strings fit except contract_unset (43 vs23), whose verified production fallback uses contract (26), not truncation. suggest_long/medium/short: 50 > 39 > 23 cells, excluding two-space indent.",
+    "widths": [
+      {
+        "key": "tui.settings_view.editor.contract",
+        "en_cells": 25,
+        "es_cells": 26,
+        "maxCells": null
+      },
+      {
+        "key": "tui.settings_view.editor.contract_unset",
+        "en_cells": 42,
+        "es_cells": 43,
+        "maxCells": 23
+      },
+      {
+        "key": "tui.settings_view.editor.suggest_long",
+        "en_cells": 50,
+        "es_cells": 50,
+        "maxCells": null
+      },
+      {
+        "key": "tui.settings_view.editor.suggest_medium",
+        "en_cells": 38,
+        "es_cells": 39,
+        "maxCells": null
+      },
+      {
+        "key": "tui.settings_view.editor.suggest_short",
+        "en_cells": 22,
+        "es_cells": 23,
+        "maxCells": 23
+      },
+      {
+        "key": "tui.settings_view.pane.agents_empty",
+        "en_cells": 20,
+        "es_cells": 27,
+        "maxCells": 38
+      },
+      {
+        "key": "tui.settings_view.pane.empty_hint",
+        "en_cells": 29,
+        "es_cells": 28,
+        "maxCells": 38
+      },
+      {
+        "key": "tui.settings_view.pane.more",
+        "en_cells": 8,
+        "es_cells": 7,
+        "maxCells": 16
+      },
+      {
+        "key": "tui.settings_view.pane.providers_empty",
+        "en_cells": 22,
+        "es_cells": 25,
+        "maxCells": 38
+      },
+      {
+        "key": "tui.settings_view.pane.providers_header",
+        "en_cells": 9,
+        "es_cells": 11,
+        "maxCells": 20
+      },
+      {
+        "key": "tui.settings_view.pane.tab_agents",
+        "en_cells": 6,
+        "es_cells": 7,
+        "maxCells": 10
+      },
+      {
+        "key": "tui.settings_view.pane.tab_teams",
+        "en_cells": 5,
+        "es_cells": 7,
+        "maxCells": 10
+      },
+      {
+        "key": "tui.settings_view.pane.teams_empty",
+        "en_cells": 19,
+        "es_cells": 27,
+        "maxCells": 38
+      },
+      {
+        "key": "tui.settings_view.row.add_chain",
+        "en_cells": 13,
+        "es_cells": 19,
+        "maxCells": null
+      },
+      {
+        "key": "tui.settings_view.row.add_hop",
+        "en_cells": 11,
+        "es_cells": 17,
+        "maxCells": null
+      },
+      {
+        "key": "tui.settings_view.scope.live",
+        "en_cells": 4,
+        "es_cells": 11,
+        "maxCells": 14
+      },
+      {
+        "key": "tui.settings_view.scope.never",
+        "en_cells": 5,
+        "es_cells": 5,
+        "maxCells": 14
+      },
+      {
+        "key": "tui.settings_view.scope.new_launch",
+        "en_cells": 10,
+        "es_cells": 12,
+        "maxCells": 14
+      },
+      {
+        "key": "tui.settings_view.scope.new_sessions",
+        "en_cells": 12,
+        "es_cells": 12,
+        "maxCells": 14
+      },
+      {
+        "key": "tui.settings_view.section.takes_effect",
+        "en_cells": 25,
+        "es_cells": 22,
+        "maxCells": null
+      },
+      {
+        "key": "tui.settings_view.too_short",
+        "en_cells": 48,
+        "es_cells": 57,
+        "maxCells": null
+      }
+    ]
+  },
+  "terminology_citations": [
+    "i18n/style-guides/es.md:8-18 tú, infinitive action labels, sentence case",
+    "i18n/style-guides/es.md:22-29 preserved technical literals and Spanish common nouns",
+    "i18n/style-guides/es.md:47 sesión; i18n/glossary.md:60 agente; :77 equipo",
+    "i18n/style-guides/es.md:98-102 plural one/many/other",
+    "i18n/glossary.md:25-29 commands/identifiers; :135 plural inventory; :140 placeholders",
+    "wire.settings.agents.title; wire.settings.hub_auto_update_teams.label; wire.settings.retry_modelfallback.help; wire.settings.session_scratchpad.description",
+    "tui.small.settings_view.hop_count; tui.small.settings_view.chain_row_hint; tui.small.settings_view.overflow_more; tui.small.settings_view.title"
+  ],
+  "note": "Independent side-by-side semantic audit of all 21 source/target/context keys. No unsanctioned English prose: enter/esc/tab and /team are preserved runtime literals per glossary. Lowercase finite key-hint verbs follow key-as-subject context rather than action-button infinitive convention; add rows correctly use infinitives. Generic singular sesión nueva is acceptable within the 14-cell scope budget. Material width expansions: agents_empty 20→27, teams_empty 19→27 remain under38; add_chain13→19 and add_hop11→17 have no hard cap, optional shorter forms + añadir cadena / + añadir salto. No rendered-screen evidence claimed. Repo never edited; only this scratch receipt written."
+}

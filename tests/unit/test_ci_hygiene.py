@@ -3962,8 +3962,17 @@ def _arm_merge_gate(
     active_response: str = "",
     know_run_exists: bool = False,
     fast_rc: int = 0,
+    makefile: Path | None = None,
+    cwd: Path | None = None,
+    fast_helper: str | None = "stub",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the REAL `make merge-gate` target with a stubbed `gh` on PATH.
+
+    `makefile`/`cwd` default to the repo Makefile run from `tmp_path` (not a git
+    checkout, so helpers fall back to the Makefile's directory). `fast_helper`
+    is the FAST_GATE_HELPER override: "stub" (default) for the recording stub,
+    a path to point it elsewhere, or None for no override at all.
 
     `make` runs it, not the extracted recipe text: `$$` is make's escape for a
     literal `$`, so a shell handed that text directly would read every variable
@@ -4009,18 +4018,23 @@ def _arm_merge_gate(
         "STUB_ACTIVE_RESPONSE": active_response,
         "STUB_FAST_RC": str(fast_rc),
         "STUB_FAST_ARGV": str(tmp_path / "fast.argv"),
+        **(extra_env or {}),
     }
     proc = subprocess.run(
         [
             "make",
             "-f",
-            str(MAKEFILE),
+            str(makefile or MAKEFILE),
             "merge-gate",
             "PR=3631",
-            f"FAST_GATE_HELPER={fast_stub}",
+            *(
+                []
+                if fast_helper is None
+                else [f"FAST_GATE_HELPER={fast_stub if fast_helper == 'stub' else fast_helper}"]
+            ),
             *(["I_KNOW_A_GATE_RUN_EXISTS=1"] if know_run_exists else []),
         ],
-        cwd=str(tmp_path),
+        cwd=str(cwd or tmp_path),
         env=env,
         capture_output=True,
         text=True,
@@ -4028,6 +4042,72 @@ def _arm_merge_gate(
         check=False,
     )
     return proc, (log.read_text().splitlines() if log.exists() else [])
+
+
+def _makefile_copy(tmp_path: Path) -> Path:
+    """A byte copy of the repo Makefile in a directory with no scripts/ beside it."""
+    copy = tmp_path / "elsewhere" / "Makefile"
+    copy.parent.mkdir()
+    copy.write_bytes(MAKEFILE.read_bytes())
+    return copy
+
+
+def test_merge_gate_from_a_makefile_copy_resolves_helpers_from_the_repo_root(
+    tmp_path: Path,
+) -> None:
+    """`make -f <copy> merge-gate` inside the checkout uses the checkout's helpers.
+
+    Before the fix both helpers resolved next to the Makefile copy: the missing
+    advisory read as a lookup outage ("lookup unavailable … proceeding to arm
+    without duplicate detection") and the missing fast-gate helper as an unmet
+    precondition. Neither FAST_GATE_HELPER nor any helper path is overridden.
+    """
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="synthetic",
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        makefile=_makefile_copy(tmp_path),
+        cwd=MAKEFILE.parent,
+        fast_helper=None,
+        # The REAL fast-gate helper runs here; keep it off the network: a
+        # synthetic token against a closed local port is "could not decide"
+        # (rc 3), which warns and arms by design and proves the helper was FOUND.
+        extra_env={"GH_TOKEN": "synthetic-token", "GITHUB_API_URL": "http://127.0.0.1:9"},
+    )
+    assert "can't open file" not in proc.stderr, proc.stderr
+    assert "lookup unavailable" not in proc.stderr, proc.stderr
+    assert "WARNING: could not confirm fast CI locally" in proc.stderr, proc.stderr
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert sum("--status" in call for call in calls) == 5, calls
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
+
+
+@pytest.mark.parametrize("missing", ["fast_gate_check.py", "merge_gate_advisory.py"])
+def test_merge_gate_refuses_when_a_helper_is_missing(tmp_path: Path, missing: str) -> None:
+    """A missing helper is a named refusal before any `gh` label write, never a degraded arm."""
+    if missing == "fast_gate_check.py":
+        # Repo Makefile (advisory present), fast-gate helper pointed at nothing.
+        absent = tmp_path / "nowhere" / "fast_gate_check.py"
+        stub: dict[str, Any] = {"fast_helper": str(absent)}
+    else:
+        # A copy run outside any checkout falls back to its own directory, which
+        # has no scripts/; the fast-gate stub override is still present.
+        copy = _makefile_copy(tmp_path)
+        absent = copy.parent / "scripts" / "merge_gate_advisory.py"
+        stub = {"makefile": copy}
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="synthetic",
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        **stub,
+    )
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert f"make merge-gate: helper not found: {absent}" in proc.stderr, proc.stderr
+    assert "no label changed" in proc.stderr
+    assert "WARNING" not in proc.stderr and "re-armed" not in proc.stdout
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic"]
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls), calls
+    assert not (tmp_path / "label-transitions.jsonl").exists()
 
 
 def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:

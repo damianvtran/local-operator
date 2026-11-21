@@ -10,6 +10,7 @@
   "wire.errors.bedrock.credentials_rejected": "Amazon Bedrock đã từ chối thông tin xác thực AWS này tại {region}.",
   "wire.errors.bedrock.iam_denied": "Danh tính AWS của bạn không được phép gọi {action} trên {resource}. Hãy nhờ quản trị viên AWS cấp quyền này trong IAM; các mô hình khác có thể vẫn hoạt động.",
   "wire.errors.bedrock.input_invalid": "Yêu cầu kết nối Amazon Bedrock này không hợp lệ: {field} bị thiếu hoặc sai định dạng.",
+  "wire.errors.bedrock.invalid_api_key": "Amazon Bedrock đã từ chối khóa API tại {region}: khóa sai định dạng hoặc không hợp lệ. Hãy kiểm tra xem đã sao chép toàn bộ khóa chưa, hoặc tạo khóa mới.",
   "wire.errors.bedrock.invalid_connection": "Kết nối Amazon Bedrock này không hợp lệ ({detail}). Hãy kết nối lại Bedrock.",
   "wire.errors.bedrock.model_access": "Tài khoản AWS này không có quyền truy cập {model} tại {region}. Hãy bật quyền truy cập mô hình trong bảng điều khiển Amazon Bedrock, hoặc chọn mô hình khác.",
   "wire.errors.bedrock.model_unavailable": "{model} không khả dụng tại {region}. Hãy thử hồ sơ suy luận global. hoặc theo khu vực của mô hình (ví dụ us.), hoặc một khu vực khác.",

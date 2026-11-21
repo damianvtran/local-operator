@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "غیر مخاطب کی فی گھنٹہ حد",
   "wire.settings.team_bridge_session.help": "نئے پیغامات پر جس سیشن کو جگایا جا سکے؛ خالی = صرف بیج۔",
   "wire.settings.team_bridge_session.label": "CoS سیشن",
+  "wire.settings.team_bridge_hold_release.label": "کام کی درخواستیں روکیں",
+  "wire.settings.team_bridge_hold_release.help": "نئے کام کی کچھ درخواستیں روکی جاتی ہیں تاکہ آپ انہیں پہنچائیں یا مسترد کریں۔ آپ کے پہنچائے بغیر ایجنٹ تک کچھ نہیں پہنچتا۔ بند ہونے پر ان سے انکار ہوتا ہے۔",
   "wire.settings.tool_approval_mode.choice.ask.description": "لکھنے/چلانے والے ٹولز سے پہلے پوچھیں",
   "wire.settings.tool_approval_mode.choice.ask.label": "ask",
   "wire.settings.tool_approval_mode.choice.auto.description": "بغیر پوچھے چلائیں",
@@ -885,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 گھنٹے",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 گھنٹے",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "اتنی دیر بعد عارضی چیٹس حذف کریں",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "عارضی چیٹ کتنی دیر غیر فعال رہ سکتی ہے اس سے پہلے کہ حذف ہو جائے۔ اسکرین پر رہنے کا وقت، چلتا ہوا کام یا کھلا سوال غیر فعالی میں شمار نہیں ہوتا۔"
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "عارضی چیٹ کتنی دیر غیر فعال رہ سکتی ہے اس سے پہلے کہ حذف ہو جائے۔ اسکرین پر رہنے کا وقت، چلتا ہوا کام یا کھلا سوال غیر فعالی میں شمار نہیں ہوتا۔",
+  "wire.settings.mesh_moves.title": "سیشن منتقلی",
+  "wire.settings.mesh_moves.description": "دوسری ڈیوائس پر منتقل کی گئی گفتگو اپنے ساتھ کیا لے جاتی ہے۔ ہر منتقلی پر پڑھا جاتا ہے، اس لیے تبدیلی اگلی منتقلی پر لاگو ہوتی ہے۔",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "فی منتقلی ورکنگ فائلوں کی حد (بائٹس)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "ورکنگ فائل ڈیٹا (بنڈل شدہ commits کے ساتھ staged، unstaged اور untracked فائلیں) کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیجتی ہے یا اس سے قبول کرتی ہے۔ اس سے زیادہ ہونے پر منتقلی مسترد ہو جاتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔",
+  "wire.settings.mesh_move_working_set_roots.label": "وہ فولڈر جو منتقل شدہ ریپوزٹریز وصول کر سکتے ہیں",
+  "wire.settings.mesh_move_working_set_roots.help": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کاموں سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔"
 }

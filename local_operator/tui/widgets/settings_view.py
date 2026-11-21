@@ -55,10 +55,11 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
+from local_operator.i18n.keys import tui_settings_view as _sv
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
-from local_operator.settings_io import Kind, Section, Setting
+from local_operator.settings_io import Kind, Scope, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
@@ -79,6 +80,39 @@ _t = display_tr("tui.small")
 _t_sound = display_tr("tui.sound")
 _raw_t = tr("tui.small")
 _record_t = tr_record("tui.small")
+# This view's residual chrome (too-short notice, section scope tag, cascade add
+# rows, editor key hints, the side pane's tabs and empty states) lives in its
+# OWN namespace rather than in `tui.small`: adding keys to `tui.small` would
+# stale every locale's carried audit of it, whereas a new namespace falls back
+# to English until its own translation/audit wave lands. Key names and
+# commands are placeholders classified technical, so they stay verbatim (and
+# bidi-isolated as one island in RTL locales) while the prose around them is
+# translated. Every lookup resolves at PAINT time, so a live language change
+# repaints without a refresher.
+#
+# `browse_keys` (`↑↓`) is deliberately NOT technical. The display boundary
+# (`i18n.display.isolated_status_text`) admits only printable ASCII inside a
+# technical span — a shared validation contract that also guards against
+# smuggled controls, so it is not widened for one glyph pair. Nor does it need
+# to be: the arrows are bidi-neutral and not Bidi_Mirrored, so in RTL prose
+# they at worst lay out as `↓↑`, which names the same two keys. Declaring them
+# technical made every suggestion hint raise in `ur` (PR #4361 review R2).
+_t_sv = display_tr(
+    "tui.settings_view",
+    technical_params=("save_key", "cancel_key", "complete_key", "command"),
+)
+#: The same namespace resolved to PLAIN text, for a word that is substituted
+#: into another catalogued sentence. Display projection must happen exactly
+#: once, on the outermost string: a projected word carries bidi isolates in
+#: `ur`, and the enclosing sentence's projection rejects control characters
+#: (PR #4361 review R1 — `/settings` crashed on open in Urdu).
+_raw_sv = tr("tui.settings_view")
+#: Key names the editor hints mention. Literal key labels, not prose: the
+#: same words the footer legend and every keymap print.
+_KEY_SAVE = "enter"  # i18n: ignore key name
+_KEY_CANCEL = "esc"  # i18n: ignore key name
+_KEY_BROWSE = "↑↓"  # i18n: ignore key glyphs
+_KEY_COMPLETE = "tab"  # i18n: ignore key name
 
 
 def _paint(text: str, *, source_locale: str | None = None) -> str:
@@ -508,14 +542,37 @@ _BODY_MIN_ROWS = 1
 #: What the detail line says when even the 1-row sheds cannot free a
 #: body row (terminal ≲ 14). A blank band here would repeat #431 at a
 #: smaller size; naming the constraint is the other option the issue
-#: offered, and it is the one that stays monotonic.
-_TOO_SHORT = "terminal too short for settings — make it taller"
+#: offered, and it is the one that stays monotonic. The sentence is the
+#: ``tui.settings_view.too_short`` message, resolved in ``_paint_detail`` at
+#: paint time so a language change reaches it.
 
 #: The right-hand pane's two read-only tabs. Read-only on purpose: teams and
 #: agents are configured in files, and a page that showed an editable-looking
 #: roster it could not write would be worse than one that admits the boundary.
 _PANE_TEAMS = "teams"
 _PANE_AGENTS = "agents"
+
+
+def _more(count: int) -> str:
+    """The pane's `… N more` spill count, in the active language.
+
+    ``shown`` is raw digits so every locale prints the same number the pane's
+    shedding arithmetic counted; ``count`` only selects the plural form.
+    """
+    return _t_sv(_sv.pane_more(count=count, shown=str(count)))
+
+
+#: The pane ids above are STATE (compared, cycled); these are what the tab row
+#: paints, translated at paint time.
+_PANE_LABELS = {_PANE_TEAMS: _sv.pane_tab_teams, _PANE_AGENTS: _sv.pane_tab_agents}
+#: Scope words for the section header's `takes effect:` tag. `Scope.value` is
+#: the registry's English identifier (also read by `lop config`), so the paint
+#: maps it to a message instead of printing the value.
+_SCOPE_WORDS = {
+    Scope.LIVE: _sv.scope_live,
+    Scope.NEW_SESSIONS: _sv.scope_new_sessions,
+    Scope.NEW_LAUNCH: _sv.scope_new_launch,
+}
 
 
 class _ChromeStatic(Static):
@@ -1022,6 +1079,12 @@ class SettingsView(Vertical):
         #: path that could disagree with the config.
         self._rows: list[_Row] = []
         self._selected = 0
+        #: Where the LATEST programmatic body scroll is headed while it waits
+        #: for the refresh it was deferred to, and the generation that owns
+        #: it. See :meth:`_scroll_body_to` for why the movers must decide
+        #: against this rather than the applied offset.
+        self._scroll_pending_y: int | None = None
+        self._scroll_generation = 0
         #: Whether the detail band is currently rendering a WRAPPED two-line
         #: explanation (agent-messages rows on narrow terminals, D4). Tracked
         #: so the band's padding is touched only when the MODE flips — the
@@ -1745,7 +1808,7 @@ class SettingsView(Vertical):
         height = self._body_rows()
         if height <= 0:
             return
-        offset = self._body.scroll_offset.y
+        offset = self._body_offset_y()
         # The cursor's claim is on its whole VISUAL UNIT, not on its one line.
         # Some settings carry an ATTACHED trailing row that only makes sense
         # beside the row it belongs to — today the cascade's `empty` line, which
@@ -1786,7 +1849,7 @@ class SettingsView(Vertical):
             while top > 0 and self._rows[top - 1].kind == "header":
                 top -= 1
         if top < offset:
-            self._body.scroll_to(y=top, animate=False, immediate=immediate)
+            self._scroll_body_to(top, immediate=immediate)
         elif bottom >= offset + height:
             # The SELECTED row still wins when the unit is taller than the
             # viewport: an explanation painted without the row it explains is
@@ -1795,7 +1858,53 @@ class SettingsView(Vertical):
             # attached row already fits, so a page that was fine does not move.
             target = max(bottom - height + 1, 0)
             target = min(target, self._selected)
-            self._body.scroll_to(y=target, animate=False, immediate=immediate)
+            self._scroll_body_to(target, immediate=immediate)
+
+    def _body_offset_y(self) -> int:
+        """The body offset the NEXT frame will show: a pending move, else the applied one."""
+        if self._scroll_pending_y is not None:
+            return self._scroll_pending_y
+        return self._body.scroll_offset.y
+
+    def _scroll_body_to(self, y: int, *, immediate: bool = False) -> None:
+        """Move the body to ``y``, now or after the next refresh, newest move wins.
+
+        WHY NOT ``scroll_to(immediate=False)`` DIRECTLY. Textual defers that to
+        ``call_after_refresh`` and only then updates ``scroll_offset`` (and
+        ``scroll_target_y``), so a second mover arriving before the refresh
+        decided against the OLD offset. `end` then `home` in one batch was the
+        visible case: `home` read 0, judged the top row already in view and
+        scheduled nothing, then the queued `end` landed and left the cursor on
+        the first row with the viewport on the last page (`305 == 0`, main
+        run 44674031880). One `pilot.pause()` does not promise a refresh on a
+        loaded runner, and a fast typist or a remote terminal batches keys the
+        same way, so this was a product race the test merely exposed.
+
+        The fix keeps the deferral (the next frame still carries cursor and
+        offset together, and the body's virtual size after a repaint is only
+        settled by that refresh) but records the destination so
+        :meth:`_body_offset_y` answers from it, and tags each move with a
+        generation so a superseded deferred move is dropped rather than applied
+        over a newer one. An immediate move bumps the generation too, so a
+        stale deferred move can never land after it either.
+        """
+        self._scroll_generation += 1
+        generation = self._scroll_generation
+        if immediate:
+            self._scroll_pending_y = None
+            self._body.scroll_to(y=y, animate=False, immediate=True)
+            return
+        self._scroll_pending_y = y
+
+        def apply() -> None:
+            if generation != self._scroll_generation:
+                return
+            self._scroll_pending_y = None
+            self._body.scroll_to(y=y, animate=False, immediate=True)
+
+        # On the BODY, as Textual's own deferred path does, so the move lands
+        # after the same refresh it always did.
+        self._body.call_after_refresh(apply)
 
     def _attached_bottom(self, index: int) -> int:
         """Last row index of the visual unit that starts at ``index``.
@@ -2158,13 +2267,13 @@ class SettingsView(Vertical):
             if self._rows[index].kind not in ("choice", "hop", "hop_add", "note"):
                 break
             last = index
-        offset = self._body.scroll_offset.y
+        offset = self._body_offset_y()
         if last >= offset + height:
             # Prefer keeping the OWNING row on screen when the group is taller
             # than the viewport: the choices are meaningless without the label
             # that says what is being chosen.
             target = min(self._selected, last - height + 1)
-            self._body.scroll_to(y=max(target, 0), animate=False)
+            self._scroll_body_to(max(target, 0))
 
     def action_reset(self) -> None:
         """``r`` — put the highlighted row back to its shipped default.
@@ -4028,9 +4137,15 @@ class SettingsView(Vertical):
             # new point on that timeline. A fourth member would have to be
             # handled by every consumer of `Scope` to say one thing about one
             # section.
-            scope_word = "never" if row.section.name == "retired" else row.section.scope.value
-            full = f"takes effect: {scope_word}"
-            short = scope_word
+            scope_msg = (
+                _sv.scope_never()
+                if row.section.name == "retired"
+                else _SCOPE_WORDS[row.section.scope]()
+            )
+            # The PLAIN word goes into the sentence; each painted string is
+            # projected once (see `_raw_sv`).
+            full = _t_sv(_sv.section_takes_effect(scope=_raw_sv(scope_msg)))
+            short = _t_sv(scope_msg)
             # LEFT-aligned on one shared column, not right-aligned against each
             # title. Right-aligning made the tag's position depend on the
             # title's length, so `Model` and `Failover and retry` — two headers
@@ -4165,7 +4280,7 @@ class SettingsView(Vertical):
             if editing:
                 line.append_text(self._editor_text())
             else:
-                label = "+ add a hop" if row.kind == "hop_add" else "+ add a chain"
+                label = _t_sv(_sv.row_add_hop() if row.kind == "hop_add" else _sv.row_add_chain())
                 line.append(label, style=base if selected else dim)
             return line
 
@@ -4340,7 +4455,8 @@ class SettingsView(Vertical):
         # `clear to unset` is offered only where clearing MEANS something
         # (#387's deferred U6): on a setting whose empty string is a real value
         # the clause advertised a behaviour the row does not have.
-        contract = "  enter saves · esc cancels"
+        keys = {"save_key": _KEY_SAVE, "cancel_key": _KEY_CANCEL}
+        contract = "  " + _t_sv(_sv.editor_contract(**keys))
         # `setting` was resolved above the ghost, once, for the whole editor.
         # When a suggestion dropdown is live the contract names the browse and
         # complete keys, SHORTENED so it survives the value column at 100 cols
@@ -4354,16 +4470,17 @@ class SettingsView(Vertical):
         # A widest-first ladder keeps the fuller inline form where it fits.
         if self._suggest_rows():
             room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
+            browse = {"browse_keys": _KEY_BROWSE, "complete_key": _KEY_COMPLETE}
             for candidate in (
-                "  ↑↓ suggestions · tab completes · enter saves · esc",
-                "  ↑↓ browse · tab complete · enter saves",
-                "  ↑↓ · tab · enter saves",
+                "  " + _t_sv(_sv.editor_suggest_long(**browse, **keys)),
+                "  " + _t_sv(_sv.editor_suggest_medium(**browse, save_key=_KEY_SAVE)),
+                "  " + _t_sv(_sv.editor_suggest_short(**browse, save_key=_KEY_SAVE)),
             ):
                 if cell_len(candidate) <= room:
                     contract = candidate
                     break
         elif setting is not None and setting.empty_unsets:
-            full = "  enter saves · esc cancels · clear to unset"
+            full = "  " + _t_sv(_sv.editor_contract_unset(**keys))
             room = self._list_width() - _VALUE_COLUMN - cell_len(editor.plain)
             if cell_len(full) <= room:
                 contract = full
@@ -4721,7 +4838,7 @@ class SettingsView(Vertical):
             # into too-short, so there is never a disarmed app behind this
             # line. A string that must stay legible at every future width is a
             # weaker guarantee than a state that cannot occur.
-            text.append(_TOO_SHORT, style=faint)
+            text.append(_t_sv(_sv.too_short()), style=faint)
         elif self._capture is not None:
             # Above everything but the too-short constraint: while a row is
             # listening, the app has no hotkeys at all, so what this row says
@@ -5518,7 +5635,7 @@ class SettingsView(Vertical):
         # Each line is a LIST of styled segments, because a provider row is two
         # inks on one line (the id in `muted`, its state in `faint`) and folding
         # them into a single style loses the distinction the row is built on.
-        header: _PaneLine = [("providers", head)]
+        header: _PaneLine = [(_t_sv(_sv.pane_providers_header()), head)]
         provider_lines: list[_PaneLine] = []
         if self._providers:
             for name, state in self._providers:
@@ -5538,7 +5655,16 @@ class SettingsView(Vertical):
             # the prefix overran the pane by exactly those two cells, which is
             # the one line in the pane that got this wrong (design round 2, D10).
             provider_lines.append(
-                [(f"  {truncate_cells('none logged in — /login <provider>', room - 2)}", dim)]
+                [
+                    (
+                        "  "
+                        + truncate_cells(
+                            _t_sv(_sv.pane_providers_empty(command="/login <provider>")),
+                            room - 2,
+                        ),
+                        dim,
+                    )
+                ]
             )
         # The header and the provider rows stay SEPARATE all the way into
         # `_fit_pane`, which sheds them as a section. Flattening them into one
@@ -5551,7 +5677,8 @@ class SettingsView(Vertical):
         # visible target rather than being a key you have to already know about.
         tabs = Text(no_wrap=True, overflow="ellipsis")
         for pane in (_PANE_TEAMS, _PANE_AGENTS):
-            tabs.append(f"{pane}  ", style=accent if pane == self._pane else dim)
+            tab = _t_sv(_PANE_LABELS[pane]())
+            tabs.append(f"{tab}  ", style=accent if pane == self._pane else dim)
         tabs.append("(←→)", style=faint)
 
         rows = self._teams if self._pane == _PANE_TEAMS else self._agents
@@ -5575,12 +5702,10 @@ class SettingsView(Vertical):
             # command that creates it. "No teams" alone leaves a user unable to
             # tell an empty registry from a broken page.
             verb = "/team" if self._pane == _PANE_TEAMS else "/agent"
-            entries.append(
-                [[(f"  {truncate_cells(f'no {self._pane} configured', room - 2)}", dim)]]
-            )
-            entries.append(
-                [[(f"  {truncate_cells(f'{verb} lists and attaches them', room - 2)}", faint)]]
-            )
+            empty = _sv.pane_teams_empty() if self._pane == _PANE_TEAMS else _sv.pane_agents_empty()
+            hint = _t_sv(_sv.pane_empty_hint(command=verb))
+            entries.append([[(f"  {truncate_cells(_t_sv(empty), room - 2)}", dim)]])
+            entries.append([[(f"  {truncate_cells(hint, room - 2)}", faint)]])
         else:
             # The ROSTER is what gives way, not the caption. `read-only` used to
             # be appended unconditionally and simply fell off the bottom once
@@ -5715,12 +5840,12 @@ class SettingsView(Vertical):
                 # a row each. `providers  … 3 more` is two cells longer than the
                 # header alone and says something true, where the header alone
                 # says the opposite of the truth.
-                return [[("providers", header[0][1]), (f"  … {hidden} more", dim)]]
+                return [[header[0], ("  " + _more(hidden), dim)]]
             if not shown and not hidden:
                 return []
             block = [header, *shown]
             if hidden:
-                block.append([(f"  … {hidden} more", dim)])
+                block.append([("  " + _more(hidden), dim)])
             return block
 
         def roster_block() -> list[_PaneLine]:
@@ -5741,7 +5866,7 @@ class SettingsView(Vertical):
                 # are BUTTONS in the same frame and the same ink, so leading a
                 # statement of fact with the page's own "this row adds one"
                 # glyph made a count read as an affordance (design round 2, D9).
-                block.append([(f"  … {spilled} more", dim)])
+                block.append([("  " + _more(spilled), dim)])
             return block
 
         def painted() -> int:
@@ -5813,12 +5938,33 @@ class SettingsView(Vertical):
             text.append("\n")
         if gap:
             text.append("\n")
-        text.append_text(tabs)
         if roster_collapsed:
             # The count rides on the tab row itself. The tab row keeps its own
             # accent because it still names the live pane; the count follows in
             # `dim` so it reads as a fact rather than as a third tab.
-            text.append(_t(_x.settings_view_overflow_more(spilled=str(spilled))), style=dim)
+            #
+            # Budgeted by cells, because the height arithmetic above counts
+            # this as ONE row: a row wider than the pane wraps onto a second
+            # one nothing paid for and pushes the `read-only` caption out of
+            # the box (es `equipos  agentes  (←→)  … 12 más` is 32 cells
+            # against 31 — PR #4361 QA Q3 / design D3). Widest first: the full
+            # row; then without the `(←→)` key hint, because the count is a
+            # FACT (entries are withheld) and the hint only an accelerator the
+            # footer legend also carries; then the bare tabs, never a wrap.
+            count = _t(_x.settings_view_overflow_more(spilled=str(spilled)))
+            room = self._pane_width()
+            bare = tabs[: len(tabs.plain) - len("(←→)")]
+            bare.rstrip()
+            if cell_len(tabs.plain) + cell_len(count) <= room:
+                text.append_text(tabs)
+                text.append(count, style=dim)
+            elif cell_len(bare.plain) + cell_len(count) <= room:
+                text.append_text(bare)
+                text.append(count, style=dim)
+            else:
+                text.append_text(tabs)
+        else:
+            text.append_text(tabs)
         text.append("\n")
         for segments in roster_block():
             for chunk, style in segments:

@@ -1,0 +1,29 @@
+{
+  "locale": "ru",
+  "namespace": "wire.teams.effective",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "effective-reasons-ru-audit",
+    "session": "18a5766f5b20",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "9588c120c894",
+    "date": "2026-11-19"
+  },
+  "record_reference": {
+    "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/record.json",
+    "sha256": "b8e319ca2fe46021b9ec1a279898607bf7cf2f321123edfba7766e91b3ec160b"
+  },
+  "receipt_verified": {
+    "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/receipt.json",
+    "sha256": "8e06df43849a1626952e5396195b4081d776089ba5ba3189ba5ed2bbe91fbe28"
+  },
+  "actual_execution_log": {
+    "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/append-dry-run.log",
+    "sha256": "8ed2066343b019eac9ff5ac4d29572b6300b6a5e08fa13c9a614ad12808f1441"
+  },
+  "append_dry_run_exit_code": 0,
+  "applied": false,
+  "verification": "Read-back JSON and artifact SHA-256 links verified; target remains byte-identical. Dry-run stdout names i18n/audit-history/ru/wire.teams.effective.json; no apply performed."
+}

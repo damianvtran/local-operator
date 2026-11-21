@@ -205,7 +205,10 @@ class TransferPreflight(BaseModel):
     destination probe's do (``session_transfer_working_set_probe``): per row
     ``clone_check``, ``clone_detail``, ``https_rewrite {url, fetch, push}``,
     ``remedy {run_on, command}``, ``missing_tools[]``, ``markers[]``; per block
-    ``destination_probe {state, missing_tools[], team_bridge?}``.
+    ``destination_probe {state, missing_tools[], team_bridge?, import_granted?}`` and,
+    when the destination has not granted this device ``workset_import`` (#4245 round
+    2), ``import {granted: false, remedy}`` — the files stay and ``remedy`` is the
+    grant command to run on the destination.
     """
 
     session_id: str

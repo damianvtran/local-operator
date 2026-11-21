@@ -1,0 +1,11 @@
+{
+  "wire.teams.effective.team_missing": "Aucune équipe nommée {role} n’a été trouvée.",
+  "wire.teams.effective.registry_unreadable": "Impossible de lire le registre des agents. Vérifiez les définitions des agents et réessayez.",
+  "wire.teams.effective.config_unreadable": "Impossible de lire la configuration du modèle. Vérifiez votre configuration et réessayez.",
+  "wire.teams.effective.tier_invalid_value": "La valeur de subagents.models.{tier} est invalide. Utilisez un sélecteur provider/model ou un objet de configuration de modèle.",
+  "wire.teams.effective.tier_invalid_mapping": "L’objet de configuration à l’emplacement subagents.models.{tier} est invalide. Définissez model sur un sélecteur provider/model et, si nécessaire, effort sur un niveau d’effort de raisonnement pris en charge.",
+  "wire.teams.effective.tier_unconfigured": "Aucun modèle n’est configuré à l’emplacement subagents.models.{tier}.",
+  "wire.teams.effective.tier_invalid_selector": "Le sélecteur de modèle à l’emplacement subagents.models.{tier} est invalide. Utilisez le format provider/model.",
+  "wire.teams.effective.model_unresolvable": "Impossible de déterminer le modèle correspondant à {selector}. Vérifiez le sélecteur de modèle et la configuration du fournisseur.",
+  "wire.teams.effective.unavailable": "Ce membre de l’équipe est indisponible. Vérifiez la configuration de son modèle et sa définition d’agent."
+}

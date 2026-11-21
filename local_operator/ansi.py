@@ -82,7 +82,24 @@ def strip_control_sequences(text: str) -> str:
     return _CONTROL_RE.sub("", text)
 
 
-def sanitize_prompt_line(text: str, limit: int = 500) -> str:
+#: Directional isolate openers (LRI, RLI, FSI) and their terminator (PDI).
+_ISOLATE_OPENERS = frozenset("\u2066\u2067\u2068")
+_PDI = "\u2069"
+
+
+def _balanced_isolates(text: str) -> set[int]:
+    """Indices of isolate openers/PDIs in ``text`` that pair up, properly nested."""
+    stack: list[int] = []
+    paired: set[int] = set()
+    for index, ch in enumerate(text):
+        if ch in _ISOLATE_OPENERS:
+            stack.append(index)
+        elif ch == _PDI and stack:
+            paired.update((stack.pop(), index))
+    return paired
+
+
+def sanitize_prompt_line(text: str, limit: int = 500, *, keep_isolates: bool = False) -> str:
     """Make model-controlled text safe to render as ONE line of a security prompt.
 
     Three separate hazards, and stripping alone covers only the first:
@@ -109,9 +126,32 @@ def sanitize_prompt_line(text: str, limit: int = 500) -> str:
     # in a line whose entire job is to be read literally, so they are replaced
     # with a visible escape rather than dropped — a prompt that silently removes
     # characters is the defect this function's own callers were fixed for.
+    #
+    # ``keep_isolates`` is the one, opt-in exception, for NOTICE lines (never an
+    # approval prompt): the Urdu sign-in notice wraps each command it tells the
+    # user to run in LRI…PDI so an RTL paragraph keeps `/login google-vertex`
+    # whole, and escaping those printed `\u2066/login …\u2069` -- a command
+    # nobody can copy. Only isolates that PAIR UP survive: an isolate confines
+    # its reordering to its own span and a matching PDI ends it, so nothing
+    # outside can be rearranged; an unmatched opener (which would isolate the
+    # rest of the line) or stray PDI is still escaped, and so is every override
+    # (RLO/LRO), embedding, mark and joiner -- the Trojan-source characters.
+    paired = _balanced_isolates(stripped) if keep_isolates else set()
     visible = "".join(
-        ch if unicodedata.category(ch) != "Cf" else ch.encode("unicode_escape").decode("ascii")
-        for ch in stripped
+        (
+            ch
+            if index in paired or unicodedata.category(ch) != "Cf"
+            else ch.encode("unicode_escape").decode("ascii")
+        )
+        for index, ch in enumerate(stripped)
     )
-    flattened = " ".join(visible.split())
-    return flattened[:limit]
+    flattened = " ".join(visible.split())[:limit]
+    if keep_isolates:
+        # The length cut can sever a pair; an opener left open would isolate
+        # everything after it on the terminal row, so drop the orphans (they
+        # are invisible formatting, not content).
+        orphaned = {
+            index for index, ch in enumerate(flattened) if (ch in _ISOLATE_OPENERS or ch == _PDI)
+        } - _balanced_isolates(flattened)
+        flattened = "".join(ch for index, ch in enumerate(flattened) if index not in orphaned)
+    return flattened

@@ -280,6 +280,61 @@ class InvalidGrantError(LoginError):
     """
 
 
+#: Why a grant died, persisted beside the dead-grant tombstone so a surface can
+#: name the cause without another refresh. Only one cause is distinguished
+#: today; every other dead grant carries no reason and reads as a plain
+#: "sign-in expired".
+REAUTH_REASON_SESSION_POLICY = "session_policy"
+
+
+class ReauthRequiredError(InvalidGrantError):
+    """The IdP demands an interactive re-authentication by organisation policy.
+
+    Google answers a refresh with ``invalid_grant`` / ``error_subtype:
+    invalid_rapt`` ("reauth related error") when a Google Workspace admin has
+    turned on **Google Cloud session control**
+    (https://support.google.com/a/answer/9368756): every 1-24 h the user must
+    sign in again for gcloud, the Cloud console and any third-party app that
+    holds a Cloud scope. The refresh token itself is still valid, but no
+    client-side refresh can get past the policy, so for this store it is as
+    dead as any other ``invalid_grant`` -- the only remedies are an interactive
+    sign-in, or an admin exempting the OAuth client (Trusted apps + "Exempt
+    Trusted apps") or relaxing the policy.
+
+    A subclass of :class:`InvalidGrantError` so every dead-grant handler (the
+    tombstone, the cascade, ``/usage``) treats it identically; ``reason`` is
+    the extra fact the user-facing copy uses to explain WHY a sign-in that
+    worked this morning stopped working without anything having been revoked.
+    """
+
+    reason = REAUTH_REASON_SESSION_POLICY
+
+
+def is_reauth_policy_response(body: str) -> bool:
+    """Whether a token-endpoint body is Google's session-control refusal.
+
+    Matched on the structured ``error_subtype`` first; the description text is
+    the fallback because Google documents the subtype only informally and the
+    description (``reauth related error (invalid_rapt)``) is what every
+    observed body carries. Requires the ``invalid_grant`` verdict as well, so a
+    body that merely mentions RAPT in some other error is not promoted.
+    """
+    stripped = (body or "").strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        return False
+    if not isinstance(parsed, dict) or parsed.get("error") != "invalid_grant":
+        return False
+    subtype = parsed.get("error_subtype")
+    if isinstance(subtype, str) and subtype.strip().lower() == "invalid_rapt":
+        return True
+    description = parsed.get("error_description")
+    return isinstance(description, str) and "invalid_rapt" in description.lower()
+
+
 #: OAuth2 token-endpoint error codes that are terminal for a STORED grant
 #: (RFC 6749 SS5.2). Terminal here means "re-presenting the same refresh token
 #: to the same client can never succeed", which is a narrower question than
@@ -511,6 +566,12 @@ def raise_for_refresh_failure(
     classifies the failure without restyling anyone's error string.
     """
     message = message or f"{provider_label} refresh failed ({status_code}): {body}"
+    if is_reauth_policy_response(body):
+        raise ReauthRequiredError(
+            f"{provider_label} refresh refused: your Google Workspace's Google Cloud "
+            "session control requires you to sign in again "
+            f"(https://support.google.com/a/answer/9368756). {message}"
+        )
     if is_terminal_grant_response(status_code, body):
         raise InvalidGrantError(message)
     raise LoginError(message)

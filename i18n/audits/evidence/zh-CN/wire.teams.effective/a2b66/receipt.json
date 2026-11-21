@@ -1,0 +1,27 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "530f154495de",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19T18:41:24.794825+00:00",
+    "actual_model_source": "Translator receipt, hash independently verified",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2b66cec83cdb",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19T18:58:15.801134+00:00",
+    "independent_from_translator_session": "530f154495de",
+    "actual_model_source": "Host session model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/record.json; 9-key independent linguistic+scoped mechanical pass; 0 B/M. Second independent audit and rendered/integration evidence remain required.",
+  "record_reference": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/record.json"
+}

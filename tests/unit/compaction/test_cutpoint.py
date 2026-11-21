@@ -602,6 +602,44 @@ def test_advance_moves_the_cut_later_until_the_kept_side_fits_the_band():
     assert _kept_bytes_of(messages)(advanced - 2) > 8 * FRAME
 
 
+def test_advance_at_the_landing_target_leaves_as_much_room_as_it_keeps():
+    """The walk driven by the REAL landing target, not a hand-picked band.
+
+    At the acceptance band (0.8 x trigger) the same run keeps 16 of 20 frames
+    and is back at the trigger four frames later; at the landing target it
+    keeps at most half the trigger, so at least that much again fits before
+    the next byte-fired pass.
+    """
+    from local_operator.compaction.thresholds import (
+        WIRE_RECOVERY_BAND,
+        CompactionSettings,
+        resolve_wire_bytes_trigger,
+        wire_landing_bytes,
+    )
+
+    settings = CompactionSettings(wire_bytes_trigger=20 * FRAME)
+    trigger = resolve_wire_bytes_trigger(settings)
+    messages = _observation_run(22)  # 22 frames: over the 20-frame trigger
+    kept = _kept_bytes_of(messages)
+    cut = 3  # a token-ruled cut that kept 21 frames
+
+    landed = advance_cut_to_wire_band(
+        messages, cut, kept_bytes=kept, band_bytes=wire_landing_bytes(settings)
+    )
+    accepted = advance_cut_to_wire_band(
+        messages, cut, kept_bytes=kept, band_bytes=int(WIRE_RECOVERY_BAND * trigger)
+    )
+
+    assert kept(landed) <= trigger // 2
+    assert trigger - kept(landed) >= 10 * FRAME, "fewer than ten frames of room after the pass"
+    assert landed > accepted, "the landing target cut no deeper than the acceptance band"
+    assert trigger - kept(accepted) == 4 * FRAME  # what aiming at the acceptance line left
+    # The current observation and the call that produced it are still kept.
+    assert messages[-1] in messages[landed:] and messages[-2] in messages[landed:]
+    # FIRST fitting cut: one tool group earlier would be over the target.
+    assert kept(landed - 2) > wire_landing_bytes(settings)
+
+
 def test_advance_is_inert_when_the_kept_side_already_fits_or_the_band_is_off():
     messages = _observation_run(12)
     kept = _kept_bytes_of(messages)

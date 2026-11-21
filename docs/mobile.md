@@ -379,6 +379,22 @@ Screens, following branding.md §7's agent-output hierarchy:
   it would resend — because the field is not where that text necessarily is any
   more.
 
+### Starting a chat as an agent or team (`GET /api/start-targets`)
+
+`POST /api/sessions/start` accepts an optional, mutually exclusive `agent` or
+`team` (a profile or team name). The relay validates it with the desktop's own
+new-chat validator and writes the session's `attachment.json` before the child
+spawns, so the first turn already runs as that agent, or as the team's manager
+with the team brief and roster. The model is not taken from the target. The
+picker's rows come from `GET /api/start-targets` (`agents`, `teams`, painted
+`label`s, avatar hashes, and `degraded` when the registries cannot be read).
+
+Both are licensed by `capabilities.session_start.agent` / `.team`. A client
+MUST read them before offering a picker or sending a field: an older relay's
+unkeyed start silently drops unknown fields, which would start an unbound chat.
+Fields, refusal codes and idempotency rules:
+[mobile-start-receipts.md](design/mobile-start-receipts.md).
+
 ### The armed index — wakes and monitors (`GET /api/schedules`)
 
 The machine-wide read of what is ARMED: every conversation carrying wakes and
@@ -779,6 +795,43 @@ re-dated at every serialization) are excluded, which is why the session's
 `unchanged` event carries their current values. A digest that does not match
 for any reason (including a field that moves with time) costs only the full
 seed the legacy path always sent; it can never elide a changed frame.
+
+### Steer journal order — `?steer_journal_order=1`
+
+| Capability | Contract |
+|---|---|
+| `capabilities.steer_journal_order = {"available": true}` | delivered phone steers sit at their journal slot on the session stream |
+
+A phone steer is painted on the live projection at SEND time and upgraded in
+place when the drain delivers it at a later tool boundary. The journal — so
+`/history`, a fresh mount and a resume — records it at DELIVERY. Without this
+capability the live frame reads `steer, tool, tool` while every page reads
+`tool, tool, user`: the "messages load out of order" report.
+
+`GET /api/sessions/{id}/events?steer_journal_order=1` declares the fix for that
+connection (only the exact value `1`; the parameter is per stream, like
+`?have=`). On a declaring stream, once a steer is delivered its row moves to
+just after the row it follows in the journal and its `kind` becomes `user` —
+the page's kind, since the journal carries no steer marker. Its `id` does not
+change, so a client keyed by id repaints the row instead of adding one. An
+undelivered steer stays where it was painted (`kind: "steer"`), and a steer
+whose anchor row is outside the capped frame keeps its slot (only the kind
+changes). Several steers drained at one boundary keep their send order.
+
+A stream that does not declare it is byte-identical to a relay without the
+feature: send-time slot, `kind: "steer"`. That is deliberate:
+local-operator-mobile builds before #359 mis-place a held row that moves later,
+and installed phones never update in step with the relay. The ordering hint
+(`steer_journal_order` on the projection, written by the runtime's fold) is
+relay-internal and stripped from every SSE frame. An older relay ignores the
+parameter, so a client feature-detects the capability rather than assuming the
+order.
+
+| Client | Declares | Sees after delivery |
+|---|---|---|
+| Phone app before #359 | no | send-time slot, `steer` (unchanged) |
+| Phone app that declares it | yes | journal slot, `user` — matches `/history` |
+| Relay web SPA | yes | held tab: the row keeps its held slot and repaints (upsert by id); fresh mount: journal order |
 
 ### The transfer verb — a conversation's move (`POST /api/sessions/{id}/transfer`)
 

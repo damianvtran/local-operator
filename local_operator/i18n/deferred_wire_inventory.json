@@ -11,7 +11,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 876
+        "settings_io.py": 884
       }
     },
     "wire.settings.hub_defaults": {
@@ -387,11 +387,11 @@
         {
           "path": "local_operator/session/catalog.py",
           "symbol": "_terminal_label (render)",
-          "note": "complete terminal messages selected by CatalogEntry.status/_stop_label/_error_label and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
+          "note": "complete messages selected by CatalogEntry.status (terminal rungs via _stop_label/_error_label, and since PR #4334 the live rungs: approval/answer needed, wedged heartbeat, working, unseen completion, attached, ready/exec headless, dormant, complete, recent, waiting) and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
         }
       ],
       "references": {
-        "session/catalog.py": 10
+        "session/catalog.py": 33
       }
     },
     "wire.sessions": {
@@ -534,6 +534,44 @@
         "providers/bedrock/sso_login.py": 1,
         "server/utils/desktop_auth.py": 1,
         "tui/app.py": 1
+      }
+    },
+    "wire.providers.reauth": {
+      "reason": "Google sign-in recovery notice and login-status state words rendered in-process: providers/failover.py::sign_in_required_text (render_record) and providers/auth_cli.py::_sign_in_required_state (render_resolved); the session notice and the login-status line carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/providers/failover.py",
+          "symbol": "sign_in_required_text",
+          "note": "render_record finishes the sentence in-process; the English copy becomes ProviderError text and the user-locale copy (display=True) becomes a NoticeEvent text with no code"
+        },
+        {
+          "path": "local_operator/providers/auth_cli.py",
+          "symbol": "_sign_in_required_state",
+          "note": "render_resolved finishes the state word before format_logins composes the plain login-status line"
+        }
+      ],
+      "references": {
+        "providers/auth_cli.py": 1,
+        "providers/failover.py": 3
+      }
+    },
+    "wire.errors.sdk_spec": {
+      "reason": "SDK specification refusals rendered in-process by session/spec.py and sdk.py through spec_refusal_text (active locale) and raised as a one-string SessionSpecError; the exception carries finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/session/spec.py",
+          "symbol": "spec_refusal_text / SessionSpec.__post_init__",
+          "note": "every keyed refusal is wrapped in spec_refusal_text, which renders the active locale before SessionSpecError(str) is raised; the exception has no code/params attribute"
+        },
+        {
+          "path": "local_operator/sdk.py",
+          "symbol": "open_session / spawn_session / _refuse_attach_extras / _refuse_spawn_extras",
+          "note": "same spec_refusal_text wrapper; the SDK raises finished text in the embedding process and never serialises a catalogue key"
+        }
+      ],
+      "references": {
+        "sdk.py": 16,
+        "session/spec.py": 28
       }
     }
   }

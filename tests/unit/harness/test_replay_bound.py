@@ -217,6 +217,63 @@ def test_the_read_bound_tracks_the_internal_read_cap():
     assert READ_REPLAY_BOUND_CHARS == INTERNAL_READ_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS
 
 
+def test_the_wide_result_bound_tracks_the_unreadable_spill_inline_cap():
+    """``WIDE_RESULT_REPLAY_BOUND_CHARS`` is a literal for the same reason as the
+    read bound; this keeps it in step with the inline cap it must not undercut."""
+    from local_operator.harness.replay_bound import (
+        REPLAY_RESULT_HEADROOM_CHARS,
+        WIDE_RESULT_REPLAY_BOUND_CHARS,
+    )
+    from local_operator.tools.builtin import UNREADABLE_SPILL_INLINE_LIMIT_CHARS
+
+    assert (
+        WIDE_RESULT_REPLAY_BOUND_CHARS
+        == UNREADABLE_SPILL_INLINE_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS
+    )
+
+
+@pytest.mark.parametrize("name", ["mcp__bd_fetch", "web_fetch"])
+def test_a_result_inlined_whole_without_read_replays_untouched(tmp_path, monkeypatch, name):
+    """A session without ``read`` inlines MCP / web_fetch results up to 24,000
+    chars. The 9 KiB default bound would middle-elide that on its FIRST view
+    (the bound applies to the current turn's results too) — the very bytes the
+    wider inline cap exists to deliver."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    context = ToolContext(cwd=str(tmp_path), session_id="no-read", spill_readable=False)
+    whole, _ = builtin.spill_truncate("x" * 12_000, name, context, 24_000)
+    capped, _ = builtin.spill_truncate("y" * 60_000, name, context, 24_000)
+    rows = [tool_row(whole, name=name), tool_row(capped, tool_call_id="c2", name=name)]
+    assert len(whole) == 12_000 and len(capped) == 24_000
+
+    out = bound_replay_payloads(rows)
+
+    assert out[0] is rows[0] and out[1] is rows[1]
+    # A non-wide tool at the same size is still bounded: the widening is by name.
+    (bash,) = bound_replay_payloads([tool_row(whole, name="bash")])
+    assert "elided on replay" in text_at(bash, 0)
+
+
+def test_a_readable_mcp_result_replays_exactly_as_before(tmp_path, monkeypatch):
+    """With ``read`` an MCP result is capped at 8 KiB + footer, under the old
+    9 KiB bound, so the wider bound leaves its replay bytes unchanged."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    context = ToolContext(cwd=str(tmp_path), session_id="with-read")
+    body, details = builtin.spill_truncate("z" * 12_000, "mcp__bd_fetch", context)
+    assert details is not None and "spill://" in body
+    row = tool_row(body, name="mcp__bd_fetch")
+
+    (out,) = bound_replay_payloads([row])
+    (old,) = bound_replay_payloads([row], bound_chars=DEFAULT_REPLAY_RESULT_BOUND_CHARS)
+
+    assert out is row and old is row
+
+
 def test_arguments_keep_the_tools_layer_bound_at_the_default():
     message = assistant_call({"content": "y" * (DEFAULT_REPLAY_BOUND_CHARS + 500)})
     (out,) = bound_replay_payloads([message])

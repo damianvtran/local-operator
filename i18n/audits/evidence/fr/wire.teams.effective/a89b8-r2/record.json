@@ -1,0 +1,66 @@
+{
+  "locale": "fr",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "audit_timestamp": "2026-11-19T19:18:30.602556+00:00",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "89b8acddcc7c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_from_translator_session": "34a8703ccbff",
+    "independent_from_first_auditor_session": "32077ea6da37"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/wire.teams.effective.fr.json",
+      "sha256": "9c7ffd5f52a5ad10267d739074e19c56c90f532b6c79b15314e2256655038226"
+    }
+  },
+  "artifacts": {
+    "per_key_report": {
+      "path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/report.fr.json",
+      "sha256": "5db77b101dc80b3dc6d084499a8a8b46121bcd263d9ce2e0ffae1cda7b2a8c21"
+    },
+    "mechanical_execution_result": {
+      "path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/mechanical.fr.json",
+      "sha256": "5b2a81b47b0a3fc933e4a28c2ea7ab2a1fa8cde2d6844102cbd80c84511c6220"
+    },
+    "audit_script": {
+      "path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/audit_second.py",
+      "sha256": "ce30588fb959999ad895a9cbfd2e2a5ee9a4b09e715880df85b082bea2659f9e"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "first_auditor_receipt_consultation": {
+    "path": "/Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/receipt.fr.json",
+    "sha256": "6bba5db37d9dd06098cb9e472beb506019b05396190516e892e54c34952009c7",
+    "timing": "Only after independent verdict/report files and mechanical results were written",
+    "source_status": "passed",
+    "independent_verdict_agrees": true
+  },
+  "retention": "Scratch-only handoff per explicit task. No tracked evidence or ledger row written. Manager must retain evidence in canonical tracked root before publication.",
+  "proposed_canonical_record_path": "i18n/audits/evidence/fr/wire.teams.effective/a89b8-r2/record.json",
+  "pending_evidence": [
+    "No translation/MT service used.",
+    "Scoped repository catalogue validator plus independent structural checks only.",
+    "No plural/select messages; CLDR branch completeness not applicable.",
+    "No pseudo-localization, fallback, bidi/mixed-direction rendered review, HTTP serving, or UI integration execution.",
+    "Neither shipped status nor runtime visual fit is certified."
+  ],
+  "audit_notes_not_execution_log": true
+}

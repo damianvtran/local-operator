@@ -1,0 +1,46 @@
+{
+ "slot": "independent slot 2 — convergence (merged namespace)",
+ "pr": 4378,
+ "head": "7c7541d29bddf2981d048b5ae4b6fc5aab030715",
+ "scope": "60dcbe088..7c7541d29",
+ "locale": "ru",
+ "namespace": "cli.sessions_move_workset",
+ "source_sha256": "0f5602723eb92b22c93931ddc3f2cbffec94da232249504726202a45aaf4db1b",
+ "context_sha256": "be34b5769c82454dd0fe0b13177833cd7f3bd209a7e022cdfe7ff4e54a9ccb78",
+ "target_sha256": "7637456847a6650d53c4ca2b3b2a93b4b208b72b1c609c02d7008b8865d37d05",
+ "pr4380_rows_full_audit": {
+  "needs_confirmation": "PASS",
+  "help_yes": "PASS",
+  "yes_preflight_failed": "PASS",
+  "yes_carry_unavailable": "PASS",
+  "agent_needs_operator": "PASS",
+  "plan_not_honoured": "PASS"
+ },
+ "deps_rows": "20 deps_* byte-identical to 70878bbaf (slot2-r3 certified; tree evidence slot2-r3 byte-identical to auditor scratch); read beside #4380 rows: coherent",
+ "other_rows": "85 byte-identical to 70878bbaf and to merge 5e860469d",
+ "findings": {
+  "T4-RU-1": {
+   "sev": "minor",
+   "locale": "ru",
+   "key": "help_yes",
+   "current": "иначе отказывает, как и из оболочки агента",
+   "proposed": "иначе отказывается выполняться, как и из оболочки агента",
+   "reason": "Intransitive «отказывает» can read as \"fails/breaks down\"; «отказывается» is \"refuses\". Still a non-success reading, so not safety."
+  }
+ },
+ "concurred_first_slot": [],
+ "blocker": 0,
+ "major": 0,
+ "verdict": "PASS",
+ "chained_on": {
+  "first_slot_receipt_sha256": "a43f6340220215946b0ba46b109275d56492e95d86917cc0cc404d7a2c560b48",
+  "history_sha_before": "a0ab7c3589b035048bb8fdc6182912b2392f3c834a643488992c83264b10c853",
+  "history_sha_after_first_slot": "cc789e1f3f2c7768d28433c77123117c7322b57d64d0a3f5460effe59da01c0d"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev) slot 2, session 6fd346121602",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none"
+ },
+ "limits": "no native-speaker review; no rendered terminal frame; agent-independent only (same model family as translators and first-slot auditors)"
+}

@@ -1,0 +1,23 @@
+{
+  "tui.settings_view.editor.contract": "{save_key} saves · {cancel_key} cancels",
+  "tui.settings_view.editor.contract_unset": "{save_key} saves · {cancel_key} cancels · clear to unset",
+  "tui.settings_view.editor.suggest_long": "{browse_keys} suggestions · {complete_key} completes · {save_key} saves · {cancel_key}",
+  "tui.settings_view.editor.suggest_medium": "{browse_keys} browse · {complete_key} complete · {save_key} saves",
+  "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key} saves",
+  "tui.settings_view.pane.agents_empty": "no agents configured",
+  "tui.settings_view.pane.empty_hint": "{command} lists and attaches them",
+  "tui.settings_view.pane.more": "{count, plural, one {… {shown} more} other {… {shown} more}}",
+  "tui.settings_view.pane.providers_empty": "none logged in — {command}",
+  "tui.settings_view.pane.providers_header": "providers",
+  "tui.settings_view.pane.tab_agents": "agents",
+  "tui.settings_view.pane.tab_teams": "teams",
+  "tui.settings_view.pane.teams_empty": "no teams configured",
+  "tui.settings_view.row.add_chain": "+ add a chain",
+  "tui.settings_view.row.add_hop": "+ add a hop",
+  "tui.settings_view.scope.live": "live",
+  "tui.settings_view.scope.never": "never",
+  "tui.settings_view.scope.new_launch": "new launch",
+  "tui.settings_view.scope.new_sessions": "new sessions",
+  "tui.settings_view.section.takes_effect": "takes effect: {scope}",
+  "tui.settings_view.too_short": "terminal too short for settings — make it taller"
+}

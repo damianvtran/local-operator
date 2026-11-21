@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.tool_card.extra",
+  "history_sha256": "65a196f0d28c1e7eebff19ccf4dd17f25b1b2bbe28735a42506092a852f37446",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.tool_card.extra",
+      "source_sha256": "a89883a2ea4462b720f39ec853b5569904920da2a7ca72f98855d28f19f8bd2c",
+      "context_sha256": "ef227e6333498cd9cfb4a82a1e4e8038e716264040cf0da0440b7721f5911b45",
+      "target_sha256": "f7363211723a8c0a5a00b03bd94dc3b19938619c6031982da19addbf2f8b2dbe",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "provenance": "identity and model as supplied in the audit brief; translator instance not observed by the auditor"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent extra-audit-vi), not the translator; did not edit values",
+        "session": "858106d7ad78",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "clean-with-findings",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 2,
+          "nit": 1
+        },
+        "finding_ids": [
+          "VI-X01",
+          "VI-X02",
+          "VI-X03"
+        ],
+        "fallback_used": true,
+        "fallback_note": "session primary openai/gpt-6.1-sol hit quota HTTP 429; audit performed on cross-vendor fallback anthropic/claude-opus-5-5 — same model as the translator (independent instance, not the same agent)",
+        "independent_from_translator": true,
+        "actual_model_source": "harness model-switch notice in the auditor session",
+        "pinned_model": "openai/gpt-6.1-sol"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 1, te1) of the new tui.tool_card.extra namespace (16 keys), source commit 37892ab97f46 (rebased 690dc589139e, catalogue bytes unchanged). Auditor 858106d7ad78 pinned openai/gpt-6.1-sol, served by anthropic/claude-opus-5-5 as a disclosed quota fallback (same model as the translator; independence by separate agent instance only). Verdict clean-with-findings: 0 blocker, 0 major, 2 minor, 1 nit (VI-X01, VI-X02, VI-X03). target_sha256 re-derived against the committed file at ledger-write time. Record: i18n/audits/evidence/vi/tui.tool_card.extra/te1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/tui.tool_card.extra/te1/record.json",
+      "round": "te1"
+    }
+  ]
+}

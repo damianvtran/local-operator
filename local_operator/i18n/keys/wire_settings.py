@@ -1453,6 +1453,30 @@ def memory_guard_title() -> Msg:
     return Msg("wire.settings.memory_guard.title", {})
 
 
+def mesh_move_working_set_max_bytes_help() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_max_bytes.help", {})
+
+
+def mesh_move_working_set_max_bytes_label() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_max_bytes.label", {})
+
+
+def mesh_move_working_set_roots_help() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_roots.help", {})
+
+
+def mesh_move_working_set_roots_label() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_roots.label", {})
+
+
+def mesh_moves_description() -> Msg:
+    return Msg("wire.settings.mesh_moves.description", {})
+
+
+def mesh_moves_title() -> Msg:
+    return Msg("wire.settings.mesh_moves.title", {})
+
+
 def mesh_updates_description() -> Msg:
     return Msg("wire.settings.mesh_updates.description", {})
 
@@ -3063,6 +3087,14 @@ def team_bridge_enabled_help() -> Msg:
 
 def team_bridge_enabled_label() -> Msg:
     return Msg("wire.settings.team_bridge_enabled.label", {})
+
+
+def team_bridge_hold_release_help() -> Msg:
+    return Msg("wire.settings.team_bridge_hold_release.help", {})
+
+
+def team_bridge_hold_release_label() -> Msg:
+    return Msg("wire.settings.team_bridge_hold_release.label", {})
 
 
 def team_bridge_screening_ambient_budget_per_hour_help() -> Msg:

@@ -116,12 +116,22 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # manifest, and a destination probed remotes at a peer's request.
         "session.workset.preflight",
         "session.workset.probe",
+        # The owner accepted a working-set consent: which surface, which scope
+        # digest, whether the files travel (mobility.AUDIT_WORKSET_CONSENT).
+        "session.workset.consent",
+        # A moved session's working set (move-working-set.md §8.3; workset_move).
+        "session.workset.serve",
+        "session.workset.restore",
+        "session.workset.departed",
         # transport scope (§7.6 of mesh-transport-identity.md)
         "pairing_refused",
         "invite_minted",
         "member_admitted",
         "member_removed",
         "member_left",
+        # THIS device learned, from a member that proved it on a live handshake, that
+        # it was removed while it was offline (G9-B, ``relay._apply_verified_removal``).
+        "membership_ended",
         # `lop network member grant/revoke`: what a peer may do on THIS device
         # changed. A membership-class event: an incident review asking "how could
         # that device move a session here" is answered by exactly this record.
@@ -140,6 +150,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
+        # A dialled endpoint answered with a POSITIVE wrong listener proof (wrong
+        # device, bad signature, bad MAC) and was removed from the member row it
+        # was dialled from (mesh-listener-auth §6, G4 heal-on-negative-proof).
+        "endpoint_demoted",
         # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME (F4, drill
         # 2026-10-04): not a refusal — nothing decided anything — and the row that
         # answers "the relay saw it" when a join stops before any pairing record
@@ -154,6 +168,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "session_file_read_admitted",
         "link_closed",
         "link_idle",
+        # Host clock-gap diagnostics and coalesced scheduler failures: technical
+        # facts only, never raw exception messages or another credential path.
+        "host_resumed",
+        "redial_failed",
         "link_replaced",
         "duplicate_identity",
         "self_link",
@@ -234,6 +252,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # counts only, never the token.
         "credential.held_served",
         "credential.held_lapsed",
+        # A SUBAGENT session first using its ancestor session's held GitHub grant
+        # while the owner was away (credentials/client.py ``_bridge_ancestor_hold``,
+        # 2026-11-21): names the child as the consumer and the ancestor it came from,
+        # so the serve is never silently attributed to the parent. Ids only.
+        "credential.held_bridged",
         # The BORROWER's own record that a dial did not get a grant (credentials/client.py
         # ``_note_borrow_failed``): the 2026-11-17 owner_busy burst was visible only in
         # the owner's log. Coalesced per (owner, key) per window, codes only.
@@ -491,10 +514,12 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "member_removed": frozenset({"initiated_by", "rekeyed", "epoch_after"}),
     "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
     "member_left": frozenset({"epoch"}),
+    "membership_ended": frozenset({"notice_epoch", "credentials_dropped"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
     "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
+    "endpoint_demoted": frozenset({"endpoint", "code"}),
     "handshake_refused": frozenset(
         {
             "cause",
@@ -536,6 +561,8 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "link_closed": frozenset({"cause", "frames_in", "frames_out"}),
     "link_idle": frozenset({"last_seen_at", "missed_beats"}),
+    "host_resumed": frozenset({"gap_s"}),
+    "redial_failed": frozenset({"device", "code", "attempt", "next_retry_at", "repeats"}),
     "link_replaced": frozenset({"instance_id", "age_s"}),
     "duplicate_identity": frozenset({"instance_id", "duplicate_count"}),
     "self_link": frozenset({"instance_id"}),
@@ -652,6 +679,12 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.held_lapsed": frozenset(
         {"credential_key", "act", "sub", "grant_id", "serves", "pending", "bound"}
     ),
+    # `consumer` is the session that used the grant, `bridged_from` the ancestor
+    # session whose held grant it was (both opaque session ids), `grant_id` the
+    # ORIGINAL grant, `hold_until` that grant's (never extended) hold end.
+    "credential.held_bridged": frozenset(
+        {"credential_key", "act", "sub", "grant_id", "consumer", "bridged_from", "hold_until"}
+    ),
     # `code`/`reason` are the owner's machine answer (never its sentence), `held`
     # whether this device's held grant bridged it, `retry_after_ms` the owner's
     # stated wait (0 = none), `repeats` the rows folded since the last one written.
@@ -720,7 +753,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.copy_wiped": frozenset({"credential_key", "act", "sub", "rows"}),
     "credential.marked": frozenset({"credential_key", "mark"}),
     "definitions_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
-    "mcp_defs_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
+    # `withdrawn`: mirrors removed because their origin turned the server off
+    # (mcpdefs' explicit-withdrawal exception) — names only, like the rest.
+    "mcp_defs_applied": frozenset({"installed", "updated", "withdrawn", "conflicts", "refused"}),
     "skills_applied": frozenset({"installed", "updated", "conflicts", "refused"}),
     # `detail` here is the warm failure's own sentence (a string), not a nested map.
     "session.create.warm_failed": frozenset({"peer", "detail"}),
@@ -829,6 +864,25 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # fixed result codes only — never a path, a URL path, userinfo or git output.
     "session.workset.preflight": frozenset({"peer", "worktrees", "planned", "bytes", "excluded"}),
     "session.workset.probe": frozenset({"peer", "hosts", "results", "refused"}),
+    # ``surface`` is a closed token (mobility.CONSENT_SURFACES, or "unattributed"),
+    # CLAIMED by the requesting surface and not verified: attribution, never proof;
+    # ``digest`` the scope digest the gate matched (a hash of the manifest, never a
+    # path); ``carry_decision`` "carry"/"stay"; ``lease_epoch`` binds the row to the
+    # move it gated.
+    "session.workset.consent": frozenset(
+        {"peer", "surface", "consent", "digest", "carry_decision", "lease_epoch"}
+    ),
+    # A moved session's working set (design move-working-set.md §8.3). Bounded
+    # metadata only — ids, sizes, one home-relative path, reason codes — never
+    # bytes or file contents. ``serve`` is the required row written before the
+    # first byte of each artifact (and before each resumed serve) leaves.
+    # ``kind``: ``span`` (bytes served from ``offset``) or ``prefix`` (the sha256 of the
+    # first ``offset`` bytes, answered for a resume; security review #4245 S4).
+    "session.workset.serve": frozenset(
+        {"peer", "to_device", "lease_epoch", "artifact", "bytes", "offset", "path", "kind"}
+    ),
+    "session.workset.restore": frozenset({"peer", "state", "worktrees"}),
+    "session.workset.departed": frozenset({"peer", "marked"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
@@ -877,6 +931,10 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         # unattributable. Each independently authorized fetch is an admission,
         # not transport telemetry; ordinary frames remain unlogged/batched.
         "session_file_read_admitted",
+        # A moved session's working-set bytes leave this device only after this row
+        # is on disk (``workset_move._audit_workset_serve``, design §8.3): an egress
+        # an incident cannot reconstruct is the loss this table exists for.
+        "session.workset.serve",
         "panic_raised",
         "panic_received",
         "disconnect_initiated",
@@ -891,6 +949,9 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         # newcomer became visible here, and a lost record would leave the mesh
         # looking as though that device had always been a member.
         "membership_learned",
+        # Losing membership on a removed device's own word-of-a-member: as durable as
+        # the removal it records, or an incident review cannot see why bearers ended.
+        "membership_ended",
         "epoch_rotated",
         "epoch_rejected",
         "handshake_refused",
@@ -1231,6 +1292,19 @@ class AuditLog:
 
     # -- writing ------------------------------------------------------------
 
+    def admits_required(self) -> bool:
+        """Would :meth:`record_required` admit a row right now (enabled, not degraded)?
+
+        WHY A PUBLIC PREDICATE: a caller whose ONE durable row already covers a stream
+        (the working-set serve's contiguous continuations, #4245 security review S-1)
+        must still stop the moment the trail it relies on is disabled or has a hole,
+        without writing another row per chunk or reading this writer's privates.
+        ``record_required`` uses this same predicate, so the two cannot drift. A
+        ``True`` here is advisory, not an admission: only ``record_required`` holds
+        the write lock and proves a row durable.
+        """
+        return bool(self._enabled) and not self.degraded
+
     def record_required(self, event: AuditEvent, *, expected_file_phase: str = "fetch") -> bool:
         """Commit a durable admission before its caller releases protected bytes.
 
@@ -1243,7 +1317,7 @@ class AuditLog:
         if event.event not in self.DURABLE_EVENTS:
             raise ValueError("a required audit record must be a durable event")
         with self._write_lock:
-            if not self._enabled or self.degraded:
+            if not self.admits_required():
                 return False
             expected_detail = None
             if event.event == "session_file_read_admitted":

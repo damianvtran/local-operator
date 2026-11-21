@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.session_status",
-  "history_sha256": "6f2bb772d67594207a33f082155826e1dcf4d8491099b74a0bbcc4dd351f0e42",
+  "history_sha256": "33892ed951d4bc2b8b8fc77a7079d102135d81d813e6d1a4fbfe3e73305c7814",
   "entries": [
     {
       "locale": "fr",
@@ -194,6 +194,117 @@
         ],
         "provenance": "Authored by same independent auditor session 3d32baae3ed6, actual model openai/gpt-6.1-sol, no fallback. No linguistic/formatter samples rerun. Source, context and target hashes rechecked unchanged."
       }
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.session_status",
+      "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+      "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+      "target_sha256": "8e28af9d575f293f463bb7cbf6e9d72b6ca1e09842b61458da2a6f1c6eeaa943",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "c077690d8eb5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "fail",
+        "findings": 2,
+        "unresolved_blocker_major": 1,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 1,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "F1",
+          "F2"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "failed",
+      "note": "Round 1 independent audit of the live session-status labels (wire.session_status). Auditor c077690d8eb5 (openai/gpt-6.1-sol, no fallback) verdict FAIL: 0 blocker, 1 major, 1 minor, 0 nit ['F1', 'F2']. Scope: full namespace (31 keys incl. 14 new live-status keys) at worktree head 514d51243ce3. Superseded by round 2 (ls2) at corrected bytes. Record: i18n/audits/evidence/fr/wire.session_status/ls1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/wire.session_status/ls1/record.json",
+      "round": "ls1"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.session_status",
+      "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+      "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+      "target_sha256": "531f93976a9d9badebbee9bb02e38fe49ff637fbf02164615c80935d2b955b64",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), remediation pass",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "dddc1ae29ef5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Round 2 independent audit of the live session-status labels (wire.session_status). Auditor dddc1ae29ef5 (openai/gpt-6.1-sol, no fallback) verdict CLEAN: 0 blocker, 0 major, 0 minor, 0 nit. Scope: round-2 remediation re-audit of the round-1 finding keys plus consistency neighbours, at worktree head 514d51243ce3; the remaining keys carry the round-1 full-namespace audit (ls1) at unchanged values. r1 F1 (major, 'heartbeat' wording in wedged_heartbeat) fixed in these bytes ('signal de vie'); F2 (minor, delegating_queued_addend width) rejected by the implementer and the rejection accepted by the r2 auditor: 'en file d’attente' distinguishes capacity-queued subagents from 'En attente' background jobs; context sets no fixed cell cap. Record: i18n/audits/evidence/fr/wire.session_status/ls2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/wire.session_status/ls2/record.json",
+      "round": "ls2"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.session_status",
+      "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+      "context_sha256": "4f9cf2dabc89f7e711c3cf2d74b2a6e75c274954152daa14a1dad31ac9cf12f2",
+      "target_sha256": "9d39802f777c145ee4577601dbfb6b8151e3bcf91c4cbaa0d28ff6b5e982aea3",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "3af0528b6788",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent audit of the duration-unit slice of wire.session_status (4 new keys duration_seconds/minutes/hours_minutes/days_hours plus the wedged_heartbeat {duration} integration and its edited context note), source commit 74b05c6a2aee; unchanged entries verified against the prior passed rows. Auditor 3af0528b6788 (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. context_sha256 recorded by the auditor. Record: i18n/audits/evidence/fr/wire.session_status/ld1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/wire.session_status/ld1/record.json",
+      "round": "ld1"
     }
   ]
 }

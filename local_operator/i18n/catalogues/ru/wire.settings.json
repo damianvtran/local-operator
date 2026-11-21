@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Потолок неадресованных в час",
   "wire.settings.team_bridge_session.help": "Сессия, которую можно пробудить при новых сообщениях; пусто = только индикатор.",
   "wire.settings.team_bridge_session.label": "Сессия CoS",
+  "wire.settings.team_bridge_hold_release.label": "Задерживать запросы на работу",
+  "wire.settings.team_bridge_hold_release.help": "Некоторые запросы на новую работу задерживаются, чтобы вы их доставили или отклонили. Без вашей доставки агент ничего не получит. Если выключено, им отказывают.",
   "wire.settings.tool_approval_mode.choice.ask.description": "спрашивать перед инструментами записи/выполнения",
   "wire.settings.tool_approval_mode.choice.ask.label": "спрашивать",
   "wire.settings.tool_approval_mode.choice.auto.description": "выполнять их, не спрашивая",
@@ -885,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 часа",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 часа",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "Удалять временные чаты через",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Сколько временный чат может простаивать, прежде чем будет удалён. Время на экране, выполняющаяся задача или открытый вопрос простоем не считаются."
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Сколько временный чат может простаивать, прежде чем будет удалён. Время на экране, выполняющаяся задача или открытый вопрос простоем не считаются.",
+  "wire.settings.mesh_moves.title": "Перенос сессий",
+  "wire.settings.mesh_moves.description": "Что разговор, перенесённый на другое устройство, берёт с собой. Читается при каждом переносе, поэтому изменение действует со следующего.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Лимит рабочих файлов на перенос (байт)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "Максимальный объём рабочих файлов (упакованные коммиты плюс проиндексированные, непроиндексированные и неотслеживаемые файлы), который один перенос отправляет на другое устройство или принимает с него. При превышении перенос отклоняется и ничего не меняется. По умолчанию 256 МиБ.",
+  "wire.settings.mesh_move_working_set_roots.label": "Папки, принимающие перенесённые репозитории",
+  "wire.settings.mesh_move_working_set_roots.help": "Где на этом устройстве перенос сессии может создать или восстановить репозиторий: папки в домашнем каталоге, записанные через ~ и разделённые запятыми (например ~/code, ~/work). Скрытые, системные папки, папки команд (из PATH) и node_modules не используются никогда. Если не задано: репозиторий восстанавливается там, где он уже есть, а отсутствующий клонируется только в папку, где уже есть ваши репозитории; задайте значение, чтобы разрешить другие папки."
 }

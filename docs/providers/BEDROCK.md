@@ -1,8 +1,10 @@
 # Amazon Bedrock
 
-Provider id: `bedrock`. Model ids: `bedrock/<inference-profile-or-model-id>`,
+Provider id: `bedrock`. Model selectors: `bedrock/<inference-profile-or-model-id>`,
 for example `bedrock/global.anthropic.claude-opus-5-5` or
-`bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`.
+`bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`. `--model bedrock/<id>`
+selects Bedrock when no hosting is chosen; with `--hosting bedrock` (or
+`SessionSpec(hosting="bedrock")`) pass the bare id, `--model global.anthropic.claude-opus-5-5`.
 
 Local Operator talks to Claude on Bedrock with the **Anthropic Messages API
 over `InvokeModelWithResponseStream`** (`POST /model/{id}/invoke-with-response-stream`,
@@ -56,6 +58,18 @@ Only on an explicit signal, first match wins:
 3. An AWS-compute marker is present: `AWS_CONTAINER_CREDENTIALS_FULL_URI`,
    `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
    `AWS_LAMBDA_FUNCTION_NAME` or `ECS_CONTAINER_METADATA_URI_V4`.
+
+"Turns on" means Bedrock counts as a signed-in provider, and, when **no
+hosting is chosen anywhere** (no `--hosting`, agent, team or `hosting:` in
+`config.yml`), `lop exec` and the SDK (`SessionSpec` without `hosting`) pick
+Bedrock by themselves, with its default model if none is given, **provided
+Bedrock is the only provider with a usable credential**. With another
+provider signed in too (say `OPENAI_API_KEY`), nothing is guessed and the run
+still reports "Hosting platform is not configured"; pass `--hosting bedrock`.
+A model written `bedrock/<id>` (for example
+`--model bedrock/global.anthropic.claude-opus-5-5`) also selects Bedrock when
+no hosting is chosen, with or without a signal. A chosen hosting is never
+overridden.
 
 A plain `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` in a laptop shell does **not**
 enable Bedrock in the global provider census or default-model suggestions,
@@ -189,6 +203,7 @@ negative control and a real harmless tool side effect. This is protocol evidence
 | `ResourceNotFoundException` | the model or profile is not in that Region; try `global.` or a geographic prefix |
 | `AccessDeniedException` "access to the model" | enable model access in the Bedrock console. The credential stays usable for other models |
 | `AccessDeniedException` (IAM) naming one `foundation-model/`, `inference-profile/` or `application-inference-profile/` resource ARN | per-model request error, not an auth failure: the message names the IAM action and resource your AWS admin has to grant (often a cross-Region profile routing to a Region the policy omits, or an identity with no Bedrock permission at all). The credential stays usable for other models |
+| `AccessDeniedException` "Invalid API Key format" (a malformed or truncated Bedrock API key) | authentication error naming the API key: copy the whole key again or create a new one (not an IAM problem) |
 | `AccessDeniedException` (IAM, no model resource), `UnrecognizedClient`, `InvalidSignature`, `ExpiredToken` | authentication error |
 
 Per-model errors (`ResourceNotFoundException` and both per-model

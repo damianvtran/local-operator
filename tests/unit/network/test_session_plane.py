@@ -103,8 +103,23 @@ def _viewer(server: relay.RelayServer) -> None:
     server.start()
 
 
-def _dial_to(server: relay.RelayServer, record: Any, host: str, port: int) -> relay.PeerLink:
-    link, reason = server.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+def _dial_to(
+    server: relay.RelayServer, record: Any, host: str, port: int, *, expected_device: str = ""
+) -> relay.PeerLink:
+    # The dialer names whom it meant to reach (mesh-listener-auth): the caller's id,
+    # or else the one other active member of a two-device record, read from the
+    # dialer's OWN record.
+    if expected_device:
+        peer = expected_device
+    else:
+        (peer,) = [
+            m.device_id
+            for m in store.load(record.network_id, server.root).active_members()
+            if m.device_id != server.identity.device_id
+        ]
+    link, reason = server.dial(
+        record.network_id, host=f"{host}:{port}", epoch=record.epoch, expected_device=peer
+    )
     assert link is not None, reason
     return link
 
@@ -415,7 +430,16 @@ def _call(root: Path, op: str, **fields: Any) -> dict[str, Any]:
 
 
 def _dial(server: relay.RelayServer, record: Any, host: str, port: int) -> relay.PeerLink:
-    link, reason = server.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    # The dialer names whom it meant to reach (mesh-listener-auth): the one other
+    # active member of this two-device record, read from the dialer's OWN record.
+    (peer,) = [
+        m.device_id
+        for m in store.load(record.network_id, server.root).active_members()
+        if m.device_id != server.identity.device_id
+    ]
+    link, reason = server.dial(
+        record.network_id, host=f"{host}:{port}", epoch=record.epoch, expected_device=peer
+    )
     assert link is not None, reason
     return link
 
@@ -2086,7 +2110,13 @@ def test_two_links_reading_one_stored_page_share_the_relays_own_loop(
         _link.member_pulled_at = 0.0
     server_b.refresh_membership()
     _viewer(server_c)
-    link_c = _dial_to(server_c, store.load(record.network_id, server_c.root), host_b, port_b)
+    link_c = _dial_to(
+        server_c,
+        store.load(record.network_id, server_c.root),
+        host_b,
+        port_b,
+        expected_device=server_b.identity.device_id,
+    )
 
     loops: list[Any] = []
     reads: list[int] = []
@@ -3241,13 +3271,38 @@ def _warm_frame_index(root: Path, session_id: str) -> None:
     Through ``start_refresh`` rather than ``refresh_index``: the frame's fast path
     reads the RESIDENT index, which only the refresh task publishes (the desktop
     twin's ``_Harness.warm`` makes the same choice for the same reason).
+
+    THE PUBLISHED INDEX MUST DESCRIBE THE JOURNAL AS IT IS NOW. ``start_refresh``
+    joins a refresh already in flight — since PR #4224 across loops too, so a
+    refresh an EARLIER frame read armed on the relay's page loop is joined from
+    this ``asyncio.run`` loop. That scan may have read the journal before the
+    cell rewrote it, and its (correct, but older) index makes the next frame
+    answer ``runs_state: "building"`` and re-arm (gate run 44793529479). So the
+    joined scan is drained and the refresh re-run until the published
+    signature matches the journal on disk; a refresh that never catches up
+    still fails the assertion below rather than being accepted as warm.
     """
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    journal = root / "sessions" / session_id / TRANSCRIPT_FILENAME
 
     async def _warm() -> None:
         from local_operator.session import transcript_index as ti
 
-        task, _started = ti.start_refresh(root, session_id)
-        assert await task is not None
+        published: dict[str, Any] = {}
+        for _attempt in range(3):
+            task, _started = ti.start_refresh(root, session_id)
+            index = await task
+            assert index is not None
+            published = dict(index.sig)
+            st = journal.stat()
+            if (published.get("inode"), published.get("size"), published.get("mtime")) == (
+                st.st_ino,
+                st.st_size,
+                st.st_mtime,
+            ):
+                return
+        raise AssertionError(f"resident index never caught up with the journal: {published}")
 
     asyncio.run(_warm())
 

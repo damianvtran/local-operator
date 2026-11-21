@@ -1,0 +1,73 @@
+{
+  "locale": "es",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "dd826c7d3f45c259b1fe79a9b84c7732348d4d31bb6688677d8feef381deae97",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator (identity supplied by delegator; not independently re-derived)",
+    "model": "anthropic/claude-opus-5-5 (delegator supplied)",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor / status-audit-es / session 7e74b08f235c",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "failed",
+    "findings": 1,
+    "unresolved_blocker_major": 1
+  },
+  "status": "failed",
+  "verdict": "fail",
+  "keys_audited": 18,
+  "findings": [
+    {
+      "id": "ES-STATUS-01",
+      "severity": "major",
+      "key": "tui.tool_card.status.session_reset",
+      "current": "sesión nueva",
+      "proposed": "sesión: reinicio",
+      "reason": "The eval kernel lost earlier variables/imports because the existing session state was reset; a new session is a different event and hides that reset warning.",
+      "evidence": [
+        "English context note for session_reset",
+        "local_operator/tui/widgets/tool_card.py:239-245 (_reset_label)",
+        "local_operator/tui/widgets/tool_card.py:5956-5972 (kernel-reset success warning)"
+      ],
+      "proposed_cells": 16,
+      "max_cells": 16
+    }
+  ],
+  "namespace_verdicts": {
+    "tui.tool_card.status": {
+      "verdict": "fail",
+      "keys_read": 18,
+      "blocker": 0,
+      "major": 1,
+      "minor": 0,
+      "nit": 0
+    }
+  },
+  "checks": {
+    "key_parity": "18/18 exact",
+    "message_arguments": "18/18 matched English; no placeholders, markup, ICU branches or skeletons in this namespace",
+    "render_message": "18/18 rendered with locale es and empty params, exact value equality",
+    "bidi_controls": "none in all 18 values; Spanish LTR, Urdu not applicable",
+    "register": "sentence case, terse fragments, no T/V addresses",
+    "unsanctioned_English": "none; error is also a native Spanish noun",
+    "widths": "All bounded strings fit except send.wake_unconfirmed: 23/22 cells. Accepted documented exception, not a major: _delivery_outcome_summary returns its leading word without a fixed 22-cell slice; _build_row truncates the complete summary to its actual row budget. truncate_cells(value,22) actually returned despertar sin confirm… (22 cells). The final discriminator remains understandable and no row overflow occurs through this consumer. No rendered terminal frame was captured.",
+    "running": "activo (6 cells) accepted contextually as the executing row state, not a launch outcome or enabled-toggle label; contrast en cola and espera. Padded to seven cells by running_label.",
+    "waiting": "espera (6 cells) accepted as awaiting operator decision in approval-gated row; not running or completion. Does not explicitly spell out approval under the 7-cell budget.",
+    "desktop_consistency": {
+      "ref": "local-operator-ui origin/main @ 373c82426889982335585786e56b5f8a22464b99",
+      "exact_matches": {
+        "tui.tool_card.status.send.not_delivered": "ui.chat.trace.send.delivery.failed.word = no entregado",
+        "tui.tool_card.status.send.wake_unconfirmed": "ui.chat.trace.send.delivery.mailbox.word = despertar sin confirmar",
+        "tui.tool_card.status.send.delivery_unconfirmed": "ui.chat.trace.send.delivery.unconfirmed.word = entrega sin confirmar",
+        "tui.tool_card.status.interrupted": "ui.chat.canonical.tool_row.outcome.interrupted = interrumpido",
+        "tui.tool_card.status.not_run": "ui.chat.canonical.tool_row.outcome.never_ran = no se ejecutó"
+      }
+    },
+    "neighbor_catalogue": "es/tui.tool_card.json is absent (verified filesystem catalogue inventory and git ls-tree HEAD); read all 16 English neighbor keys instead. Cannot certify consistency with nonexistent Spanish namespace. This is a pre-existing scope limitation, not a new target finding."
+  },
+  "note": "Independent read-only semantic audit of all 18 English/context/Spanish key triplets. No repo changes or commits. Runtime checks used ~/local-operator/.venv/bin/python with PYTHONPATH pointing at the specified worktree. Width evidence is code plus direct rich/runtime function execution, not rendered-frame proof. Retain desktop-exact wake wording; do not shorten solely to satisfy the nominal cap when its real consumer safely truncates. Fix ES-STATUS-01 before passing."
+}

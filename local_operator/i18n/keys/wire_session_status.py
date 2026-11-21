@@ -9,12 +9,56 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def answer_needed() -> Msg:
+    return Msg("wire.session_status.answer_needed", {})
+
+
+def approval_needed() -> Msg:
+    return Msg("wire.session_status.approval_needed", {})
+
+
+def attached() -> Msg:
+    return Msg("wire.session_status.attached", {})
+
+
 def complete() -> Msg:
     return Msg("wire.session_status.complete", {})
 
 
+def delegating_jobs(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.delegating_jobs", {"count": count})
+
+
+def delegating_queued(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.delegating_queued", {"count": count})
+
+
+def delegating_queued_addend(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.delegating_queued_addend", {"count": count})
+
+
+def delegating_running(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.delegating_running", {"count": count})
+
+
 def dormant(*, count: int | float) -> Msg:
     return Msg("wire.session_status.dormant", {"count": count})
+
+
+def duration_days_hours(*, days: str, hours: int | float) -> Msg:
+    return Msg("wire.session_status.duration_days_hours", {"days": days, "hours": hours})
+
+
+def duration_hours_minutes(*, hours: int | float, minutes: int | float) -> Msg:
+    return Msg("wire.session_status.duration_hours_minutes", {"hours": hours, "minutes": minutes})
+
+
+def duration_minutes(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.duration_minutes", {"count": count})
+
+
+def duration_seconds(*, count: int | float) -> Msg:
+    return Msg("wire.session_status.duration_seconds", {"count": count})
 
 
 def error() -> Msg:
@@ -25,12 +69,20 @@ def error_cause(*, cause: str) -> Msg:
     return Msg("wire.session_status.error_cause", {"cause": cause})
 
 
+def exec_headless() -> Msg:
+    return Msg("wire.session_status.exec_headless", {})
+
+
 def forced_kill(*, command: str) -> Msg:
     return Msg("wire.session_status.forced_kill", {"command": command})
 
 
 def interrupted() -> Msg:
     return Msg("wire.session_status.interrupted", {})
+
+
+def ready() -> Msg:
+    return Msg("wire.session_status.ready", {})
 
 
 def recent() -> Msg:
@@ -75,3 +127,23 @@ def unseen_retirement() -> Msg:
 
 def unseen_signal_stop(*, command: str) -> Msg:
     return Msg("wire.session_status.unseen_signal_stop", {"command": command})
+
+
+def waiting(*, jobs: int | float) -> Msg:
+    return Msg("wire.session_status.waiting", {"jobs": jobs})
+
+
+def waiting_subagents(*, jobs: int | float, subagents: int | float) -> Msg:
+    return Msg("wire.session_status.waiting_subagents", {"jobs": jobs, "subagents": subagents})
+
+
+def wedged() -> Msg:
+    return Msg("wire.session_status.wedged", {})
+
+
+def wedged_heartbeat(*, duration: str) -> Msg:
+    return Msg("wire.session_status.wedged_heartbeat", {"duration": duration})
+
+
+def working() -> Msg:
+    return Msg("wire.session_status.working", {})

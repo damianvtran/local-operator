@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator import heavy_cli, heavy_lease
+from local_operator import heavy_audit, heavy_cli, heavy_lease
 
 pytestmark = pytest.mark.skipif(not heavy_lease.supported(), reason="flock is POSIX-only")
 
@@ -188,7 +188,8 @@ _PROBE = textwrap.dedent("""
     # The parent records the child's group just after spawning it.
     while (h := heavy_lease.read_holders(d)[0]).pgid is None:
         time.sleep(0.02)
-    cmd_ok = h.command.startswith(shlex.quote(sys.executable) + ' -c ')
+    # The record names the program by its audit label, never the argv (#4264 Q3).
+    cmd_ok = h.command == os.path.basename(sys.executable)
     print(f"free={taken is not None} pid={h.pid} parent={os.getppid()} "
           f"pgid_ok={h.pgid == os.getpgrp()} cmd_ok={cmd_ok}")
 """)
@@ -202,7 +203,7 @@ def test_run_holds_the_slot_while_the_child_runs_then_frees_it(env: dict[str, st
     assert fields["free"] == "False"  # the child ran while holding the slot
     assert fields["pid"] == fields["parent"]  # the record names this lop process
     assert fields["pgid_ok"] == "True"  # ...and the child's own group
-    assert fields["cmd_ok"] == "True"  # ...and the command line
+    assert fields["cmd_ok"] == "True"  # ...and the program's label
     assert _slot_free()
 
 
@@ -289,7 +290,7 @@ def test_status_lists_each_holder(env: dict[str, str]) -> None:
     lines = out.getvalue().splitlines()
     assert rc == 0
     assert lines[0].startswith("heavy jobs: 1/1 slots held")
-    assert lines[1] == f"  slot 0: pid {os.getpid()}, running 1m05s: make -j8"
+    assert lines[1] == f"  slot 0: pid {os.getpid()}, running 1m05s: make"  # label, not argv
 
 
 # -- off and unsupported --------------------------------------------------------
@@ -358,3 +359,176 @@ def test_without_killpg_nothing_is_forwarded(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_posix_forwarded_signals_are_unchanged() -> None:
     assert heavy_cli._FORWARDED == (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+# -- run --start-by -------------------------------------------------------------
+
+
+def test_run_refuses_after_queueing_past_start_by_and_never_spawns(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # Admitted in time (deadline ~2 s out), then queued behind a holder for
+    # ~4 s: the check after the queue wait must refuse, and free the slot.
+    marker = tmp_path / "ran"
+    holder = _hold(env, tmp_path / "holder.log", 4.0)
+    try:
+        proc = _lop(
+            env,
+            "run",
+            "--timeout",
+            "30",
+            "--start-by",
+            f"{time.time() + 2:.3f}",
+            "--",
+            "touch",
+            str(marker),
+        )
+        _, err = proc.communicate(timeout=60)
+    finally:
+        _reap(holder)
+    assert proc.returncode == heavy_cli.EXIT_LATE_START == 79, err
+    assert "late start: start-by " in err and "command not started" in err
+    assert not marker.exists()
+    assert _slot_free()
+
+
+@pytest.mark.parametrize("deadline", ["2020-01-01T00:00:00Z", "1577836800"])
+def test_run_with_a_past_start_by_exits_late_start(
+    env: dict[str, str], tmp_path: Path, deadline: str
+) -> None:
+    marker = tmp_path / "ran"
+    proc = _lop(env, "run", "--start-by", deadline, "--", "touch", str(marker))
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 79, err
+    assert "2020-01-01T00:00:00Z" in err
+    assert not marker.exists()
+
+
+def test_run_with_a_future_start_by_runs(env: dict[str, str], tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    proc = _lop(env, "run", "--start-by", "2999-01-01T00:00:00+00:00", "--", "touch", str(marker))
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert marker.exists()
+
+
+def test_run_with_an_unreadable_start_by_is_a_usage_error(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    proc = _lop(env, "run", "--start-by", "08:05", "--", "touch", str(marker))
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 2, err
+    assert "is not epoch seconds or an ISO-8601 time" in err
+    assert not marker.exists()
+    assert not list(heavy_lease.lease_dir().glob("slot-*.json"))
+
+
+def test_run_start_by_uses_the_clock_at_the_spawn_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unqueued path (queue off): the gate still reads the clock immediately
+    # before Popen, and a breach never reaches Popen.
+    monkeypatch.setattr(heavy_cli, "_queue_off_line", lambda: "queue off")
+    spawned: list[object] = []
+    monkeypatch.setattr(heavy_cli.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    out = io.StringIO()
+    rc = heavy_cli.run_command(["true"], None, out=out, start_by=100.0, clock=lambda: 101.0)
+    assert rc == heavy_cli.EXIT_LATE_START
+    assert spawned == []
+    assert "1.0s late" in out.getvalue()
+
+
+# -- run --start-by: the late-start audit row ----------------------------------
+#
+# The lane spec wants an audit line on every breach, on the same trail
+# (heavy_audit, #4264) that `heavy status` tails while the queue is enabled
+# (with it off, status returns before reading the trail, but the row is still
+# written), so the host that granted the window can see the refusal without the
+# refused run's terminal.
+
+
+def test_late_start_writes_one_audit_row_and_no_take_when_unqueued(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Queue off: no slot is taken, so the trail must hold the refusal alone.
+    monkeypatch.setattr(heavy_cli, "_queue_off_line", lambda: "queue off")
+    monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "sess-synthetic-1")
+    spawned: list[object] = []
+    monkeypatch.setattr(heavy_cli.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    rc = heavy_cli.run_command(
+        ["make", "test"], None, out=io.StringIO(), start_by=100.0, clock=lambda: 102.5
+    )
+    assert rc == heavy_cli.EXIT_LATE_START
+    assert spawned == []
+    events = heavy_audit.tail(heavy_lease.lease_dir(), 50)
+    assert [e["event"] for e in events] == ["late-start"]
+    row = events[0]
+    assert row["pid"] == os.getpid()
+    assert row["session"] == "sess-synthetic-1"
+    assert row["label"] == "make test"
+    assert row["start_by"] == 100.0 and row["late_s"] == 2.5
+    assert "slot" not in row
+    assert heavy_audit.describe(row).startswith("late-start pid=")
+
+
+def test_late_start_audit_write_failure_keeps_exit_79_and_never_spawns(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(heavy_cli, "_queue_off_line", lambda: "queue off")
+    spawned: list[object] = []
+    monkeypatch.setattr(heavy_cli.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+
+    def _broken(_directory: Path) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(heavy_audit, "audit_path", _broken)
+    out = io.StringIO()
+    rc = heavy_cli.run_command(["true"], None, out=out, start_by=100.0, clock=lambda: 101.0)
+    assert rc == heavy_cli.EXIT_LATE_START
+    assert spawned == []
+    assert "command not started" in out.getvalue()
+
+
+def test_queued_late_start_is_on_the_trail_between_its_take_and_release(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # Queued past the window: the slot WAS taken (and freed by the finally), so
+    # the honest trail for this pid is take → late-start → release, with
+    # exactly one late-start and the command never run.
+    marker = tmp_path / "ran"
+    holder = _hold(env, tmp_path / "holder.log", 4.0)
+    try:
+        proc = _lop(
+            env,
+            "run",
+            "--timeout",
+            "30",
+            "--start-by",
+            f"{time.time() + 2:.3f}",
+            "--",
+            "touch",
+            str(marker),
+        )
+        _, err = proc.communicate(timeout=60)
+    finally:
+        _reap(holder)
+    assert proc.returncode == 79, err
+    assert not marker.exists()
+    mine = [e for e in heavy_audit.tail(heavy_lease.lease_dir(), 50) if e.get("pid") == proc.pid]
+    assert [e["event"] for e in mine] == ["take", "late-start", "release"]
+    late = mine[1]
+    assert late["slot"] == mine[0]["slot"] == 0
+    assert late["label"] == "touch" and late["late_s"] > 0
+
+
+def test_status_renders_a_late_start_row(env: dict[str, str]) -> None:
+    heavy_lease.lease_dir().mkdir(parents=True, exist_ok=True)
+    heavy_audit.record(
+        heavy_lease.lease_dir(), "late-start", pid=4242, label="make", start_by=1.0, late_s=3.5
+    )
+    proc = _lop(env, "status")
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    # start_by renders as ISO UTC like the time column; the file keeps the epoch.
+    assert "late-start pid=4242 label=make start_by=1970-01-01T00:00:01Z late_s=3.5" in out + err
+    rows = heavy_audit.tail(heavy_lease.lease_dir(), 50)
+    assert rows[-1]["start_by"] == 1.0

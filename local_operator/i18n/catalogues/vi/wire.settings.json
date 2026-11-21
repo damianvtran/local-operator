@@ -766,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Trần không đích danh mỗi giờ",
   "wire.settings.team_bridge_session.help": "Phiên có thể được đánh thức khi có tin nhắn mới; để trống = chỉ hiện huy hiệu.",
   "wire.settings.team_bridge_session.label": "Phiên CoS",
+  "wire.settings.team_bridge_hold_release.label": "Giữ lại yêu cầu công việc",
+  "wire.settings.team_bridge_hold_release.help": "Một số yêu cầu việc mới được giữ để bạn chuyển hoặc loại bỏ. Không gì đến được tác nhân của bạn nếu bạn không chuyển. Khi tắt, chúng bị từ chối.",
   "wire.settings.tool_approval_mode.choice.ask.description": "hỏi trước với công cụ ghi/thực thi",
   "wire.settings.tool_approval_mode.choice.ask.label": "hỏi trước",
   "wire.settings.tool_approval_mode.choice.auto.description": "chạy chúng không hỏi",
@@ -885,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 giờ",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 giờ",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "Xóa cuộc trò chuyện tạm thời sau",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Thời gian một cuộc trò chuyện tạm thời có thể không hoạt động trước khi bị xóa. Thời gian hiển thị trên màn hình, tác vụ đang chạy hoặc câu hỏi đang mở không được tính là không hoạt động."
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Thời gian một cuộc trò chuyện tạm thời có thể không hoạt động trước khi bị xóa. Thời gian hiển thị trên màn hình, tác vụ đang chạy hoặc câu hỏi đang mở không được tính là không hoạt động.",
+  "wire.settings.mesh_moves.title": "Di chuyển phiên",
+  "wire.settings.mesh_moves.description": "Những gì một cuộc hội thoại được chuyển sang thiết bị khác mang theo. Được đọc ở mỗi lần di chuyển, nên thay đổi áp dụng cho lần tiếp theo.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Giới hạn tệp làm việc mỗi lần di chuyển (byte)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "Lượng dữ liệu tệp làm việc tối đa (các commit được đóng gói cùng tệp đã staged, chưa staged và chưa theo dõi) mà một lần di chuyển gửi tới hoặc nhận từ thiết bị khác. Vượt quá, lần di chuyển bị từ chối và không có gì thay đổi. Mặc định 256 MiB.",
+  "wire.settings.mesh_move_working_set_roots.label": "Thư mục có thể nhận kho mã được di chuyển",
+  "wire.settings.mesh_move_working_set_roots.help": "Nơi trên thiết bị này mà việc di chuyển phiên có thể tạo hoặc khôi phục một kho mã: các thư mục trong thư mục chính của bạn, viết bằng ~ và cách nhau bằng dấu phẩy (ví dụ ~/code, ~/work). Không bao giờ dùng thư mục ẩn, thư mục hệ thống, thư mục lệnh (trong PATH) và node_modules. Khi chưa đặt: kho mã được khôi phục tại nơi nó đã có, còn kho mã bị thiếu chỉ được sao chép vào thư mục đã chứa các kho mã của bạn; hãy đặt giá trị này để cho phép các thư mục khác."
 }

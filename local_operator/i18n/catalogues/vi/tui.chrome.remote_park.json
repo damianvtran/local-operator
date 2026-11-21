@@ -13,5 +13,6 @@
   "tui.chrome.remote_park.approval_hint_there": "chạy trên {device} — cho phép ở đó; từ chối được tại đây",
   "tui.chrome.remote_park.approval_hint_floor": "chạy trên {device}",
   "tui.chrome.remote_park.ask_hint_answer": "chạy trên {device} — trả lời được từ đây",
-  "tui.chrome.remote_park.ask_hint_floor": "chạy trên {device}"
+  "tui.chrome.remote_park.ask_hint_floor": "chạy trên {device}",
+  "tui.chrome.remote_park.ask_agent_started": "chạy trên {device} · do tác nhân trên {agent_device} khởi chạy"
 }

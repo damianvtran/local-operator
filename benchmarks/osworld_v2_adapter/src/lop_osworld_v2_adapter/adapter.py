@@ -644,29 +644,42 @@ class OSWorldV2Adapter:
             secret_refs=params.secrets,
             infra_values=self._infra_values,
         )
-        # The artifact root is first named here. Refuse unsafe tool paths and
-        # an unavailable host scorer before installing secrets or building AWS.
-        forbidden_roots = (self._workspace_root, Path(params.artifact_root))
-        provisioning.resolve_evaluator_tool_path(
+        # The artifact root is first known here. Revalidate the declared search
+        # path before any host-tool probe can use a directory inside that root.
+        artifact_root = Path(params.artifact_root)
+        tool_directories = provisioning.resolve_evaluator_tool_path(
             self._infra_values,
-            forbidden_roots=tuple(str(root) for root in forbidden_roots),
+            forbidden_roots=(str(self._workspace_root), str(artifact_root)),
         )
         self._scorer_runtime = None
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",
         ):
-            # Tasks are first named here. Check packaging and native imports
-            # without importing the task itself (which could run arbitrary code).
+            # Tasks are first named here. Check packaging and host scorer
+            # readiness without importing the task or building a provider.
             from lop_osworld_v2_adapter.dependencies import validate_task_dependencies
+            from lop_osworld_v2_adapter.evaluator_dependencies import (
+                validate_evaluator_dependencies,
+            )
 
             source = self._load_task_source(params.task_id)
             validate_task_dependencies(source)
+            inputs_root = Path(
+                os.path.expanduser(self._infra("OSWORLD_INPUTS_ROOT") or _DEFAULT_INPUTS_ROOT)
+            )
+            validate_evaluator_dependencies(
+                task_id=params.task_id,
+                source=source,
+                workspace_root=self._workspace_root,
+                tool_directories=tool_directories,
+                forbidden_roots=(self._workspace_root, artifact_root, inputs_root),
+            )
             self._scorer_runtime = await scorer_preflight.require_runtime(
                 self._workspace_root,
                 task_id=params.task_id,
                 source=source,
-                forbidden_roots=forbidden_roots,
+                forbidden_roots=(self._workspace_root, artifact_root),
             )
         self._plan = provisioning.resolve(
             self._task,
@@ -682,7 +695,7 @@ class OSWorldV2Adapter:
         # into it, not into the workspace. The cwd moves there too, in the
         # same breath and for the same reason: allocate is where upstream
         # first runs, so a relative write is possible from that call onward.
-        cache_root = _episode_cache_root(Path(params.artifact_root), params.episode_id)
+        cache_root = _episode_cache_root(artifact_root, params.episode_id)
         _enter_episode_scratch(cache_root)
         await provider.allocate(self._plan, self._task, cache_root=cache_root)
         self._provider = provider

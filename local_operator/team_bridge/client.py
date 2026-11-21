@@ -4151,6 +4151,56 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def conversation_rename(
+        self,
+        conversation_id: str,
+        name: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename a channel or group; answers the updated conversation.
+
+        Same authority as archive (the conversation owner or, on a channel, an
+        organization owner/admin) and the server decides it, along with every
+        other rule: name sanitizing (trim, collapse space runs, at most 64 code
+        points; ``400 invalid_request`` with ``details.field=name`` and a
+        ``rule`` such as ``empty``/``too_long``/``control_character``),
+        uniqueness (``409 conversation_name_taken``), archived, built-in or dm
+        (``409 conversation_archived`` / ``invalid_transition``), and the opaque
+        404 for a non-member. Those refusals surface unchanged as
+        ``BridgeRefusal`` so the renderer can show the server's own reason.
+
+        Only ASCII space and tab are trimmed here, the two characters a typed
+        name picks up at its edges; every other character (NBSP included) is
+        the server's to judge, because it is the authority on name rules and
+        answers with a ``rule`` the renderer can show. An empty or
+        whitespace-only name is therefore FORWARDED, not refused locally, so
+        ``""`` and ``"   "`` both come back as the server's
+        ``400 invalid_request`` with ``details.rule=empty`` rather than a
+        local error with no rule. Renaming to the current name is a
+        server-side 200 no-op. The answer carries the server's CANONICAL name,
+        which can differ from what was typed; the renderer displays that one.
+        The target tenant rides in the BODY as ``tenant_id`` (as members-add
+        and consent send it), never the query: the hub's rename handler reads
+        only its strict body ``{name, tenant_id?}``, so a query tenant is
+        ignored and a multi-org caller is refused ``tenant_id required``.
+        Human acts only: no ``actor_endpoint_id`` (an agent act is a server
+        ``400 invalid_request`` with ``details.rule=not_allowed`` in v1).
+        """
+
+        body: dict[str, Any] = {"name": name.strip(" \t")}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/rename",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
     async def conversation_delete(
         self,
         conversation_id: str,

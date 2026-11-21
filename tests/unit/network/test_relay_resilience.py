@@ -538,6 +538,12 @@ def test_backoff_remains_finite_after_massive_attempt_counts(
     server: Any = object.__new__(relay.RelayServer)
     server.root = None
     server.redial = tracker
+    # This stand-in bypasses __init__; supply its diagnostics dependencies so
+    # the real failure-and-audit path still runs rather than stubbing it away.
+    rows: list[audit_mod.AuditEvent] = []
+    server._refusal_rows = redial.RefusalCoalescer(clock=clock)
+    server.identity = SimpleNamespace(device_id="d_backoff")
+    server.audit = SimpleNamespace(record=rows.append)
     ticks: list[int] = []
 
     def tick(_delay: float) -> bool:
@@ -552,6 +558,11 @@ def test_backoff_remains_finite_after_massive_attempt_counts(
     server._redial_loop()
     assert tracker.snapshot("d_long")["attempts"] == 1102
     assert len(ticks) == 3
+    assert len(rows) == 1, "both ticks use the real coalesced audit path"
+    assert rows[0].event == "redial_failed"
+    assert rows[0].actor == "d_backoff" and rows[0].subject == "d_long"
+    assert rows[0].detail["attempt"] == 1101
+    assert rows[0].detail["code"] == "waiting_for_peer"
 
 
 def test_reader_close_during_admission_keeps_its_newer_loss_schedule(
@@ -598,6 +609,8 @@ def test_reader_close_during_admission_keeps_its_newer_loss_schedule(
         link_id="l_synthetic",
         device_id="d_synthetic",
         network_id="n_synthetic",
+        # An authenticated link's flag: ``_admit_link`` refuses unverified links.
+        peer_verified=True,
         last_frame_at=time.time(),
         alive=False,
         epoch=1,

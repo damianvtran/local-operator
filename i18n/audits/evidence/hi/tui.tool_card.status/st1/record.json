@@ -1,0 +1,224 @@
+{
+  "locale": "hi",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "c579a80e156eb7dd64942004eb9df147fc725f314751660bbb7931f0e637b3bb",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Delegator brief; not independently inferred from file authorship"
+  },
+  "auditor": {
+    "agent": "translation-auditor (status-audit-hi)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "failed",
+    "findings": 1,
+    "unresolved_blocker_major": 1,
+    "session": "78f24d79fa22"
+  },
+  "status": "failed",
+  "verdict": "fail",
+  "keys_read": 18,
+  "findings": [
+    {
+      "id": "H1",
+      "severity": "major",
+      "key": "tui.tool_card.status.waiting",
+      "current": "प्रतीक्षा",
+      "proposed": "स्वीकृति बाकी",
+      "proposed_cells": 7,
+      "reason": "Generic प्रतीक्षा says only waiting; in _status_runs the waiting state is exclusively a pending operator-approval gate, and this collapsed status does not tell the operator that their approval is required. स्वीकृति बाकी explicitly names the pending approval within the seven-cell cap.",
+      "code_path": "local_operator/tui/widgets/tool_card.py:5720-5728",
+      "context": "tui.tool_card.status.waiting"
+    }
+  ],
+  "evidence": {
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-tool-status",
+    "head": "66c87c0755e264db07ea375c67242cffbe302bc0",
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "pythonpath": "/Users/damian/local-operator/.worktrees/i18n-tool-status",
+    "checks": [
+      {
+        "key": "tui.tool_card.status.cut_off",
+        "source": "cut off",
+        "target": "कट गया",
+        "cells": 5,
+        "maxCells": 14,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.error",
+        "source": "error",
+        "target": "त्रुटि",
+        "cells": 3,
+        "maxCells": null,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.interrupted",
+        "source": "interrupted",
+        "target": "रोका गया",
+        "cells": 5,
+        "maxCells": 14,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.not_run",
+        "source": "not run",
+        "target": "कभी नहीं चला",
+        "cells": 8,
+        "maxCells": null,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.partial",
+        "source": "Partial",
+        "target": "आंशिक",
+        "cells": 3,
+        "maxCells": 12,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.queued",
+        "source": "queued",
+        "target": "कतार में",
+        "cells": 5,
+        "maxCells": 7,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.running",
+        "source": "running",
+        "target": "चल रहा",
+        "cells": 5,
+        "maxCells": 7,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.send.delivery_unconfirmed",
+        "source": "delivery unconfirmed",
+        "target": "डिलीवरी अपुष्ट",
+        "cells": 9,
+        "maxCells": 22,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.send.no_new_wake",
+        "source": "no new wake",
+        "target": "नई जागृति नहीं",
+        "cells": 9,
+        "maxCells": 14,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.send.not_delivered",
+        "source": "not delivered",
+        "target": "पहुँचा नहीं",
+        "cells": 6,
+        "maxCells": 16,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.send.receipt_reused",
+        "source": "receipt reused",
+        "target": "पिछली रसीद ली",
+        "cells": 9,
+        "maxCells": 16,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.send.wake_unconfirmed",
+        "source": "wake unconfirmed",
+        "target": "जागृति अपुष्ट",
+        "cells": 8,
+        "maxCells": 22,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.session_reset",
+        "source": "session reset",
+        "target": "सत्र रीसेट",
+        "cells": 7,
+        "maxCells": 16,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.switch.partial",
+        "source": "switched (error)",
+        "target": "बदला गया (त्रुटि)",
+        "cells": 12,
+        "maxCells": 20,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.switch.pending",
+        "source": "pending",
+        "target": "लंबित",
+        "cells": 3,
+        "maxCells": 16,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.switch.switched",
+        "source": "switched",
+        "target": "बदला गया",
+        "cells": 6,
+        "maxCells": 16,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.switch.unchanged",
+        "source": "no change",
+        "target": "कोई बदलाव नहीं",
+        "cells": 10,
+        "maxCells": 16,
+        "arguments": [],
+        "render": "pass"
+      },
+      {
+        "key": "tui.tool_card.status.waiting",
+        "source": "waiting",
+        "target": "प्रतीक्षा",
+        "cells": 5,
+        "maxCells": 7,
+        "arguments": [],
+        "render": "pass"
+      }
+    ],
+    "key_parity": "pass",
+    "placeholder_ICU_plural_markup": "All 18 source/target strings are plain text, no arguments, plurals or markup; message_arguments and render_message passed for each. Parentheses preserved in switch.partial.",
+    "latin_bidi": "No Latin letters or bidi controls in target strings. Hindi is LTR.",
+    "caps": "All declared caps passed rich.cells.cell_len. running is padded to seven in running_label; waiting/queued shed whole below measured width; reasons truncate or shed according to _outcome_runs; send/switch summaries truncate from the right.",
+    "desktop_ref": "local-operator-ui origin/main @ 373c82426889982335585786e56b5f8a22464b99",
+    "desktop_matches": {
+      "ui.chat.trace.send.delivery.failed.word": "पहुँचा नहीं",
+      "ui.chat.trace.send.delivery.mailbox.word": "जागृति अपुष्ट",
+      "ui.chat.trace.send.delivery.unconfirmed.word": "डिलीवरी अपुष्ट",
+      "ui.chat.canonical.tool_row.outcome.interrupted": "रोका गया",
+      "ui.chat.canonical.tool_row.outcome.never_ran": "कभी नहीं चला"
+    },
+    "adjacent_namespace": "Read English tui.tool_card.json (16 keys); target hi/tui.tool_card.json does not exist, confirmed by directory listing and Path.exists, so same-locale adjacency cannot be certified. Pre-existing out-of-scope coverage gap, not a finding against these 18 keys.",
+    "linguistic": "17 keys clean: चल रहा denotes execution rather than launch/activity; सत्र रीसेट denotes reset, not a new session; failed delivery distinct from unconfirmed delivery and wake; wake follows endorsed जागृति glossary. No address/capitalization drift or overflow findings.",
+    "render_limit": "render_message verified; no rendered TUI frame or terminal shaping claim."
+  },
+  "note": "Read-only independent audit. One major approval-specificity finding; no repository files changed. Receipt is for current target bytes only."
+}

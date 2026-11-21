@@ -1,0 +1,138 @@
+{
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/wire.teams.effective.fr.json",
+      "sha256": "9c7ffd5f52a5ad10267d739074e19c56c90f532b6c79b15314e2256655038226"
+    },
+    "translator_receipt": {
+      "path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/translator-receipt.fr.json",
+      "sha256": "23c5bab253b77d5f858781da77afcfa84a12db532bd1c2d3c6fb9ae1f1933dff"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "keys": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "source": "No team named {role} was found.",
+      "current": "Aucune équipe nommée {role} n’a été trouvée.",
+      "repository_argument_signature": [
+        [
+          "role",
+          "simple"
+        ]
+      ],
+      "characters": 44,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "source": "The agent registry could not be read. Check the agent definitions and try again.",
+      "current": "Impossible de lire le registre des agents. Vérifiez les définitions des agents et réessayez.",
+      "repository_argument_signature": [],
+      "characters": 92,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "source": "The model configuration could not be read. Check your configuration and try again.",
+      "current": "Impossible de lire la configuration du modèle. Vérifiez votre configuration et réessayez.",
+      "repository_argument_signature": [],
+      "characters": 89,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "source": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "current": "La valeur de subagents.models.{tier} est invalide. Utilisez un sélecteur provider/model ou un objet de configuration de modèle.",
+      "repository_argument_signature": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "characters": 127,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "source": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "current": "L’objet de configuration à l’emplacement subagents.models.{tier} est invalide. Définissez model sur un sélecteur provider/model et, si nécessaire, effort sur un niveau d’effort de raisonnement pris en charge.",
+      "repository_argument_signature": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "characters": 208,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "source": "No model is configured at subagents.models.{tier}.",
+      "current": "Aucun modèle n’est configuré à l’emplacement subagents.models.{tier}.",
+      "repository_argument_signature": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "characters": 69,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "source": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "current": "Le sélecteur de modèle à l’emplacement subagents.models.{tier} est invalide. Utilisez le format provider/model.",
+      "repository_argument_signature": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "characters": 111,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "source": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "current": "Impossible de déterminer le modèle correspondant à {selector}. Vérifiez le sélecteur de modèle et la configuration du fournisseur.",
+      "repository_argument_signature": [
+        [
+          "selector",
+          "simple"
+        ]
+      ],
+      "characters": 130,
+      "mechanical": "PASS"
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "source": "This team member is unavailable. Check its model configuration and agent definition.",
+      "current": "Ce membre de l’équipe est indisponible. Vérifiez la configuration de son modèle et sa définition d’agent.",
+      "repository_argument_signature": [],
+      "characters": 105,
+      "mechanical": "PASS"
+    }
+  ],
+  "problems": [],
+  "french_categories": [
+    "many",
+    "one",
+    "other"
+  ]
+}

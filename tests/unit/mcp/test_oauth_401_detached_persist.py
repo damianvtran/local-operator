@@ -309,7 +309,12 @@ async def test_foreign_lock_holder_costs_only_the_ordinary_wait(auth_branch: lis
 async def test_persist_wait_is_per_server_and_cut_at_the_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(auth_mod, "LOCK_ACQUIRE_TIMEOUT_S", LOCK_S)
+    # A lock bound far wider than the 0.3 s this exchange has left past it, so
+    # "cut one lock bound short of the deadline" and "cut at the deadline" are
+    # 30 s apart on the loop clock: no stall between two adjacent lines in the
+    # product can move the recorded cut point across that gap.
+    lock_s = 30.0
+    monkeypatch.setattr(auth_mod, "LOCK_ACQUIRE_TIMEOUT_S", lock_s)
     loop = asyncio.get_running_loop()
     parked = asyncio.Event()
 
@@ -318,21 +323,49 @@ async def test_persist_wait_is_per_server_and_cut_at_the_deadline(
 
     other = asyncio.create_task(_stuck())
     ours = asyncio.create_task(_stuck())
+    # WHERE the wait is cut is read off the wait itself, not off a stopwatch:
+    # the spy records which exchanges were awaited, and the loop-time point the
+    # wait was told to stop at. The old `< 0.1` / `< 0.6` wall ceilings measured
+    # the runner's scheduling as much as the cut (docs/TEST_TIME_ASSERTIONS.md).
+    waits: list[tuple[set[Any], float]] = []
+    real_wait = asyncio.wait
+
+    async def spy_wait(fs: Any, *args: Any, timeout: float | None = None, **kwargs: Any) -> Any:
+        fs = set(fs)
+        if fs & {other, ours}:
+            assert timeout is not None, "the persist wait must be bounded"
+            waits.append((fs, loop.time() + timeout))
+        return await real_wait(fs, *args, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spy_wait)
     try:
         auth_mod._detach_refresh_exchange(
             other, "https://other.test/mcp", persist_deadline=loop.time() + 60
         )
-        auth_mod._detach_refresh_exchange(
-            ours, SERVER_URL, persist_deadline=loop.time() + LOCK_S + 0.3
-        )
+        ours_deadline = loop.time() + lock_s + 0.3
+        auth_mod._detach_refresh_exchange(ours, SERVER_URL, persist_deadline=ours_deadline)
         start = time.monotonic()
-        await auth_mod._await_detached_persist("https://unrelated.test/mcp")
-        assert time.monotonic() - start < 0.1, "another server's exchange is not waited for"
+        # Another server's exchange is not waited for: nothing at all is
+        # awaited, so the call finishes on its first step.
+        unrelated = auth_mod._await_detached_persist("https://unrelated.test/mcp")
+        with pytest.raises(StopIteration):
+            unrelated.send(None)
+        assert waits == [], "another server's exchange is not waited for"
         await auth_mod._await_detached_persist(SERVER_URL)
         # The wait stops one lock bound short of the exchange's deadline: the
         # caller's ordinary acquire covers the rest, so the total never exceeds
         # the deadline itself.
-        assert 0.2 <= time.monotonic() - start < 0.6
+        assert [fs for fs, _ in waits] == [{ours}], "only this server's exchange is awaited"
+        # The spy reads the loop clock AFTER the product computed its timeout,
+        # so the recorded cut can only sit at or past the true one; the upper
+        # side is half the lock bound, which only a cut at (or past) the
+        # exchange's own deadline reaches.
+        cut = waits[0][1]
+        assert (
+            ours_deadline - lock_s - 1e-6 <= cut < ours_deadline - lock_s / 2
+        ), f"cut {cut - (ours_deadline - lock_s):+.3f}s from deadline - lock bound"
+        # A lower bound: load can only stretch a wait, never shorten it.
+        assert time.monotonic() - start >= 0.2
         assert not ours.done(), "the wait must never cancel the exchange"
     finally:
         parked.set()

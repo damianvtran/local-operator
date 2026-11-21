@@ -7267,7 +7267,13 @@ class AttachedSession:
         if trace is not None:
             trace.fields["metadata_record"] = "hit" if record is not None else "miss"
         if record is None:
-            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path)
+            # ``stats`` names which proof a MISS paid (incremental after growth,
+            # full after a rewrite) in the open trace, so a slow open can be
+            # attributed without re-instrumenting.
+            stats: dict[str, Any] = {}
+            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path, stats)
+            if trace is not None:
+                trace.fields.update(stats)
         if record is None:
             return None
         self._cold_checkpoint = record.checkpoint
@@ -10382,6 +10388,17 @@ class AttachedSession:
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.pending_gate
+
+    @property
+    def queued_engine_live(self) -> bool:
+        """Whether the owner runs the queued-ask engine; see the store's property.
+
+        Paired with :attr:`pending_gate`: an ask-kind gate while this is true is
+        the legacy mirror of a queued ask, not a parked card.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.queued_engine_live
 
     @property
     def has_running_job(self) -> bool:

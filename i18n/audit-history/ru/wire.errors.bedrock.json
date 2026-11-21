@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.errors.bedrock",
-  "history_sha256": "f4d7fdc1061e8e5d05c39a3fd7adc27015f58286f912de7aa3e6fe065d5f453a",
+  "history_sha256": "f8d6bbe0c142918c7430468fdd29aaa046fe9b35c6e9b8b4ecf2a8565e30300c",
   "entries": [
     {
       "locale": "ru",
@@ -173,6 +173,43 @@
       "status": "passed",
       "note": "PR #4270 rebased onto base feat/bedrock-provider (6faa1a15724a / faec4beffb93): carry-forward receipt for the merged wire.errors.bedrock, en 0da44c7082f4 = exact union of two independently audited sets, proved byte-level here: (a) base en f3ea9f43f7f8 (pr4266-r3 receipt, adds iam_denied) — every base key is value-identical in current en, current en context sidecar and this locale, and this locale's base file hash equals that receipt's target_sha256; (b) removing iam_denied from current en / context / this locale and re-serialising reproduces exactly bf06ba5e8571 / c9dac394ce65 / this locale's pr4270-r1 target_sha256. Current en adds nothing beyond those two sets (24 keys = 14 + iam_denied + 9). No value was re-translated, so no new semantic surface; key set equals en; serialisation byte-identical to the canonical writer. Findings 0.",
       "round": "pr4270-r2-merge"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.bedrock",
+      "source_sha256": "9e12b66963fd41f7333ecd379005ea095de22118a9b7ca91084b932c2cd43660",
+      "context_sha256": "c75b0ad369bb73608060225e41840d4960f9b7a04f0a0cfceca748188290b11c",
+      "target_sha256": "acd9760c3f9fdc0a9f7011dcbcc9dea2c777abfa9dde15048401fdb01e68d791",
+      "translator": {
+        "agent": "coder (team lopdev), session 5c1fa6f32d37, commit c68036618046",
+        "session": "5c1fa6f32d37",
+        "session_kind": "lopdev coder session id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, task role, independent i18n auditor of PR #4324; independent of translator/coder session 5c1fa6f32d37), session 8144d5b47639; did not author the English or these translations and read no translator scratchpad",
+        "session": "8144d5b47639",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "ru-B1"
+        ]
+      },
+      "status": "passed",
+      "note": "PR #4324 (Bedrock build-day patch) round 1: independent audit of the one new key wire.errors.bedrock.invalid_api_key (commit c68036618046) against en 9e12b66963fd with context sidecar c75b0ad369bb. Mechanical: key set equals en (25/25); placeholder {region} preserved; literals Amazon Bedrock, API verbatim; NFC; no manual bidi controls. Semantic: faithful to en and context (AWS rejected the API key itself as malformed/invalid, e.g. a truncated paste; remedy = check the whole key was copied or create a new one; not an IAM permission problem); 'в регионе {region}' matches access_denied; вы imperative (Проверьте, создайте). Carry-forward: the other 24 keys are byte-identical in en, the en context sidecar and this locale versus the pr4270-r2-merge audited state (base 35583da5ee34 file hashes equal that receipt's source/context/target hashes; diff 35583da5ee34..c68036618046 only adds the invalid_api_key line and its context entry), so that audit carries onto the new en hash. ru-B1 (nit): 'API-ключ' is correct, but the Bedrock login strings say 'Ключ API Bedrock' and the catalogue favours 'ключ API' (11 vs 2); 'ключ API' would match — deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4324-r1"
     }
   ]
 }

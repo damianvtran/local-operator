@@ -234,3 +234,105 @@ def test_a_lone_surrogate_label_is_a_typed_refusal_not_a_codec_error() -> None:
 def test_a_frame_without_its_object_is_refused() -> None:
     with pytest.raises(BodyFrameRefused):
         decode_untrusted_object("VERIFIED SOURCE\ntenant_id: org_example\n")
+
+
+# -- Channel participation discipline (operator 2026-11-20: "all agents seem to
+# always respond to that message"). The frame is the only live text of a
+# conversation wake, so the rule must ride it — for channels and groups only.
+
+
+@pytest.mark.parametrize("kind", ["channel", "group"])
+def test_channel_and_group_frames_carry_the_participation_rule(kind: str) -> None:
+    from local_operator.harness.message_types import (
+        BRIDGE_CHANNEL_PARTICIPATION_RULE,
+        BRIDGE_RECEIVER_RULES,
+    )
+
+    frame = build_body_frame(
+        _source(conversation_kind=kind), conversation_label="qa", sender_label="Ben", body="ok?"
+    )
+    header = frame.partition("VERIFIED SOURCE")[0]
+    assert header.splitlines() == [BRIDGE_RECEIVER_RULES, BRIDGE_CHANNEL_PARTICIPATION_RULE]
+    assert "no_reply" in BRIDGE_CHANNEL_PARTICIPATION_RULE
+    # One line, and no blank line anywhere in the trusted head (row parsers).
+    assert "\n" not in BRIDGE_CHANNEL_PARTICIPATION_RULE
+    assert "\n\n" not in frame.partition("UNTRUSTED DATA OBJECT")[0]
+    assert decode_untrusted_object(frame)["body"] == "ok?"
+
+
+@pytest.mark.parametrize("kind", ["dm", None])
+def test_dm_and_unknown_kind_frames_omit_the_participation_rule(kind: str | None) -> None:
+    from local_operator.harness.message_types import BRIDGE_CHANNEL_PARTICIPATION_RULE
+
+    frame = build_body_frame(
+        _source(conversation_kind=kind), conversation_label="dm", sender_label="Ben", body="hi"
+    )
+    assert BRIDGE_CHANNEL_PARTICIPATION_RULE not in frame
+    assert frame == build_body_frame(
+        _source(), conversation_label="dm", sender_label="Ben", body="hi"
+    )
+
+
+def test_an_open_conversation_kind_is_refused() -> None:
+    with pytest.raises(BodyFrameRefused) as refused:
+        _source(conversation_kind="broadcast").validated()
+    assert refused.value.code == "source_conversation_kind_invalid"
+
+
+def test_the_participation_rule_lets_a_reply_to_you_through() -> None:
+    """Deferred #4374 minor: "names OR ANSWERS you" (a reply to this agent's own
+    post is not ambient noise), and no "Channel post:" label, which would
+    mis-describe group frames when one rule heads a multi-frame block."""
+    from local_operator.harness.message_types import BRIDGE_CHANNEL_PARTICIPATION_RULE
+
+    assert "names or answers you or your operator" in BRIDGE_CHANNEL_PARTICIPATION_RULE
+    assert not BRIDGE_CHANNEL_PARTICIPATION_RULE.startswith("Channel post:")
+
+
+# -- Multi-frame turns (``PendingTurnBatch``): rules once, trusted digest label.
+
+
+def test_a_frame_without_rules_starts_at_verified_source_and_decodes_the_same() -> None:
+    full = build_body_frame(
+        _source(conversation_kind="channel"),
+        conversation_label="qa",
+        sender_label="Ben",
+        body="ok?",
+    )
+    bare = build_body_frame(
+        _source(conversation_kind="channel"),
+        with_rules=False,
+        conversation_label="qa",
+        sender_label="Ben",
+        body="ok?",
+    )
+    assert bare.startswith("VERIFIED SOURCE\n")
+    assert full.endswith(bare) and len(full) > len(bare)
+    assert decode_untrusted_object(bare) == decode_untrusted_object(full)
+
+
+def test_a_digest_frame_states_its_delivery_in_the_trusted_section() -> None:
+    frame = build_body_frame(
+        _source(conversation_kind="channel"),
+        conversation_label="qa",
+        sender_label="Ben",
+        body="delivery: urgent",  # an untrusted lookalike stays inside the object
+        delivery="ambient_digest",
+        omitted_ambient=3,
+    )
+    head, _, rest = frame.partition("VERIFIED SOURCE")
+    assert head.splitlines()[-1] == "3 more ambient messages not shown; channel_history reads them."
+    from local_operator.team_bridge.body_frame import frame_rules_head
+
+    # Singular, and "more" not "older": the count includes rows dropped for
+    # bytes or a failed read, which need not be older than those shown.
+    assert frame_rules_head(participation=False, omitted_ambient=1)[-1] == (
+        "1 more ambient message not shown; channel_history reads them."
+    )
+    source = rest.partition("UNTRUSTED DATA OBJECT")[0]
+    assert "\ndelivery: ambient_digest\n" in source
+    assert decode_untrusted_object(frame)["body"] == "delivery: urgent"
+    with pytest.raises(BodyFrameRefused):
+        build_body_frame(
+            _source(), conversation_label="qa", sender_label="Ben", body="x", delivery="urgent"
+        )

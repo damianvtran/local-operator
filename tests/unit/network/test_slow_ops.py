@@ -67,7 +67,12 @@ def _admin_link(
         register(server_a)
     finally:
         server_a._started = started  # noqa: SLF001
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     return link, server_a
 

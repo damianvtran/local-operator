@@ -53,7 +53,7 @@ import pytest
 
 from local_operator.network import cli as net_cli
 from local_operator.network import relay, store, wire
-from local_operator.network.handshake import Credential, Handshake
+from local_operator.network.handshake import Credential, DialerExpectation, Handshake
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _pair,
@@ -108,7 +108,20 @@ def _handshake_that_waits_for_the_test(
         raise AssertionError("the test never released the parked handshake")
     try:
         handshake.send_auth(sock, credential)
-        handshake.read_welcome(reader, wire.deadline_in(30.0))
+        # As ``RelayServer.dial`` does: the listener must prove it is the one other
+        # member of this two-device record, against the key that record stores.
+        record = store.load(network_id, server.root)
+        (listener_id,) = [
+            m.device_id for m in record.active_members() if m.device_id != server.identity.device_id
+        ]
+        handshake.read_welcome(
+            reader,
+            wire.deadline_in(30.0),
+            DialerExpectation(
+                device_id=listener_id,
+                public_key_for=relay._active_key_reader(record),  # noqa: SLF001
+            ),
+        )
         handshake.establish()
         codec = handshake.codec()
         sock.sendall(codec.seal({"op": "ping", "req": 4242, "locality": "remote"}))
@@ -454,7 +467,12 @@ def test_a_handshake_in_flight_when_a_peer_panic_arrives_is_refused(
         lambda: not any(link.alive for link in server_a.links.values())
     ), f"the pairing link never drained: {list(server_a.links)}"
 
-    alarm, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    alarm, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert alarm is not None, reason
     with server_a._links_lock:
         existing = [link for link in server_a.links.values() if link.alive]
