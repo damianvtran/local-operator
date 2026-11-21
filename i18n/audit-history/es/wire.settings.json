@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "c5ad300245b91c0b9810711d9eb4ecb09d1c8e3f7fe3d7f4eee9c15e3d1d4cd2",
+  "history_sha256": "c6188b0c8acff65af00b60f2f7bb41c3f499213ee1c98b500f335d47cade90b3",
   "entries": [
     {
       "locale": "es",
@@ -1513,6 +1513,48 @@
         ]
       },
       "note": "PR #4245 convergence rebind at af6351c89 (merge of origin/main 1a8dae591; common base 37b118a36). Mechanical union verified by the auditor from git blobs: the 6 PR keys (mesh_move_working_set_max_bytes.help, mesh_move_working_set_max_bytes.label, mesh_move_working_set_roots.help, mesh_move_working_set_roots.label, mesh_moves.description, mesh_moves.title) are codepoint-equal to be2280f4b, whose es target f652e763ce90 is the exact target hashed in both PR #4245 audits (mt1 at a69e0e74b, second safety audit mt-secondary at 4ba2f4218, en 562655dc455f); main's 6-key delta (providers_bedrock_auth.help, providers_bedrock_auth.label, providers_bedrock_region.help, providers_bedrock_region.label, team_bridge_hold_release.help, team_bridge_hold_release.label) is codepoint-equal to 1a8dae591, whose last receipt is passed at en 10a336b2a4af / target b3c9fa2ce11f (PR #4317 copy r2, session aa991fa2d698; bedrock keys PR #4266 r1, session f1e8189586d6); every other key is codepoint-equal to both parents and the base. Key deltas disjoint (0 overlap), merged key set equals en (895). en context is main's bytes (the PR changed none). No value re-audited and no new linguistic, native-speaker or rendered certification claimed beyond the cited receipts; their open non-gating findings carry unchanged."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+      "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+      "target_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+      "translator": {
+        "agent": "i18n-translator / voice-labels-es",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "provenance_source": "manager integration brief; independent audit receipt records separate agent",
+        "fallback": "provider quota fallback from anthropic/claude-opus-5-5"
+      },
+      "auditor": {
+        "agent": "translation-auditor / voice-audit-es",
+        "session": "bb24daf92834",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, host model-switch notice: provider quota failure",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": true
+      },
+      "status": "passed",
+      "contribution_keys": [
+        "wire.settings.speech_voice_expressiveness.choice.high.label",
+        "wire.settings.speech_voice_expressiveness.choice.low.label",
+        "wire.settings.speech_voice_expressiveness.choice.medium.label",
+        "wire.settings.speech_voice_tone.choice.authoritative.label",
+        "wire.settings.speech_voice_tone.choice.bright.label",
+        "wire.settings.speech_voice_tone.choice.calm.label",
+        "wire.settings.speech_voice_tone.choice.neutral.label",
+        "wire.settings.speech_voice_tone.choice.warm.label"
+      ],
+      "contribution_key_count": 8,
+      "full_namespace_reaudit": false,
+      "audit_receipt": "docs/qa/i18n-voice-choice-audits/es.json",
+      "audit_receipt_sha256": "6684c4b1813cc0bd86724427b8e20b4083ebf2255807819c5a4ab9f72a8e39b0",
+      "inherited_history_sha256": "c5ad300245b91c0b9810711d9eb4ecb09d1c8e3f7fe3d7f4eee9c15e3d1d4cd2",
+      "note": "Exact eight-key voice-choice label contribution only; unchanged namespace provenance remains in prior ordered history, not re-audited. All descriptions and machine IDs unchanged. Six precommit audit targets match committed bytes; Urdu audited committed 982548f6. Pseudo-localization and rendered fit NOT RUN; independent QA/design follow. UR1 pre-existing warm loan and Russian pre-existing medium description deferred without byte changes."
     }
   ]
 }

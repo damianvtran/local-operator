@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings",
-  "history_sha256": "f2ea053c8c628bdbd0717902c15041f3d17e546ca0ef68ba14935b514c0f65cb",
+  "history_sha256": "ef43672336f1f3fbfa5f6097e8d5cd11ff26c8d5e7d5b8c9ddfa4b86408400ff",
   "entries": [
     {
       "locale": "hi",
@@ -1500,6 +1500,54 @@
         ]
       },
       "note": "PR #4245 convergence rebind at af6351c89 (merge of origin/main 1a8dae591; common base 37b118a36). Mechanical union verified by the auditor from git blobs: the 6 PR keys (mesh_move_working_set_max_bytes.help, mesh_move_working_set_max_bytes.label, mesh_move_working_set_roots.help, mesh_move_working_set_roots.label, mesh_moves.description, mesh_moves.title) are codepoint-equal to be2280f4b, whose hi target d2bd83636903 is the exact target hashed in both PR #4245 audits (mt1 at a69e0e74b, second safety audit mt-secondary at 4ba2f4218, en 562655dc455f); main's 6-key delta (providers_bedrock_auth.help, providers_bedrock_auth.label, providers_bedrock_region.help, providers_bedrock_region.label, team_bridge_hold_release.help, team_bridge_hold_release.label) is codepoint-equal to 1a8dae591, whose last receipt is passed at en 10a336b2a4af / target 300fa1dcf1b1 (PR #4317 copy r2, session aa991fa2d698; bedrock keys PR #4266 r1, session f1e8189586d6); every other key is codepoint-equal to both parents and the base. Key deltas disjoint (0 overlap), merged key set equals en (895). en context is main's bytes (the PR changed none). No value re-audited and no new linguistic, native-speaker or rendered certification claimed beyond the cited receipts; their open non-gating findings carry unchanged."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+      "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+      "target_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+      "translator": {
+        "agent": "i18n-translator / 84b0ffb759f5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "provenance_source": "manager integration brief; independent audit receipt records separate agent",
+        "fallback": "provider quota fallback from anthropic/claude-opus-5-5"
+      },
+      "auditor": {
+        "agent": "translation-auditor / voice-audit-hi (lopdev task)",
+        "session": "55ac8e3ab73e",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota switch observed in this transcript",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "independence": "Independent session/agent; same actual model as translator disclosed; no repository writes."
+      },
+      "status": "passed",
+      "contribution_keys": [
+        "wire.settings.speech_voice_expressiveness.choice.high.label",
+        "wire.settings.speech_voice_expressiveness.choice.low.label",
+        "wire.settings.speech_voice_expressiveness.choice.medium.label",
+        "wire.settings.speech_voice_tone.choice.authoritative.label",
+        "wire.settings.speech_voice_tone.choice.bright.label",
+        "wire.settings.speech_voice_tone.choice.calm.label",
+        "wire.settings.speech_voice_tone.choice.neutral.label",
+        "wire.settings.speech_voice_tone.choice.warm.label"
+      ],
+      "contribution_key_count": 8,
+      "full_namespace_reaudit": false,
+      "audit_receipt": "docs/qa/i18n-voice-choice-audits/hi.json",
+      "audit_receipt_sha256": "a7d5656567b7390159e208cfc4077223cbeb9b3dbd0b4ec1720d6869a7b3b678",
+      "inherited_history_sha256": "f2ea053c8c628bdbd0717902c15041f3d17e546ca0ef68ba14935b514c0f65cb",
+      "note": "Exact eight-key voice-choice label contribution only; unchanged namespace provenance remains in prior ordered history, not re-audited. All descriptions and machine IDs unchanged. Six precommit audit targets match committed bytes; Urdu audited committed 982548f6. Pseudo-localization and rendered fit NOT RUN; independent QA/design follow. UR1 pre-existing warm loan and Russian pre-existing medium description deferred without byte changes."
     }
   ]
 }
