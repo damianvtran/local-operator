@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "अपडेट की जानकारी: स्रोत {source}; संस्करण {version}; तैयारी की स्थिति {readiness}; कैश की उम्र {age}।",
+  "cli.update_discovery.check.cached_unverified": "PyPI पर नवीनतम संस्करण की पुष्टि नहीं हो सकी। कैश में मौजूद संस्करण {version} को आधिकारिक जानकारी नहीं माना जा सकता; कुछ भी इंस्टॉल नहीं किया गया।",
+  "cli.update_discovery.check.ahead": "इंस्टॉल किया गया local-operator {installed}, PyPI पर दिखे संस्करण {latest} से नया है; पुराने संस्करण पर लौटने का प्रयास नहीं किया गया।"
+}

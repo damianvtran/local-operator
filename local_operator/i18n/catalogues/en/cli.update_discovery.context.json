@@ -1,0 +1,25 @@
+{
+  "cli.update_discovery.check.summary": {
+    "role": "Concise CLI discovery summary shown when no newer release is offered or discovery is unavailable.",
+    "tone": "Factual, concise; observation is not a guarantee of registry freshness.",
+    "placeholders": {
+      "source": "Fixed technical source enum: live, cache-fallback, unavailable, cache-ttl, unknown.",
+      "version": "Bounded metadata version or a dash when absent.",
+      "readiness": "Fixed technical readiness enum: ready, pending, unavailable, cached-ready, unknown.",
+      "age": "Cache age in seconds with technical s suffix, or a dash when unknown."
+    }
+  },
+  "cli.update_discovery.check.cached_unverified": {
+    "role": "Network failure refusal after a forced CLI check could only recover old local metadata. No installer or service refresh has run.",
+    "tone": "Honest and actionable, without claiming the cached version is latest.",
+    "placeholders": {"version": "Bounded version from the local readiness-checked cache."}
+  },
+  "cli.update_discovery.check.ahead": {
+    "role": "CLI no-upgrade result when installed is strictly newer than the currently observed live PyPI version. Does not claim publication readiness of the installed build.",
+    "tone": "Neutral and factual; never suggest a downgrade.",
+    "placeholders": {
+      "installed": "Installed version identifier.",
+      "latest": "Observed live PyPI version identifier, not a guarantee of registry freshness."
+    }
+  }
+}

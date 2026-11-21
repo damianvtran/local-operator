@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "Проверка обновлений: источник {source}; версия {version}; статус готовности {readiness}; возраст кэша {age}.",
+  "cli.update_discovery.check.cached_unverified": "Не удалось проверить последнюю версию на PyPI. На версию {version} из кэша нельзя полагаться как на актуальную; ничего не установлено.",
+  "cli.update_discovery.check.ahead": "Установленная версия local-operator {installed} новее версии {latest}, обнаруженной на PyPI; попыток понижения версии не было."
+}

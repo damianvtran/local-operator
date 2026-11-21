@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.update_discovery",
+  "history_sha256": "6ad922ea9af42cff43cfdf9ad8a674524410f9e597a0f9c1e655fad94e0b97e3",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.update_discovery",
+      "source_sha256": "d2f7932a828a4132bc75cca73ee3a2980f565f5fd1beaebcf3415b5e292a3948",
+      "translator": {
+        "agent": "i18n-translator-hi",
+        "job": "4738588e5fff",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "fallback": "provider quota; actual served model recorded"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-hi",
+        "session": "d1ed6d959ad5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "fallback": "provider quota; actual served model recorded"
+      },
+      "status": "passed",
+      "note": "Independent complete-namespace LLM semantic audit, 3 keys, on English d2f7932a828a4132bc75cca73ee3a2980f565f5fd1beaebcf3415b5e292a3948 and target d7f46898e677a56dba48e905eff7afd57b071095c6e58c627e567a67789adcb4. Primary report: d1ed6d959ad5/scratchpad/hi-cli-update-discovery-audit.md. Translator job 4738588e5fff; independent auditor session d1ed6d959ad5; same actual model family disclosed. Independent LLM semantic audit; rendered wrapping/RTL unverified; VI/ES wrapping minors retained. No native-speaker or native-platform completion claimed. Verdict/provenance supplied in manager audit handoff and report file; current bytes hash-verified by implementer."
+    }
+  ]
+}
