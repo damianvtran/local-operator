@@ -2067,6 +2067,14 @@ async def _session_tail(session: Any) -> str:
                 session._memory_terminal = (marker.id, terminal)
 
             session._spawn_background(recover())
+    # High-wake sessions only (``Session._arm_eviction_hint``): the operator
+    # turns this pass evicted from the verbatim block, with the ask to store
+    # what still binds. Independent of ``capture``: it asks for STATED facts,
+    # which is what an always-on session otherwise stops writing. Bound to the
+    # marker it describes, so a newer pass can never show a stale list.
+    eviction = getattr(session, "_eviction_hint", None)
+    if eviction is not None and marker is not None and eviction[0] == marker.id:
+        memory_hint = "\n\n".join(x for x in (memory_hint, eviction[1]) if x)
     suggestions = ""
     if enabled["suggest"]:
         from local_operator.compaction.tokens import count_text_tokens
