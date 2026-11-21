@@ -1,0 +1,20 @@
+{
+  "tui.tool_card.status.cut_off": "coupé",
+  "tui.tool_card.status.error": "erreur",
+  "tui.tool_card.status.interrupted": "interrompu",
+  "tui.tool_card.status.not_run": "jamais exécuté",
+  "tui.tool_card.status.partial": "Partiel",
+  "tui.tool_card.status.queued": "en file",
+  "tui.tool_card.status.running": "tourne",
+  "tui.tool_card.status.send.delivery_unconfirmed": "envoi non confirmé",
+  "tui.tool_card.status.send.no_new_wake": "aucun réveil",
+  "tui.tool_card.status.send.not_delivered": "non remis",
+  "tui.tool_card.status.send.receipt_reused": "reçu réutilisé",
+  "tui.tool_card.status.send.wake_unconfirmed": "réveil non confirmé",
+  "tui.tool_card.status.session_reset": "session réinit.",
+  "tui.tool_card.status.switch.partial": "changé (erreur)",
+  "tui.tool_card.status.switch.pending": "en attente",
+  "tui.tool_card.status.switch.switched": "changé",
+  "tui.tool_card.status.switch.unchanged": "inchangé",
+  "tui.tool_card.status.waiting": "attente"
+}

@@ -1,0 +1,62 @@
+{
+  "locale": "fr",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "7e6ef86370fdba6df29709f23b156fbf224582d49ef04508d4556ca244cb2654",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by delegation; not independently observed."
+  },
+  "auditor": {
+    "agent": "translation-auditor (status-audit-fr)",
+    "session": "19f8383c6908",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "fallback": "none",
+    "result": "fail",
+    "findings": 2,
+    "unresolved_blocker_major": 1,
+    "minor": 1,
+    "nit": 0
+  },
+  "status": "failed",
+  "verdict": "fail",
+  "keys_read": 18,
+  "findings": [
+    {
+      "id": "FR-1",
+      "severity": "major",
+      "key": "tui.tool_card.status.running",
+      "current": "lancé",
+      "proposed": "tourne",
+      "reason": "Lancé describes having been launched, not ongoing execution; this row is specifically executing with an unknown start time. Tourne is an idiomatic process-running label and fits the seven-cell column.",
+      "proposed_cells": 6
+    },
+    {
+      "id": "FR-2",
+      "severity": "minor",
+      "key": "tui.tool_card.status.session_reset",
+      "current": "session relancée",
+      "proposed": "session réinit.",
+      "reason": "Relancée says restarted but does not reliably communicate that the Python kernel lost its variables/imports; réinit. explicitly names reinitialization while fitting the 16-cell budget.",
+      "proposed_cells": 15
+    }
+  ],
+  "checks": {
+    "key_parity": "18/18",
+    "message_arguments": "18/18 pass; no arguments in source/target",
+    "render_message": "18/18 exact French outputs",
+    "maxCells": "All 16 declared caps pass via rich.cells.cell_len. Two source keys have no cap.",
+    "plural_markup": "No plurals, number/date skeletons or markup tokens present.",
+    "latin_english": "No unsanctioned English words found; French uses Latin script.",
+    "register": "Consistent terse fragments; no T/V mismatch.",
+    "desktop": "Exact matches to origin/main French ui.chat.trace.send.delivery.failed.word, mailbox.word, unconfirmed.word, and ui.chat.canonical.tool_row.outcome.interrupted, never_ran.",
+    "sibling_namespace": "English tui.tool_card.json read (16 keys). French tui.tool_card.json absent in this worktree, so French sibling consistency cannot be certified.",
+    "overflow": "not_run: 14 vs English 7 cells, exact desktop wording; error/not-run reason slots truncate via _outcome_runs abbreviates. switch.pending: 10 vs 7, fits 16-cell cap. No current over-cap values.",
+    "consumer": "tool_card.py running_label pads to 7 cells; _status_runs sheds waiting/queued/running words whole under cap; _outcome_runs truncates reset/partial/error reasons, sheds interruption reasons; send/model outcomes lead right-truncated summary."
+  },
+  "note": "Read-only audit at 66c87c0755e264db07ea375c67242cffbe302bc0; uncommitted locale bytes hashed above. No repository edits. Namespace fails on FR-1. No native-speaker certification or visual/rendered-frame check claimed; render_message output and cell geometry verified."
+}
