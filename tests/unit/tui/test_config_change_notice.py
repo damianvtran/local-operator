@@ -24,8 +24,8 @@ from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.settings_view import (
-    _GATE_KEPT_ALERT_RUNGS,
     SettingsView,
+    _gate_kept_alert_rungs,
 )
 from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -1191,11 +1191,11 @@ async def test_the_page_reports_a_loosening_it_could_not_make(monkeypatch, tmp_p
         await pilot.pause()
 
         assert (
-            view.render_lines_for_test()[-1] == _GATE_KEPT_ALERT_RUNGS[0]
+            view.render_lines_for_test()[-1] == _gate_kept_alert_rungs()[0]
         ), view.render_lines_for_test()
         # Kept as well: the slot is what a future caller reads, and the two
         # cannot drift apart without one of these failing.
-        assert view.notice_text == _GATE_KEPT_ALERT_RUNGS[0], view.notice_text
+        assert view.notice_text == _gate_kept_alert_rungs()[0], view.notice_text
         # The write really landed in the file (that half is not a failure, and
         # the sentence says so), while the engine's gate did not move.
         assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "auto"
@@ -1245,7 +1245,7 @@ async def test_the_refusal_alert_sheds_the_fact_before_the_remedy(
         await pilot.pause()
 
         painted = view.render_lines_for_test()[-1]
-        assert painted == _GATE_KEPT_ALERT_RUNGS[expected], (size, painted)
+        assert painted == _gate_kept_alert_rungs()[expected], (size, painted)
         # The route the line exists to deliver survives every width the page
         # renders at, including the narrowest.
         assert "/approvals auto loosens it" in painted, (size, painted)
