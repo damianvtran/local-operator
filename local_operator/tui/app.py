@@ -159,6 +159,7 @@ from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.keys import tui_update as _upd
+from local_operator.i18n.keys import tui_welcome
 from local_operator.i18n.keys import wire_language_receipts as _lang_keys
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import register_refresh, tr
@@ -317,6 +318,7 @@ from local_operator.tui.events import (
     WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.link_targets import (
     LinkTarget,
     build_link_targets,
@@ -664,6 +666,14 @@ _t_asks = tr("tui.asks")
 #: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
 #: the two module constants below on a live language move.
 _t_setup = tr("tui.setup_cues")
+#: The welcome screen's audited "not logged in — /login {provider}" line, reused by
+#: the model picker's footer for a provider whose STORED sign-in is dead
+#: (`_reauth_status`): the same remedy in the same words on both screens.
+#: Resolved through ``display_tr`` with the SAME command island the welcome
+#: screen declares (``widgets/welcome.py``): RTL prose (``ur`` ships) orders
+#: neighbouring LTR runs right-to-left, so a raw ``tr`` would paint
+#: ``google-vertex /login`` there (code review round 1, R1-3).
+_t_welcome = display_tr("tui.welcome", technical_commands=("/login {provider}",))
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
@@ -49857,7 +49867,14 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
+            # A dead stored sign-in LEADS, ahead of the access note: its rows
+            # are offered as usable yet every turn on them fails, and the clause
+            # carries the only copy of the exact `/login <id>` command. Behind
+            # the access note `_fit_clauses` dropped it whole at 100 columns and
+            # cut the provider id at 150 (QA round 1, Q1); the generic access
+            # note degrades to `N hidden…` instead, which still says rows hid.
             status=_status_line(
+                _reauth_status(statuses),
                 note,
                 _catalogue_status(statuses),
                 self._owner_catalogue_clipped_note(),
@@ -67393,6 +67410,9 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     — two footers counting one fact ("3 provider(s) need a login · 42 hidden")
     reads as two separate problems.
 
+    ``reauth_required`` is not reported HERE either, but it is reported: see
+    `_reauth_status`, which the caller places ahead of the access note.
+
     Wording is budgeted, not just chosen. The footer truncates at the picker's
     width and the access note (``2 hidden — /login <provider>``, 28 cells) leads
     it, which leaves 39 cells for this clause at a 100-column terminal. The
@@ -67424,6 +67444,35 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     if empty:
         bits.append(_t(_x.providers_no_live_list(names=", ".join(empty))))
     return " · ".join(bits)
+
+
+def _reauth_status(statuses: dict[str, str]) -> str:
+    """Footer clause naming each provider whose STORED sign-in is dead.
+
+    ``reauth_required`` is a provider the user DID sign in to whose stored grant
+    the IdP has since refused for good (``ProviderController.live_catalogue``).
+    Its rows are NOT hidden — a stored credential still counts as usable for the
+    access filter — so `_catalogue_rows` counts nothing for it, and without this
+    clause the picker showed the bundled rows with no hint that every turn on
+    them would fail until a fresh ``/login``. One clause per provider, in the
+    welcome screen's own audited words (``not logged in — /login <id>``), so the
+    user gets the exact command; the provider id is the command's argument.
+
+    Separate from `_catalogue_status` because of WHERE it goes: the caller puts
+    it first in the status, ahead of the access note. ``model_picker._fit_clauses``
+    keeps leading clauses and drops trailing ones, so behind the access note
+    (``225 hidden — /login <provider> · /model --all shows``, 51 cells) this
+    clause vanished at 100 columns and lost its provider id at 150 (QA round 1,
+    Q1). Leading, it costs 36 cells after the row count and survives at 80.
+    """
+    # Imported here, not at module top: the controller module is heavy and this
+    # module already defers its other imports from it to the call sites.
+    from local_operator.providers.controller import REAUTH_REQUIRED_STATUS
+
+    return " · ".join(
+        _t_welcome(tui_welcome.status_login_required(provider=provider))
+        for provider in sorted(p for p, s in statuses.items() if s == REAUTH_REQUIRED_STATUS)
+    )
 
 
 def _status_line(*bits: str) -> str:

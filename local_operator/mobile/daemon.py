@@ -14191,8 +14191,14 @@ def _models_payload() -> dict[str, Any]:
     which the phone renders as "unavailable". Raises whatever ``_list_models``
     raises, which the route answers as a 502.
     """
-    models = _list_models()
-    return {"models": models, "default": _configured_default()}
+    models, provider_status = _list_models()
+    payload: dict[str, Any] = {"models": models, "default": _configured_default()}
+    if provider_status:
+        # ADDITIVE and omitted when empty, the ``efforts`` convention: an older
+        # relay never sends it, so a client already has to read absence as
+        # "nothing to act on", and a healthy owner's body stays byte-identical.
+        payload["provider_status"] = provider_status
+    return payload
 
 
 def _file_stat(path: Path) -> tuple[int, int, int] | None:
@@ -14553,8 +14559,16 @@ def _efforts_field(
     return {} if ladder is None else {"efforts": ladder}
 
 
-def _list_models() -> list[dict[str, Any]]:
+def _list_models() -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
     """The model sheet's rows: what the owner can run, ranked exactly as ``/model``.
+
+    Returns ``(rows, provider_status)``. ``provider_status`` is
+    :meth:`ProviderController.provider_notices` over the live pass's statuses
+    -- provider id -> ``{"status", "name"}`` for a state the owner must act on
+    (today only ``reauth_required``: a stored sign-in whose grant the IdP
+    refused for good). It is the same map the desktop route publishes, so the
+    phone and the desktop say "sign in again" from one fact; it carries no
+    credential detail because it crosses the tunnel.
 
     THE SAME CATALOGUE AND THE SAME ORDER AS THE DESKTOP, by construction rather
     than by convention. This used to walk ``model/registry.SupportedHostingProviders``
@@ -14635,7 +14649,8 @@ def _list_models() -> list[dict[str, Any]]:
             usable=None,
             use_max_context=use_max_context,
         )
-        return _model_rows(cached_rows)
+        # No live pass ran, so there are no statuses to report.
+        return _model_rows(cached_rows), {}
     with closing(store):
         controller = ProviderController(store, directory)
         admitted = controller.persisted_providers()
@@ -14682,7 +14697,7 @@ def _list_models() -> list[dict[str, Any]]:
                 f"Model catalogue unavailable for {', '.join(unavailable)}; "
                 "retry or log in again"
             )
-    return _model_rows(rows)
+    return _model_rows(rows), ProviderController.provider_notices(statuses)
 
 
 #: The login page is server-rendered (not part of the SPA) so the auth gate
