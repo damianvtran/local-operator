@@ -241,16 +241,43 @@ class CustomFrameInjection:
 
     @classmethod
     def append(cls, messages: Sequence[Any], text: str, *, message_id: str) -> list[Any]:
+        return cls.insert(messages, text, message_id=message_id, index=len(messages))
+
+    @classmethod
+    def insert(
+        cls,
+        messages: Sequence[Any],
+        text: str,
+        *,
+        message_id: str,
+        index: int | None = None,
+    ) -> list[Any]:
+        """Return a NEW list with one transient frame inserted at ``index``.
+
+        WHY insert-at-index rather than always append: a multi-step turn makes
+        several provider calls (tool use -> tool result -> follow-up). Always
+        appending to ``messages[-1]`` teleports up to 16 KiB of body text past
+        every assistant/tool message emitted mid-turn, busting the provider's
+        prefix cache on every tool step. Anchoring at the Call 1 index keeps
+        the prefix byte-identical through the frame for the entire turn while
+        leaving ``messages`` unmutated and never persisting the frame.
+        """
         from local_operator.harness.types import CustomMessage
 
-        return list(messages) + [
-            CustomMessage(
-                custom_type=cls.CUSTOM_TYPE,
-                attribution="user",
-                details={"text": text},
-                id=message_id,
-            )
-        ]
+        frame = CustomMessage(
+            custom_type=cls.CUSTOM_TYPE,
+            attribution="user",
+            details={"text": text},
+            id=message_id,
+        )
+        # Non-serialized private flag: tells provider cache-breakpoint logic
+        # not to anchor the tail cache_control marker on an ephemeral frame
+        # that vanishes as soon as the turn settles.
+        frame._ephemeral = True
+        out = list(messages)
+        pos = len(out) if index is None else max(0, min(index, len(out)))
+        out.insert(pos, frame)
+        return out
 
 
 def assemble_injection(
@@ -358,14 +385,14 @@ def inject_into_context(
 
     from local_operator.harness.types import CustomMessage
 
-    return list(messages) + [
-        CustomMessage(
-            custom_type=custom_type,
-            attribution="user",
-            details=body_details(injected),
-            id=message_id,
-        )
-    ]
+    frame = CustomMessage(
+        custom_type=custom_type,
+        attribution="user",
+        details=body_details(injected),
+        id=message_id,
+    )
+    frame._ephemeral = True
+    return list(messages) + [frame]
 
 
 def admission_digest(owner_key: str, policy_digest: str, body_sha256: str, receipt_id: str) -> str:

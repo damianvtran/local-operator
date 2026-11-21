@@ -34,7 +34,7 @@ import unicodedata
 import urllib.parse
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from datetime import timezone
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, runtime_checkable
 
@@ -2954,10 +2954,10 @@ def _targets_cover(targets: list[dict[str, Any]], block: dict[str, Any]) -> bool
     return any(existing is block for existing in targets)
 
 
-def _settled_cache_target(
+def _settled_cache_target_with_index(
     messages: list[dict[str, Any]], image_part_types: tuple[str, ...]
-) -> dict[str, Any] | None:
-    """The content block whose cached prefix ends BEFORE the newest frame.
+) -> tuple[int, dict[str, Any]] | None:
+    """Return ``(message_index, content_block)`` whose prefix ends BEFORE the newest frame.
 
     Frame-heavy sessions cross the wire budget and start re-rendering old
     screenshots -- the fit walk keeps the newest frame at full size and
@@ -2991,6 +2991,12 @@ def _settled_cache_target(
     The frame scan descends into a part's nested ``content``; see
     :func:`_part_holds_frame` for the Anthropic ``tool_result`` shape that
     makes a top-level-only scan find nothing on a screenshot session.
+
+    Returning the message index alongside the block lets callers tell whether
+    an image is already deep in history behind newer text turns: when
+    ``prev_user`` sits strictly AFTER the settled boundary, callers keep BOTH
+    markers so a tail miss does not collapse hundreds of thousands of tokens
+    back to an old screenshot.
     """
     image_indices = [
         i
@@ -3000,18 +3006,27 @@ def _settled_cache_target(
     ]
     if not image_indices:
         return None
-    candidates: list[dict[str, Any]] = []
+    candidates: list[int] = []
     if image_indices[-1] > 0:
-        candidates.append(messages[image_indices[-1] - 1])
+        candidates.append(image_indices[-1] - 1)
     if len(image_indices) >= 2:
-        candidates.append(messages[image_indices[-2]])
-    for message in candidates:
+        candidates.append(image_indices[-2])
+    for idx in candidates:
+        message = messages[idx]
         content = message.get("content")
         if isinstance(content, str) and content:
             message["content"] = content = [{"type": "text", "text": content}]
         if isinstance(content, list) and content and isinstance(content[-1], dict):
-            return content[-1]
+            return idx, content[-1]
     return None
+
+
+def _settled_cache_target(
+    messages: list[dict[str, Any]], image_part_types: tuple[str, ...]
+) -> dict[str, Any] | None:
+    """The content block whose cached prefix ends BEFORE the newest frame."""
+    found = _settled_cache_target_with_index(messages, image_part_types)
+    return found[1] if found is not None else None
 
 
 class OpenAICompatClient:
@@ -3026,6 +3041,10 @@ class OpenAICompatClient:
     this client is configured for it and the ``ModelSpec`` advertises support;
     compatibility providers and explicit opt-outs keep chat/completions.
     """
+
+    # Anthropic-backed pools reached through OpenAI-compatible gateways
+    # (Radient, OpenRouter) enforce Anthropic's 4-breakpoint limit per request.
+    MAX_CACHE_BREAKPOINTS = 4
 
     def __init__(
         self,
@@ -3283,6 +3302,7 @@ class OpenAICompatClient:
         # prefix, captured as rendered (one entry per message on this wire).
         epoch_ids = _frozen_prefix_ids(request)
         epoch_entry: dict[str, Any] | None = None
+        ephemeral_indices: set[int] = set()
         for message in _without_unrenderable_tool_calls(wire_messages):
             entry = self._replay_chat_message(
                 message, request.model, endpoint, scope, chat_document_budget
@@ -3300,6 +3320,8 @@ class OpenAICompatClient:
             if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
                 echo_turns += 1
             messages.append(entry)
+            if getattr(message, "_ephemeral", False):
+                ephemeral_indices.add(len(messages) - 1)
             if message.id in epoch_ids:
                 epoch_entry = entry
         # Aggregator identity alone is not the model family: Google keeps its
@@ -3326,11 +3348,19 @@ class OpenAICompatClient:
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
-        elif request.model.supports_prompt_cache and not (
-            request.model.provider == "openai"
-            and endpoint == "https://api.openai.com/v1/chat/completions"
+        elif (
+            request.cache_markers == "auto"
+            and request.model.supports_prompt_cache
+            and not (
+                request.model.provider == "openai"
+                and endpoint == "https://api.openai.com/v1/chat/completions"
+            )
         ):
-            self._message_cache_markers(messages, frozen_entry=epoch_entry)
+            self._message_cache_markers(
+                messages,
+                frozen_entry=epoch_entry,
+                ephemeral_indices=ephemeral_indices,
+            )
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -3499,29 +3529,38 @@ class OpenAICompatClient:
     def _system_messages(self, request: ChatRequest) -> list[dict[str, Any]]:
         """System blocks → messages; stable blocks carry ``cache_control``.
 
-        Mirrors the Anthropic client's all-but-last-two breakpoint policy so
-        OpenRouter BYOK / OpenAI-compatible pools that honor ephemeral markers
-        get the same warm prefix. Providers that ignore the field are
-        unaffected; gated on ``supports_prompt_cache``.
+        Mirrors ``AnthropicClient``'s ``cache_markers`` policy so gateways
+        (Radient, OpenRouter BYOK) routing to Anthropic do not pay 1.25x
+        cache-write on one-shot auxiliary prompts:
+        - ``"none"``: no ``cache_control`` markers anywhere.
+        - ``"system"``: mark only the final system block (caches the static
+          head without touching unique user messages, matching
+          ``AnthropicClient._build_body`` even for 1-block judge prompts).
+        - ``"auto"``: all-but-last-two stable blocks, capped at
+          ``MAX_CACHE_BREAKPOINTS``.
         """
         blocks = request.system_blocks
         out: list[dict[str, Any]] = []
-        stable_cutoff = max(len(blocks) - 2, 0)
+        # DeepSeek caches complete persisted prefixes automatically. Explicit
+        # ephemeral markers are undocumented there and moving them each turn
+        # rewrites old prefixes, defeating the very cache they try to help.
+        # Direct OpenAI caches implicitly; Anthropic's marker dialect is
+        # supported by some gateways but is not a Chat API field.
+        can_mark = (
+            request.cache_markers != "none"
+            and request.model.supports_prompt_cache
+            and request.model.provider != "deepseek"
+            and not (
+                request.model.provider == "openai" and self._base_url == "https://api.openai.com/v1"
+            )
+        )
+        stable_cutoff = min(self.MAX_CACHE_BREAKPOINTS, max(len(blocks) - 2, 0))
         for i, block in enumerate(blocks):
-            # DeepSeek caches complete persisted prefixes automatically. Explicit
-            # ephemeral markers are undocumented there and moving them each turn
-            # rewrites old prefixes, defeating the very cache they try to help.
-            if (
-                request.model.supports_prompt_cache
-                and request.model.provider != "deepseek"
-                # Direct OpenAI caches implicitly; Anthropic's marker dialect is
-                # supported by some gateways but is not a Chat API field.
-                and not (
-                    request.model.provider == "openai"
-                    and self._base_url == "https://api.openai.com/v1"
-                )
-                and i < stable_cutoff
-            ):
+            should_mark = can_mark and (
+                (request.cache_markers == "system" and i == len(blocks) - 1)
+                or (request.cache_markers == "auto" and i < stable_cutoff)
+            )
+            if should_mark:
                 out.append(
                     {
                         "role": "system",
@@ -3539,56 +3578,107 @@ class OpenAICompatClient:
         messages: list[dict[str, Any]],
         *,
         frozen_entry: dict[str, Any] | None = None,
+        ephemeral_indices: Collection[int] | None = None,
     ) -> None:
-        """Mark the final message and the settled boundary for caching.
+        """Mark the final persistent message and the settled/rolling boundary for caching.
 
         Same economics as the Anthropic client: system-only markers stop the
         warm prefix before the conversation. OpenAI-compatible pools that
-        honor ``cache_control`` on content parts (OpenRouter BYOK) then keep
-        the previous request's prefix warm; providers that ignore the field
-        are unaffected. Only applied when the model reports prompt caching.
+        honor ``cache_control`` on content parts (Radient, OpenRouter BYOK)
+        then keep the previous request's prefix warm; providers that ignore the
+        field are unaffected. Only applied when the model reports prompt
+        caching and ``request.cache_markers == "auto"``.
+
+        Tail placement skips trailing transient frames (``ephemeral_indices``,
+        such as ``PendingTurn``'s ephemeral body frame) whenever a persistent
+        conversation message exists before them, so the tail cache entry
+        survives after the turn settles and the frame disappears.
 
         The second marker sits at the settled boundary -- the last message
         before the newest frame -- rather than on an earlier user turn: an
         older turn's block is stable but sits hundreds of content blocks deep
         once frames start re-rendering, where the provider's backward lookback
-        can no longer find it (see ``_settled_cache_target`` for the measured
-        cost). With no usable frame in the history the previous user turn is
-        marked instead, the historical layout for text-only sessions.
+        can no longer find it (see ``_settled_cache_target_with_index``). When
+        an image sits deep in history and ``prev_user`` is strictly AFTER the
+        settled message, BOTH ``settled`` and ``prev_user`` are marked (within
+        ``MAX_CACHE_BREAKPOINTS = 4`` by trimming trailing system markers) so a
+        tail miss does not collapse 200k tokens back to an old screenshot.
 
         ``frozen_entry`` is the rendered message ending a Radient Saver prefix
         (contract §4). When present its last block takes the second marker in
         place of the heuristic, exactly as on the Anthropic wire.
         """
+        ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         targets: list[dict[str, Any]] = []
-        if messages:
-            last = messages[-1]
-            content = last.get("content")
+        # Walk backward past trailing ephemeral frames so the tail cache entry
+        # lands on the last persistent conversation message.
+        tail_msg: dict[str, Any] | None = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if idx not in ephemeral and messages[idx].get("role") != "system":
+                tail_msg = messages[idx]
+                break
+        if tail_msg is None and messages:
+            tail_msg = messages[-1]
+        if tail_msg is not None:
+            content = tail_msg.get("content")
             if isinstance(content, str):
-                last["content"] = [{"type": "text", "text": content}]
-                content = last["content"]
+                tail_msg["content"] = [{"type": "text", "text": content}]
+                content = tail_msg["content"]
             if isinstance(content, list) and content:
                 targets.append(content[-1])
-        settled = _settled_cache_target(messages, ("image_url",))
+
+        settled_pair = _settled_cache_target_with_index(messages, ("image_url",))
         frozen_block = _last_block([frozen_entry]) if frozen_entry is not None else None
+        # Filter ephemeral frames out of prev_user candidates so a transient
+        # frame neither receives a rolling marker nor displaces the prior user
+        # turn that keeps the pre-turn cache warm.
+        user_indices = [
+            i for i, m in enumerate(messages) if m.get("role") == "user" and i not in ephemeral
+        ]
+        prev_user_idx = user_indices[-2] if len(user_indices) >= 2 else None
+
+        def _append_prev_user() -> None:
+            if prev_user_idx is None:
+                return
+            prev = messages[prev_user_idx]
+            content = prev.get("content")
+            if isinstance(content, str):
+                prev["content"] = [{"type": "text", "text": content}]
+                content = prev["content"]
+            if isinstance(content, list) and content:
+                prev_block = content[-1]
+                if not _targets_cover(targets, prev_block):
+                    targets.append(prev_block)
+
         if frozen_block is not None:
             if not _targets_cover(targets, frozen_block):
                 targets.append(frozen_block)
-        elif settled is not None:
-            if not _targets_cover(targets, settled):
-                targets.append(settled)
+        elif settled_pair is not None:
+            settled_idx, settled_block = settled_pair
+            if not _targets_cover(targets, settled_block):
+                targets.append(settled_block)
+            if prev_user_idx is not None and prev_user_idx > settled_idx:
+                _append_prev_user()
         else:
-            user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-            if len(user_indices) >= 2:
-                prev = messages[user_indices[-2]]
-                content = prev.get("content")
-                if isinstance(content, str):
-                    prev["content"] = [{"type": "text", "text": content}]
-                    content = prev["content"]
-                if isinstance(content, list) and content:
-                    prev_block = content[-1]
-                    if not _targets_cover(targets, prev_block):
-                        targets.append(prev_block)
+            _append_prev_user()
+
+        if not targets:
+            return
+        # Enforce MAX_CACHE_BREAKPOINTS across system + message markers so
+        # Anthropic-backed OpenAI-compat pools never reject >4 cache_control
+        # blocks; drop trailing (lowest-value) system markers first.
+        system_marker_blocks = [
+            part
+            for msg in messages
+            if msg.get("role") == "system" and isinstance(msg.get("content"), list)
+            for part in msg["content"]
+            if isinstance(part, dict)
+            and "cache_control" in part
+            and not _targets_cover(targets, part)
+        ]
+        budget = max(0, self.MAX_CACHE_BREAKPOINTS - len(targets))
+        for block in system_marker_blocks[budget:]:
+            block.pop("cache_control", None)
         for block in targets:
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
@@ -5424,6 +5514,7 @@ class AnthropicClient:
         *,
         ttl: str | None = None,
         frozen_block: dict[str, Any] | None = None,
+        ephemeral_indices: Collection[int] | None = None,
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
 
@@ -5431,13 +5522,18 @@ class AnthropicClient:
         markers stop the cached prefix before the first message, so the
         growing conversation (every tool result, every assistant turn) is
         re-processed at full price on every request. Mark the last content
-        block of the final message and the settled boundary -- the message
-        immediately before the newest frame -- so the second breakpoint's
-        block survives the frame re-renders that long screenshot sessions
-        perform (see ``_settled_cache_target`` for the measured cost of the
-        older placement). With no usable frame in the history the previous
-        user turn is marked instead, the historical layout for text-only
-        sessions.
+        block of the final persistent message (skipping trailing ephemeral
+        frames such as ``PendingTurn``'s body frame so the cache entry
+        survives once the frame disappears) and the settled boundary -- the
+        message immediately before the newest frame -- so the second
+        breakpoint's block survives the frame re-renders that long screenshot
+        sessions perform (see ``_settled_cache_target_with_index`` for the
+        measured cost of the older placement). When an image sits deep in
+        history and ``prev_user`` is strictly AFTER the settled message, BOTH
+        ``settled`` and ``prev_user`` are marked so a tail miss does not
+        collapse 200k tokens back to an old screenshot. With no usable frame
+        in the history the previous persistent user turn is marked instead,
+        the historical layout for text-only sessions.
 
         Budget: MAX_CACHE_BREAKPOINTS total. System markers are counted
         first; when the sum would exceed the cap the LOWEST-value system
@@ -5457,30 +5553,50 @@ class AnthropicClient:
         """
         system = body.get("system") or []
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
+        ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         message_targets: list[dict[str, Any]] = []
-        if messages:
-            last = messages[-1]
-            if isinstance(last.get("content"), list) and last["content"]:
-                message_targets.append(last["content"][-1])
-        settled = _settled_cache_target(messages, ("image",))
+        # Prefer the last persistent (non-ephemeral) message so the tail
+        # breakpoint survives after an ephemeral PendingTurn frame disappears.
+        tail_msg: dict[str, Any] | None = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if idx not in ephemeral:
+                tail_msg = messages[idx]
+                break
+        if tail_msg is None and messages:
+            tail_msg = messages[-1]
+        if tail_msg is not None:
+            if isinstance(tail_msg.get("content"), list) and tail_msg["content"]:
+                message_targets.append(tail_msg["content"][-1])
+        settled_pair = _settled_cache_target_with_index(messages, ("image",))
+        user_indices = [
+            i for i, m in enumerate(messages) if m.get("role") == "user" and i not in ephemeral
+        ]
+        prev_user_idx = user_indices[-2] if len(user_indices) >= 2 else None
+
+        def _append_prev_user() -> None:
+            if prev_user_idx is None:
+                return
+            prev_user = messages[prev_user_idx]
+            if isinstance(prev_user.get("content"), list) and prev_user["content"]:
+                block = prev_user["content"][-1]
+                if not _targets_cover(message_targets, block):
+                    message_targets.append(block)
+
         if frozen_block is not None:
             if not _targets_cover(message_targets, frozen_block):
                 message_targets.append(frozen_block)
-        elif settled is not None:
-            if not _targets_cover(message_targets, settled):
-                message_targets.append(settled)
+        elif settled_pair is not None:
+            settled_idx, settled_block = settled_pair
+            if not _targets_cover(message_targets, settled_block):
+                message_targets.append(settled_block)
+            if prev_user_idx is not None and prev_user_idx > settled_idx:
+                _append_prev_user()
         else:
-            # Second-to-last USER turn keeps the previous request's prefix warm.
-            user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-            if len(user_indices) >= 2:
-                prev_user = messages[user_indices[-2]]
-                if isinstance(prev_user.get("content"), list) and prev_user["content"]:
-                    block = prev_user["content"][-1]
-                    if not _targets_cover(message_targets, block):
-                        message_targets.append(block)
+            # Second-to-last persistent USER turn keeps the previous request's prefix warm.
+            _append_prev_user()
         if not message_targets:
             return
-        budget = self.MAX_CACHE_BREAKPOINTS - len(message_targets)
+        budget = max(0, self.MAX_CACHE_BREAKPOINTS - len(message_targets))
         # Drop the lowest-value system breakpoints (the last stable blocks)
         # until system + message markers fit the cap.
         for index in system_markers[budget:]:
@@ -5523,6 +5639,7 @@ class AnthropicClient:
         # it is rendered rather than located by index afterwards.
         epoch_ids = _frozen_prefix_ids(request)
         epoch_block: dict[str, Any] | None = None
+        ephemeral_indices: set[int] = set()
         for message in _without_unrenderable_tool_calls(wire_messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
@@ -5589,6 +5706,8 @@ class AnthropicClient:
                     # where skipping is the right answer.
                     blocks = [{"type": "text", "text": EMPTY_USER_TEXT}]
                 messages.append({"role": message.role, "content": blocks})
+                if getattr(message, "_ephemeral", False):
+                    ephemeral_indices.add(len(messages) - 1)
             if message.id in epoch_ids:
                 epoch_block = _last_block(messages)
 
@@ -5652,7 +5771,13 @@ class AnthropicClient:
             # second breakpoint's block survives frame re-renders, within
             # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
             # breakpoint.
-            self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
+            self._message_cache_breakpoints(
+                messages,
+                body,
+                ttl=ttl,
+                frozen_block=epoch_block,
+                ephemeral_indices=ephemeral_indices,
+            )
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #

@@ -492,3 +492,67 @@ def test_a_designation_move_makes_the_routed_turn_drift_and_release(tmp_path) ->
     store.update_designated_session(_owner(), "sess_new")
 
     assert routed.for_call() is None  # the per-call fence no longer holds
+
+
+def test_pending_turn_anchors_frame_index_across_mid_turn_tool_calls(tmp_path) -> None:
+    """REGRESSION (cache): Call 1 pins the ephemeral frame index right after
+    pre-turn history; Call 2+ (after assistant tool_use and tool_result are
+    appended) keeps the frame at that anchored index instead of teleporting it
+    to ``messages[-1]`` and busting the prefix cache."""
+    from local_operator.harness.render import _default_convert_to_llm
+    from local_operator.harness.types import Message, TextContent, ToolCall
+    from local_operator.team_bridge.card_projection import presented_bridge_ref
+
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    turn = _turn(tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch)) is True
+
+    card = Message.user("wake card")
+    call1_input = [card]
+    call1 = turn.transform(call1_input)
+    assert len(call1_input) == 1, "transform must not mutate its input list"
+    assert len(call1) == 2
+    assert call1[0] is card
+    frame1 = call1[1]
+    assert getattr(frame1, "_ephemeral", False) is True
+    assert "_ephemeral" not in frame1.model_dump()
+    assert BODY_TEXT in frame1.details["text"]
+
+    # Mid-turn: assistant calls a tool and receives a result.
+    asst = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="c1", name="noop", arguments={})],
+    )
+    tool = Message(
+        role="tool",
+        tool_call_id="c1",
+        tool_name="noop",
+        content=[TextContent(text="ok")],
+    )
+    call2_input = [card, asst, tool]
+    call2 = turn.transform(call2_input)
+    assert len(call2_input) == 3, "transform must not mutate its input list"
+    assert len(call2) == 4
+    # Frame stays anchored at index 1 — BEFORE the assistant/tool messages.
+    assert call2[0] is card
+    frame2 = call2[1]
+    assert call2[2] is asst
+    assert call2[3] is tool
+    assert frame2.id == frame1.id
+    assert frame2.details == frame1.details
+    assert getattr(frame2, "_ephemeral", False) is True
+
+    # Rendered Messages propagate _ephemeral and preserve admission proof.
+    rendered1 = _default_convert_to_llm(call1)
+    rendered2 = _default_convert_to_llm(call2)
+    assert getattr(rendered1[1], "_ephemeral", False) is True
+    assert getattr(rendered2[1], "_ephemeral", False) is True
+    assert "_ephemeral" not in rendered1[1].model_dump()
+    assert [m.model_dump() for m in rendered2[:2]] == [m.model_dump() for m in rendered1]
+    assert presented_bridge_ref(rendered1) is not None
+    assert presented_bridge_ref(rendered2) == presented_bridge_ref(rendered1)
+
+    # Mid-turn history shrink (e.g., compaction) clamps cleanly without IndexError.
+    shrunk = turn.transform([])
+    assert len(shrunk) == 1 and BODY_TEXT in shrunk[0].details["text"]

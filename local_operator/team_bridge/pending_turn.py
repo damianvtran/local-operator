@@ -145,6 +145,11 @@ class PendingTurn:
         self._drifted = False
         self._drift_reason = "admission_drift"
         self._injected: InjectedBody | None = None
+        #: Position in ``messages`` where Call 1 placed the ephemeral frame.
+        #: Re-using this index on Call 2+ keeps the pre-turn + frame prefix
+        #: byte-identical across mid-turn tool steps instead of teleporting
+        #: the frame to ``messages[-1]`` and busting the provider prompt cache.
+        self._anchor_index: int | None = None
         self._presentation_ref: Any = None
         #: Held only so a COMPLETED settlement can hand the verified bytes to
         #: the display store; cleared with the claim either way.
@@ -297,12 +302,20 @@ class PendingTurn:
         return True
 
     def transform(self, messages: list[Any]) -> list[Any]:
-        """The ``transform_context`` callback: append the frame, or pass through.
+        """The ``transform_context`` callback: inject the frame, or pass through.
 
         WHY the callback lives here rather than in the session: the session must
         not know how a frame is shaped or where it is inserted, and this is the
-        same object that holds the lease the append depends on. Returning the
+        same object that holds the lease the injection depends on. Returning the
         input list unchanged is the ordinary-request answer, not an error.
+
+        ANCHOR INVARIANT: the insertion index is pinned on the first admitted
+        call of this turn (``len(messages)``, right after pre-turn history /
+        wake card) and reused on subsequent tool-step calls of the same turn
+        (clamped to ``len(messages)`` if history shrinks, e.g. mid-turn
+        compaction). That keeps the wire prefix through the frame byte-identical
+        across Call 1 -> Call 2+ so mid-turn tool calls hit the prompt cache
+        while preserving every admission, lease and non-persistence invariant.
         """
 
         text = self.for_call()
@@ -311,9 +324,16 @@ class PendingTurn:
         from .card_projection import mark_admitted_frame
         from .request_body import CustomFrameInjection
 
-        shaped = CustomFrameInjection.append(messages, text, message_id=self._frame_message_id())
+        if self._anchor_index is None:
+            self._anchor_index = len(messages)
+        insert_idx = min(self._anchor_index, len(messages))
+        shaped = CustomFrameInjection.insert(
+            messages, text, message_id=self._frame_message_id(), index=insert_idx
+        )
         if self._presentation_ref is not None:
-            mark_admitted_frame(shaped[-1], self._presentation_ref, self._card_admission_intact)
+            mark_admitted_frame(
+                shaped[insert_idx], self._presentation_ref, self._card_admission_intact
+            )
         # This native frame contains screened source metadata AND body. Raw
         # journal cards never borrow its admission by repeating the same ids;
         # they remain content-free markers even in this very request.
