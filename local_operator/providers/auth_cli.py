@@ -1304,8 +1304,11 @@ def format_logins(
         auth_store.retained_radient_login_ids(), action=action
     )
     if rows:
+        from rich.cells import cell_len
+
         lines.append("Stored credentials:")
         now_ms = int(time.time() * 1000)
+        listed: list[tuple[Any, str, str]] = []
         for row in rows:
             # The ONE label derivation (``credential_identity`` -> row.data
             # email/account_id/org_name): a row whose payload carries no
@@ -1327,7 +1330,16 @@ def format_logins(
             else:
                 source = row.data.get("source") or "stored"
                 detail = f"api_key ({source})"
-            lines.append(f"  [{row.id}] {row.provider:<14} {detail:<22} identity={identity}")
+            listed.append((row, detail, identity))
+        # Padded in terminal CELLS to the widest state actually listed (never
+        # narrower than the historic 22): the sign-in states are longer than
+        # 22, and CJK states are two cells per code point, so a code-point pad
+        # (`f"{detail:<22}"`) left `identity=` ragged on exactly the rows a user
+        # opens this command to read (design round 1, D1).
+        width = max([22, *(cell_len(detail) for _row, detail, _identity in listed)])
+        for row, detail, identity in listed:
+            pad = " " * (width - cell_len(detail))
+            lines.append(f"  [{row.id}] {row.provider:<14} {detail}{pad} identity={identity}")
     else:
         lines.append("No usable stored credentials." if retained else "No stored credentials.")
     if retained:

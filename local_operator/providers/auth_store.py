@@ -1759,6 +1759,13 @@ class AuthStore:
         # pool whose members are all equally valid.
         self._deprioritized: dict[str, dict[int, int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
+        #: Row id -> the provider's own sentence for a refresh it refused before
+        #: sending because LOCAL configuration can never work (e.g. a custom
+        #: Vertex OAuth client id with no secret). Process-local on purpose: it
+        #: is re-earned by the next attempt, cleared by any attempt that gets
+        #: past configuration, and read by the failover walk so the user is told
+        #: what to configure instead of "wait for the limit to reset".
+        self._refresh_config_refusals: dict[int, str] = {}
         #: Identity of this process in lease rows, so a release only frees a
         #: lease THIS process took. Same shape as :class:`UsageCacheStore`.
         self._refresh_holder = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -3985,6 +3992,17 @@ class AuthStore:
             and self._grant_dead_at(row.data) is not None
         )
 
+    def refresh_configuration_error(self, credential_id: int) -> str | None:
+        """Why this row's last refresh was refused locally as misconfigured, if it was.
+
+        Set only when a provider refused BEFORE sending because its own
+        configuration cannot work (a ``ConfigurationError`` under
+        ``RefreshNotSentError``), cleared by the next attempt that gets further.
+        The failover walk reads it so a missing client secret is reported as
+        what it is, not as a resting quota.
+        """
+        return self._refresh_config_refusals.get(credential_id)
+
     def grant_dead_reason(self, credential_id: int) -> str | None:
         """The recorded cause of a dead grant, or ``None`` (alive, or no cause known).
 
@@ -4628,6 +4646,7 @@ class AuthStore:
             # re-adding it as a top-level import. This is a refresh path that
             # has already paid for the module, so the cost is zero here.
             from local_operator.providers.oauth.callback_server import (
+                ConfigurationError,
                 InvalidGrantError,
                 LoginError,
                 RefreshNotSentError,
@@ -4749,6 +4768,7 @@ class AuthStore:
                     # other field (claims, markers, delegate records) as they stood
                     # before the POST.
                     sent = json.loads(json.dumps(fresh))
+                    self._refresh_config_refusals.pop(row.id, None)
                     async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
                         refreshed = await refresh(fresh)
                 except AuthStoreError:
@@ -4765,6 +4785,8 @@ class AuthStore:
                     # refusal still surfaces as the store's own error type, as
                     # every refresh failure here does.
                     self._clear_send_marker(row.id, armed)
+                    if isinstance(exc.__cause__, ConfigurationError):
+                        self._refresh_config_refusals[row.id] = str(exc)
                     raise AuthStoreError(
                         f"OAuth refresh for '{row.provider}' was refused before sending: {exc}"
                     ) from exc

@@ -157,6 +157,8 @@ def validate_location(location: str) -> str:
 #: Env / secret-store names for an organisation's OWN OAuth desktop client.
 CLIENT_ID_ENV = "GOOGLE_VERTEX_OAUTH_CLIENT_ID"
 CLIENT_SECRET_ENV = "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET"
+#: Env-only override of the user-OAuth refresh endpoint (local stubs/QA).
+OAUTH_TOKEN_URI_ENV = "GOOGLE_VERTEX_OAUTH_TOKEN_URI"
 #: ``config.yml`` home of the client id: ``values.providers.google-vertex``.
 _CONFIG_PROVIDER_KEY = "google-vertex"
 _CONFIG_CLIENT_ID_KEY = "oauth_client_id"
@@ -225,13 +227,20 @@ def _client_secret(client_id: str | None = None) -> str:
     would fail at the token endpoint as ``invalid_client``, which this store
     reads as a dead grant and answers with a sign-in that can never work. So a
     custom id without its secret is refused up front, before any request.
+
+    The same holds in the other direction: a configured custom secret belongs
+    to the custom id only. A credential gcloud's client issued (every sign-in
+    before an org registered its own client) keeps refreshing with gcloud's
+    public secret even after ``GOOGLE_VERTEX_OAUTH_CLIENT_SECRET`` is stored;
+    sending the org's secret with gcloud's id is answered ``invalid_client``
+    and would tombstone a perfectly good sign-in.
     """
     client_id = client_id or _client_id()
+    if client_id == DEFAULT_CLIENT_ID:
+        return DEFAULT_CLIENT_SECRET
     explicit = (os.environ.get(CLIENT_SECRET_ENV) or "").strip() or _stored_value(CLIENT_SECRET_ENV)
     if explicit:
         return explicit
-    if client_id == DEFAULT_CLIENT_ID:
-        return DEFAULT_CLIENT_SECRET
     raise ConfigurationError(
         f"Google Vertex AI is set to use OAuth client {client_id!r}, but no client "
         f"secret is configured for it. Store it with `lop credential update "
@@ -241,16 +250,34 @@ def _client_secret(client_id: str | None = None) -> str:
 
 
 def _refresh_token_url() -> str:
-    """Where an OAuth refresh is POSTed: Google's endpoint unless pinned by env.
+    """Where a user-OAuth refresh is POSTed: Google's endpoint unless overridden.
 
-    ``GOOGLE_VERTEX_TOKEN_URI`` already names an operator-trusted token endpoint
-    for service-account keys (private Google endpoints, test doubles). Honouring
-    it here too is what lets a local stub answer a refresh, e.g. to reproduce a
-    Workspace session-control refusal end to end. Only the environment can set
-    it -- never a stored credential -- so a forged payload cannot redirect the
-    refresh token to another host.
+    ``OAUTH_TOKEN_URI_ENV`` exists so a local stub can answer a refresh (e.g. to
+    reproduce a Workspace session-control refusal end to end). It is a variable
+    of its own, not ``GOOGLE_VERTEX_TOKEN_URI``: that one only confirms a
+    service-account key's ``token_uri``, and an operator who set it for a
+    private SA endpoint must not silently start sending their user refresh
+    token and client secret there too. The override must be https unless it
+    points at loopback (where a plain-http stub cannot leak anything off the
+    machine). Only the environment can set it -- never a stored credential --
+    so a forged payload cannot redirect the refresh token.
+
+    Raises ``ConfigurationError`` for an unusable override, before any request.
     """
-    return (os.environ.get("GOOGLE_VERTEX_TOKEN_URI") or "").strip() or TOKEN_URL
+    override = (os.environ.get(OAUTH_TOKEN_URI_ENV) or "").strip()
+    if not override:
+        return TOKEN_URL
+    parsed = urllib.parse.urlparse(override)
+    host = (parsed.hostname or "").lower()
+    loopback = host in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme == "https" and host:
+        return override
+    if parsed.scheme == "http" and loopback:
+        return override
+    raise ConfigurationError(
+        f"{OAUTH_TOKEN_URI_ENV} must be an https:// URL (plain http is accepted only "
+        "for localhost/127.0.0.1/::1). Unset it to use Google's token endpoint."
+    )
 
 
 def _configured_project() -> str | None:
@@ -625,6 +652,9 @@ async def login_vertex_oauth(
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Run the Google Cloud browser OAuth2 + PKCE sign-in for Vertex AI."""
+    # A custom client id with no secret can never finish the code exchange:
+    # refuse before the browser opens, not after the user completed consent.
+    _client_secret()
     return await VertexOAuthFlow(
         callbacks,
         open_browser=open_browser,
@@ -821,6 +851,7 @@ async def refresh_vertex_token(
     )
     try:
         client_secret = _client_secret(client_id)
+        token_url = _refresh_token_url()
     except ConfigurationError as exc:
         # Nothing has been sent: say so, so the store does not hold the token
         # in doubt for a request that never left this machine.
@@ -831,7 +862,6 @@ async def refresh_vertex_token(
         "client_secret": client_secret,
         "refresh_token": refresh_token,
     }
-    token_url = _refresh_token_url()
     if http_client is not None:
         response = await http_client.post(token_url, data=form)
     else:

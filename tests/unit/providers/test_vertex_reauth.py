@@ -52,7 +52,12 @@ INVALID_RAPT_BODY = json.dumps(
 @pytest.fixture(autouse=True)
 def _no_client_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the operator's env/store/config out of the client-id resolution."""
-    for name in (vertex.CLIENT_ID_ENV, vertex.CLIENT_SECRET_ENV, "GOOGLE_VERTEX_TOKEN_URI"):
+    for name in (
+        vertex.CLIENT_ID_ENV,
+        vertex.CLIENT_SECRET_ENV,
+        "GOOGLE_VERTEX_OAUTH_TOKEN_URI",
+        "GOOGLE_VERTEX_TOKEN_URI",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(vertex, "_stored_value", lambda _name: None)
     monkeypatch.setattr(vertex, "_configured_client_id", lambda: None)
@@ -362,3 +367,307 @@ def test_the_deferred_reauth_copy_still_renders_translated(
     assert _sign_in_required_state(REAUTH_REASON_SESSION_POLICY) == (
         "requiere iniciar sesión (política de Workspace)"
     )
+
+
+# --- Round-1 remediation (PR #4356) ------------------------------------------
+
+
+def _ok_transport(seen: list[httpx.Request]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"access_token": "new", "expires_in": 3600})
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["store", "env"])
+async def test_a_gcloud_issued_sign_in_keeps_gclouds_secret_after_an_org_secret_is_set(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """Review M1 / QA Q3: gcloud's id paired with the org's secret is answered
+    ``invalid_client`` (terminal), tombstoning a working sign-in."""
+    if source == "store":
+        monkeypatch.setattr(vertex, "_stored_value", {vertex.CLIENT_SECRET_ENV: "org-secret"}.get)
+    else:
+        monkeypatch.setenv(vertex.CLIENT_SECRET_ENV, "org-secret")
+    seen: list[httpx.Request] = []
+    async with httpx.AsyncClient(transport=_ok_transport(seen)) as http:
+        await vertex.refresh_vertex_token({"type": "oauth", "refresh": "r"}, http_client=http)
+    form = dict(httpx.QueryParams(seen[0].content.decode()))
+    assert (form["client_id"], form["client_secret"]) == (
+        vertex.DEFAULT_CLIENT_ID,
+        vertex.DEFAULT_CLIENT_SECRET,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_sa_token_uri_no_longer_redirects_the_user_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review m3: ``GOOGLE_VERTEX_TOKEN_URI`` is the SA ``token_uri`` check only."""
+    monkeypatch.setenv("GOOGLE_VERTEX_TOKEN_URI", "http://sa.example.test/token")
+    seen: list[httpx.Request] = []
+    async with httpx.AsyncClient(transport=_ok_transport(seen)) as http:
+        await vertex.refresh_vertex_token({"type": "oauth", "refresh": "r"}, http_client=http)
+    assert str(seen[0].url) == vertex.TOKEN_URL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override",
+    ["http://127.0.0.1:8765/token", "http://localhost/token", "https://stub.example.test/t"],
+)
+async def test_the_oauth_refresh_override_accepts_https_or_loopback(
+    monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    monkeypatch.setenv("GOOGLE_VERTEX_OAUTH_TOKEN_URI", override)
+    seen: list[httpx.Request] = []
+    async with httpx.AsyncClient(transport=_ok_transport(seen)) as http:
+        await vertex.refresh_vertex_token({"type": "oauth", "refresh": "r"}, http_client=http)
+    assert str(seen[0].url) == override
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["http://stub.example.test/token", "ftp://127.0.0.1/t"])
+async def test_the_oauth_refresh_override_refuses_plain_http_off_loopback(
+    monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    monkeypatch.setenv("GOOGLE_VERTEX_OAUTH_TOKEN_URI", override)
+    seen: list[httpx.Request] = []
+    async with httpx.AsyncClient(transport=_ok_transport(seen)) as http:
+        with pytest.raises(RefreshNotSentError, match="GOOGLE_VERTEX_OAUTH_TOKEN_URI"):
+            await vertex.refresh_vertex_token({"type": "oauth", "refresh": "r"}, http_client=http)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_login_refuses_a_custom_client_without_secret_before_the_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review n1 / QA Q5: refuse before consent, not at the code exchange."""
+    monkeypatch.setenv(vertex.CLIENT_ID_ENV, "org.apps.googleusercontent.com")
+    opened: list[str] = []
+    with pytest.raises(ConfigurationError, match=vertex.CLIENT_SECRET_ENV):
+        await vertex.login_vertex_oauth(open_browser=opened.append)
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_a_missing_custom_secret_on_refresh_is_reported_as_configuration_not_quota(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q4: nothing is sent and nothing is tombstoned, and the walk now names
+    the missing secret instead of "retry once the limit resets"."""
+    seen: list[httpx.Request] = []
+    _route_refreshes_to(monkeypatch, _ok_transport(seen))
+    store = AuthStore(db_path=tmp_path / "auth.db")
+    row = store.upsert_credential(
+        "google-vertex",
+        {
+            "type": "oauth",
+            "auth_mode": "oauth",
+            "access": "stale",
+            "refresh": "r",
+            "expires": 1,
+            "client_id": "org.apps.googleusercontent.com",
+        },
+    )
+
+    class _Client:
+        async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            raise AssertionError("no model request may be sent without a bearer")
+            yield  # pragma: no cover
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _Client()
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr(failover_module, "_abortable_sleep", no_sleep)
+    request = ChatRequest(model=ModelSpec(provider="google-vertex", model_id="gemini-test"))
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(
+            request, store, {"retry": {"enabled": True, "baseDelayMs": 1}}, client_for
+        ):
+            pass
+    error = excinfo.value
+    assert seen == []
+    assert not store.grant_is_dead(row.id)
+    assert error.kind == "auth", (error.kind, error.message)
+    assert vertex.CLIENT_SECRET_ENV in error.message
+    assert "lop credential update" in error.message
+    assert "limit resets" not in error.message
+    assert dead_grant_reason(store, "google-vertex") == (False, None)
+    store.close()
+
+
+# --- The one-shot sign-in notice on a live session (review M2, m1; QA Q1) ----
+
+
+def _dead_vertex_store(tmp_path: Any) -> tuple[AuthStore, int]:
+    store = AuthStore(db_path=tmp_path / "auth.db")
+    row_id = _seed_expired_vertex(store)
+    assert store._mark_grant_dead(
+        row_id, rejected_refresh_token="still-valid-refresh", reason=REAUTH_REASON_SESSION_POLICY
+    )
+    return store, row_id
+
+
+def _session_for(store: AuthStore, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[str]]:
+    from local_operator.i18n import resolve
+    from local_operator.model.configure import SessionStreamFn
+
+    monkeypatch.setattr(resolve, "resolve_language", lambda: "en")
+    stream = SessionStreamFn(store, {}, "s-reauth")
+    stream._primary_selector = "google-vertex/gemini-test"
+    notices: list[str] = []
+
+    async def collect(text: str, kind: str) -> None:
+        notices.append(text)
+
+    stream.set_notice_handler(collect)
+    return stream, notices
+
+
+def _sign_ins(notices: list[str]) -> list[str]:
+    return [text for text in notices if "lop login google-vertex" in text]
+
+
+@pytest.mark.asyncio
+async def test_the_sign_in_notice_re_arms_after_the_primary_recovers(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Die -> recover -> die in ONE session: google-vertex has no usage
+    fetcher, so the healthy-usage edge that used to re-arm it never comes."""
+    store, row_id = _dead_vertex_store(tmp_path)
+    stream, notices = _session_for(store, monkeypatch)
+    fallback = failover_module.FallbackTarget("anthropic/claude-test")
+
+    await stream._on_route_change(fallback, "provider failure: auth")
+    await stream._on_route_change(fallback, "provider failure: auth")
+    assert len(_sign_ins(notices)) == 1  # sticky fallback: said once
+
+    # The user signs in again; the primary serves; the route settles back.
+    _seed_expired_vertex(store)
+    await stream._on_route_settle(None, "primary model recovered")
+    assert "back to google-vertex/gemini-test" in notices
+
+    # Session control expires the new sign-in hours later, same session.
+    for row in store.list_credentials("google-vertex"):
+        store._mark_grant_dead(
+            row.id,
+            rejected_refresh_token=row.data["refresh"],
+            reason=REAUTH_REASON_SESSION_POLICY,
+        )
+    await stream._on_route_change(fallback, "provider failure: auth")
+    assert len(_sign_ins(notices)) == 2
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_sign_in_notice_shows_when_a_later_hop_reports_quota(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m1: quota outranks auth in the walk's reason, so a 429 from an
+    intermediate hop must not hide the dead primary's sign-in."""
+    store, _row_id = _dead_vertex_store(tmp_path)
+    stream, notices = _session_for(store, monkeypatch)
+    await stream._on_route_change(
+        failover_module.FallbackTarget("openai/gpt-test"), "provider failure: quota"
+    )
+    await stream._on_route_change(
+        failover_module.FallbackTarget("anthropic/claude-test"), "provider failure: quota"
+    )
+    assert len(_sign_ins(notices)) == 1
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_no_sign_in_notice_while_the_primary_login_is_alive(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AuthStore(db_path=tmp_path / "auth.db")
+    _seed_expired_vertex(store)
+    stream, notices = _session_for(store, monkeypatch)
+    await stream._on_route_change(
+        failover_module.FallbackTarget("anthropic/claude-test"), "provider failure: quota"
+    )
+    assert _sign_ins(notices) == []
+    store.close()
+
+
+# --- Headless (``lop exec``) rendering of the Urdu notice (QA Q2) -------------
+
+
+def test_the_urdu_notice_prints_whole_commands_in_lop_exec() -> None:
+    import io
+
+    from rich.console import Console
+
+    from local_operator import headless_print as hp
+    from local_operator.harness.types import NoticeEvent
+
+    shown = sign_in_required_text(
+        "google-vertex", REAUTH_REASON_SESSION_POLICY, locale="ur", display=True
+    )
+    buffer = io.StringIO()
+    hp.PrintRenderer(Console(file=buffer, width=400, no_color=True)).handle(NoticeEvent(text=shown))
+    out = buffer.getvalue()
+    assert "\\u20" not in out
+    assert f"{_LRI}/login google-vertex{_PDI}" in out
+    assert f"{_LRI}lop login google-vertex{_PDI}" in out
+
+
+def test_keep_isolates_still_escapes_everything_but_balanced_isolates() -> None:
+    from local_operator.ansi import sanitize_prompt_line
+
+    # The default (approval prompts) is unchanged: every Cf is escaped.
+    assert sanitize_prompt_line(f"{_LRI}x{_PDI}") == "\\u2066x\\u2069"
+    # Balanced pairs survive, nested too.
+    nested = f"{_RLI}a {_LRI}b{_PDI} c{_PDI}"
+    assert sanitize_prompt_line(nested, keep_isolates=True) == nested
+    # An unmatched opener would isolate the rest of the row: escaped.
+    assert sanitize_prompt_line(f"a{_LRI}b", keep_isolates=True) == "a\\u2066b"
+    assert sanitize_prompt_line(f"a{_PDI}b", keep_isolates=True) == "a\\u2069b"
+    # Overrides, marks and joiners (Trojan source) are still escaped.
+    assert (
+        sanitize_prompt_line("\u202egnp.terces\u200d", keep_isolates=True)
+        == "\\u202egnp.terces\\u200d"
+    )
+    # A length cut that severs a pair drops the orphaned opener.
+    cut = sanitize_prompt_line(f"ab{_LRI}cdef{_PDI}", limit=4, keep_isolates=True)
+    assert cut == "abc"
+
+
+# --- ``login-status`` column alignment (design D1) ----------------------------
+
+
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+def test_login_status_aligns_identity_by_display_width(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, locale: str
+) -> None:
+    from rich.cells import cell_len
+
+    from local_operator.i18n import resolve
+
+    monkeypatch.setattr(resolve, "resolve_language", lambda: locale)
+    store, _dead = _dead_vertex_store(tmp_path)
+    store.upsert_credential(
+        "anthropic",
+        {"type": "oauth", "access": "a", "refresh": "r", "expires": None, "email": "x@e.test"},
+    )
+    store.upsert_credential(
+        "google-vertex",
+        {"type": "oauth", "access": "a", "refresh": "r2", "expires": 1, "email": "z@e.test"},
+    )
+    store._mark_grant_dead(
+        max(row.id for row in store.list_credentials("google-vertex")),
+        rejected_refresh_token="r2",
+    )
+    rows = [line for line in format_logins(store) if "identity=" in line]
+    assert len(rows) == 3
+    columns = {cell_len(line[: line.index("identity=")]) for line in rows}
+    assert len(columns) == 1, rows
+    store.close()

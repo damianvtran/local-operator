@@ -95,9 +95,19 @@ values:
 Precedence for the client ID: the `GOOGLE_VERTEX_OAUTH_CLIENT_ID` environment
 variable, then the secret store, then `config.yml`, then the Google Cloud SDK
 client. The secret comes from `GOOGLE_VERTEX_OAUTH_CLIENT_SECRET` (environment
-first, then the store). A custom client ID with no secret is refused before any
-request is sent; gcloud's secret is never paired with another client.
+first, then the store). A custom client ID with no secret is refused before the
+browser opens (and, on refresh, before any request is sent, reported as a
+missing secret rather than a quota). The secret pairs only with the custom ID:
+gcloud's secret is never sent with another client, and a sign-in gcloud's
+client issued keeps refreshing with gcloud's own secret even after you store an
+organisation secret.
 
 A refresh token belongs to the client that issued it, so a sign-in remembers its
 client ID and keeps refreshing with it. After you switch clients, sign in again
 so the stored login uses the new one.
+
+For testing only, `GOOGLE_VERTEX_OAUTH_TOKEN_URI` (environment only) sends the
+OAuth refresh to another token endpoint, such as a local stub. It must be
+`https://`, or plain `http://` on `localhost`/`127.0.0.1`/`::1`. It is separate
+from `GOOGLE_VERTEX_TOKEN_URI`, which only confirms a service-account key's
+`token_uri` and never receives your user refresh token.

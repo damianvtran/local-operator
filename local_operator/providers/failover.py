@@ -6405,6 +6405,9 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
     dead = _dead_grant_error(auth, provider)
     if dead is not None:
         return dead
+    misconfigured = _refresh_configuration_error(auth, rows)
+    if misconfigured is not None:
+        return misconfigured
     kinds = {row.credential_type for row in rows}
     what = "OAuth sign-in" if "oauth" in kinds else "API key"
     count = len(rows)
@@ -6544,9 +6547,14 @@ def _dead_grant_error(auth: Any, provider: str) -> ProviderError | None:
     verdict, so this is a statement of fact, not a guess from wording.
 
     Retryable and pre-wire exactly like the quota sentence it replaces, so the
-    walk's behaviour (advance to the fallback, revisit on the loop-back sweep,
-    which finds a sign-in made in another window meanwhile) is unchanged; only
-    the classification and the words differ.
+    walk still advances to the fallback and revisits on the loop-back sweep
+    (which finds a sign-in made in another window meanwhile). The ``auth`` kind
+    is a deliberate, provider-wide change for EVERY OAuth provider whose rows
+    are all dead (anthropic, openai, ... not just Vertex): the route pin becomes
+    the 60 s auth cooldown instead of a quota pin re-probed every message, Team
+    Bridge records ``auth_unusable`` instead of ``quota``, and the session shows
+    the sign-in notice and ``login-status`` shows ``sign-in required``. Each is
+    the truthful reading of a grant only a sign-in can fix.
     """
     dead, reason = dead_grant_reason(auth, provider)
     if not dead:
@@ -6555,6 +6563,43 @@ def _dead_grant_error(auth: Any, provider: str) -> ProviderError | None:
         ProviderError(
             None,
             sign_in_required_text(provider, reason, locale="en"),
+            retryable=True,
+            kind="auth",
+            request_sent=False,
+        )
+    )
+
+
+def _refresh_configuration_error(auth: Any, rows: list["StoredCredential"]) -> ProviderError | None:
+    """An ``auth``-kind refusal when every row's refresh was refused as misconfigured.
+
+    WHY: a Vertex sign-in made with an organisation's own OAuth client, on a
+    machine where that client's secret is missing, is refused locally before
+    any request (nothing is sent, nothing is tombstoned). Without this the walk
+    fell through to the generic quota sentence -- "retry once the limit
+    resets" -- which can never come true and hides the one remedy, storing the
+    secret. The provider's own sentence (``vertex._client_secret``) names the
+    missing variable and the ``lop credential update`` command, so it is used
+    as is. ``auth`` rather than ``quota`` because the user must act on the
+    credential configuration; it is not a dead grant, so no sign-in notice
+    follows (``dead_grant_reason`` answers not-dead for these rows).
+
+    Only when EVERY row agrees: one row that merely rested means the generic
+    sentence is still the truthful one. Duck-typed like the other probes.
+    """
+    reason_of = getattr(auth, "refresh_configuration_error", None)
+    if not callable(reason_of) or not rows:
+        return None
+    try:
+        reasons = [reason_of(row.id) for row in rows]
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    if not all(isinstance(reason, str) and reason for reason in reasons):
+        return None
+    return _mark_prewire_refusal(
+        ProviderError(
+            None,
+            str(reasons[0]),
             retryable=True,
             kind="auth",
             request_sent=False,

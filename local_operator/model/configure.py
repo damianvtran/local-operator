@@ -83,6 +83,11 @@ from local_operator.session.request_observation import (
 
 logger = logging.getLogger("local_operator.model.configure")
 
+#: Quota-latch token of the one-shot "sign in again" notice
+#: (``SessionStreamFn._announce_sign_in_required``); discarded when the route
+#: returns to the primary so a later expiry in the same session re-announces.
+SIGN_IN_REQUIRED_TOKEN = "auth:sign-in-required"
+
 if TYPE_CHECKING:
     # Import-time cost only for type checkers: the listing clients pull in the
     # whole requests/provider surface, and this module is on the CLI startup
@@ -5783,8 +5788,13 @@ class SessionStreamFn:
     async def _on_route_change(self, target: Any, reason: str) -> None:
         effort = f" ({target.effort} effort)" if target.effort else ""
         await self._notice(f"{reason} — falling back to {target.selector}{effort}")
-        if reason.startswith("provider failure: auth"):
-            await self._announce_sign_in_required()
+        # On EVERY route change, not only when ``reason`` reads ``auth``: the
+        # reason names the walk's highest-ranked error, and quota outranks auth,
+        # so a dead primary followed by a hop answering 429 settles as "quota"
+        # and would hide the one remedy. The announce checks the store's own
+        # dead-grant verdict itself and dedupes on its latch token, so a live
+        # primary stays silent and a multi-hop walk still speaks once.
+        await self._announce_sign_in_required()
 
     async def _announce_sign_in_required(self) -> None:
         """Tell the user ONCE, in their language, that the primary needs a sign-in.
@@ -5798,9 +5808,10 @@ class SessionStreamFn:
         named here, from the store's persisted verdict (no refresh is sent).
 
         Deduped through the quota latch on its own ``auth:`` token, so a sticky
-        fallback does not repeat it every message and a re-login (which clears
-        the latch on the healthy edge) re-arms it for a real recurrence. Never
-        fails the turn: a notice is advisory.
+        fallback does not repeat it every message; the route returning to the
+        primary (``_on_route_settle``) discards the token, so a real recurrence
+        later in the same session announces again. Never fails the turn: a
+        notice is advisory.
         """
         primary = self._primary_selector
         if not primary:
@@ -5822,7 +5833,7 @@ class SessionStreamFn:
             # ``display=True``: this is the copy a person reads, so the two
             # commands are kept whole in an RTL (Urdu) paragraph.
             text = sign_in_required_text(provider, cause, locale=resolve_language(), display=True)
-            await self._announce_quota_change(primary, "auth:sign-in-required", text)
+            await self._announce_quota_change(primary, SIGN_IN_REQUIRED_TOKEN, text)
         except Exception as exc:  # noqa: BLE001 - a notice must never fail the turn
             logger.debug("sign-in notice failed (%s)", type(exc).__name__)
 
@@ -5836,6 +5847,16 @@ class SessionStreamFn:
             # "back to" — the failure edge's "falling back to" and this pair
             # off the same preposition (design D1).
             await self._notice(f"back to {self._primary_selector}", "info")
+            # Re-arm the sign-in notice. Its latch token is otherwise cleared
+            # only by a healthy usage reading, and providers without a usage
+            # fetcher (google-vertex) never produce one, so the NEXT expiry in
+            # this same long-lived session (Workspace session control repeats
+            # every 1-24 h) would fall back with no "sign in again" at all.
+            # The primary serving again is the proof the sign-in was repaired.
+            primary = self._primary_selector
+            announced = self._last_quota_state.get(primary) if primary else None
+            if announced is not None:
+                announced.discard(SIGN_IN_REQUIRED_TOKEN)
         if self._route_handler is None:
             return
         result = self._route_handler(target, reason)
