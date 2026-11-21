@@ -1711,7 +1711,13 @@ def test_revocation_rotates_the_epoch_and_refuses_the_removed_device_afterwards(
         expected_device=server_a.identity.device_id,
     )
     assert link is None
-    assert reason.startswith("handshake_refused") or reason in ("not_a_member", "epoch_stale")
+    # G9-B: the removed device dialled with its OWN, genuine key, so it proves the
+    # key stored on its tombstone and is told — once, signed, over this handshake —
+    # that its membership ended; it marks itself removed. Dialers that prove nothing
+    # still get the silent refusal (tests/unit/network/test_removed_member_notice.py).
+    assert reason == "membership_ended", reason
+    b_self = store.load(record.network_id, server_b.root).self_member()
+    assert b_self is not None and not b_self.active
     assert "member_removed" in _events(server_a)
     assert "handshake_refused" in _events(server_a)
 

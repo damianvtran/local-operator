@@ -129,6 +129,9 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "member_admitted",
         "member_removed",
         "member_left",
+        # THIS device learned, from a member that proved it on a live handshake, that
+        # it was removed while it was offline (G9-B, ``relay._apply_verified_removal``).
+        "membership_ended",
         # `lop network member grant/revoke`: what a peer may do on THIS device
         # changed. A membership-class event: an incident review asking "how could
         # that device move a session here" is answered by exactly this record.
@@ -511,6 +514,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "member_removed": frozenset({"initiated_by", "rekeyed", "epoch_after"}),
     "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
     "member_left": frozenset({"epoch"}),
+    "membership_ended": frozenset({"notice_epoch", "credentials_dropped"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
     "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
@@ -945,6 +949,9 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         # newcomer became visible here, and a lost record would leave the mesh
         # looking as though that device had always been a member.
         "membership_learned",
+        # Losing membership on a removed device's own word-of-a-member: as durable as
+        # the removal it records, or an incident review cannot see why bearers ended.
+        "membership_ended",
         "epoch_rotated",
         "epoch_rejected",
         "handshake_refused",

@@ -708,6 +708,15 @@ def test_a_silently_refused_handshake_is_named_locally(
     a.server._ctl_member_rm(  # noqa: SLF001 — the CLI's own control op
         {"network": record.network_id, "device_id": b.device_id}
     )
+    # SILENCE IS STILL THE ANSWER PAST THE NOTICE WINDOW (G9-B). Inside
+    # ``relay.REMOVAL_NOTICE_WINDOW_S`` a removed device that proves its own key is
+    # told "membership ended" instead (test_removed_member_notice.py); this cell pins
+    # the silent path, so the removal is aged past that window first.
+    with store.mutate(record.network_id, a.root) as aged:
+        tomb = aged.member(b.device_id)
+        assert tomb is not None and tomb.removed_at is not None
+        tomb.removed_at -= relay.REMOVAL_NOTICE_WINDOW_S + 60
+        store.save(aged, a.root)
     # ...AND IT COMES BACK: a fresh relay on the existing root — the durable state is
     # on disk, the process is not (the process that paired is not the process that
     # later dials). Dial-only, per the rule the fresh-relay helper in
