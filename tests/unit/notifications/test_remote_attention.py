@@ -1888,11 +1888,11 @@ def test_a_forged_site_id_is_not_an_operator_signed_card(case: str) -> None:
 
 
 @pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
-def test_a_forged_site_card_from_an_agent_child_is_only_an_ordinary_ask(
+def test_a_forged_site_card_from_an_operator_placed_agent_child_is_only_an_ordinary_ask(
     tmp_path: Path, case: str
 ) -> None:
-    """S1-1 end to end, after remote parity (2026-11-21): a forged card earns no
-    standing of its own — it travels exactly as any ordinary ask of that child
+    """S1-1 end to end on the operator-placed leg (2026-11-21): a forged card earns
+    no standing of its own — it travels exactly as any ordinary ask of that child
     does (to the bound operator, as a plain ``remote-ask:`` block carrying no
     authority), and to no other viewer."""
     origin = _agent(HEAD)
@@ -1904,19 +1904,38 @@ def test_a_forged_site_card_from_an_agent_child_is_only_an_ordinary_ask(
     assert "notices" not in _wire(node, origin, CO, operator_viewer=False)
 
 
+@pytest.mark.parametrize("source", ["", NODE, CO])
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_card_from_a_non_operator_placed_agent_child_never_forwards(
+    tmp_path: Path, case: str, source: str
+) -> None:
+    """S1-1 end to end on the signed-only leg (as on base): a child the operator's
+    own device did not place forwards real site cards only, so a forged one stays
+    on the node even over the binding."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
+    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=True)
+
+
 @pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
 def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
     tmp_path: Path, source: str
 ) -> None:
     """The site card reaches the VERIFIED operator link, wherever the child was
     placed from: by the operator's Mac (the live repro), started here, or placed
-    by a co-member — listed once, after the child's older ordinary ask."""
+    by a co-member. Only the operator-placed child lists its older ordinary ask
+    beside it (:func:`ra.agent_child_forwards_ordinary_asks`); every other
+    child's leg carries the site card alone, exactly as on base."""
     origin = _agent(source)
     node = _agent_child_node(tmp_path, origin)
     # A REAL completion (review R1-1): without one, "no badge" holds vacuously.
     AttentionStore(node / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
     row = _wire(node, origin, HEAD, operator_viewer=True)
-    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    if source == HEAD:
+        assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    else:
+        assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
     if source == HEAD:
         # The Mac placed the child: its completion badge reaches the Mac, as before.
         assert row["attention"] == {"token": TOK1, "outcome": "complete"}
@@ -1929,15 +1948,15 @@ def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
     assert "build" not in _keys(row)
 
 
-@pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
-def test_an_agent_childs_ordinary_ask_reaches_the_bound_operator_only(
-    tmp_path: Path, source: str
+def test_an_operator_placed_agent_childs_ordinary_ask_reaches_the_bound_operator_only(
+    tmp_path: Path,
 ) -> None:
     """Remote parity (2026-11-21; live repro d83f5525a563's a-e9c5, no Mac banner):
-    the child's ordinary ask reaches the VERIFIED operator viewer, as a local agent
-    child's ask reaches the local inbox. Its notify item never travels, and no
-    unbound viewer — the origin it names, a co-member — gets anything."""
-    origin = _agent(source)
+    a child the operator's OWN device placed sends its ordinary ask to the VERIFIED
+    operator viewer, as a local agent child's ask reaches the local inbox. Its
+    notify item never travels, and no unbound viewer — the origin it names, a
+    co-member — gets anything."""
+    origin = _agent(HEAD)
     node = _agent_child_node(tmp_path, origin, site_card=False)
     row = _wire(node, origin, HEAD, operator_viewer=True)
     assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain"]  # never "build"
@@ -1947,7 +1966,42 @@ def test_an_agent_childs_ordinary_ask_reaches_the_bound_operator_only(
     # The target is the caller's VERIFIED operator id, or nobody without one.
     assert ra.signed_card_target(origin, operator_device_id=HEAD) == HEAD
     assert ra.signed_card_target(origin, operator_device_id="") == ""
+    assert ra.agent_child_forwards_ordinary_asks(origin, operator_device_id=HEAD)
     assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+
+
+@pytest.mark.parametrize("source", ["", NODE, CO])
+def test_a_non_operator_placed_agent_childs_ordinary_ask_reaches_nobody(
+    tmp_path: Path, source: str
+) -> None:
+    """Security review P1 (narrow gate): ``origin.kind`` is the placing device's own
+    claim, so a co-member could stamp any session it places ``agent``. Ordinary
+    asks travel only when the AUTHENTICATED ``source_device`` is the verified
+    operator; a co-member-placed (or locally started, or source-less) agent child
+    sends NO ordinary ask to anyone, the operator included — and its real site
+    card still reaches the operator, unchanged from base."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    for viewer, bound in ((HEAD, True), (HEAD, False), (CO, False), (NODE, False)):
+        assert "notices" not in _wire(node, origin, viewer, operator_viewer=bound), viewer
+    assert not ra.agent_child_forwards_ordinary_asks(origin, operator_device_id=HEAD)
+    # The site card leg is untouched: added now, it alone reaches the operator.
+    _queue_raw(node, "a-site", [_site_question()])
+    assert _keys(_wire(node, origin, HEAD, operator_viewer=True)) == [
+        f"{ra.ASK_NOTICE_PREFIX}a-site"
+    ]
+    assert "notices" not in _wire(node, origin, CO, operator_viewer=False)
+
+
+def test_the_ordinary_ask_gate_needs_a_verified_operator_and_an_agent_child() -> None:
+    """The gate's own truth table: no verified operator, a non-agent row, or a
+    source that is not the operator never widens the agent-child leg."""
+    assert not ra.agent_child_forwards_ordinary_asks(_agent(HEAD), operator_device_id="")
+    assert not ra.agent_child_forwards_ordinary_asks(
+        {"kind": "user", "source_device": HEAD}, operator_device_id=HEAD
+    )
+    assert not ra.agent_child_forwards_ordinary_asks(None, operator_device_id=HEAD)
+    assert not ra.agent_child_forwards_ordinary_asks(_agent(CO), operator_device_id=HEAD)
 
 
 def test_an_agent_childs_asks_share_the_wire_cap_oldest_first(tmp_path: Path) -> None:
@@ -2005,7 +2059,7 @@ def test_an_unreadable_ask_log_on_an_agent_child_says_unknown(tmp_path: Path) ->
 
 MAC = "d_mac"
 ASK_KEY = f"{ra.ASK_NOTICE_PREFIX}a-e9c5"
-AGENT_BODY = "Asked by a session that an agent on damian-mac started on lop-remote-node-2"
+AGENT_BODY = "runs on lop-remote-node-2 · started by an agent on damian-mac"
 
 
 def _labelled_rows(origins: dict[str, Any]) -> dict[str, SessionRow]:
@@ -2089,7 +2143,7 @@ def test_an_unlabelled_forwarded_ask_keeps_the_plain_body(root: Path) -> None:
 def test_a_labelled_rows_notify_item_keeps_the_plain_body(
     root: Path, _no_banner_threads: list[dict[str, Any]]
 ) -> None:
-    """The label says "Asked by": only an ask carries it, never a notify item."""
+    """The "started by an agent" label belongs to an ask, never a notify item."""
     row = _row(notice=("k", 1, "high", "Deploy finished"))._replace(
         remote_started_by_agent_on="damian-mac"
     )

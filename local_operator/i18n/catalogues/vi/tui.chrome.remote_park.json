@@ -14,5 +14,5 @@
   "tui.chrome.remote_park.approval_hint_floor": "chạy trên {device}",
   "tui.chrome.remote_park.ask_hint_answer": "chạy trên {device} — trả lời được từ đây",
   "tui.chrome.remote_park.ask_hint_floor": "chạy trên {device}",
-  "tui.chrome.remote_park.ask_agent_started": "Câu hỏi từ một phiên do tác nhân trên {agent_device} khởi chạy trên {device}"
+  "tui.chrome.remote_park.ask_agent_started": "chạy trên {device} · do tác nhân trên {agent_device} khởi chạy"
 }

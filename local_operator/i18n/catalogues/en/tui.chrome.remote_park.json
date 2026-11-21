@@ -14,5 +14,5 @@
   "tui.chrome.remote_park.approval_hint_floor": "runs on {device}",
   "tui.chrome.remote_park.ask_hint_answer": "runs on {device} — answer it from here",
   "tui.chrome.remote_park.ask_hint_floor": "runs on {device}",
-  "tui.chrome.remote_park.ask_agent_started": "Asked by a session that an agent on {agent_device} started on {device}"
+  "tui.chrome.remote_park.ask_agent_started": "runs on {device} · started by an agent on {agent_device}"
 }
