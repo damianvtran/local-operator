@@ -4134,6 +4134,7 @@ class SessionStreamFn:
         *,
         wrap_client: Callable[[Any], Any] | None = None,
         http_client: Any | None = None,
+        use_auto_effort: bool = True,
         _transport: _SessionTransport | None = None,
         _child_request_counter: _ChildModelRequestCounter | None = None,
         _counts_as_child_request: bool = False,
@@ -4145,6 +4146,9 @@ class SessionStreamFn:
 
         self._auth_store = auth_store
         self._settings = settings
+        # Store the startup intent separately from live/reloaded settings: a
+        # classifier must not silently replace an explicit SDK effort choice.
+        self._use_auto_effort = use_auto_effort
         # Bound by Session after construction; keeping these on the stream lets
         # every turn read the latest CLI/resolver state without rebuilding
         # clients. Only the parent's spawn value lives here: the session choice
@@ -7572,7 +7576,8 @@ class SessionStreamFn:
         # model is sub-millisecond / zero tokens — an extra "small LLM" call
         # would erase the saving on the short prompts most likely to go low.
         if (
-            self._message_boundary_pending
+            self._use_auto_effort
+            and self._message_boundary_pending
             and request.purpose == "turn"
             and request.effort_override is None
         ):
@@ -8499,6 +8504,7 @@ def create_stream_fn(
     cache_lineage_id: str | None = None,
     wrap_client: Callable[[Any], Any] | None = None,
     http_client: Any | None = None,
+    use_auto_effort: bool = True,
 ) -> SessionStreamFn:
     """Build the ``LoopConfig.stream_fn`` for a session.
 
@@ -8542,6 +8548,7 @@ def create_stream_fn(
         cache_lineage_id,
         wrap_client=wrap_client,
         http_client=http_client,
+        use_auto_effort=use_auto_effort,
     )
 
 

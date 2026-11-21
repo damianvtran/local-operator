@@ -5363,6 +5363,7 @@ async def _prepare(
         settings=config_manager.get_config().values,
         session_id=transcript_dir.name,
         cache_lineage_id=fork_parent(transcript_dir) or None,
+        use_auto_effort=not getattr(args, "prefer_birth_effort", False),
     )
 
     # --- session-scoped roles (LOH-9) ---------------------------------------
