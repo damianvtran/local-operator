@@ -1389,6 +1389,9 @@ class MeshCredentialClient:
                 extra["exclude_credential_ids"] = excluded
             # The same only-when-present rule for the selection inputs.
             extra.update(_selection_fields(affinity, demote_credential_ids))
+            # This process's own incarnation, so the relay can renew the key before
+            # it expires only while THIS session lives (G10 Q3, ``_control_asker``).
+            extra.update(_own_process_fields())
             # GitHub's whole source bound must answer before this control hop
             # closes, while preserving the existing 10s gh-unusable distinction.
             # Other provider/MCP callers retain their existing short budget.
@@ -2024,7 +2027,9 @@ class MeshCredentialClient:
                         outcome = self._policy_error(key, code)
                     else:
                         if renewal is not None and not force_refresh:
-                            self._adopt_renewal(key, session_id, renewal, stamp)
+                            self._adopt_renewal(
+                                key, session_id, renewal, stamp, policy=policy, document=document
+                            )
                         if not force_refresh:
                             # Before the generation fence, so a stale ancestor grant
                             # is fenced out of the copy exactly as out of the slot.
@@ -2130,7 +2135,14 @@ class MeshCredentialClient:
         return outcome
 
     def _adopt_renewal(
-        self, key: str, session_id: str, renewal: tuple[Grant, Any], stamp: Any
+        self,
+        key: str,
+        session_id: str,
+        renewal: tuple[Grant, Any],
+        stamp: Any,
+        *,
+        policy: Any = None,
+        document: Any = None,
     ) -> None:
         """Put the relay's renewal in this session's slot when it holds out longer.
 
@@ -2150,6 +2162,15 @@ class MeshCredentialClient:
             # renewal with today's stamp would serve what a session's own grant of
             # the same age would be refused, so it is not adopted.
             return
+        if policy is not None and document is not None:
+            # RE-CHECKED AT ADOPT TIME against the CURRENT standing (G10 Q11). A
+            # renewal the relay fetched on a timer can land after a revoke, an
+            # unshare or a member rm; the fetch stamp alone says nothing about
+            # placement or membership, so the admission runs again here, on the
+            # document this transaction holds, and any verdict refuses the adopt.
+            verdict, current = self._hold_admission(policy, document, key)
+            if verdict or current != fetch_stamp:
+                return
         renewal_grant = grant
         cap = offline_hold_s(self.root)
         now_boot = _sleep_inclusive_clock()
@@ -2422,8 +2443,21 @@ class MeshCredentialClient:
         exclude_credential_ids: list[int] | None = None,
         affinity: tuple[int, int] | None = None,
         demote_credential_ids: Collection[int] = (),
+        asker: Any = None,
+        dial: bool = True,
+        renew_trigger: str = "",
     ) -> dict[str, Any]:
         """Answer a leg-1 ``credential_grant``. Returns a ``detail`` object.
+
+        ``asker`` is the asking session's :class:`~local_operator.secrets.peer.ProcessIdentity`,
+        verified live by pid AND start time on this relay (``credentials._control_asker``)
+        or ``None``. A grant actually served to a
+        session through this relay records it, and only that record lets the
+        pre-expiry step (``renew_push.pre_expiry_step``) renew the key while the
+        process lives. ``dial=False`` and ``renew_trigger`` are that step's: ask only
+        over a link that is already up, and label the owner's audit row.
+        ``renew_trigger`` is an audit label only; the owner authorises the ask
+        exactly as any other.
 
         THE OWNER IS ASKED DIRECTLY WHENEVER THIS DEVICE CAN REACH IT ITSELF
         (``_dial_owner``), and the runtime's own relay otherwise. Both paths end at
@@ -2465,6 +2499,9 @@ class MeshCredentialClient:
             "model_id": model_id,
             "force_refresh": bool(force_refresh),
         }
+        if renew_trigger:
+            # Only when present, so the frame an older owner reads is unchanged.
+            frame["renew_trigger"] = renew_trigger
         if exclude_credential_ids:
             # The borrower's resting rows (``PlacementState.cool_down``). Present only
             # when non-empty, so the frame an older owner reads is unchanged — and an
@@ -2472,15 +2509,23 @@ class MeshCredentialClient:
             # account (it is a narrowing, never a widening).
             frame["exclude_credential_ids"] = list(exclude_credential_ids)
         frame.update(_selection_fields(affinity, demote_credential_ids))
-        direct = self._ask_owner_directly(owner, frame)
+        # ``dial`` only when it is the non-default: every existing caller and seam
+        # of ``_ask_owner_directly(owner, frame)`` keeps its exact call shape.
+        direct = (
+            self._ask_owner_directly(owner, frame)
+            if dial
+            else self._ask_owner_directly(owner, frame, dial=False)
+        )
         if direct is not None:
-            return self._detail_from_owner(
+            answer = self._detail_from_owner(
                 direct,
                 key,
                 label,
                 excluded=bool(exclude_credential_ids),
                 request_stamp=request_stamp,
             )
+            self._note_session_borrow(key, owner, session_id, asker, answer)
+            return answer
         offline = self._detail_error(
             self._render(self._offline(key, label, owner=owner), key, label)
         )
@@ -2492,6 +2537,28 @@ class MeshCredentialClient:
             # owner's last return rather than at its own last ask.
             offline["held_renewal"] = renewal
         return offline
+
+    def _note_session_borrow(
+        self, key: str, owner: str, session_id: str, asker: Any, answer: Any
+    ) -> None:
+        """Record a grant the owner just SERVED to a live local session (G10 Q2/Q3).
+
+        The pre-expiry step renews only keys recorded here: an ask the owner
+        answered with a grant, from a process the relay identified on its own
+        control socket. The relay's own renewal asks (``RENEW_SESSION``) never
+        count, so a renewal can never keep itself alive.
+        """
+        if self._relay is None or asker is None or not isinstance(answer, dict):
+            return
+        if answer.get("kind") != "grant":
+            return
+        from local_operator.network.credentials import renew_push
+
+        if session_id == renew_push.RENEW_SESSION:
+            return
+        renew_push.note_session_borrow(
+            self._relay, key, owner, asker, int(answer.get("token_expires_at_ms") or 0)
+        )
 
     def _sweep_relay_renewals(self) -> None:
         """Drop the relay's renewed logins this device may no longer hold, NOW.
@@ -2514,6 +2581,25 @@ class MeshCredentialClient:
         for key in keys:
             if not self.should_borrow(key):
                 renew_push.drop_held(self._relay, key)
+        # A CONSENT WITHDRAWAL (or any held-policy deny) ends a held renewal too
+        # (G10 Q6): the MCP bearer it may carry must not sit in relay memory once
+        # this device has said it no longer uses that login. Unknown policy fails
+        # closed: everything held goes.
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        try:
+            policy = self._policy()
+            with policy.transaction() as document:
+                denied = [
+                    key
+                    for key in renew_push.held_keys(self._relay)
+                    if policy.code(document, self.owner_of(key), key)
+                ]
+        except PolicyUnknown:
+            renew_push.drop_held(self._relay)
+            return
+        for key in denied:
+            renew_push.drop_held(self._relay, key)
 
     def _held_renewal(self, key: str, owner: str) -> dict[str, Any] | None:
         """The renewal this relay holds for ``key``, if it may still be offered.
@@ -2603,7 +2689,12 @@ class MeshCredentialClient:
         return validate_response(detail, network=self.network_id, owner=owner, key=key)
 
     def _ask_owner_directly(
-        self, owner: str, frame: dict[str, Any], *, required_capability: str = ""
+        self,
+        owner: str,
+        frame: dict[str, Any],
+        *,
+        required_capability: str = "",
+        dial: bool = True,
     ) -> dict[str, Any] | None:
         """Run ``net_broker`` over a link to ``owner``, dialling if there is none.
 
@@ -2637,6 +2728,18 @@ class MeshCredentialClient:
                     "message": "this relay build cannot dial peers for credential brokering",
                 },
             }
+        if not dial:
+            # A BACKGROUND ASK NEVER DIALS (G10 Q12): only a link already up and
+            # authenticated to the owner carries it; otherwise "owner offline".
+            link_for = getattr(self._relay, "_link_for", None)
+            link = link_for(owner, network_id=self.network_id) if link_for else None
+            if link is None or not getattr(link, "peer_verified", False):
+                return None
+            try:
+                reply = link.request({**frame, "req": next_req()})
+            except Exception:  # noqa: BLE001 — as below
+                return None
+            return reply if isinstance(reply, dict) else None
         try:
             link, _reason = ensure(owner)
         except Exception as exc:  # noqa: BLE001 — reported as the owner being unreachable
@@ -4253,6 +4356,26 @@ class MeshCredentialClient:
             affinity=affinity,
             demote_credential_ids=tuple(demote_credential_ids),
         )
+
+
+def _own_process_fields() -> dict[str, int]:
+    """``{"asker_pid", "asker_start"}`` for THIS process, or ``{}`` if unreadable.
+
+    Read per call (cheap: one ``/proc`` or ``sysctl`` read) rather than cached, so
+    a forked child never states its parent's incarnation. Labels for the relay's
+    liveness check only (``credentials._control_asker``); never authority.
+    """
+    import os
+
+    from local_operator.secrets.peer import process_info
+
+    try:
+        own = process_info(os.getpid())
+    except Exception:  # noqa: BLE001 — no identity just means no background renewal
+        return {}
+    if own is None:
+        return {}
+    return {"asker_pid": int(own.pid), "asker_start": int(own.start_time)}
 
 
 def _selection_fields(

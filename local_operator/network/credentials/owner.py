@@ -115,6 +115,12 @@ if TYPE_CHECKING:  # the store is imported lazily (_auth_store_instance)
 
 logger = logging.getLogger("local_operator.network.credentials.owner")
 
+#: ``renew_push.RENEW_SESSION``, restated so this module does not import the holder
+#: half at load; ``test_pre_expiry_renewal`` pins the two equal.
+_RENEW_SESSION = "relay-renew"
+#: The closed ``credential.grant`` ``trigger`` labels a holder relay may state.
+_RENEW_TRIGGERS: frozenset[str] = frozenset({"pre_expiry", "link_up"})
+
 #: How long a second asker joins an in-flight resolve for the same key. Short on
 #: purpose: it exists to catch the CONCURRENT case (several provider calls in one
 #: turn, or two peers asking at the same instant, arriving within a scheduler
@@ -987,6 +993,13 @@ class MeshCredentialBroker:
             "account_label": label if isinstance(label, str) else None,
             "ranked_reason": selection.audit_reason() if selection is not None else "unranked",
         }
+        trigger = frame.get("renew_trigger")
+        if for_session == _RENEW_SESSION and trigger in _RENEW_TRIGGERS:
+            # An AUDIT LABEL ONLY (G10 Q2/Q9): the ask above was authorised exactly
+            # as any holder's. It lets the owner's log tell a holder relay's
+            # pre-expiry renewal from a reconnect renewal; a closed word, so a
+            # holder cannot write free text into this device's audit.
+            detail["trigger"] = trigger
         self._audit(
             "credential.grant",
             actor=self.self_device,
