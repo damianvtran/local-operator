@@ -356,7 +356,11 @@ def test_update_status_copy_follows_live_locale_and_cell_width(locale: str, comp
     from local_operator.i18n.keys import tui_welcome
     from local_operator.i18n.text import active_locale, set_active_locale, tr_record
     from local_operator.tui.i18n_status import localized_display
-    from local_operator.tui.widgets.info_panel import _Body, _install_section, semantic_style
+    from local_operator.tui.widgets.info_panel import (
+        _Body,
+        _install_section,
+        semantic_style,
+    )
     from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 
     version = "0.52.0"
