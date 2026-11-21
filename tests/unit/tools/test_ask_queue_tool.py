@@ -187,11 +187,12 @@ async def test_the_description_tells_the_model_which_mode_it_is_in(
     # The answer's arrival is stated as its OWN turn: that is what makes "do not
     # wait" actionable rather than a mood.
     assert "ANSWER ARRIVES LATER" in queued
-    # The calibration table (design §3), which the model needs to choose a
-    # deadline at all: the default alone is a number it cannot reason about.
-    assert "1 h (3600) is routine" in queued
+    # The urgent calibration (design §3) is said only here; the default, floor
+    # and cap are the ``timeout`` field's own description, and the 24 h use is
+    # system.md's queued paragraph (wave 2 dropped the restatement).
     assert "5-10 minutes" in queued
-    assert "24 h" in queued
+    timeout_field = builtin.AskParams.model_json_schema()["properties"]["timeout"]
+    assert "Default 3600 (1 h); min 120 (2 min); max 86400" in str(timeout_field)
     # The caps, whose refusals are what the model will actually read when it
     # crosses them.
     assert "8 asks can be open at once" in queued

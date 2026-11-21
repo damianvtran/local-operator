@@ -17,6 +17,13 @@ from typing import Any
 import pytest
 
 from local_operator.network.credentials import github as github_mod
+
+# The borrow cell below arms a 600 s belt; this module's own guard cancels and
+# joins it at the cell's teardown instead of leaving it to the package backstop
+# (run 44408211857: this module's belt fired inside test_cli_remote).
+from tests.unit.network.self_revoke_guard import (  # noqa: F401 — autouse fixture by import
+    no_self_revoke_outlives_its_cell,
+)
 from tests.unit.network.test_credentials_real_link import _parser
 from tests.unit.network.test_github_pushable_designation import _config
 from tests.unit.network.test_github_pushable_designation import (  # noqa: F401
@@ -212,24 +219,18 @@ def test_other_helper_outcomes_stay_silent_and_forged_context_cannot_select_cred
     assert result.stderr == ""
 
 
-# QUARANTINED as the CULPRIT, not a victim: borrowed_git_env arms the daemon
-# self-revoke timer, which later fires `DELETE /installation/token` during an
-# unrelated test's teardown and trips the network guard there. REMOVE this
-# marker when #4261 (test/netguard-self-revoke-belt) merges.
-@pytest.mark.skip(
-    reason=(
-        "QUARANTINED 2026-11-18 flaky-sweep ledger lopdev-E01: arms the daemon "
-        "self-revoke timer, whose `DELETE https://api.github.com/installation/token` "
-        "trips the network guard in tests/unit/remote_compute/test_cli_remote.py "
-        "teardown (#4235 gate jobs 135207196151, 135107436353); owner: #4261 author; "
-        "real fix: #4261 test/netguard-self-revoke-belt — remove this skip when it merges"
-    )
-)
 def test_borrow_attaches_only_matching_display_context_without_an_extra_request(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import time
     from types import SimpleNamespace
+
+    # Stub the transport the belt would use: even if teardown ever lost the
+    # timer, its DELETE must never leave for the real api.github.com.
+    revoked: list[str] = []
+    monkeypatch.setattr(
+        github_mod, "revoke_installation_token", lambda token, **_: revoked.append(token)
+    )
 
     from local_operator.network.credentials.types import (
         CredentialRef,
@@ -272,6 +273,7 @@ def test_borrow_attaches_only_matching_display_context_without_an_extra_request(
     assert calls == ["github"] and token == TOKEN
     assert env_map[CONTEXT_ENV] == github_mod._diagnostic_scope(TOKEN, ALLOWED)
     assert github_mod.repositories_for(tmp_path) == tuple(ALLOWED)
+    assert revoked == [], "the belt is armed for the hold end, not fired in the cell"
 
 
 def test_optional_metadata_is_scrubbed_or_dropped_without_changing_the_borrowed_token(

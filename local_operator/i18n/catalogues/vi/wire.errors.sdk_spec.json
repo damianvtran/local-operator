@@ -7,6 +7,7 @@
   "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' mở một trình xem cho spec.resume; nó không gắn nhóm, hồ sơ, công cụ, tên, mục tiêu hay chính sách phê duyệt — đó là phía chủ sở hữu. Chỉ đặt resume trên spec này (hoặc dùng mode=''own''). Các trường vi phạm: {fields}.",
   "wire.errors.sdk_spec.attach_output_unsupported": "không thể đặt ràng buộc đầu ra trên phiên được gắn kèm; runtime sở hữu sẽ quyết định",
   "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' cần spec.resume: trình xem gắn vào một id",
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": "mcp_ready_timeout_s: timeout_s phải là số hữu hạn >= 0",
   "wire.errors.sdk_spec.mode_invalid": "mode phải là ''own'' hoặc ''attach'', không phải {mode}",
   "wire.errors.sdk_spec.output_format_invalid": "output_format phải là một trong {formats}",
   "wire.errors.sdk_spec.output_retries_range": "output_retries phải nằm trong khoảng 0 đến 5",

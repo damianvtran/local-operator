@@ -226,6 +226,41 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "network/credentials/messages.py and network/credentials/github.py; "
         "the wire and stderr carry finished text, never a catalogue key"
     ),
+    # Deferred rather than raising the eager total ceiling (PR #4266, merge
+    # gate run 44521486072): the Amazon Bedrock remedies (4,166 B in hi) took
+    # hi's eager total to 74,237 B, past EAGER_TOTAL_MAX_BYTES, yet no client
+    # resolves one of its keys. providers/bedrock/errors.py and check.py render
+    # every key in-process through ``_text`` (``render_resolved``) and hand on a
+    # FINISHED sentence as ProviderError / KeyCheck text.
+    "wire.errors.bedrock": (
+        "Amazon Bedrock error remedies and connection-check results rendered "
+        "in-process by providers/bedrock/errors.py and providers/bedrock/check.py "
+        "(_text = render_resolved), and server/routes/auth.py renders refusal "
+        "envelopes with machine-category codes; all carry finished text, never "
+        "a catalogue key"
+    ),
+    # Login copy is composed before callbacks: CLI/TUI pickers and desktop
+    # operation snapshots receive strings, not keys for a client to resolve.
+    # Keep it out of the eager bundle rather than raising the total ceiling.
+    "wire.login.bedrock": (
+        "Amazon Bedrock login copy rendered in-process through render_resolved "
+        "by providers/bedrock/login.py, providers/bedrock/sso_login.py, "
+        "providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; "
+        "callbacks and operation snapshots carry finished text, never a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4349, merge gate
+    # run 44849201008): adding mcp_ready_timeout_invalid took hi's eager total to
+    # 77,924 B, 100 B past EAGER_TOTAL_MAX_BYTES (77,824 B); this namespace alone
+    # is 5,603 B in hi. No client resolves one of its keys: the SDK refusals are
+    # rendered in the EMBEDDING process by ``spec_refusal_text`` (active locale)
+    # and raised as a one-string SessionSpecError with no code attribute, so
+    # nothing a desktop/phone client loads at startup ever needs this copy.
+    "wire.errors.sdk_spec": (
+        "SDK specification refusals rendered in-process by session/spec.py and "
+        "sdk.py through spec_refusal_text (active locale) and raised as a "
+        "one-string SessionSpecError; the exception carries finished text, never "
+        "a catalogue key"
+    ),
 }
 
 

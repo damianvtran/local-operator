@@ -339,7 +339,13 @@ def add_parser(
     # the default `drive` role cannot move, delete or borrow a login, and the only
     # other way to widen it is a re-pair that burns the device id.
     for verb, words in (
-        ("grant", "Allow a peer more on this device (move, delete, broker_credential, ...)"),
+        # ``workset_import`` is named here because ``move`` does not imply it: without
+        # it a move onto this device carries the conversation and leaves the files.
+        (
+            "grant",
+            "Allow a peer more on this device (move, workset_import, delete, "
+            "broker_credential, ...)",
+        ),
         ("revoke", "Take capabilities back from a peer on this device"),
     ):
         caps = member_actions.add_parser(verb, help=words)
@@ -2803,8 +2809,11 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     # device that has been shared a credential but whose record has not been re-read
     # would otherwise print "nothing is shared" — the exact state this listing exists
     # to make visible. The record is joined only for the NAME.
+    from local_operator.network.credentials import github as github_mod
+
     networks: list[dict[str, Any]] = []
     lines: list[str] = []
+    github_source: str | None = None
     for document in _placement_documents():
         record = _record_for(document.network_id)
         network_name = record.name if record is not None else document.network_id
@@ -2844,6 +2853,15 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     for h in entry.holders
                 ],
             }
+            if row["owned_here"] and key == github_mod.GITHUB_KEY:
+                # THE LEND THIS DEVICE SERVES, NAMED BY ITS ARM (lend honesty,
+                # 2026-11-19): the placement's ``kind`` is the row's wire type and
+                # stays put; ``label`` is what the operator reads, so a gh-served
+                # lend no longer prints as ``github-app``. Resolved once per listing.
+                if github_source is None:
+                    github_source = github_mod.resolve_source(_config_dir())
+                row["source"] = github_source
+                row["label"] = github_mod.source_label(github_source)
             if not row["owned_here"]:
                 holder = entry.is_holder(self_device)
                 if holder:
@@ -2863,8 +2881,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
                 # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
                 # 7, last acked 14:02)``. Read from the sync document only: a
-                # listing never dials and never reads a store, and a copy
-                # relationship with no generation yet shows NO segment (absent,
+                # listing never dials, and the one store touch is the github
+                # arm's metadata ``describe`` above (``resolve_source``; no value
+                # is read, as ``source_present`` already does for ``shareable``).
+                # A copy relationship with no generation yet shows NO segment (absent,
                 # never "failed" — the rollout segment's own rule). The §4.2
                 # selection mark rides the same read (S4): one document, so the
                 # mark cannot disagree with the holders it governs.
@@ -2885,6 +2905,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
             lines.append(f"{network_name}: nothing is shared in this network yet")
         else:
             lines.append(f"{network_name}:")
+            # The type column is sized to the widest entry (min 15, the historic
+            # width) so the 27-character gh label keeps ``owner:`` aligned across
+            # rows instead of pushing that one row right (agent review n1 / QA Q3).
+            kind_width = max([15] + [len(r.get("label") or r["kind"]) for r in keys])
             for row in keys:
                 owner = (
                     "this device"
@@ -2893,9 +2917,16 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 )
                 label = _peer_label(row["identity_label"] or "")
                 who = f" ({label})" if label else ""
+                shown_kind = row.get("label") or row["kind"]
                 lines.append(
-                    f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
+                    f"  {row['credential_name']:<14} {shown_kind:<{kind_width}} owner: {owner}{who}"
                 )
+                if row.get("source") == github_mod.SOURCE_GH:
+                    # The same caution the ``shareable`` row and ``ready`` give, on
+                    # the lend itself: borrowers of this row get the full account.
+                    from local_operator.network.readiness import GITHUB_BROAD_TOKEN_NOTE
+
+                    lines.append(f"      {GITHUB_BROAD_TOKEN_NOTE}")
                 if row.get("mark"):
                     mark_tail = " — never crosses" if row["mark"] == "local-only" else ""
                     lines.append(f"      marked {row['mark']}{mark_tail}")
@@ -3442,9 +3473,16 @@ def _github_shareable_row(self_device: str) -> dict[str, Any]:
                     "scope": holder.scope,
                 }
             )
+    # THE ARM THAT WOULD SERVE, beside the stable ``kind`` (lend honesty,
+    # 2026-11-19): ``kind`` stays ``github-app`` for every reader keyed on it, and
+    # ``source``/``label`` say what actually travels — a gh login is the account's
+    # full user token, not an App grant. Metadata only: no token is read.
+    source = github_mod.resolve_source(_config_dir())
     return {
         "provider": github_mod.GITHUB_KEY,
         "kind": github_mod.GITHUB_KIND,
+        "source": source,
+        "label": github_mod.source_label(source),
         "identity_label": "",
         "shared_with": shared_with,
         "remedy": (
@@ -7370,6 +7408,16 @@ def _persist_join(
                 added_via="invite",
             ),
         ]
+    # NO RECEIVER-LOCAL GRANT RIDES THE ADMISSION TABLE (#4245 security round 4, S17,
+    # the join-path sibling of S15): ``workset_import`` is THIS device's own decision
+    # about a peer ("granted on the receiver, never implied by any role incl. admin"),
+    # and a fresh joiner has decided nothing yet, so whatever the inviter's table says
+    # about it is dropped here exactly as ``relay.adopt_members`` drops it from a pull.
+    from local_operator.network.relay import _without_receiver_local
+
+    for row in rows:
+        if row.device_id != identity.device_id:
+            row.capabilities = _without_receiver_local(row.capabilities)
     self_row = next((row for row in rows if row.device_id == identity.device_id), None)
     # WHERE WE CAN BE REACHED, from our own settings rather than from the address
     # we happened to dial.
@@ -10807,6 +10855,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _doctor_locally(args)
     checks = [dict(check) for check in payload.get("checks") or []]
+    # THIS DEVICE'S NETWORK FIRST (2026-11-18): see ``network.uplink``. A
+    # passive route reading taken here, on the relay's own host; prepended so
+    # the first remedy names this device when the fault is ours.
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     from local_operator.network import relay as relay_mod
 
     supervision = relay_mod.supervision_state()
@@ -10865,6 +10919,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         observed = check.get("observed")
         observed = observed if isinstance(observed, Mapping) else {}
         scoped = bool(observed.get("out_of_scope"))
+        if check.get("check") == "uplink":
+            # Composed, localized prose (``network.uplink``): printed as written,
+            # never through the dial-code gloss, with its remedies under it.
+            state = (
+                "n/a " if observed.get("not_applicable") else ("ok " if check.get("ok") else "FAIL")
+            )
+            lines.extend(readiness_mod.uplink_lines(check, state))
+            continue
         if scoped:
             # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING (F9; design
             # round 1, D3): the same address reads the same way here as on
@@ -10894,6 +10956,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         lines.append(readiness_mod.NO_IDENTITY_LINE)
 
     def failure_words(check: Mapping[str, Any]) -> str:
+        if check.get("check") == "uplink":
+            return f"uplink: {check.get('detail', '') or 'failed'}"
         return (
             f"{check.get('check', '')}: "
             f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
@@ -10923,6 +10987,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "degraded": degraded,
         "payload_failures": payload_failures,
         "supervision_failures": supervision_failures,
+        "uplink": uplink_reading,
     }
     if not healthy:
         answer["code"] = "unhealthy"
@@ -10962,6 +11027,49 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                     "this device"
                 )
     return _emit(args, answer, lines)
+
+
+def _uplink_reading() -> dict[str, Any]:
+    """This device's passive uplink reading (``network.uplink``); never raises.
+
+    A module attribute lookup at call time so tests inject a scripted reading
+    with ``monkeypatch`` instead of depending on the runner's real routes.
+    """
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.read_uplink()
+    except Exception:  # noqa: BLE001 — fail-safe: an unreadable uplink claims nothing
+        return uplink_mod.unknown_reading()
+
+
+def _uplink_rows(reading: Mapping[str, Any], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``uplink`` rows, or none at all when building them fails (fail-safe)."""
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.uplink_checks(reading, checks, names=_member_names())
+    except Exception:  # noqa: BLE001 — never let the new row break the old report
+        return []
+
+
+def _member_names() -> dict[str, str]:
+    """Device id -> member name across this device's networks, for row labels.
+
+    ``doctor``'s rows carry only the id; an uplink sentence that names a peer
+    reads its name. An unreadable store labels by id, never fails the report.
+    """
+    from local_operator.network import store
+
+    names: dict[str, str] = {}
+    try:
+        for record in store.list_networks():
+            for member in record.members:
+                if member.name:
+                    names.setdefault(member.device_id, member.name)
+    except Exception:  # noqa: BLE001 — labels only
+        return {}
+    return names
 
 
 def _ready_lines(checks: list[dict[str, Any]]) -> list[str]:
@@ -11028,6 +11136,11 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
+    # THIS DEVICE'S NETWORK FIRST: the same rows, and the same reason, as
+    # ``doctor`` (see ``network.uplink``).
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     # THE ROW'S OWN STATE, ON THE ROW (F8 residual): `ready --json` is the
     # drill's acceptance surface, and a reader there scans ROWS, not the
     # aggregate — a reported-but-non-gating row must not read failure-shaped
@@ -11051,7 +11164,7 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     # nothing admission-shaped or still-gating.
     failures = [_ready_failure(check) for check in readiness_mod.onboarding_failures(checks)]
     healthy = not failures and bool(payload.get("identity_present", True))
-    answer: dict[str, Any] = {**payload, "ok": healthy}
+    answer: dict[str, Any] = {**payload, "checks": checks, "ok": healthy, "uplink": uplink_reading}
     if not healthy:
         answer["code"] = "unhealthy"
         answer["message"] = "; ".join(failures) or "the device has no identity"
@@ -11365,6 +11478,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         from local_operator.paths import config_dir
 
         checks.extend(readiness_mod.local_serve_daemon_rows(config_dir()))
+        checks.extend(readiness_mod.local_github_source_rows(config_dir()))
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
@@ -13070,7 +13184,9 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             # the state round trip and the apply's summary), printed rather than
             # re-derived here — the definitions verb's rule.
             lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
-            for outcome in ("installed", "updated"):
+            # ``withdrawn``: a mirror the peer removed because this device turned
+            # the server off — the peer's own answer, never what was asked.
+            for outcome in ("installed", "updated", "withdrawn"):
                 for row in item.get(outcome) or []:
                     if isinstance(row, dict):
                         lines.append(f"  {outcome} server {row.get('name')!r}")
@@ -13127,6 +13243,11 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         withheld = str(row.get("withheld") or "")
         if withheld:
             line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
+        # A server this device turned off is not sent; its name goes out as a
+        # withdrawal instead (mcpdefs' explicit-withdrawal exception). Only for
+        # the device's own rows: a mirror is never sent from here either way.
+        if row.get("disabled") and not origin:
+            line += " — disabled: not sent; peers withdraw an unedited mirror of it"
         lines.append(line)
     if not lines:
         lines = ["no user-scope MCP servers on this device"]

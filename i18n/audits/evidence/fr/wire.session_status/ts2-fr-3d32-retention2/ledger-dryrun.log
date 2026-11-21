@@ -1,0 +1,9 @@
+AUTHOR auditor session 3d32baae3ed6; model openai/gpt-6.1-sol; metadata-only retention correction
+COMMAND ["/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/ledger.py", "append", "--receipt", "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/retention2-fr/receipt.json", "--expected-history-sha", "d159e2c2fe93f1a63e10cdb9252005bbf7b33abc4708a3dfc40c87e2006320dc", "--dry-run"]
+HISTORY_COMMAND ["/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/ledger.py", "history-sha", "--locale", "fr", "--namespace", "wire.session_status"]
+EXPECTED_HISTORY_SHA d159e2c2fe93f1a63e10cdb9252005bbf7b33abc4708a3dfc40c87e2006320dc
+EXIT 0
+STDOUT
+i18n/audit-history/fr/wire.session_status.json
+
+STDERR

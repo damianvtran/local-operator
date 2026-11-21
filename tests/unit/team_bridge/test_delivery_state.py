@@ -130,6 +130,9 @@ _SCREENING_UNAVAILABLE = {
 # after a verdict, or owner-setup waits like ``bridge_off`` (holds trace).
 _DELIVERY_PENDING = {
     "delivery_failed",
+    # a replayed card id the receiver still holds in flight: the SAME id is
+    # re-sent on the retry backoff (PR #3478 QA r1), so it is transient.
+    "card_unconfirmed",
     "bridge_off",
     "phase_refused",
     "ack_recovery",
@@ -152,6 +155,12 @@ _DELIVERY_PENDING = {
 _AWAITING_REVIEW = {
     # a person decides (``screening_failed`` is a Discard-only review code)
     "screening_failed",
+    # card hand-off identity refusals no retry clears on its own: a legacy row
+    # with no provenance (never auto-replayed), a binding that no longer matches
+    # the live owner/session/state, and partition drift (PR #3478 QA r1).
+    "card_provenance_unknown",
+    "card_binding_mismatch",
+    "card_handoff_split",
     # owner-action holds: only the owner can restore the authority the hub
     # withdrew (``OWNER_ACTION_HOLD_CODES``, published awaiting_review on main)
     "sign_in_required",

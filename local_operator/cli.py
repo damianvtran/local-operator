@@ -116,6 +116,7 @@ from local_operator.remote_compute.arguments import add_remote_arguments, wants_
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Sequence
 
     from local_operator.agents import AgentData, AgentRegistry
@@ -163,6 +164,25 @@ def _positive_seconds(text: str) -> float:
     if value <= 0:
         raise argparse.ArgumentTypeError(_tr(_failure_details.positive_seconds()))
     return value
+
+
+def _start_by_time(text: str) -> float:
+    """argparse ``type`` for ``lop services heavy run --start-by``.
+
+    Epoch seconds or ISO-8601 with an offset/Z (``bounded_contract.parse_start_by``,
+    shared with ``scripts/run_bounded.py``). Unreadable is a usage error (exit 2)
+    before any queue wait; a past deadline is NOT one: it parses, and the run is
+    refused at spawn time with the late-start code instead.
+    """
+    from local_operator import bounded_contract
+    from local_operator.i18n.keys import cli_services_heavy as _shv_copy
+
+    try:
+        return bounded_contract.parse_start_by(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            tr("cli.services_heavy")(_shv_copy.not_start_by(value=repr(text)))
+        ) from None
 
 
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
@@ -224,6 +244,16 @@ def _add_services_heavy_parser(
     )
     run.add_argument(
         "--timeout", type=_positive_seconds, default=None, metavar="SECONDS", help=timeout_help
+    )
+    # Latest-start window granted by a node host ("start by 08:05Z"). An
+    # unreadable value is a usage error here, before any queue wait; a deadline
+    # already past parses and is refused at spawn time with the breach code.
+    run.add_argument(
+        "--start-by",
+        type=_start_by_time,
+        default=None,
+        metavar="WHEN",
+        help=_shv.start_by().envelope(locale=help_locale)["text"],
     )
     # REMAINDER after `--`: the wrapped command's own flags (`pytest -x`) must
     # reach it untouched instead of being parsed as lop's.
@@ -356,6 +386,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
             "kimi",
             "alibaba",
             "google",
+            "google-vertex",
             "mistral",
             "openrouter",
             "xai",
@@ -1632,7 +1663,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # in `guides/configuration/GUIDE.md`. They are added below, after the other
     # visible commands, and a new visible command must be added here too.
     sessions_subparsers = sessions_parser.add_subparsers(
-        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync}"
+        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync,notifications}"
     )
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
@@ -2018,6 +2049,13 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # holds and the store audit" section of `guides/configuration/GUIDE.md`;
     # the handlers and `session/cleanup.py`'s holds block carry the semantics
     # for a code reader. Follow-up: one help-tranche key per argument/command.
+    notifications_parser = sessions_subparsers.add_parser("notifications", parents=[parent_parser])
+    notifications_parser.add_argument("session")
+    notifications_action = notifications_parser.add_mutually_exclusive_group()
+    notifications_action.add_argument("--grant", action="store_true")
+    notifications_action.add_argument("--revoke", action="store_true")
+    notifications_parser.add_argument("--reason", default="")
+
     hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
     hold_parser.add_argument("session")
     hold_parser.add_argument("--reason", required=True)
@@ -5094,6 +5132,7 @@ def send_command(args: argparse.Namespace) -> int:
     # unique match come back, and neither may be converted into a stored send).
     from local_operator.mobile.peer_send import (
         live_scan_found_nothing,
+        pid_not_on_this_device,
         session_id_unowned,
     )
 
@@ -5215,6 +5254,41 @@ def send_command(args: argparse.Namespace) -> int:
             cold_session_id = stored_id
         elif stored_error:
             error = stored_error
+    if (
+        record is None
+        and getattr(args, "pid", None) is not None
+        and pid_not_on_this_device(error or "")
+    ):
+        # A REMOTE PID: same rule and same fresh read as the in-session `send`
+        # tool (``peer_send.remote_pid_decision``), so a pid copied from a
+        # remote row of `lop sessions` gets an answer naming the session it
+        # is. `lop send` has no cross-device route of its own (a remote
+        # `--session` is not routed here either), so the ONE-live-match case
+        # names the mesh command that delivers by session id instead of
+        # inventing a transport; every other case is the tool's refusal in
+        # this command's grammar. Entered only on the local MISS form, so a
+        # local pid hit never reads the catalogue: local wins.
+        from local_operator.mobile.peer_send import remote_pid_decision
+        from local_operator.session.peer_rows import peer_pid_rows
+
+        def _mesh_address(session_id: str, device: str) -> str:
+            return (
+                f"lop network sessions --peer {device} --send {session_id} "
+                "--mailbox -- '<message>'"
+            )
+
+        routed_row, pid_refusal = remote_pid_decision(
+            args.pid, peer_pid_rows(args.pid, config_dir()), address=_mesh_address
+        )
+        if routed_row is not None:
+            pid_refusal = (
+                f"pid {args.pid} is session {routed_row.session_id} on "
+                f"{routed_row.owner_device_name}; `lop send` does not cross devices — "
+                f"deliver by session id with "
+                f"`{_mesh_address(routed_row.session_id, routed_row.owner_device)}`"
+            )
+        _peer_red(pid_refusal)
+        return 1
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             # The stored fallback just failed too, so the message names BOTH
@@ -8040,6 +8114,41 @@ def sessions_sync_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sessions_notifications_command(args: argparse.Namespace) -> int:
+    """Explicit operator-authorized local notification policy; JSON control output.
+
+    No spawn/profile field or agent registration calls this operation. Like other
+    local operator controls it may be executed by an assistant only when the
+    operator actually authorized this routing change, not on its own initiative.
+    This is not an authenticated-human or same-uid security boundary.
+    """
+    import json
+
+    from local_operator.notifications.authority import granted, read_decision, set_grant
+    from local_operator.session.cleanup import resolve_session_reference
+
+    root = config_dir() / "sessions"
+    session_id, candidates = resolve_session_reference(root, str(args.session))
+    if session_id is None:
+        print(json.dumps({"error": "ambiguous_session" if candidates else "session_not_found"}))
+        return 2
+    directory = root / session_id
+    try:
+        if args.grant or args.revoke:
+            decision = set_grant(directory, allow=bool(args.grant), reason=str(args.reason))
+        else:
+            decision = read_decision(directory)
+        print(
+            json.dumps(
+                {"session_id": session_id, "granted": granted(directory), "decision": decision}
+            )
+        )
+        return 0
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"error": str(exc), "session_id": session_id}))
+        return 2
+
+
 def sessions_hold_command(args: argparse.Namespace) -> int:
     """``lop sessions hold`` — record an operator value hold on one conversation.
 
@@ -8230,6 +8339,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
+
+    if getattr(args, "sessions_command", None) == "notifications":
+        return sessions_notifications_command(args)
 
     if getattr(args, "sessions_command", None) == "hold":
         return sessions_hold_command(args)
@@ -12228,6 +12340,121 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     return listener
 
 
+#: Exit status of a ``--listener-fd`` serve whose boot missed its deadline.
+#: 69 is ``EX_UNAVAILABLE`` from sysexits.h: distinct from the plain ``1`` every
+#: other serve refusal uses (so a log or ``systemctl status`` names THIS failure),
+#: non-zero so the systemd unit's ``Restart=on-failure`` cold-starts its
+#: ``ExecStart`` (which carries ``--port``, never ``--listener-fd``), and not
+#: ``75``, which other units list in ``RestartPreventExitStatus``.
+SERVE_ADOPT_BOOT_DEADLINE_EXIT = 69
+
+#: Overrides the adopted-listener boot deadline, in seconds. ``LOCAL_OPERATOR_``
+#: prefixed and read per call like the other runtime knobs
+#: (``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS``): ``lop`` runs from a uv-tool
+#: install, so an import-time constant would need a rebuild to change.
+SERVE_ADOPT_BOOT_DEADLINE_ENV = "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS"
+
+#: Default boot deadline. A healthy adopt finishes its app import and lifespan
+#: startup in seconds; 90 s leaves an order of magnitude of headroom for a loaded
+#: host while still bounding the outage a wedged boot causes.
+SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS = 90.0
+
+
+def resolve_adopt_boot_deadline_seconds() -> float:
+    """The adopted-listener boot deadline, resolved at call time.
+
+    Precedence: :data:`SERVE_ADOPT_BOOT_DEADLINE_ENV` > the default. Anything that
+    is not a positive finite number (a typo, an empty export, ``0``) falls back to
+    the default rather than disabling the deadline: an unbounded adopt is exactly
+    the wedge this deadline exists to end, so it is not a setting to reach by typo.
+    """
+    raw = os.environ.get(SERVE_ADOPT_BOOT_DEADLINE_ENV)
+    if raw is None or not raw.strip():
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0:
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    return seconds
+
+
+def _exit_missed_adopt_boot(code: int) -> None:
+    """Leave the process NOW. ``os._exit`` because the main thread is the one that
+    is wedged: ``sys.exit`` from this watchdog thread would only end the watchdog,
+    and an orderly interpreter shutdown would wait on the very lifespan that hung.
+    A seam of its own so tests can observe the exit without dying."""
+    os._exit(code)
+
+
+def arm_adopted_boot_deadline(
+    *,
+    fd: int,
+    port: int,
+    is_ready: Callable[[], bool],
+    sockets: Callable[[], "list[socket.socket]"],
+    deadline_s: float | None = None,
+    poll_s: float = 0.25,
+) -> "threading.Event":
+    """Bound how long an ADOPTED listener may sit un-served while this image boots.
+
+    WHY ONLY THE ADOPT PATH (node2 incident). A reload ``execve``s this process with
+    the bound socket inherited as ``--listener-fd``. If the new image then stalls
+    in boot -- an import, a lock wait, a lifespan startup that never returns -- the
+    kernel keeps the port in LISTEN on a descriptor nothing will ever ``accept``
+    from: clients queue or are refused, the old image is gone (same pid, replaced),
+    and anything probing the port sees it taken. A FRESH bind has no such trap: its
+    failed boot releases the port and the supervisor's retry re-binds it. So only
+    an adopt is armed, and ``--reload`` (which never adopts) is untouched.
+
+    WHAT FIRING DOES. One stderr line naming the fd, port and elapsed time; every
+    socket ``sockets()`` returns at that moment is closed (the adopted listener and
+    the handoff owner's dup -- either alone keeps the port in LISTEN); then the
+    process exits :data:`SERVE_ADOPT_BOOT_DEADLINE_EXIT`. The fd lives only in this
+    process, so nothing can re-adopt it: the systemd unit's ``Restart=on-failure``
+    runs its ``ExecStart``, which binds ``--port`` cold.
+
+    READY is ``is_ready()`` -- uvicorn's ``Server.started``, set only after the
+    lifespan startup completed and the sockets are accepting. Returns an event the
+    caller sets once serving has ended, so a clean shutdown never trips the exit.
+    """
+    import threading
+
+    budget = resolve_adopt_boot_deadline_seconds() if deadline_s is None else deadline_s
+    done = threading.Event()
+    started = time.monotonic()
+
+    def watch() -> None:
+        while not done.wait(poll_s):
+            if is_ready():
+                return
+            elapsed = time.monotonic() - started
+            if elapsed < budget:
+                continue
+            # Flushed explicitly: ``os._exit`` skips the interpreter's buffer flush,
+            # and this line is the only record of why the daemon left.
+            print(  # i18n: ignore serve daemon stderr log line; English-only
+                f"serve: adopted listener fd {fd} on port {port} not serving after "
+                f"{elapsed:.1f}s (boot deadline {budget:g}s); closing it and exiting "
+                f"{SERVE_ADOPT_BOOT_DEADLINE_EXIT} so a cold start can re-bind the port",
+                file=sys.stderr,
+                flush=True,
+            )
+            for sock in sockets():
+                try:
+                    sock.close()
+                except OSError:  # pragma: no cover — already closed is the goal
+                    pass
+            _exit_missed_adopt_boot(SERVE_ADOPT_BOOT_DEADLINE_EXIT)
+            return
+
+    # Daemon: a serve that finished (or crashed) on the main thread must not be
+    # held open by its own watchdog.
+    threading.Thread(target=watch, name="serve-adopt-boot-deadline", daemon=True).start()
+    return done
+
+
 def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     # Install before importing the server or uvicorn: startup diagnostics must
     # not inherit the CLI's synchronous stderr handler. No other CLI changes.
@@ -12324,6 +12551,10 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
 
     listener: socket.socket | None = None
     resolved_port = port
+    # Filled in as the adopt path's boot proceeds, so its deadline watchdog can
+    # read readiness and close the owner's dup; unused on every other path.
+    serve_ref: dict[str, Any] = {}
+    boot_deadline_done: Any = None
     if listener_fd is not None and reload:
         # Both at once is a contradiction rather than a precedence rule: a
         # ``--reload`` child's port belongs to uvicorn's supervisor, which is
@@ -12362,6 +12593,21 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             )
             return 1
         resolved_port = listener.getsockname()[1]
+        # Armed HERE, before the app import below, because that import and the
+        # lifespan are exactly where an adopted boot has been seen to wedge with
+        # the port held (see ``arm_adopted_boot_deadline``). The fresh-bind and
+        # ``--reload`` paths are deliberately never armed.
+        adopted_listener = listener
+        boot_deadline_done = arm_adopted_boot_deadline(
+            fd=listener_fd,
+            port=resolved_port,
+            is_ready=lambda: bool(getattr(serve_ref.get("server"), "started", False)),
+            sockets=lambda: [
+                s
+                for s in (adopted_listener, getattr(serve_ref.get("owner"), "socket", None))
+                if s is not None
+            ],
+        )
     elif not reload:
         try:
             listener = _bind_serve_socket(host, port)
@@ -12412,9 +12658,24 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         from local_operator.server import reload as serve_reload
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
+        # Same-OS-user check on every loopback connection (follow-up D,
+        # ``server/peer_check.py``): started now, in a background thread, so its
+        # self-probe overlaps app start-up instead of delaying it; connections
+        # that arrive first wait, paused, for the verdict. ``http=`` is the
+        # whole wiring -- ``tests/unit/test_cli_serve.py`` pins it, because a
+        # refactor that drops it silently reopens the cross-user hole.
+        from local_operator.server import peer_check
+
+        peer_check.ensure_resolving()
         # dictConfig otherwise closes ALL existing handlers (including ours)
         # and reinstalls synchronous stderr handlers before startup can run.
-        config = uvicorn.Config(asgi_app, host=host, port=resolved_port, log_config=None)
+        config = uvicorn.Config(
+            asgi_app,
+            host=host,
+            port=resolved_port,
+            log_config=None,
+            http=peer_check.gated_protocol_class(),
+        )
         # Retain the Server object so a ready-successor handoff can pause/resume
         # ACCEPTORS on it without a kill: the listener socket lives in this frame
         # and the handoff runs in the lifespan's loop, so app.state is the one
@@ -12426,6 +12687,8 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         asgi_app.state.listener_owner = service_handoff.ListenerOwner(
             asgi_app, servers=[], listener=listener
         )
+        serve_ref["server"] = server
+        serve_ref["owner"] = asgi_app.state.listener_owner
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -12436,6 +12699,11 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             server.run(sockets=[listener])
         except KeyboardInterrupt:
             pass
+        finally:
+            # Serving ended on its own terms: a later shutdown, however slow, is
+            # not a missed boot.
+            if boot_deadline_done is not None:
+                boot_deadline_done.set()
     else:
         # The reloader re-imports ``server.app`` in a CHILD process, so the app
         # object cannot be reached above and the inherited environment is the
@@ -12450,6 +12718,9 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             reload=reload,
             reload_excludes=[".venv"],
             log_config=None,
+            # An import string: the reloader re-imports the protocol in its
+            # child, which resolves the peer-uid policy on its first connection.
+            http="local_operator.server.peer_check:PeerCheckedHTTPProtocol",
         )
     return 0
 
@@ -17900,6 +18171,9 @@ def _preflight_api_key(
         import asyncio
 
         from local_operator.network.credentials import build_auth_store
+        from local_operator.providers.bedrock.connection import (
+            configure_invocation_auth,
+        )
         from local_operator.providers.registry import credential_provider_id
 
         # THE STORE THE SESSION WILL USE, not a plain ``AuthStore`` (mesh credentials,
@@ -17911,6 +18185,7 @@ def _preflight_api_key(
         # row for a borrowable key otherwise; either way this stays a presence check
         # with no network call, which is the rule this function's docstring states.
         auth_store = build_auth_store(config_dir)
+        configure_invocation_auth(auth_store, canonical)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
@@ -17936,6 +18211,14 @@ def _preflight_api_key(
     key_name = env_key_name(canonical)
     credential_hint = f", `local-operator credential update {key_name}`" if key_name else ""
     env_hint = f", or set {key_name} in the environment" if key_name else ""
+    # Bedrock has no single key variable (env_key_name is None) and several
+    # ways to connect; name them (AWS_BEARER_TOKEN_BEDROCK, the ambient switch
+    # for headless workers) from the same catalogued copy the runtime uses.
+    provider_hint = ""
+    if canonical == "bedrock":
+        from local_operator.providers.bedrock.errors import no_credentials_text
+
+        provider_hint = f" {no_credentials_text()}"
 
     if not require_key:
         # Interactive start: name the fact and the remedies, then let the app
@@ -17947,7 +18230,8 @@ def _preflight_api_key(
             paint(
                 f"Warning: no credentials are configured for hosting platform "
                 f"'{hosting}'. Starting anyway — run `/login {canonical}` in the "
-                f"TUI, `local-operator login {canonical}` from a shell{env_hint}.",
+                f"TUI, `local-operator login {canonical}` from a shell{env_hint}."
+                f"{provider_hint}",
                 WARNING,
                 stream=sys.stderr,
             ),
@@ -17962,7 +18246,7 @@ def _preflight_api_key(
         paint(
             f"Error: {subject} is required for hosting platform '{hosting}' but "
             f"is not configured. Set it via `local-operator login {canonical}`"
-            f"{credential_hint}, or the environment.",
+            f"{credential_hint}, or the environment.{provider_hint}",
             ERROR,
             stream=sys.stderr,
         ),
@@ -19244,7 +19528,11 @@ def main() -> int:
                     # REMAINDER keeps the separator when it follows an option.
                     if argv and argv[0] == "--":
                         argv = argv[1:]
-                    return heavy_cli.run_command(argv, getattr(args, "timeout", None))
+                    return heavy_cli.run_command(
+                        argv,
+                        getattr(args, "timeout", None),
+                        start_by=getattr(args, "start_by", None),
+                    )
                 if heavy == "status":
                     return heavy_cli.status_command()
                 print(

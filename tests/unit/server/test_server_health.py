@@ -94,7 +94,11 @@ def test_the_identity_fields_are_additive_for_an_older_client() -> None:
         # asserted below) still validates. Pinned so the key cannot silently
         # disappear from the fresh-serving-process health report.
         "rolling_reload_contract",
+        # The same-OS-user check's posture (follow-up D), additive and
+        # defaulted to None: absent on older servers and under test clients.
+        "peer_uid_check",
     }
+    assert old_payload.peer_uid_check is None
 
 
 @pytest.mark.asyncio

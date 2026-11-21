@@ -725,9 +725,15 @@ def run_probe(root: Path, frame: Mapping[str, Any], *, device: str = "") -> dict
         item = {"remote_url": url, **checks.get(url, {})}
         item["missing_tools"] = missing_tools(row.get("markers") or [])
         answered.append(item)
+    from local_operator.network.workset import WORKSET_TRANSFER_VERSION
+
     answer: dict[str, Any] = {
         "ok": True,
         "probe_version": PROBE_VERSION,
+        # Whether THIS device can receive the files (PR B): the offload preflight
+        # recomputes its manifest as "they stay" for a destination below the
+        # transfer protocol, so the user is never shown a send that will not happen.
+        "working_set_version": WORKSET_TRANSFER_VERSION,
         "worktrees": answered,
         # Whether a remedy should be ``include`` (a share exists) or ``share``; the
         # asker builds the command (S3).
@@ -798,6 +804,11 @@ PROBE_ROW_FIELDS = ("remedy", "https_rewrite", "clone_check", "clone_detail", "m
 PROBE_BLOCK_FIELDS = ("destination_probe",)
 
 
+#: Fields only the restoring/probing device writes (see ``scrub_peer_block``).
+PEER_RESULT_ROW_FIELDS = ("recipes", "dest_path", "remapped", "branch_moved", "mode")
+PEER_RESULT_BLOCK_FIELDS = ("notes", "import")
+
+
 #: The only shape ``workset.scope_digest`` mints.
 _SCOPE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -838,6 +849,24 @@ def scrub_peer_block(block: dict[str, Any]) -> dict[str, Any]:
     from local_operator.network import workset
 
     strip_probe_fields(block)
+    # THE TRANSFER HALF'S RESULT FIELDS ARE ALSO THIS DEVICE'S (PR B, #4245): a row's
+    # ``recipes`` ("To recreate its dependencies, run in <cwd>: <run>"), ``dest_path``,
+    # ``remapped`` and ``branch_moved``, and the block's ``notes`` and ``import``
+    # (whose ``remedy`` is a command) are written only by the device that restored
+    # or probed — ``workset_move.arrival_receipt`` merges a restore row's fields only
+    # when the restore set them, so a peer's pre-filled value would otherwise survive
+    # onto the receipt. ``transferred: true`` is likewise only ever set locally (no
+    # block that crosses the link before a restore legitimately says so). The source's
+    # offload receipt reads the destination's answer through its own closed reducer
+    # (``workset_move.source_receipt``), not this block.
+    for row in block.get("worktrees") or []:
+        if isinstance(row, dict):
+            for name in PEER_RESULT_ROW_FIELDS:
+                row.pop(name, None)
+    for name in PEER_RESULT_BLOCK_FIELDS:
+        block.pop(name, None)
+    if block.get("transferred") is True:
+        block["transferred"] = False
     if "scope_digest" in block and not _SCOPE_DIGEST.fullmatch(str(block["scope_digest"])):
         block.pop("scope_digest")
     for item in block.get("left_behind") or []:
@@ -908,7 +937,11 @@ def apply_probe(
             remedy_url = rewritten
             needs_remedy = not push
         else:
-            needs_remedy = check in ("destination_cannot_fetch", "destination_cannot_push")
+            # QA Q6: a policy refusal has no credential remedy to offer.
+            needs_remedy = check in (
+                "destination_cannot_fetch",
+                "destination_cannot_push",
+            ) and row.get("clone_detail") not in ("host_refused", "url_refused")
         if needs_remedy:
             remedy = _remedy(remedy_url, device_id=device_id, borrowing_github=borrowing)
             if remedy:
@@ -919,6 +952,18 @@ def apply_probe(
         row["missing_tools"] = tools
         missing_union.extend(t for t in tools if t not in missing_union)
     probe: dict[str, Any] = {"state": "answered", "missing_tools": sorted(missing_union)}
+    if "working_set_version" in answer:
+        # Absent from a destination that predates the transfer: the reader treats a
+        # missing key as 0 ("cannot receive files"), so it is not invented here.
+        try:
+            probe["working_set_version"] = int(answer.get("working_set_version") or 0)
+        except (TypeError, ValueError):
+            probe["working_set_version"] = 0
+    # Whether the destination accepts this device's files (``workset_import`` on its
+    # row for us, security-lead ruling #4245). Only a real boolean is kept; absent or
+    # malformed reads as "not granted" at the reader, which then plans no transfer.
+    if isinstance(answer.get("import_granted"), bool):
+        probe["import_granted"] = answer["import_granted"]
     bridge = answer.get("team_bridge")
     if isinstance(bridge, Mapping) and bridge.get("needed"):
         probe["team_bridge"] = {"needed": True, "enrolled": bridge.get("enrolled") is True}
@@ -957,7 +1002,18 @@ def arrival_note(
             branch = str(row.get("branch") or "HEAD")
             state = str(row.get("state") or "")
             if state in ("restored", "carried"):
-                lines.append(f"- {path} (branch {branch}): restored on this device.")
+                # QA Q1: name where the files ARE. A beside or remapped restore leaves
+                # ``path`` holding something else here (the user's own files), and an
+                # agent following the note would edit the wrong tree.
+                dest = str(row.get("dest_path") or "")
+                if dest and dest != path:
+                    lines.append(
+                        f"- {path} (branch {branch}): restored on this device at {dest}; "
+                        f"work there, not in {path} (on this device that path holds "
+                        "other files or is not where the worktree landed)."
+                    )
+                else:
+                    lines.append(f"- {path} (branch {branch}): restored on this device.")
                 continue
             lines.append(
                 f"- {path} (branch {branch}): NOT on this device; it stayed on {source}. "

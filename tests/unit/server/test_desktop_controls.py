@@ -1740,6 +1740,129 @@ async def test_an_optional_paste_keeps_the_browser_primary(desktop, monkeypatch)
     assert "Paste the key" not in waiting["message"]
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_vertex_post_callback_project_prompt_is_required_and_answerable(
+    desktop, monkeypatch, cancel
+):
+    """MAJOR 4 / QA Q2: the REAL Vertex flow, Cloud Resource Manager returning
+    zero projects. After the browser callback wins, the follow-up project-ID
+    prompt must be live (required, not optional, with its own prompt_id and
+    question) and answerable -- it used to be wiped by the cancelled fallback
+    prompt's teardown, so the input endpoint answered 409 until timeout."""
+    from urllib.parse import parse_qs, urlsplit
+
+    import httpx as real_httpx
+
+    from local_operator.providers.oauth import vertex
+
+    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *a, **kw: None)
+    for var in ("GOOGLE_CLOUD_PROJECT", "VERTEX_PROJECT", "GOOGLE_CLOUD_LOCATION"):
+        monkeypatch.delenv(var, raising=False)
+
+    def google(request: real_httpx.Request) -> real_httpx.Response:
+        url = str(request.url)
+        if url == vertex.TOKEN_URL:
+            return real_httpx.Response(
+                200, json={"access_token": "ya29.t", "refresh_token": "1//r", "expires_in": 3600}
+            )
+        if url == vertex.USERINFO_URL:
+            return real_httpx.Response(200, json={"email": "dev@example.com"})
+        return real_httpx.Response(200, json={"projects": []})
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        async with real_httpx.AsyncClient(transport=real_httpx.MockTransport(google)) as http:
+            return await vertex.login_vertex_oauth(
+                callbacks, open_browser=lambda _u: None, signal=signal, http_client=http
+            )
+
+    _stub_login(monkeypatch, "google-vertex", login)
+    client, _ = desktop
+    started = (await client.post("/v1/auth/login", json={"provider": "google-vertex"})).json()[
+        "result"
+    ]
+    assert started["input_optional"] is True
+    snapshot: dict[str, Any] = {}
+    for _ in range(400):
+        snapshot = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if snapshot["auth_url"] and snapshot["input_required"]:
+            break
+        await asyncio.sleep(0.01)
+    first_prompt = snapshot["prompt_id"]
+    assert first_prompt and snapshot["input_optional"] is True
+
+    query = parse_qs(urlsplit(snapshot["auth_url"]).query)
+    async with real_httpx.AsyncClient() as browser:
+        await browser.get(
+            query["redirect_uri"][0], params={"code": "c", "state": query["state"][0]}
+        )
+
+    for _ in range(400):
+        snapshot = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if snapshot["prompt_id"] not in (None, first_prompt):
+            break
+        await asyncio.sleep(0.01)
+    assert snapshot["state"] == "input_required"
+    assert snapshot["input_required"] is True
+    assert snapshot["input_optional"] is False
+    assert snapshot["prompt_id"] and snapshot["prompt_id"] != first_prompt
+    assert snapshot["message"] == "Google Cloud project ID"
+    if cancel:
+        # Desktop has an explicit cancel control, not CLI's empty-line cancel.
+        # Keep the HTTP contract honest while proving no partial OAuth row is
+        # stored after declining this required post-auth field.
+        empty = await client.post(
+            f"/v1/auth/operations/{started['id']}/input",
+            json={"value": "", "prompt_id": snapshot["prompt_id"]},
+        )
+        assert empty.status_code == 422
+        cancelled = await client.delete(f"/v1/auth/operations/{started['id']}")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["result"]["state"] == "cancelled"
+        assert not desktop[1].state.desktop_auth.store.list_credentials("google-vertex")
+        return
+
+    reply = await client.post(
+        f"/v1/auth/operations/{started['id']}/input",
+        json={"value": "my-manual-proj", "prompt_id": snapshot["prompt_id"]},
+    )
+    assert reply.status_code == 200
+    await wait_for_state(client, started["id"], "succeeded")
+    stored = await AuthStore(
+        db_path=desktop[1].state.config_manager.config_dir / "auth.db"
+    ).get_oauth_access("google-vertex")
+    assert stored is not None and (stored.raw or {}).get("project_id") == "my-manual-proj"
+
+
+async def test_a_cancelled_prompt_never_clears_a_newer_one(desktop, monkeypatch):
+    """MAJOR 4: a prompt torn down late must not wipe the prompt opened after it."""
+    client, _ = desktop
+    release = asyncio.Event()
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://claude.ai/oauth/authorize", instructions=None)
+        first = asyncio.ensure_future(callbacks.on_manual_code_input())
+        await asyncio.sleep(0.01)
+        second = asyncio.ensure_future(callbacks.on_manual_code_input())
+        await asyncio.sleep(0.01)
+        first.cancel()  # unwinds AFTER the newer prompt exists
+        await asyncio.gather(first, return_exceptions=True)
+        release.set()
+        value = await second
+        return {"type": "oauth", "access": value, "refresh": "rt", "expires": 1}
+
+    _stub_login(monkeypatch, "anthropic", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    await asyncio.wait_for(release.wait(), 5)
+    snapshot = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+    assert snapshot["input_required"] is True and snapshot["prompt_id"]
+    reply = await client.post(
+        f"/v1/auth/operations/{started['id']}/input",
+        json={"value": "code#state", "prompt_id": snapshot["prompt_id"]},
+    )
+    assert reply.status_code == 200
+    await wait_for_state(client, started["id"], "succeeded")
+
+
 async def test_oauth_success_applies_and_reports_the_suggested_default(desktop, monkeypatch):
     client, app = desktop
 
@@ -2044,6 +2167,8 @@ async def test_an_oauth_paste_is_not_sent_to_the_key_check(desktop, monkeypatch)
 _PASTE_NOT_A_KEY = {
     "anthropic": "the fallback box reads an OAuth authorization code (code#state)",
     "zai-oauth": "the fallback box reads an OAuth authorization code or redirect URL",
+    "google-vertex": "the fallback box reads an OAuth authorization code or redirect URL",
+    "google-vertex-sa": "the prompt reads a GCP service account JSON payload or file path",
 }
 
 
@@ -2064,10 +2189,10 @@ def test_every_paste_prompt_is_classified_for_the_key_check():
     for provider_id in _PASTE_NOT_A_KEY:
         definition = registry.get_provider_definition(provider_id)
         assert definition is not None and not definition.paste_is_api_key, provider_id
-    # Every REQUIRED prompt in the registry today reads a key (the flavour gate
-    # checked all but one of them); a required non-key prompt must be a
-    # deliberate addition to the exemptions, never a silent default.
-    assert {p.id for p in offered if p.paste_is_api_key} >= required
+    # Every REQUIRED prompt must either be checked as an API key or explicitly
+    # listed in _PASTE_NOT_A_KEY (e.g. google-vertex-sa reads a JSON key / path,
+    # never an API key string).
+    assert ({p.id for p in offered if p.paste_is_api_key} | set(_PASTE_NOT_A_KEY)) >= required
 
 
 @pytest.mark.parametrize(

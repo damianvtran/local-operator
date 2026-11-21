@@ -32,10 +32,12 @@ import asyncio
 import logging
 import random
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
+from local_operator.team_bridge.connector import routing
 from local_operator.team_bridge.connector.batch_screen import (
     prescreen_conversation_refs,
     prescreen_scope,
@@ -932,7 +934,8 @@ async def run_iteration(
     # iteration is buffered per (endpoint, conversation, thread) and flushed
     # once at the end, so a burst that lands in one batch costs ONE wake. The
     # per-message screen/admit/reserve path inside is unchanged.
-    with CONNECTOR_COALESCER.scope(), prescreen_scope():
+    with CONNECTOR_COALESCER.scope(), prescreen_scope(), routing.iteration_scope():
+        _sweep_routed(owner, config_dir)
         try:
             summary = await _run_iteration_inner(
                 owner,
@@ -957,6 +960,36 @@ async def run_iteration(
                 CONNECTOR_COALESCER.persist_pending_holds(config_dir=config_dir)
     summary["coalesced_wakes"] = summary_wakes
     return summary
+
+
+#: Monotonic-ish time of the last routed-row sweep, per config dir.
+_LAST_ROUTED_SWEEP: dict[str, float] = {}
+
+
+def _sweep_routed(owner: Any, config_dir: Path, *, now: float | None = None) -> int:
+    """Hand routed rows nobody picked up back to the designated session.
+
+    A routed session that died (or never reads its inbox) would otherwise strand
+    its message: the designated session is blind to a row routed elsewhere.
+    Throttled to once a minute and read-first, so an idle connector never takes
+    the store's write lock for it. Never raises: a failed sweep costs one more
+    minute of waiting, not the iteration.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    moment = time.time() if now is None else now
+    key = str(config_dir)
+    if moment - _LAST_ROUTED_SWEEP.get(key, 0.0) < routing.ROUTED_SWEEP_EVERY_S:
+        return 0
+    _LAST_ROUTED_SWEEP[key] = moment
+    try:
+        return Store(config_dir).reclaim_routed(
+            owner, older_than=moment - routing.ROUTED_RECLAIM_AFTER_S, now=moment
+        )
+    except Exception:  # noqa: BLE001 — closed code, never content
+        logger.warning("bridge: routed-row sweep failed code=routed_sweep_failed")
+        return 0
 
 
 def _events_wait_s() -> int:

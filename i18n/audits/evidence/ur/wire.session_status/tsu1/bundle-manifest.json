@@ -1,0 +1,60 @@
+{
+  "auditor": {
+    "agent": "i18n-auditor (lopdev; terminal-status-ur-audit; first independent instance)",
+    "session": "9075da90042e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host system session-state Model declaration in this audit session",
+    "fallback_used": false,
+    "fallback": "No fallback used in this audit session",
+    "independent_from_translator_session": "7b97856c53df",
+    "independent_from_translator": true,
+    "date": "2026-11-19",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "record_reference": "record.json",
+  "files": [
+    {
+      "path": "record.json",
+      "sha256": "5bd45b5f00ce5448a7f219f6c95f0900222dca03be38bbd055795131291a886c"
+    },
+    {
+      "path": "receipt.json",
+      "sha256": "fa2bdbe7012ec4341bb6d903ef3f3223b6d0a41d41b6c574cf9df729bb40ddf3"
+    },
+    {
+      "path": "report.md",
+      "sha256": "370918e602a5f2660358036a2cb2f9dcbb39e351db0a091404b0ce25cbabd7b6"
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "139beb6691c1438fe28e2b1b34eb1387f8d9f915687f76a7009ff17b6990bd86"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "1398a7489fe0f0285a0e499b05ef18ecabd3833982a4404722bd95e66272934e"
+    },
+    {
+      "path": "audit-ur.py",
+      "sha256": "e7c7e320e3960a82b7f036d6b8defa77ded35fd1c98c25541efb55029632e947"
+    },
+    {
+      "path": "audit-attempt1.log",
+      "sha256": "214995c4f61761071ca06793f29da3cd63cb4ada5d04e6881f235aebcca13b53"
+    },
+    {
+      "path": "audit-attempt2.log",
+      "sha256": "3f2a0f7f333bb8afa9234dd8ae669783d6fc054014c41edc1e5a07412ee3b7c7"
+    },
+    {
+      "path": "ledger-dryrun.log",
+      "sha256": "d5b326bc6e0744a6eefe4deee0a6c7ab56c26114c40979357bcd5ec896884f70"
+    },
+    {
+      "path": "history-sha.txt",
+      "sha256": "498e3874b9b555074017eff97d853de228d12ef8674fbb8cee74fc4d2bd21353"
+    }
+  ],
+  "not_claimed_tracked": true
+}

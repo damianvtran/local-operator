@@ -38,7 +38,18 @@ issues GET requests and needs nothing beyond the standard library, so a broken
 install can never decide the gate.
 
 The runner never waits for CI: a red gate fails in seconds and waiting belongs
-on the client (``--local`` mode, run by ``make fast-gate``).
+on the client (``--local`` mode, run by ``make fast-gate``). A runner-side poll
+was rejected (GH #4194/#4215/#4145): every observed early arm found ci.yml
+``queued`` because the shared runner pool was saturated, and ci.yml pull_request
+runs took median 46 / p90 137 / max 210 min created->completed (n=140,
+2026-11-17..18), so a waiting precondition would hold a runner for up to hours
+while competing with the very run it waits for. Instead ``make merge-gate``
+runs this check BEFORE touching the label and refuses on exit 1.
+
+EXIT CODES: 0 green; 1 decided NOT green (pending, red, absent, ambiguous,
+unbound); 3 UNKNOWN (API or token unavailable, unexpected payload). The runner
+treats every non-zero as fail-closed; only the client distinguishes 3, so a
+local network/API outage does not block an arm the runner will judge anyway.
 """
 
 from __future__ import annotations
@@ -82,6 +93,9 @@ TAG_BUDGET_SECONDS = 120
 #: Tip-run conclusions that do not count as "the tip will be tested".
 _DEAD_CONCLUSIONS = frozenset({"cancelled", "skipped", "stale", "startup_failure"})
 RELEASE_SUBJECT_PREFIX = "chore(release)"
+#: See the module docstring: 1 = decided not green, 3 = could not decide.
+EXIT_NOT_GREEN = 1
+EXIT_UNKNOWN = 3
 
 #: ``fetch(path, headers_out=None)``; ``headers_out`` receives the ``link`` header.
 Fetch = Callable[..., Any]
@@ -416,9 +430,10 @@ def main(argv: list[str] | None = None, *, sleep: Callable[[float], None] = time
         token = ""
     if not token:
         print("::error title=Fast-CI precondition::no GitHub token available", file=sys.stderr)
-        return 1
+        return EXIT_UNKNOWN
     fetch = make_fetch(args.api_url, token)
     superseded = False
+    unknown = False
     rerun = ""
     try:
         if args.event == "pull_request":
@@ -447,6 +462,7 @@ def main(argv: list[str] | None = None, *, sleep: Callable[[float], None] = time
             ok, why = True, f"{args.event}: not gated, runs in full"
     except ApiError as exc:
         ok, why = False, f"GitHub API unavailable ({exc}); unknown is not green"
+        unknown = True
     _write(
         args.github_output,
         f"ok={'true' if ok else 'false'}\nsuperseded={'true' if superseded else 'false'}\n",
@@ -463,7 +479,7 @@ def main(argv: list[str] | None = None, *, sleep: Callable[[float], None] = time
     _write(args.summary, f"### Fast-CI precondition\n\n{line}\n")
     if not ok and not superseded:
         print(f"::error title=Fast-CI precondition::{line}")
-        return 1
+        return EXIT_UNKNOWN if unknown else EXIT_NOT_GREEN
     return 0
 
 

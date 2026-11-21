@@ -56,6 +56,29 @@ WORKSET_VERSION = 1
 #: force. Over it the move is refused ``working_set_over_cap`` naming the sizes.
 DEFAULT_CAP_BYTES = 256 * 1024 * 1024
 
+#: The working-set PROTOCOL a build speaks, carried as ``version`` on every consent
+#: frame (``mobility._consent_frame``) and on the recall's ``workset_preflight``.
+#: ``1`` = PR A (manifest + consent, nothing transferred); ``2`` = the transfer half
+#: (snapshot, ``workset_plan``/``workset_fetch``, restore). The OWNER carries files only
+#: when the destination's prepare says ``>= 2`` and the user's consent covers a manifest
+#: that said ``carries_files: true``; any older peer keeps PR A's behaviour exactly.
+#: Kept apart from ``WORKSET_VERSION`` (the block schema and a digest input) so the
+#: negotiation can move without changing every scope digest.
+WORKSET_TRANSFER_VERSION = 2
+
+#: The lowest peer protocol the OWNER sends files to. Separate from the number this
+#: build speaks so the two halves of a negotiation are separately addressable (and an
+#: in-process test can make one relay "old" without making the other one forget).
+WORKSET_TRANSFER_MIN_VERSION = 2
+
+#: Config key for the per-move cap (``mesh.move.working_set_max_bytes``; AGENTS.md
+#: "Adding a configuration key"). The default is ``DEFAULT_CAP_BYTES``.
+CAP_CONFIG_PATH = ("mesh", "move", "working_set_max_bytes")
+#: Config key for the destination's restore roots (``mesh.move.working_set_roots``;
+#: security review #4245 S1). Mirrored by ``workset_transfer.DEFAULT_RESTORE_ROOTS``.
+RESTORE_ROOTS_CONFIG_PATH = ("mesh", "move", "working_set_roots")
+DEFAULT_RESTORE_ROOTS: tuple[str, ...] = ("~",)
+
 #: The states a worktree row may carry (§3.4). PR A computes only the first and last;
 #: the transfer half adds the middle three.
 WORKTREE_STATES = ("planned", "carried", "restored", "pending_restore", "left_behind")
@@ -80,6 +103,10 @@ LEFT_BEHIND_REASONS = (
     "destination_cannot_clone",
     "unsupported_by_peer",
     "not_transferred",
+    # Why a CONFIRMED move left the files on the source on a build that transfers
+    # (QA Q3 / security-lead ruling, #4245 round 2).
+    "kept_as_confirmed",
+    "import_not_granted",
     # Shared with the transfer half (workset_transfer.py), one spelling each: a path
     # that cannot be recreated safely on the destination, and a destination that
     # lacks the free space the restore needs.
@@ -138,14 +165,19 @@ class Excluded:
     """A path withheld from the transfer. ``rule`` is a rule id or credential class,
     never the value."""
 
-    path: str  # home-relative (~/...) when under home
+    path: str  # home-relative (~/...) when under home; repo-relative from the history scan
     why: str  # secret_path | secret_content | history_secret_path | history_secret_content
     rule: str = ""
+    #: Blob/tree id a history-scan finding is about (``workset_transfer.history_check``),
+    #: so a finding is addressable by digest. Empty for manifest-time path/content hits.
+    object: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"path": self.path, "why": self.why}
         if self.rule:
             out["rule"] = self.rule
+        if self.object:
+            out["object"] = self.object
         return out
 
 
@@ -368,17 +400,63 @@ def scope_digest(manifest: Manifest) -> str:
     ``_artifact_binding`` below rather than changing the inputs above, so a PR A
     consent stays comparable.
     """
+    return _scope_digest_of(
+        to_device=manifest.to_device,
+        worktrees=[[w.path, w.repo, w.branch, w.state, w.reason] for w in manifest.worktrees],
+        excluded=[[item.path, item.why] for item in manifest.excluded],
+        carries_files=manifest.carries_files,
+    )
+
+
+def _scope_digest_of(
+    *,
+    to_device: str,
+    worktrees: Iterable[list[str]],
+    excluded: Iterable[list[str]],
+    carries_files: bool,
+) -> str:
+    """The one canonical hash behind :func:`scope_digest` and :func:`block_scope_digest`.
+
+    Shared so the destination's recompute of a peer's block (S13) can never drift
+    from what the owner mints: a new digest input lands here, for both, or nowhere.
+    """
     payload = {
         "version": WORKSET_VERSION,
-        "to_device": manifest.to_device,
-        "worktrees": sorted(
-            [w.path, w.repo, w.branch, w.state, w.reason] for w in manifest.worktrees
-        ),
-        "excluded": sorted([item.path, item.why] for item in manifest.excluded),
-        **_artifact_binding(manifest),
+        "to_device": to_device,
+        "worktrees": sorted(worktrees),
+        "excluded": sorted(excluded),
+        **_artifact_inputs(carries_files),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def block_scope_digest(block: Mapping[str, Any], *, to_device: str) -> str:
+    """Recompute the scope digest a ``working_set`` block's OWN rows name, for ``to_device``.
+
+    WHY (#4245 security round 4, S13/M1): on a recall the block is the OWNER's answer
+    and its ``scope_digest`` is the owner's claim. The destination keeps the planned
+    rows of each block by digest, and the operator confirms a digest, so that claim
+    must be checked: recomputed from the rows that were shown, with ``to_device``
+    set to THIS device (never the block's own ``destination``), the digest names one
+    row set for one device. A block whose claim differs is a forgery or a
+    version skew, and either way it is not recorded (fail closed: no record, no
+    files). Reads exactly the fields :meth:`Manifest.to_dict` writes for the inputs
+    of :func:`scope_digest`: ``worktrees[].path/repo/branch/state/reason`` (absent
+    keys are the empty string ``to_dict`` omits), top-level ``excluded[].path/why``
+    and ``carries_files``.
+    """
+    rows = [r for r in block.get("worktrees") or [] if isinstance(r, Mapping)]
+    withheld = [e for e in block.get("excluded") or [] if isinstance(e, Mapping)]
+    return _scope_digest_of(
+        to_device=to_device,
+        worktrees=[
+            [str(r.get(k) or "") for k in ("path", "repo", "branch", "state", "reason")]
+            for r in rows
+        ],
+        excluded=[[str(e.get("path") or ""), str(e.get("why") or "")] for e in withheld],
+        carries_files=block.get("carries_files") is True,
+    )
 
 
 def _artifact_binding(manifest: Manifest) -> dict[str, Any]:
@@ -397,9 +475,99 @@ def _artifact_binding(manifest: Manifest) -> dict[str, Any]:
     enforces the cap on the bytes it stages — so the consent binds only that files
     travel at all.
     """
-    if not manifest.carries_files:
+    return _artifact_inputs(manifest.carries_files)
+
+
+def _artifact_inputs(carries_files: bool) -> dict[str, Any]:
+    """:func:`_artifact_binding` by its one input, so a block recompute shares it."""
+    if not carries_files:
         return {}
     return {"carries_files": True}
+
+
+def transfer_binding(
+    scope: str, *, lease_epoch: str, to_device: str, snapshots: Iterable[Mapping[str, Any]]
+) -> str:
+    """``sha256:`` binding the CONFIRMED scope digest to one prepare (design §4 P4).
+
+    Computed by the owner right after it snapshots the planned worktrees, journaled with
+    the move, and handed to the destination in the prepare reply: the confirmed scope,
+    the lease epoch the prepare minted, the authenticated destination and the IMMUTABLE
+    snapshot commit ids (path -> head/index/worktree, in plan order). Every later
+    ``workset_plan``/``workset_fetch`` is authorised against the journal this digest
+    names, so bytes can only leave for the scope the user confirmed, to the device it
+    named, inside the move that minted the epoch.
+    """
+    rows = [
+        [str(s.get("path")), str(s.get("head")), str(s.get("index")), str(s.get("worktree"))]
+        for s in snapshots
+    ]
+    payload = {
+        "scope_digest": scope,
+        "lease_epoch": lease_epoch,
+        "to_device": to_device,
+        "snapshots": rows,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def restore_roots(root: Path | None = None) -> tuple[str, ...]:
+    """``mesh.move.working_set_roots``: where on THIS device a moved repository may land.
+
+    Security review #4245 S1: the destination's own allowlist of ``~``-relative roots
+    (default ``("~",)``, i.e. anywhere the path rules in
+    ``workset_transfer.primary_path_refusal`` allow). An absent key is the default;
+    with it, an ABSENT repository is also cloned only beside existing ones (S9, round
+    2: ``restore_roots_configured`` / ``workset_transfer.clone_parent_refusal``).
+    A PRESENT value is taken as written, and an unreadable one is the empty tuple,
+    which refuses every restore: an allowlist that cannot be read must narrow, never
+    widen (unlike the cap, where a typo must not turn every move into a refusal).
+    """
+    from local_operator.network import store
+
+    try:
+        value = store.read_config(RESTORE_ROOTS_CONFIG_PATH, None, root)
+    except Exception:  # noqa: BLE001 — unreadable: refuse rather than widen
+        return ()
+    if value is None:
+        return DEFAULT_RESTORE_ROOTS
+    if isinstance(value, str):
+        value = [part.strip() for part in value.split(",")]
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in value if str(item).strip())
+
+
+def restore_roots_configured(root: Path | None = None) -> bool:
+    """Whether the operator SET ``mesh.move.working_set_roots`` (S9, round 2).
+
+    Unset is the default clone policy (``workset_transfer.clone_parent_refusal``: an
+    absent repository is cloned only beside the user's existing repositories); set,
+    the roots themselves decide. Unreadable reads as unset (the stricter policy).
+    """
+    from local_operator.network import store
+
+    try:
+        return store.read_config(RESTORE_ROOTS_CONFIG_PATH, None, root) is not None
+    except Exception:  # noqa: BLE001 — unreadable: the stricter default
+        return False
+
+
+def cap_bytes(root: Path | None = None) -> int:
+    """``mesh.move.working_set_max_bytes`` or :data:`DEFAULT_CAP_BYTES`.
+
+    An unreadable or non-positive value falls back to the default rather than raising:
+    a typo in config must not turn every move into a refusal (same rule as the audit
+    log's bounds, ``audit._resolve``).
+    """
+    try:
+        from local_operator.network import store
+
+        value = int(store.read_config(CAP_CONFIG_PATH, DEFAULT_CAP_BYTES, root))
+    except Exception:  # noqa: BLE001 — a bad value is the default, never a refusal
+        return DEFAULT_CAP_BYTES
+    return value if value > 0 else DEFAULT_CAP_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1148,11 @@ def classify_exclusions(worktree: Path, entries: Iterable[str], *, home: Path) -
     from local_operator.supplements.denylist import is_sensitive
     from local_operator.team_bridge.secret_guard import credential_classes
 
+    def text_classes(data: bytes | None) -> list[str]:
+        if not data or len(data) > _CONTENT_SCAN_MAX_BYTES or b"\0" in data[:8192]:
+            return []  # absent, over the bound, or binary: the table is text-shaped
+        return list(credential_classes(data.decode("utf-8", "replace")))
+
     out: list[Excluded] = []
     for relative in dict.fromkeys(entries):
         absolute = worktree / relative
@@ -988,17 +1161,33 @@ def classify_exclusions(worktree: Path, entries: Iterable[str], *, home: Path) -
         if rule:
             out.append(Excluded(shown, "secret_path", rule))
             continue
+        data: bytes | None = None
         try:
-            if not absolute.is_file() or absolute.is_symlink():
-                continue
-            if absolute.stat().st_size > _CONTENT_SCAN_MAX_BYTES:
-                continue
-            data = absolute.read_bytes()
+            if (
+                absolute.is_file()
+                and not absolute.is_symlink()
+                and absolute.stat().st_size <= _CONTENT_SCAN_MAX_BYTES
+            ):
+                data = absolute.read_bytes()
         except OSError:
-            continue
-        if b"\0" in data[:8192]:
-            continue  # binary: the credential table is text-shaped
-        classes = credential_classes(data.decode("utf-8", "replace"))
+            data = None
+        classes = text_classes(data)
+        if not classes:
+            # QA Q4 (#4245): the STAGED copy travels too (the snapshot's index
+            # commit), and it can hold a secret the working file no longer does —
+            # or the working file is gone. Scanned here so the consent screen lists
+            # it withheld; the snapshot then reverts that index entry (``_trees``)
+            # instead of the outgoing-object scan refusing the whole worktree as a
+            # "history" secret with push-or-rewrite advice.
+            staged = _git(
+                worktree,
+                "cat-file",
+                "blob",
+                f":{relative}",
+                binary=True,
+                limit=_CONTENT_SCAN_MAX_BYTES + 1,
+            )
+            classes = text_classes(staged if isinstance(staged, bytes) else None)
         if classes:
             out.append(Excluded(shown, "secret_content", classes[0]))
     return out
@@ -1390,7 +1579,7 @@ def compute_manifest(
     )
 
 
-def arrival_block(manifest: Manifest) -> dict[str, Any]:
+def arrival_block(manifest: Manifest, reason: str = "not_transferred") -> dict[str, Any]:
     """The receipt's ``working_set`` block for a move that did NOT transfer the files.
 
     PR A's honest arrival (brief, 2026-11-18): the user confirmed the manifest, the
@@ -1398,6 +1587,12 @@ def arrival_block(manifest: Manifest) -> dict[str, Any]:
     row is reported ``left_behind``/``not_transferred`` and the block says
     ``transferred: false``. ``scope_digest`` is the CONFIRMED scope (computed before
     the rewrite), so a surface can match the receipt to the dialog it showed.
+
+    ``reason`` (QA Q3, #4245): WHY the rows stayed, from the owner's gate — the user
+    left them (``kept_as_confirmed``), the destination cannot receive files
+    (``unsupported_by_peer``) or has not allowed this device to send them
+    (``import_not_granted``). ``not_transferred`` ("this version does not transfer
+    files yet") is only true of a PR A owner, and stays the default for that reading.
     """
     block = manifest.to_dict()
     block["state"] = "left_behind"
@@ -1405,7 +1600,7 @@ def arrival_block(manifest: Manifest) -> dict[str, Any]:
     for row in block["worktrees"]:
         if row.get("state") == "planned":
             row["state"] = "left_behind"
-            row["reason"] = "not_transferred"
+            row["reason"] = reason if reason in LEFT_BEHIND_REASONS else "not_transferred"
     return block
 
 

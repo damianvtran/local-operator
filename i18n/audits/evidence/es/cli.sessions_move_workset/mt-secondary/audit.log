@@ -1,0 +1,23 @@
+# Second independent safety audit — es — PR #4245 delta (22 cli.sessions_move_workset + 6 wire.settings mesh_* keys vs 696a18338)
+# auditor session 1946542ef662 (anthropic/claude-opus-5-5); worktree HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10
+
+## HOWTO gates (each alone)
+# HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10 origin/main 1d7e456afbb93d14e855884a4eb988cbbe5f7553 — before second-audit receipts
+$ python scripts/i18n/generate.py --check
+generate.py --check: 179 artifact(s) byte-identical
+exit=0
+$ python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ python scripts/i18n/check.py --audit-base origin/main
+check.py: ok — 235 file(s) scanned, 2714 literal(s) at or below the baseline, catalogues consistent; 107 advisory finding(s) (report-only until activated)
+exit=0
+
+## Independent mechanical pass + plural renders (n=0,1,2,5,21; source=mbp, device=studio)
+es cli.sessions_move_workset: 22 delta keys present=True; mismatches=none
+es wire.settings: 6 delta keys present=True; mismatches=none
+es n=0: Los archivos de trabajo llegaron desde mbp: 0 worktrees restaurados aquí. | 0 worktrees aún no están restaurados; este dispositivo lo reintenta cuando se reinicia su relay, y mbp todavía tiene los archivos. | Los archivos de trabajo se enviaron a studio: 0 worktrees recibidos allí; studio los restaura cuando llega la conversación.
+es n=1: Los archivos de trabajo llegaron desde mbp: 1 worktree restaurado aquí. | 1 worktree aún no está restaurado; este dispositivo lo reintenta cuando se reinicia su relay, y mbp todavía tiene los archivos. | Los archivos de trabajo se enviaron a studio: 1 worktree recibido allí; studio los restaura cuando llega la conversación.
+es n=2: Los archivos de trabajo llegaron desde mbp: 2 worktrees restaurados aquí. | 2 worktrees aún no están restaurados; este dispositivo lo reintenta cuando se reinicia su relay, y mbp todavía tiene los archivos. | Los archivos de trabajo se enviaron a studio: 2 worktrees recibidos allí; studio los restaura cuando llega la conversación.
+es n=5: Los archivos de trabajo llegaron desde mbp: 5 worktrees restaurados aquí. | 5 worktrees aún no están restaurados; este dispositivo lo reintenta cuando se reinicia su relay, y mbp todavía tiene los archivos. | Los archivos de trabajo se enviaron a studio: 5 worktrees recibidos allí; studio los restaura cuando llega la conversación.
+es n=21: Los archivos de trabajo llegaron desde mbp: 21 worktrees restaurados aquí. | 21 worktrees aún no están restaurados; este dispositivo lo reintenta cuando se reinicia su relay, y mbp todavía tiene los archivos. | Los archivos de trabajo se enviaron a studio: 21 worktrees recibidos allí; studio los restaura cuando llega la conversación.

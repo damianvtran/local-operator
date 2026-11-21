@@ -735,6 +735,12 @@ class RelayConnector:
             try:
                 grant = await self._fresh_grant()
             except Exception as failure:  # noqa: BLE001 - a /connect blip is a retry
+                from local_operator.tunnels.errors import RequestFailed
+
+                # A protocol prerequisite is not a /connect blip. Let the owning
+                # service tear down and park instead of retrying the same grant.
+                if isinstance(failure, RequestFailed) and failure.status == 426:
+                    raise
                 self.announce(f"relay token refresh failed: {describe_failure(failure)}")
                 await asyncio.sleep(backoff_delay(attempt))
                 return None

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import sys
 import threading
 import weakref
 
@@ -211,6 +212,204 @@ async def test_completed_subagent_disposes_its_owned_browser_surface(tmp_path, m
 
     assert calls == [("close", {"tab": "bridge:44:childnonce"}, "bridge:44:childnonce")]
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "final_state",
+    ["closed", "pending", "cancelled", "dispose_closed", "paused_in_dispose", "paused_in_recover"],
+)
+async def test_terminal_child_retries_only_after_dispose(tmp_path, monkeypatch, final_state):
+    """Real child runner and exact on-disk cleanup, with a disposable protocol peer."""
+    from local_operator.browser_bridge import resources
+    from local_operator.harness import subagent as subagent_mod
+    from local_operator.session_lease import (
+        SessionLeaseHeldError,
+        acquire_session_lease,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    original_build = subagent_mod._build_child_session
+    retry_entered = asyncio.Event()
+    answer_retry = asyncio.Event()
+    dispose_entered = asyncio.Event()
+    answer_dispose = asyncio.Event()
+    retry_recover_entered = asyncio.Event()
+    bridge_cancelled = asyncio.Event()
+    paused = final_state in ("paused_in_dispose", "paused_in_recover")
+    exact_identity: list[bool] = []
+    surface = "bridge:44:synthetic-capability"
+    children: list[Session] = []
+
+    async def build_with_owned_tab(**kwargs):
+        child = await original_build(**kwargs)
+        children.append(child)
+        resource = child._browser.resource
+        resource.initialize()
+        resource.remember(surface)
+        child._browser.surface_id = surface
+        return child
+
+    class Bridge:
+        async def call(self, method, params):
+            if method == "owner_recover":
+                if final_state == "paused_in_recover" and len(exact_identity) == 2:
+                    retry_recover_entered.set()
+                    try:
+                        await answer_retry.wait()
+                    except asyncio.CancelledError:
+                        # Let the recovery reply win the cancellation race so
+                        # this tests admission, not transport cancellation.
+                        bridge_cancelled.set()
+                return {"ownership_version": 1, "state": "owned", "tab": surface}
+            assert method == "owner_finish"
+            original = children[0]._browser.resource.params()
+            exact_identity.append(
+                params.get("outcome") == "completed"
+                and all(
+                    params.get(key) == original[key]
+                    for key in ("requester", "owner_generation", "owner_proof", "allocation_id")
+                )
+            )
+            finish_count = len(exact_identity)
+            if finish_count == 2:
+                if final_state == "dispose_closed":
+                    return {"state": "closed"}
+                if final_state == "paused_in_dispose":
+                    dispose_entered.set()
+                    await answer_dispose.wait()
+            if finish_count == 3 and paused:
+                return {"state": "closed"}
+            if finish_count <= 2:
+                raise ConnectionError("synthetic-capability")
+            retry_entered.set()
+            try:
+                await answer_retry.wait()
+            except asyncio.CancelledError:
+                bridge_cancelled.set()
+                raise
+            if final_state == "pending":
+                raise ConnectionError("synthetic-capability")
+            return {"state": "closed"}
+
+    monkeypatch.setattr(resources, "BridgeClient", Bridge)
+    monkeypatch.setattr(subagent_mod, "_build_child_session", build_with_owned_tab)
+    parent = make_session(tmp_path, OneShotStream())
+    try:
+        job_id = parent._launch_subagent(label="sub", prompt="finish")
+        if paused:
+            if final_state == "paused_in_dispose":
+                await wait_for(dispose_entered.is_set)
+                pause = asyncio.create_task(parent.subagent_comms.pause(job_id))
+                await wait_for(lambda: parent.subagent_comms._record(job_id).paused)
+                answer_dispose.set()
+                assert (await pause).outcome == "paused"
+            else:
+                await wait_for(retry_recover_entered.is_set)
+                assert (await parent.subagent_comms.pause(job_id)).outcome == "paused"
+                assert bridge_cancelled.is_set()
+        elif final_state != "dispose_closed":
+            await wait_for(
+                lambda: retry_entered.is_set()
+                or (job := parent.jobs.get(job_id)) is not None
+                and job.status != "running"
+            )
+            [child] = children
+            resource = child._browser.resource
+            record = json.loads(resource.path.read_text())
+            # The negative control on the base reaches this assertion with
+            # only its terminal and disposal closes, leaving cleanup_pending.
+            assert retry_entered.is_set(), (
+                len(exact_identity),
+                record["state"],
+                parent._cleanup_verdict_errors(),
+            )
+            assert record["state"] == "cleanup_pending"
+            assert parent.subagent_comms.resume(job_id, "continue") == (
+                None,
+                "subagent sub is still running; cancel or pause it first",
+            )
+            with pytest.raises(SessionLeaseHeldError):
+                acquire_session_lease(resource.directory)
+            if final_state == "cancelled":
+                assert await parent.jobs.cancel(job_id)
+                assert bridge_cancelled.is_set()
+            else:
+                answer_retry.set()
+        await wait_for(
+            lambda: (job := parent.jobs.get(job_id)) is not None and job.status != "running"
+        )
+        [child] = children
+        resource = child._browser.resource
+        record = json.loads(resource.path.read_text())
+        assert record["generation"] == resource.record["generation"]
+        assert record["state"] == (
+            "closed" if final_state in ("closed", "dispose_closed") else "cleanup_pending"
+        )
+        assert exact_identity == [True] * (2 if final_state == "dispose_closed" or paused else 3)
+        assert not (resource.directory / ".execution-lease").exists()
+        assert not (resource.directory / ".session.pid").exists()
+        acquire_session_lease(resource.directory).release()
+        job = parent.jobs.get(job_id)
+        assert job is not None and job.child_jobs is None
+        assert job.status == ("cancelled" if final_state == "cancelled" or paused else "completed")
+        reason = {
+            "pending": "browser cleanup still pending after exact retry",
+            "cancelled": "browser cleanup retry cancelled; closure unverified",
+        }.get(final_state)
+        assert parent._cleanup_verdict_errors() == (
+            (f"descendant {child.session_id} cleanup unverified: {reason}",) if reason else ()
+        )
+    finally:
+        answer_dispose.set()
+        answer_retry.set()
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protection", ["paused", "retained", "handed", "nonterminal", "successor"])
+async def test_terminal_browser_retry_requires_unprotected_exact_marker(
+    tmp_path, monkeypatch, protection
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from local_operator.browser_bridge import resources
+    from local_operator.harness import subagent as subagent_mod
+
+    child = make_session(tmp_path, OneShotStream())
+    browser = child._browser
+    resource = browser.resource
+    resource.initialize()
+    browser.surface_id = "bridge:44:synthetic-capability"
+    resource.remember(browser.surface_id)
+    if protection != "nonterminal":
+        resource.record["terminal"] = "completed"
+        resource.remember(browser.surface_id, state="cleanup_pending")
+    if protection == "retained":
+        resource.record["retention"] = "human approval"
+    if protection == "handed":
+        browser.handed_to = "synthetic-parent"
+    comms = SimpleNamespace(_record=lambda _: SimpleNamespace(paused=protection == "paused"))
+
+    finish = AsyncMock(return_value=resources.BrowserCleanupResult("pending"))
+    monkeypatch.setattr(child, "finish_browser_scope", finish)
+    retry = AsyncMock()
+    monkeypatch.setattr(resources, "cleanup_exact", retry)
+    await subagent_mod._finish_child_browser(child, comms, "synthetic-job", "completed")
+    if protection == "successor":
+        assert browser.terminal_cleanup_generation == resource.generation
+        resource.record["generation"] = "synthetic-successor"
+    else:
+        assert not browser.terminal_cleanup_generation
+    if protection in ("paused", "handed"):
+        finish.assert_not_awaited()
+    if protection == "paused":
+        assert resource.record["retention"] == "paused scope"
+    assert await subagent_mod._retry_stranded_child_browser(child) == ""
+    retry.assert_not_awaited()
+    assert not browser.terminal_cleanup_generation
+    await child.dispose()
 
 
 @pytest.mark.asyncio
@@ -744,6 +943,120 @@ async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monk
     await parent.dispose()
 
 
+def _describe_referrer(obj: object) -> str:
+    """One cheap line naming what a gc referrer is, for leak diagnostics."""
+    kind = type(obj).__name__
+    if isinstance(obj, dict):
+        if isinstance(obj.get("__name__"), str) and "__file__" in obj:
+            return f"module globals {obj['__name__']}"
+        keys = [repr(k) for k in list(obj)[:6]]
+        return f"dict keys=[{', '.join(keys)}{', ...' if len(obj) > 6 else ''}]"
+    code = getattr(obj, "f_code", None)
+    if code is not None:
+        return f"frame {getattr(code, 'co_qualname', code.co_name)}"
+    qualname = getattr(obj, "__qualname__", None)
+    if isinstance(qualname, str):
+        return f"{kind} {qualname}"
+    return f"{kind} ({type(obj).__qualname__})"
+
+
+def _safe_describe(obj: object) -> str:
+    """Describe a referrer without letting a hostile ``__getattr__`` or a
+    half-torn-down object raise from inside the assertion message, which
+    would replace the leak report with an unrelated traceback."""
+    try:
+        return _describe_referrer(obj)
+    except Exception:
+        return type(obj).__name__
+
+
+def _referrer_report(obj: object, limit: int = 20) -> str:
+    """Name who still holds ``obj`` (two levels), so a CI-only retention
+    failure reports its holder instead of just "still a live Session".
+
+    The report's own frames (and the calling test's coroutine) and the
+    referrer lists it builds are excluded; they hold ``obj`` only because we
+    are looking at it. So is ``obj``'s own ``__dict__``: it is its cycle,
+    not an outside holder.
+
+    Methods bound to ``obj`` are kept, because a live bound method held by a
+    task done-callback, a ``call_soon`` handle or a subscriber list is exactly
+    the holder class this report exists to name. Only a bound method whose
+    sole holder is ``obj``'s own ``__dict__`` (a cached self-reference) is
+    skipped as noise; every other bound method is listed with its holder on
+    the line under it.
+
+    Ordering, not filtering, keeps the capped report useful: a referrer whose
+    every holder is ``obj``'s ``__dict__`` or one of ``obj``'s own attribute
+    values (e.g. a Session's job manager holding ``Session._on_job_completed``)
+    is a collectible internal cycle, so it is listed after the referrers held
+    from outside. Without that, a Session's dozen self-wired callbacks fill
+    the cap before the outside holder appears. A holder that a module's
+    globals keep alive gets that module named, since "<- list" alone does not
+    say which list.
+    """
+    if obj is None:
+        return "collected during report"
+    here = sys._getframe()
+    caller = here.f_back
+    own: list[object] = [here, caller]
+    gc.collect()
+    obj_dict = getattr(obj, "__dict__", None)
+    internal_ids = {id(obj_dict)}
+    if isinstance(obj_dict, dict):
+        internal_ids.update(id(v) for v in obj_dict.values())
+    candidates = gc.get_referrers(obj)
+    own.append(candidates)
+    external: list[tuple[object, list[object]]] = []
+    internal: list[tuple[object, list[object]]] = []
+    own.append(external)
+    own.append(internal)
+
+    # A plain function, not ``any(x is o for o in own)``: a generator closing
+    # over the loop variable turns it into a cell, and that cell then shows
+    # up as a holder of every referrer, defeating the internal-cycle ordering.
+    def is_own(x: object) -> bool:
+        for o in own:
+            if x is o:
+                return True
+        return False
+
+    for r in candidates:
+        if is_own(r):
+            continue
+        if getattr(r, "cr_frame", None) is caller or r is obj_dict:
+            continue
+        raw = gc.get_referrers(r)
+        own.append(raw)
+        holders = [h for h in raw if not is_own(h)]
+        own.append(holders)
+        if getattr(r, "__self__", None) is obj and len(holders) == 1 and holders[0] is obj_dict:
+            continue
+        if holders and all(id(h) in internal_ids for h in holders):
+            internal.append((r, holders))
+        else:
+            external.append((r, holders))
+    lines = [f"live {type(obj).__name__} still referenced by:"]
+    for ref, holders in external + internal:
+        lines.append(f"  {_safe_describe(ref)}")
+        for up in holders:
+            line = f"    <- {_safe_describe(up)}"
+            if not isinstance(up, dict) and getattr(up, "f_code", None) is None:
+                modules = [
+                    g["__name__"]
+                    for g in gc.get_referrers(up)
+                    if isinstance(g, dict)
+                    and isinstance(g.get("__name__"), str)
+                    and "__file__" in g
+                ]
+                if modules:
+                    line += f" in module globals {', '.join(modules)}"
+            lines.append(line)
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines[:limit])
+
+
 @pytest.mark.asyncio
 async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monkeypatch):
     """The accounting snapshot must not keep an observability-to-owner edge."""
@@ -763,10 +1076,20 @@ async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monk
         lambda: (row := parent.jobs.get(job_id)) is not None and row.status == "completed"
     )
     await wait_for(lambda: bool(captured))
-    for _ in range(3):
+    # Why a bounded wait rather than a fixed handful of gc/yield rounds: the
+    # fixed three rounds failed intermittently on CI full-suite gates (8 of 20
+    # failed gate runs after 2026-11-19T01:04Z, py3.12 and 3.13, unrelated PRs)
+    # while always passing locally, i.e. the child's teardown can lag a few
+    # loop turns under xdist/CI load. The deadline keeps the guarded property
+    # honest: a real owner edge from the accounting snapshot never clears, so
+    # it still fails, just after ~3 s, and the message names the holder.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 3.0
+    while captured[0]() is not None and loop.time() < deadline:
         gc.collect()
-        await asyncio.sleep(0)
-    assert captured[0]() is None
+        await asyncio.sleep(0.01)
+    gc.collect()
+    assert captured[0]() is None, _referrer_report(captured[0]())
     assert parent.jobs.get(job_id) is not None
     await parent.dispose()
 

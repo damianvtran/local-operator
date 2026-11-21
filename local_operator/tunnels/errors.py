@@ -95,6 +95,15 @@ class RequestFailed(ValueError):
         self.retry_after = retry_after
 
 
+class ClientUpgradeRequired(RequestFailed):
+    """A fixed HTTP 426 mapping: retry/login/billing cannot add a capability."""
+
+    def __init__(self) -> None:
+        from local_operator.tunnels.upgrade import detail
+
+        super().__init__(detail(), status=426)
+
+
 class TunnelInactive(ValueError):
     """Radient declined to serve this tunnel, refined to the cause that blocks it.
 

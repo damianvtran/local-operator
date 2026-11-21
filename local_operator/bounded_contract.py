@@ -40,8 +40,69 @@ PRE_SPAWN_CAUSES = frozenset(
         "memory-policy-refused",
         "spawn-refused",
         "spawn-failure",
+        "late-start",
     }
 )
+
+#: A ``--start-by`` deadline passed before the child could be spawned, so it was
+#: never spawned. Shared by ``scripts/run_bounded.py`` and ``lop services heavy
+#: run`` so a scheduler reads one number for "too late, not run" whichever entry
+#: point it used. 79 sits outside sysexits' 64-78 (``heavy run`` already returns
+#: 75 EX_TEMPFAIL for a queue timeout), below the shell's reserved 124-127 that
+#: run_bounded mirrors from timeout(1), and below the 128+N signal range.
+EXIT_LATE_START = 79
+
+
+def parse_start_by(text: str) -> float:
+    """``--start-by`` as epoch seconds: a number, or ISO-8601 WITH an offset/Z.
+
+    WHY: node hosts grant heavy-test windows with a latest start ("start by
+    08:05Z"); a run that queued behind a slot or lease and woke up late must not
+    begin outside its window. A naive ISO time is refused rather than read as
+    local time: the window is stated by another host, and guessing its zone is
+    exactly the error the flag exists to prevent. A deadline already in the past
+    PARSES (it is checked, with the breach code, at the spawn point); only an
+    unreadable value is a usage error. Raises ValueError for argparse to turn
+    into exit 2.
+    """
+    from datetime import datetime, timezone
+
+    value = text.strip()
+    try:
+        epoch = float(value)
+    except ValueError:
+        epoch = None
+    if epoch is not None:
+        if not math.isfinite(epoch):
+            raise ValueError(f"not a finite epoch time: {text!r}")
+        # A finite float can still lie outside what datetime represents (e.g.
+        # -1e300). utc_stamp formats the deadline only at the breach, AFTER
+        # the queue wait, so an unrepresentable value must fail HERE as a usage
+        # error (2) rather than crash the late-start report at spawn time.
+        try:
+            datetime.fromtimestamp(epoch, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            raise ValueError(f"epoch time out of range: {text!r}") from None
+        return epoch
+    if value[-1:] in ("Z", "z"):
+        # Spelled out rather than relying on 3.11+ fromisoformat accepting Z:
+        # the script also runs under whatever interpreter a caller names.
+        value = value[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"not epoch seconds or ISO-8601: {text!r}") from None
+    if parsed.utcoffset() is None:
+        raise ValueError(f"ISO-8601 time needs an offset or Z: {text!r}")
+    return parsed.timestamp()
+
+
+def utc_stamp(epoch: float) -> str:
+    """``2026-11-19T08:05:00Z``: how a breach names the deadline and now."""
+    from datetime import datetime, timezone
+
+    stamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+    return stamp.replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -91,6 +152,11 @@ class Outcome:
     memory_ceiling_mb: int | None = None
     memory_budget_source: str | None = None
     terminal_observer: str | None = None
+    # Descendants that left the owned group (setsid/setpgid). cleanup-required
+    # on Linux counts them through a child subreaper (escaped_descendants);
+    # every other path cannot, and says `unknown`.
+    descendant_cleanup: str = "unknown"
+    escaped_residuals: tuple[int, ...] = ()
 
     def finalization_failed(self, stage: str, exc: Exception) -> None:
         # A failed restore must not discard the structured outcome or hide behind
@@ -100,9 +166,19 @@ class Outcome:
             self.wrapper_exit_code = 126
             self.termination_cause = "finalization-failure"
 
-    def accept_terminal(self, owner, verdict) -> None:
+    def accept_terminal(self, owner, verdict, escaped=None) -> None:
         # A string status is not a certificate. The owner must have accepted
         # this exact terminal object before irreversible authority revocation.
+        # ``escaped`` is the escaped-descendant sweep: an empty owned group
+        # while a setsid'd Chrome lives is not cleanup (fd36, 2026-11-19), so
+        # without that proof the status is `unproven`, naming the live pids.
+        if escaped is not None:
+            self.descendant_cleanup = "proven-empty" if escaped.proven else "unproven"
+            self.escaped_residuals = tuple(escaped.remaining)
+            if not escaped.proven:
+                self.cleanup_status = "unproven"
+                self.cleanup_reason = escaped.describe()
+                return
         if owner.accepted_terminal(verdict):
             self.cleanup_status = "proven-empty"
             self.cleanup_reason = verdict.reason
@@ -159,8 +235,11 @@ class Receipt:
             "memory_budget_source": outcome.memory_budget_source,
             "terminal_observer": outcome.terminal_observer,
             # An empty owned group says nothing about descendants that escaped
-            # it. Neither contract has authority over that wider population.
-            "descendant_cleanup": "unknown",
+            # it; only cleanup-required's subreaper sweep can speak for them.
+            "descendant_cleanup": (
+                "unknown" if contract == "command-status" else outcome.descendant_cleanup
+            ),
+            "escaped_residuals": list(outcome.escaped_residuals),
         }
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         # x mode never truncates an earlier invocation. Failure, including fsync,

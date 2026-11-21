@@ -1213,3 +1213,37 @@ def test_edit_reports_diff_counts(tmp_path) -> None:
     )
     assert result.details is not None
     assert (result.details["added"], result.details["removed"]) == (1, 1)
+
+
+def test_no_published_schema_carries_a_developer_docstring() -> None:
+    """Wave 2 (2026-11-19): pydantic turns a params class docstring into the
+    schema's top-level ``description``, and those were developer notes ("Parameters
+    for the ``sessions`` tool (see ...)", "Arguments for the ...") billed on
+    every request. ``create_tools`` strips the top level for EVERY builtin on the
+    real surface; field and nested ``$defs`` descriptions stay."""
+    from scripts.real_tool_surface import build_real_tools
+
+    tools = build_real_tools(".")
+    assert len(tools) == len(DEFAULT_TOOL_NAMES)
+    leaked = {
+        tool.name: (tool.parameters or {}).get("description")
+        for tool in tools
+        if (tool.parameters or {}).get("description")
+    }
+    assert not leaked, leaked
+    # The named shapes, stated so a re-added docstring fails with its words. A
+    # FIELD may legitimately read "Arguments for that call." (``monitor``), so
+    # only the top level is checked.
+    assert not [
+        tool.name
+        for tool in tools
+        if str((tool.parameters or {}).get("description", "")).startswith(
+            ("Parameters for", "Arguments for")
+        )
+    ]
+    # Field descriptions are the model's docs and are untouched.
+    sessions = next(tool for tool in tools if tool.name == "sessions")
+    assert all(prop.get("description") for name, prop in sessions.parameters["properties"].items())
+    # The one docstring that was a usage rule now lives in the description.
+    sound = next(tool for tool in tools if tool.name == "generate_sound_effect")
+    assert "never both" in sound.description

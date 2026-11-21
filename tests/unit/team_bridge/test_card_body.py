@@ -26,6 +26,7 @@ from local_operator.harness.types import CustomMessage
 from local_operator.team_bridge import card_projection
 from local_operator.team_bridge.card_body import resolve_card_body
 from local_operator.team_bridge.card_projection import (
+    EXCERPT_CARD_WINDOW,
     EXCERPT_MAX_BYTES,
     EXCERPT_MAX_CHARS,
     EXCERPTS_PER_CARD,
@@ -1040,3 +1041,335 @@ def test_concurrent_mount_passes_never_misreport_a_signed_in_owner(tmp_path: Pat
 
     for _ in range(20):
         assert set(asyncio.run(burst())) == {"not_loaded"}
+
+
+# -- excerpt decisions are frozen per process (cache stability) ---------------
+
+
+def _record_turn_body(root: Path, key: str, mid: str, body: str) -> None:
+    DisplayBodyStore(root).record(
+        key,
+        message_id=mid,
+        conversation_id=CONVERSATION_ID,
+        body=body,
+        body_sha256=hashlib.sha256(body.encode()).hexdigest(),
+        sender_kind="human",
+        source="turn",
+    )
+
+
+def _numbered_card(number: int) -> CustomMessage:
+    mid = f"bcmsg_{number:08d}"
+    return CustomMessage(
+        custom_type=TEAM_BRIDGE_MESSAGE_TYPE, details=_details([mid]), id=f"entry{number:04d}"
+    )
+
+
+def _memo_host(root: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        bridge_runtime=SimpleNamespace(config_dir=root, owner=_owner()),
+        _bridge_excerpt_memo={},
+    )
+
+
+def _rendered(host: SimpleNamespace, context: list[Any]) -> list[str]:
+    from local_operator.session.session import Session
+
+    shaped = Session._bridge_history_transform(host, context)  # type: ignore[arg-type]
+    return [model_card_text(item, shaped) for item in shaped]
+
+
+def test_a_card_first_sent_without_an_excerpt_keeps_its_bytes(tmp_path: Path, monkeypatch) -> None:
+    """REGRESSION (cache): the excerpt transform runs on every provider call, so
+    a card sent ids-only gained an excerpt once ``_record_display_body`` wrote its
+    body, and an excerpted card lost it when the 21st newer card pushed it out of
+    ``EXCERPT_CARD_WINDOW`` — each change re-wrote the cache from that card on
+    (2,941 calls / 51.8M one-hour cache writes on main sessions in 7 days)."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    host = _memo_host(tmp_path)
+    context: list[Any] = [_numbered_card(1)]
+    first = _rendered(host, context)[0]
+    assert "body not retained" in first
+
+    # Settled AFTER it was sent: the body lands in the display store.
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "settled later")
+    assert _rendered(host, context)[0] == first
+
+    # 21 newer cards push it past the window; its bytes still do not move.
+    for number in range(2, 23):
+        context.append(_numbered_card(number))
+        assert _rendered(host, context)[0] == first
+
+    # Control: the stateless path (no memo) is what used to ship — the excerpt
+    # appears for the same card inside the window, so the bytes differed.
+    stateless = attach_history_excerpts(context[:1], config_dir=tmp_path, owner_key=key)
+    assert model_card_text(stateless[0], stateless) != first
+
+
+def test_a_card_rendered_with_an_excerpt_keeps_it_past_the_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "already settled")
+    host = _memo_host(tmp_path)
+    context: list[Any] = [_numbered_card(1)]
+    first = _rendered(host, context)[0]
+    assert "untrusted excerpt" in first and "already settled" in first
+    for number in range(2, 2 + EXCERPT_CARD_WINDOW + 1):
+        context.append(_numbered_card(number))
+    assert _rendered(host, context)[0] == first
+    # Control: without the memo the 21st-newest card loses its excerpt.
+    stateless = attach_history_excerpts(context, config_dir=tmp_path, owner_key=key)
+    assert "untrusted excerpt" not in model_card_text(stateless[0], stateless)
+
+    # Compaction dropped the card: its decision is released with it.
+    _rendered(host, context[1:])
+    assert "entry0001" not in host._bridge_excerpt_memo
+
+
+def test_revocation_still_clears_every_frozen_excerpt(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "already settled")
+    host = _memo_host(tmp_path)
+    context: list[Any] = [_numbered_card(1)]
+    assert "already settled" in _rendered(host, context)[0]
+    context += [_numbered_card(n) for n in range(2, 2 + EXCERPT_CARD_WINDOW + 1)]
+    # Past the window now, and still excerpted: the frozen decision.
+    assert "already settled" in _rendered(host, context)[0]
+    assert host._bridge_excerpt_memo
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: {"code": "consent_revoked"})
+    revoked = _rendered(host, context)
+    assert not [text for text in revoked if "untrusted excerpt" in text]
+    assert host._bridge_excerpt_memo == {}, "frozen decisions hold body text; revocation drops them"
+
+
+# -- round 1 remediation (PR #4326): the memo never outlives a deletion -------
+
+
+def _delete_hub_answer(root: Path, key: str, mid: str) -> None:
+    # The exact call ``card_body._hub_backfill`` makes on a hub ``deleted``.
+    DisplayBodyStore(root).delete(key, [mid])
+
+
+def _purge_at_sign_out(root: Path, key: str, mid: str) -> None:
+    # Another Radient account leaving runs the shared sign-out hook, which
+    # purges EVERY display row while the owner's own id 7 stays signed in.
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        auth.org_hub_signed_out()
+    finally:
+        auth.close()
+
+
+def _expire_by_ttl(root: Path, key: str, mid: str) -> None:
+    import sqlite3
+
+    from local_operator.team_bridge.display_bodies import TTL_SECONDS
+
+    with sqlite3.connect(display_db_path(root)) as conn:
+        conn.execute(
+            "UPDATE display_bodies SET admitted_at = ? WHERE message_id = ?",
+            (time.time() - TTL_SECONDS - 60, mid),
+        )
+
+
+def _rewrite_in_place(root: Path, key: str, mid: str) -> None:
+    # A refill with a changed body UPDATEs the live turn row in place: same id,
+    # still ``source='turn'``, new text. The old excerpt is retired, and the
+    # new body is not admitted under a decision made for the old one.
+    _record_turn_body(root, key, mid, "rewritten body")
+
+
+@pytest.mark.parametrize(
+    "remove",
+    [_delete_hub_answer, _purge_at_sign_out, _expire_by_ttl, _rewrite_in_place],
+    ids=["hub_deleted", "sign_out_purge", "ttl_expired", "rewritten"],
+)
+def test_a_frozen_excerpt_leaves_with_its_deleted_display_row(
+    tmp_path: Path, monkeypatch, remove
+) -> None:
+    """REGRESSION (PR #4326 QA Q-F1, review R2): a memo hit re-attached its
+    saved excerpt without reading the store, and once every card in context was
+    memoised there was no store read at all, so text the product had deleted
+    kept riding every provider request for the life of the process. Standing
+    holds throughout: no refused render clears the memo here."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "already settled")
+    host = _memo_host(tmp_path)
+    context: list[Any] = [_numbered_card(1)]
+    first = _rendered(host, context)[0]
+    assert "already settled" in first
+    assert _rendered(host, context)[0] == first, "control: a memo hit keeps its bytes"
+
+    reads: list[list[str]] = []
+    real_bodies = DisplayBodyStore.bodies
+
+    def counting(self, owner_key, message_ids):
+        reads.append(list(message_ids))
+        return real_bodies(self, owner_key, message_ids)
+
+    monkeypatch.setattr(DisplayBodyStore, "bodies", counting)
+    remove(tmp_path, key, "bcmsg_00000001")
+    after = _rendered(host, context)[0]
+    assert "already settled" not in after and "rewritten body" not in after
+    assert "body not retained in history" in after
+    # The check rides the ONE store read the call already makes.
+    assert reads == [["bcmsg_00000001"]]
+    # Recorded reduced: the deleted text is never served from memory again.
+    assert host._bridge_excerpt_memo["entry0001"].excerpts == {}
+    assert _rendered(host, context)[0] == after
+
+
+def test_only_the_deleted_body_leaves_a_coalesced_card(tmp_path: Path, monkeypatch) -> None:
+    """Deletion drops exactly the excerpts whose rows went; a surviving one keeps
+    its exact bytes (a subset of what was sent, never a fresh choice)."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    _record_turn_body(tmp_path, key, "bcmsg_0000000a", "first of two")
+    _record_turn_body(tmp_path, key, "bcmsg_0000000b", "second of two")
+    card = CustomMessage(
+        custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+        details=_details(["bcmsg_0000000a", "bcmsg_0000000b"]),
+        id="entry_pair",
+    )
+    host = _memo_host(tmp_path)
+    before = _rendered(host, [card])[0].splitlines()
+    assert any("first of two" in line for line in before)
+    survivor = next(line for line in before if "second of two" in line)
+
+    DisplayBodyStore(tmp_path).delete(key, ["bcmsg_0000000a"])
+    after = _rendered(host, [card])[0]
+    assert "first of two" not in after
+    assert survivor in after.splitlines()
+    assert "bcmsg_0000000a in" in after and "re-read with channel_thread" in after
+
+
+def test_the_memo_keeps_only_what_the_card_renders(tmp_path: Path, monkeypatch) -> None:
+    """PR #4326 review R5: the memo held every full display body (up to 16 KiB
+    each) of a card, though the card renders at most ``EXCERPTS_PER_CARD``
+    bounded excerpts. It now holds exactly those excerpts and their row ids."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    mids = [f"bcmsg_{n:08d}" for n in range(1, EXCERPTS_PER_CARD + 3)]
+    for mid in mids:
+        _record_turn_body(tmp_path, key, mid, f"{mid} " + "x" * 16_000)
+    card = CustomMessage(
+        custom_type=TEAM_BRIDGE_MESSAGE_TYPE, details=_details(mids), id="entry_long"
+    )
+    host = _memo_host(tmp_path)
+    rendered = _rendered(host, [card])[0]
+    decided = host._bridge_excerpt_memo["entry_long"]
+    # The newest EXCERPTS_PER_CARD, exactly as rendered, and nothing else.
+    assert list(decided.excerpts) == mids[::-1][:EXCERPTS_PER_CARD]
+    for shown in decided.excerpts.values():
+        assert len(shown.text.encode("utf-8")) <= EXCERPT_MAX_BYTES
+        assert shown.text in rendered
+
+
+def test_a_purged_body_is_not_resurrected_once_standing_is_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """REGRESSION (PR #4326 QA Q-F1): an opt-out (or sign-out) purge with
+    standing restored before this session's next call never shows the session
+    a refused fence, so nothing cleared the memo and the purged text came back.
+    It must stay gone — even after the row returns, because the card has been
+    sent ids-only since and its decision is frozen at that."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "purged later")
+    host = _memo_host(tmp_path)
+    context: list[Any] = [_numbered_card(1), _numbered_card(2)]
+    assert "purged later" in _rendered(host, context)[0]
+
+    DisplayBodyStore(tmp_path).purge()  # what ``purge_if_bridge_off`` runs
+    for _ in range(3):
+        assert not [text for text in _rendered(host, context) if "purged later" in text]
+
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "purged later")
+    assert "purged later" not in _rendered(host, context)[0]
+
+
+@pytest.mark.asyncio
+async def test_compaction_releases_frozen_excerpt_decisions(tmp_path: Path, monkeypatch) -> None:
+    """REGRESSION (PR #4326 review R1): compaction keeps the kept cards' ids, so
+    the memo's "sent ids-only" decisions survived it and a long-lived bridge
+    session (it rarely restarts) never regained an excerpt for a card a body
+    turn delivered. The commit makes the cache cold, so it releases them."""
+    from local_operator.compaction.api import CompactionSettings
+    from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+
+    def stream(request, signal):
+        async def gen():
+            yield StreamTextDelta(delta="SUMMARY")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=100_000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+        compaction_settings=CompactionSettings(keep_recent_tokens=40),
+    )
+    session.bridge_runtime = SimpleNamespace(config_dir=tmp_path, owner=_owner())
+    for index in range(3):
+        await session.prompt(f"question {index} " + "detail " * 30)
+    card = _numbered_card(1)
+    await session._transcript.append_message(card)
+    session._context.messages.append(card)
+
+    def card_text() -> str:
+        shaped = session._bridge_history_transform(session._context.messages)
+        return next(
+            model_card_text(item, shaped)
+            for item in shaped
+            if getattr(item, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE
+        )
+
+    assert "body not retained in history" in card_text()
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "delivered by the body turn")
+    # Control: before compaction the decision is frozen (cache stability).
+    assert "delivered by the body turn" not in card_text()
+
+    assert (await session.compact_now()).ran is True
+    kept = [m for m in session._context.messages if getattr(m, "id", None) == card.id]
+    assert kept, "the card must survive in the kept window for this test to mean anything"
+    assert session._bridge_excerpt_memo == {}
+    assert "delivered by the body turn" in card_text()
