@@ -91,6 +91,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "the fixed device-local clear marker, never a session member; unlink refuses directories.",
     ),
     (
+        "local_operator/network/credentials/client.py::MeshCredentialClient._bridge_ancestor_hold",
+        "<path>.replace",
+        "dataclasses.replace copies an in-memory held-grant dataclass; "
+        "no filesystem path is involved.",
+    ),
+    (
         "local_operator/definition_transaction.py::_durable_json",
         "os.replace",
         "Publishes the O_EXCL-created regular JSON temp file; "
