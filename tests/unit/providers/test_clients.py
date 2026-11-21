@@ -3291,6 +3291,132 @@ def test_cache_markers_fall_back_to_the_previous_user_turn_without_frames() -> N
     assert "cache_control" in anthropic_body["messages"][0]["content"][-1]
 
 
+def test_tail_cache_breakpoint_skips_trailing_ephemeral_frame_on_both_clients() -> None:
+    """A trailing ephemeral frame (e.g. PendingTurn's transient body frame)
+    vanishes after the turn settles. Both AnthropicClient and
+    OpenAICompatClient must place the tail cache_control breakpoint on the last
+    persistent message before it (and keep prev_user on persistent turns),
+    falling back to the ephemeral frame only if no persistent message exists."""
+    frame = Message.user("ephemeral admitted body")
+    frame._ephemeral = True
+    assert "_ephemeral" not in frame.model_dump()
+
+    history = [
+        Message.user("earlier persistent turn"),
+        Message.assistant("earlier reply"),
+        Message.user("persistent wake card"),
+        frame,
+    ]
+    spec_oai = _spec(provider="radient", model_id="anthropic/claude-sonnet-5.5")
+    spec_oai.supports_prompt_cache = True
+    oai_body = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(model=spec_oai, system_blocks=["instructions", "inventory"], messages=history)
+    )
+    assert "_ephemeral" not in json.dumps(oai_body)
+    oai_conv = [m for m in oai_body["messages"] if m["role"] != "system"]
+    # Index 0 = earlier persistent user, index 2 = persistent wake card, index 3 = ephemeral frame
+    assert _marked_message_indices(oai_conv) == [0, 2]
+    assert "cache_control" not in json.dumps(oai_conv[3])
+
+    anth_body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=history,
+        )
+    )
+    assert "_ephemeral" not in json.dumps(anth_body)
+    assert _marked_message_indices(anth_body["messages"]) == [0, 2]
+    assert "cache_control" not in json.dumps(anth_body["messages"][3])
+
+    # Degenerate frame-only request falls back to marking the ephemeral message.
+    only_oai = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(model=spec_oai, system_blocks=["instructions", "inventory"], messages=[frame])
+    )
+    only_oai_conv = [m for m in only_oai["messages"] if m["role"] != "system"]
+    assert _marked_message_indices(only_oai_conv) == [0]
+
+    only_anth = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory"],
+            messages=[frame],
+        )
+    )
+    assert _marked_message_indices(only_anth["messages"]) == [0]
+
+
+def test_deep_image_keeps_both_settled_and_prev_user_within_breakpoint_cap() -> None:
+    """When an image sits deep in history behind newer text turns, ``prev_user``
+    is strictly AFTER ``settled``'s message. Both AnthropicClient and
+    OpenAICompatClient must keep BOTH ``settled`` and ``prev_user`` (plus tail)
+    so a tail miss does not collapse 200k tokens back to the old image, while
+    trimming trailing system markers to stay <= MAX_CACHE_BREAKPOINTS (4)."""
+    deep_history = [
+        Message.user("task"),
+        Message.user("old screenshot", [_tiny_frame("b2xk")]),
+        Message.assistant("analyzed"),
+        Message.user("follow-up 1"),
+        Message.assistant("reply 1"),
+        Message.user("follow-up 2"),
+        Message.assistant("reply 2"),
+        Message.user("follow-up 3"),
+    ]
+    # Anthropic wire: settled=0 (before image at 1),
+    # prev_user=5 (follow-up 2), tail=7 (follow-up 3).
+    anth_body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=deep_history,
+        )
+    )
+    assert _marked_message_indices(anth_body["messages"]) == [0, 5, 7]
+    anth_sys_marked = [e for e in anth_body["system"] if "cache_control" in e]
+    assert len(anth_sys_marked) == 1  # trimmed from 2 -> 1 to fit 1 + 3 <= 4
+    assert len(anth_sys_marked) + 3 <= AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+    # OpenAICompatClient wire: 4 system messages (indices 0..3) + conversation (4..11).
+    # settled=4 (task, before image at 5), prev_user=9 (follow-up 2), tail=11 (follow-up 3).
+    spec_oai = _spec(provider="radient", model_id="anthropic/claude-sonnet-5.5")
+    spec_oai.supports_prompt_cache = True
+    oai_body = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(
+            model=spec_oai,
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=deep_history,
+        )
+    )
+    oai_sys = [m for m in oai_body["messages"] if m["role"] == "system"]
+    oai_conv = [m for m in oai_body["messages"] if m["role"] != "system"]
+    assert _marked_message_indices(oai_conv) == [0, 5, 7]
+    oai_sys_marked = [m for m in oai_sys if "cache_control" in json.dumps(m.get("content"))]
+    assert len(oai_sys_marked) == 1  # trimmed from 2 -> 1 to fit 1 + 3 <= 4
+    total_oai = len(_marked_message_indices(oai_body["messages"]))
+    assert total_oai <= OpenAICompatClient.MAX_CACHE_BREAKPOINTS
+
+    # Nested tool_result screenshot deep in history on Anthropic wire too.
+    nested_deep = [
+        *_anthropic_frame_history("ZnJhbWU="),
+        Message.assistant("done with screenshots"),
+        Message.user("later text turn 1"),
+        Message.assistant("later reply 1"),
+        Message.user("later text turn 2"),
+    ]
+    nested_body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=nested_deep,
+        )
+    )
+    # settled=3 (assistant tool_use before newest nested image at 4),
+    # prev_user=6 (later text turn 1), tail=8 (later text turn 2).
+    assert _marked_message_indices(nested_body["messages"]) == [3, 6, 8]
+    nested_sys_marked = [e for e in nested_body["system"] if "cache_control" in e]
+    assert len(nested_sys_marked) + 3 <= AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+
 def test_openai_compat_chat_body_carries_prompt_cache_key():
     """Chat-completions body carries prompt_cache_key when the model supports
     caching and the request carries a lineage key. OpenRouter uses this as the
