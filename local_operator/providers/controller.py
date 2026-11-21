@@ -206,10 +206,11 @@ QWENCLOUD_TICKET_ORPHAN_NOTE = "no ticket — lop qwencloud-ticket set"
 #:
 #: Both remedies were run against a throwaway store rather than assumed:
 #: ``lop secret status`` prints the offending path with its ``chmod 0600``
-#: fix, and ``lop secret broker restart`` exists for version skew and is what
-#: the broker's own mismatch error names.
+#: fix, and ``lop secret broker stop`` clears version skew and is what the
+#: broker's own mismatch error names. Not ``restart``: that is a roll since
+#: PR #4389, and a roll refuses a broker speaking another protocol (CR4).
 QWENCLOUD_TICKET_EXPOSED_NOTE = "unsafe modes — lop secret status"
-QWENCLOUD_TICKET_BROKER_NOTE = "old broker — lop secret broker restart"
+QWENCLOUD_TICKET_BROKER_NOTE = "old broker — lop secret broker stop"
 
 
 @dataclasses.dataclass(frozen=True)

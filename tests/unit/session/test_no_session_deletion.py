@@ -2293,6 +2293,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "a dead broker's socket file, after probing that nothing listens",
     ),
+    # The broker roll (PR #4389). All three paths are fixed basenames in the
+    # broker's own 0700 runtime dir (`protocol.successor_socket_path`,
+    # `rolling_path`, `socket_path`), derived from the config dir alone: no
+    # caller input reaches them, so none can name a session directory.
+    (
+        "local_operator/secrets/roll.py::_kill_successor",
+        "<path>.unlink",
+        "a failed successor's temp socket `broker.next`, beside the broker socket",
+    ),
+    (
+        "local_operator/secrets/roll.py::_roll_locked",
+        "<path>.unlink",
+        "the roll sentinel `broker.rolling`, after a roll that moved nothing",
+    ),
+    (
+        "local_operator/secrets/roll.py::_hand_off",
+        "os.rename",
+        "the successor's temp socket renamed onto `broker.sock`, the roll's commit point",
+    ),
     # `lop secret harden` removes the PLAINTEXT master key once the scrypt-
     # wrapped copy is safely on disk. The path is `keys.key_path()` — the same
     # fixed `config_dir()/secrets/master.key` as replace_master_key above — so

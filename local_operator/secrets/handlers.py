@@ -1579,7 +1579,10 @@ def _restart_broker(client: Any) -> int:
             _err(f"warning: {result.warning}")
         return 0
     if result.status == "failed":
-        _err(f"Could not restart the secret broker; the running one was left in place: {result.reason}")
+        _err(
+            "Could not restart the secret broker; the running one was left in place: "
+            f"{result.reason}"
+        )
         return 2
     if result.status == "deferred" and not (
         result.code == "passphrase" and key_mode(None) == "passphrase"

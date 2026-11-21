@@ -38,6 +38,7 @@ import errno
 import hmac
 import logging
 import os
+import signal
 import socket
 import threading
 import time
@@ -122,12 +123,21 @@ UNLOCK_BACKOFF_MAX_S = 8.0
 #: closes that window without trusting anything from the old broker: the hold
 #: never grants, it only waits for the session to authenticate itself afresh.
 #:
-#: 8 s because it must stay under the client's 10 s ``REQUEST_TIMEOUT_S`` (a
-#: longer hold would surface as a timeout instead of an answer) and above the
-#: re-registration path's own worst case: the old broker's ``stop()`` closes
-#: session channels after its ≤1 s watcher tick, and the session retries over
-#: ≤2 s (``session._REREGISTER_DELAYS_S``).
-ROLL_GRACE_S = 8.0
+#: **Derived, not picked (review CR1).** A held request is answered only after
+#: the hold AND the redaction notice (``NOTIFY_ACK_TIMEOUT_S``, longer when it
+#: queues behind the session's write lock), and the whole of that must land
+#: inside the client's ``REQUEST_TIMEOUT_S`` — otherwise the client sees a
+#: timeout, the roll sentinel may be gone by then, and a timeout outside a roll
+#: is exactly what ``access.retrieve_secret`` turns into the unnotified local
+#: decrypt. The first revision held 8 s: 8 + 2 s notice ≈ the 10 s timeout. So
+#: the hold is the timeout minus the notice budget minus
+#: :data:`ROLL_HOLD_MARGIN_S` for write-lock queueing and scheduling (6 s), pinned
+#: by ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
+#: It still covers the re-registration path's own worst case with room: the old
+#: broker's ``stop()`` closes session channels after its ≤1 s watcher tick, and
+#: the session retries over ≤2 s (``session._REREGISTER_DELAYS_S``) — ~3 s.
+ROLL_HOLD_MARGIN_S = 2.0
+ROLL_GRACE_S = REQUEST_TIMEOUT_S - NOTIFY_ACK_TIMEOUT_S - ROLL_HOLD_MARGIN_S
 
 #: A successor that has not been renamed onto the canonical path within this
 #: long exits by itself. The roller kills a successor whose hand-off failed, but
@@ -218,6 +228,9 @@ class SecretBroker:
         predecessor: ProcessIdentity | None = None,
         expected_sessions: dict[int, ProcessIdentity] | None = None,
         roll_grace_s: float = ROLL_GRACE_S,
+        expected_caps: dict[int, tuple[str, ...]] | None = None,
+        predecessor_version: str = "",
+        roller: ProcessIdentity | None = None,
     ) -> None:
         """``bind_path``/``predecessor``/``expected_sessions`` make a SUCCESSOR.
 
@@ -227,6 +240,12 @@ class SecretBroker:
         message, so the old broker hands it nothing. ``expected_sessions`` is
         METADATA ONLY — pids pinned with their start times (security R2) — and
         is used solely to HOLD, never to grant: see :data:`ROLL_GRACE_S`.
+        ``expected_caps`` is what those sessions declared to the predecessor,
+        re-reported in ``status`` so a back-to-back roll still sees them (Q1).
+        ``predecessor_version`` names the old build in the ``roll`` audit row
+        (S3). ``roller`` is the process that spawned this successor; if it dies
+        between the rename and its SIGTERM, this broker retires the predecessor
+        itself (CR3, see :meth:`_retire_orphaned_predecessor`).
         """
         self._base = base
         #: Where every client connects. A successor binds elsewhere first and
@@ -235,6 +254,9 @@ class SecretBroker:
         self._path = bind_path if bind_path is not None else self._canonical
         self._predecessor = predecessor
         self._expected: dict[int, ProcessIdentity] = dict(expected_sessions or {})
+        self._expected_caps: dict[int, tuple[str, ...]] = dict(expected_caps or {})
+        self._predecessor_version = predecessor_version
+        self._roller = roller
         self._roll_grace_s = roll_grace_s
         #: Set when the rename onto the canonical path is observed; until then a
         #: hold is bounded per request by ``roll_grace_s`` alone.
@@ -260,6 +282,10 @@ class SecretBroker:
         #: retrievals; they are bounded by ``MAX_SESSIONS`` instead.
         self._watchers: set[threading.Thread] = set()
         self._stopping = threading.Event()
+        #: Set by :meth:`stop` only AFTER in-flight requests drained; it is what
+        #: ends session watchers (review CR2). Kept apart from ``_stopping`` so
+        #: "accept nothing new" and "drop the sessions" are two ordered steps.
+        self._closing_sessions = threading.Event()
 
         #: Guards ``_sessions``, ``_workers``, ``_watchers`` and the
         #: accept-thread survivor latch only. Never held across I/O.
@@ -346,6 +372,7 @@ class SecretBroker:
         server.settimeout(0.5)
         self._server = server
         self._stopping.clear()
+        self._closing_sessions.clear()
         self._last_activity = time.monotonic()
         self._accept_thread = threading.Thread(
             target=self._accept_loop, name="secret-broker-accept", daemon=True
@@ -382,12 +409,58 @@ class SecretBroker:
         predecessor = self._predecessor
         assert predecessor is not None
         exit_deadline = time.monotonic() + PREDECESSOR_EXIT_WAIT_S
+        retired = False
         while not self._stopping.is_set() and time.monotonic() < exit_deadline:
             current = process_info(predecessor.pid)
             if current is None or not current.same_process_as(predecessor):
                 break
+            if not retired:
+                retired = self._retire_orphaned_predecessor(predecessor)
             self._stopping.wait(0.1)
         self._audit_roll(predecessor.pid)
+
+    def _retire_orphaned_predecessor(self, predecessor: ProcessIdentity) -> bool:
+        """SIGTERM the predecessor when the roller died before doing so (review CR3).
+
+        After the rename the predecessor receives no new connections, but it
+        keeps its session channels open — and while it does, those sessions see
+        no EOF and never re-register here. If the roller (an update child) died
+        between the rename and its SIGTERM, nothing else would ever stop it: it
+        never idles out while sessions are registered. So the successor does it.
+
+        **Only when the roller is provably gone and never signalled.** The
+        roller records ``signalled`` in the roll sentinel BEFORE its own
+        SIGTERM; a second SIGTERM would land inside the predecessor's draining
+        ``stop()`` as another KeyboardInterrupt and cut its in-flight
+        notify/ack (R3), so this never doubles the roller's signal. Returns
+        True once the question is settled (signalled by either side), so the
+        caller stops asking.
+
+        **Pid-reuse guard.** The predecessor is pinned by start time and must
+        still run the broker module, the same two checks the roller makes.
+        """
+        roller = self._roller
+        if roller is None:
+            return True
+        current_roller = process_info(roller.pid)
+        if current_roller is not None and current_roller.same_process_as(roller):
+            return False  # the roller is alive and owns the signal
+        from local_operator.secrets.roll import roller_signalled, verified_broker_process
+
+        if roller_signalled(self._base, predecessor.pid):
+            return True
+        if not verified_broker_process(predecessor):
+            return True
+        try:
+            os.kill(predecessor.pid, signal.SIGTERM)
+        except OSError:
+            return True
+        logger.warning(
+            "secrets: the broker roll's caller exited before retiring the previous "
+            "broker (pid %s); this broker signalled it",
+            predecessor.pid,
+        )
+        return True
 
     def _audit_roll(self, old_pid: int) -> None:
         """The ONE ``roll`` row a successful roll leaves in the chain (security R6).
@@ -405,7 +478,15 @@ class SecretBroker:
         if me is None:  # pragma: no cover - our own pid is always readable
             return
         version = _install_version() or "unknown"
-        self._audit(me, "roll", f"allow:old pid {old_pid} -> new pid {me.pid} ({version})")
+        # S3: both builds, so the chain alone answers "what did this update move
+        # the broker from?" — the old version comes from the predecessor's own
+        # pre-gate `status`, read once by `_successor_inputs`.
+        old_version = self._predecessor_version or "unknown"
+        self._audit(
+            me,
+            "roll",
+            f"allow:old pid {old_pid} ({old_version}) -> new pid {me.pid} ({version})",
+        )
 
     def _expected_unregistered_ancestor(self, identity: ProcessIdentity) -> int | None:
         """The predecessor's session this caller descends from, if it has not re-registered.
@@ -567,17 +648,32 @@ class SecretBroker:
             else:
                 self._accept_thread = None
                 self._accept_thread_warned = None
+        # **Drain in-flight requests BEFORE dropping the session registry
+        # (review CR2 / security S4).** The registry used to be cleared first:
+        # an authorized `retrieve` that had not yet looked up its session
+        # (`_session_for`) then found none, skipped the redaction notice and
+        # sent the value — the §6 leak a roll's SIGTERM would hit on every
+        # in-flight descendant read. Request workers are joined while the
+        # sessions (and their channels, for the notice/ack) still exist; only
+        # then are the channels closed, which is also what ends the watchers,
+        # so those are joined last. `_handle_retrieve` additionally refuses a
+        # sessionless read while stopping, for a worker that outlives its join.
         with self._lock:
-            workers = list(self._workers) + list(self._watchers)
-            sessions = list(self._sessions.values())
-            self._sessions.clear()
+            workers = list(self._workers)
         for worker in workers:
             worker.join(timeout=timeout)
+        self._closing_sessions.set()
+        with self._lock:
+            watchers = list(self._watchers)
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
         for session in sessions:
             try:
                 session.connection.close()
             except OSError:  # pragma: no cover
                 pass
+        for watcher in watchers:
+            watcher.join(timeout=timeout)
         self._unlink_own_socket()
         # Drop the key reference on the way out. Python offers no guarantee the
         # bytes are scrubbed from the heap, so this is hygiene, not erasure,
@@ -755,7 +851,12 @@ class SecretBroker:
                 connection,
                 "version",
                 f"this broker speaks protocol {PROTOCOL_VERSION}, the caller speaks "
-                f"{version!r}. Restart the broker after updating: lop secret broker restart",
+                # CR4: `restart` is a roll now, and a roll cannot read a
+                # broker that speaks another protocol, so it refuses. Stopping
+                # is the remedy that works; the next use starts a current one.
+                f"{version!r}. Stop it after updating (lop secret broker stop); the next "
+                "secret use starts a current broker, and sessions registered with this "
+                "one must restart to keep redaction cover",
                 pid=os.getpid(),
                 protocol=PROTOCOL_VERSION,
             )
@@ -1069,7 +1170,11 @@ class SecretBroker:
         thread exception rather than the orderly teardown it actually is.
         """
         try:
-            while not self._stopping.is_set():
+            # `_closing_sessions`, not `_stopping` (review CR2): watchers must
+            # outlive the request drain in `stop()`, or the one that wakes first
+            # deregisters its session while an authorized retrieve is still
+            # in flight, and that retrieve serves the value with no notice.
+            while not self._closing_sessions.is_set():
                 current = process_info(session.identity.pid)
                 if current is None or not current.same_process_as(session.identity):
                     break
@@ -1095,7 +1200,7 @@ class SecretBroker:
                                 session.connection.setblocking(True)
                 except OSError:
                     break
-                self._stopping.wait(1.0)
+                self._closing_sessions.wait(1.0)
         finally:
             with self._lock:
                 if self._sessions.get(session.identity.pid) is session:
@@ -1125,6 +1230,33 @@ class SecretBroker:
                 }
                 for pid in sessions
             ]
+            expected = {
+                pid: identity
+                for pid, identity in self._expected.items()
+                if pid not in self._sessions
+            }
+        # **Held sessions are reported too (QA Q1).** A session the predecessor
+        # had, which has not re-registered here yet, is invisible in
+        # `sessions`; a SECOND roll right behind the first then gave its own
+        # successor an expected set without it, and that session's descendants
+        # met a broker that neither knew nor held them — the unnotified
+        # fallback. Only live ones (same pid AND start time) are listed, and
+        # `settling` says whether this broker is still inside its hold window,
+        # which is when the roller defers rather than stacking a second roll.
+        expected_lineage = []
+        for pid, identity in sorted(expected.items()):
+            current = process_info(pid)
+            if current is None or not current.same_process_as(identity):
+                continue
+            expected_lineage.append(
+                {
+                    "pid": pid,
+                    "start_time": identity.start_time,
+                    "caps": list(self._expected_caps.get(pid, ())),
+                }
+            )
+        grace = self._grace_deadline
+        settling = bool(self._expected) and (grace is None or time.monotonic() < grace)
         send_frame(
             connection,
             {
@@ -1134,6 +1266,8 @@ class SecretBroker:
                 "sessions": sessions,
                 "protocol": PROTOCOL_VERSION,
                 "session_lineage": lineage,
+                "expected_lineage": expected_lineage,
+                "settling": settling,
                 "version": _install_version(),
                 "prefix": _sys.prefix,
             },
@@ -1358,6 +1492,15 @@ class SecretBroker:
         if role not in ROLES:
             role = "agent"
         session = self._session_for(identity)
+        if session is None and self._stopping.is_set():
+            # CR2 belt: a worker that outlived `stop()`'s drain may find the
+            # registry already cleared. It cannot tell "no session" from "the
+            # session was just dropped", so it refuses as `unredactable`, which
+            # no fallback catches, rather than serve a value no one will scrub.
+            reason = "the secret broker is shutting down and can no longer notify the session"
+            self._audit_denial(identity, "retrieve", reason)
+            self._reply_error(connection, "unredactable", reason)
+            return
         try:
             value = SecretStore(key, base=self._base).get(
                 name, role=role, session_id=session.session_id if session else None
@@ -1537,9 +1680,17 @@ def executable_path(pid: int) -> str | None:
     return None
 
 
-def _successor_inputs(
-    base: Path | None, predecessor_pid: int
-) -> tuple[ProcessIdentity, dict[int, ProcessIdentity]] | None:
+@dataclass(frozen=True)
+class _SuccessorInputs:
+    """What a successor learns about the broker it replaces: metadata only (R2)."""
+
+    predecessor: ProcessIdentity
+    expected: dict[int, ProcessIdentity]
+    caps: dict[int, tuple[str, ...]]
+    version: str
+
+
+def _successor_inputs(base: Path | None, predecessor_pid: int) -> _SuccessorInputs | None:
     """What a successor learns about the broker it replaces: identities, nothing else.
 
     Read from the predecessor's pre-gate ``status`` on the canonical path:
@@ -1549,6 +1700,13 @@ def _successor_inputs(
     between the two readings is never held for. ``None`` when the canonical
     path is not answered by the named predecessor — the roll aborts rather
     than guessing which broker it is replacing.
+
+    **The predecessor's OWN held sessions count too (QA Q1).** A predecessor
+    that is itself a fresh successor reports, in ``expected_lineage``, the
+    sessions it is still holding for; they are merged here so a roll stacked
+    behind another keeps holding them instead of dropping them. The roller
+    also re-reads the predecessor right before the rename and aborts if a
+    session registered after this one-time snapshot (security S1).
     """
     from local_operator.secrets import client
 
@@ -1561,27 +1719,38 @@ def _successor_inputs(
     predecessor = process_info(predecessor_pid)
     if predecessor is None:
         return None
-    expected: dict[int, ProcessIdentity] = {}
+    reported: dict[int, tuple[Any, tuple[str, ...]]] = {}
     lineage = status.get("session_lineage")
     if isinstance(lineage, list):
-        reported = {
-            entry.get("pid"): entry.get("start_time")
-            for entry in lineage
-            if isinstance(entry, dict) and isinstance(entry.get("pid"), int)
-        }
+        for source in (lineage, status.get("expected_lineage") or []):
+            if not isinstance(source, list):
+                continue
+            for entry in source:
+                if isinstance(entry, dict) and isinstance(entry.get("pid"), int):
+                    reported.setdefault(
+                        entry["pid"], (entry.get("start_time"), _declared_caps(entry.get("caps")))
+                    )
     else:
         # A predecessor too old to report start times: pin what the kernel says
         # now. The window between its registration and this read is the same
         # one every ancestry check already lives with.
-        reported = {pid: None for pid in status.get("sessions") or () if isinstance(pid, int)}
-    for pid, start_time in reported.items():
+        for pid in status.get("sessions") or ():
+            if isinstance(pid, int):
+                reported[pid] = (None, ())
+    expected: dict[int, ProcessIdentity] = {}
+    caps: dict[int, tuple[str, ...]] = {}
+    for pid, (start_time, declared) in reported.items():
         identity = process_info(pid)
         if identity is None:
             continue
         if start_time is not None and identity.start_time != start_time:
             continue
         expected[pid] = identity
-    return predecessor, expected
+        caps[pid] = declared
+    version = status.get("version")
+    return _SuccessorInputs(
+        predecessor, expected, caps, version if isinstance(version, str) else ""
+    )
 
 
 def run_broker(
@@ -1617,21 +1786,27 @@ def run_broker(
     if key_mode(base) == "keyfile":
         provider = lambda: load_master_key(base)  # noqa: E731 - a def here shadows the annotation
 
-    predecessor: ProcessIdentity | None = None
-    expected: dict[int, ProcessIdentity] = {}
+    inputs: _SuccessorInputs | None = None
+    roller: ProcessIdentity | None = None
     if predecessor_pid is not None:
+        # The roller is our parent at this instant (`_spawn_broker` detaches the
+        # session, not the parentage); pinned now, before it can exit and we be
+        # re-parented, so CR3's "did the roller die?" asks about the right process.
+        roller = process_info(os.getppid())
         inputs = _successor_inputs(base, predecessor_pid)
         if inputs is None:
             logger.warning("secrets: the broker to be replaced is not serving; not starting")
             return 2
-        predecessor, expected = inputs
     broker = SecretBroker(
         base,
         key_provider=provider,
         idle_shutdown_s=idle_shutdown_s,
         bind_path=bind_path,
-        predecessor=predecessor,
-        expected_sessions=expected,
+        predecessor=inputs.predecessor if inputs else None,
+        expected_sessions=inputs.expected if inputs else None,
+        expected_caps=inputs.caps if inputs else None,
+        predecessor_version=inputs.version if inputs else "",
+        roller=roller,
     )
     broker.start()
     try:

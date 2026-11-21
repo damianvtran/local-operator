@@ -40,7 +40,12 @@ from local_operator.secrets import client
 from local_operator.secrets import session as session_module
 from local_operator.secrets.broker import SecretBroker
 from local_operator.secrets.crypto import generate_master_key
-from local_operator.secrets.keys import key_path, load_master_key, wrap_master_key, write_private_file
+from local_operator.secrets.keys import (
+    key_path,
+    load_master_key,
+    wrap_master_key,
+    write_private_file,
+)
 from local_operator.secrets.peer import ProcessIdentity, process_info
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
@@ -242,7 +247,9 @@ def test_roll_swaps_the_broker_and_the_session_is_notified_again(
     try:
         secrets_dir = key_path(config_root).parent
         runtime_dir = socket_path(config_root).parent
-        before_files = {p.name for p in secrets_dir.iterdir()} | {p.name for p in runtime_dir.iterdir()}
+        before_files = {p.name for p in secrets_dir.iterdir()} | {
+            p.name for p in runtime_dir.iterdir()
+        }
         audit_before = len(SecretStore(keyfile_store, base=config_root).audit_entries())
         answered_before_switch: list[object] = []
 
@@ -252,16 +259,21 @@ def test_roll_swaps_the_broker_and_the_session_is_notified_again(
 
         from local_operator.secrets.roll import roll_broker
 
-        result = roll_broker(config_root, generation_stale=lambda pid: True, before_switch=before_switch)
+        result = roll_broker(
+            config_root, generation_stale=lambda pid: True, before_switch=before_switch
+        )
         reaper.add(result.new_pid)
 
         assert result.status == "rolled", result
         assert result.old_pid == old_pid and result.new_pid not in (None, old_pid)
-        assert answered_before_switch == [old_pid], "the old broker stopped serving before the rename"
+        assert answered_before_switch == [
+            old_pid
+        ], "the old broker stopped serving before the rename"
         assert process_info(old_pid) is None, "the old broker was not told to exit"
         assert _status(config_root).get("pid") == result.new_pid
         assert not successor_socket_path(config_root).exists()
-        assert not rolling_path(config_root).exists()
+        # S1: the sentinel outlives the old broker by the successor's hold.
+        assert client.rolling_in_progress(config_root)
         assert _await(lambda: os.getpid() in (_status(config_root).get("sessions") or ())), (
             "the session did not re-register with the successor"
         )
@@ -274,6 +286,10 @@ def test_roll_swaps_the_broker_and_the_session_is_notified_again(
         assert _await(lambda: len(_roll_rows(keyfile_store, config_root)) == 1)
         rows = _roll_rows(keyfile_store, config_root)
         assert len(rows) == 1 and rows[0].outcome.startswith("allow:"), rows
+        # S3: both builds are named, the old one from the predecessor's status.
+        import re
+
+        assert re.match(r"allow:old pid \d+ \(.+\) -> new pid \d+ \(.+\)$", rows[0].outcome), rows
         assert str(old_pid) in rows[0].outcome and str(result.new_pid) in rows[0].outcome
         assert SECRET_NAME not in rows[0].outcome and SECRET_VALUE not in rows[0].outcome
 
@@ -282,10 +298,19 @@ def test_roll_swaps_the_broker_and_the_session_is_notified_again(
         during = SecretStore(keyfile_store, base=config_root).audit_entries()[audit_before:]
         assert not [e for e in during if e.event == "key"], during
         # (b) nothing new on disk but the database's own files; no plaintext.
-        after_files = {p.name for p in secrets_dir.iterdir()} | {p.name for p in runtime_dir.iterdir()}
+        after_files = {p.name for p in secrets_dir.iterdir()} | {
+            p.name for p in runtime_dir.iterdir()
+        }
         # `broker.lock` is the roller's empty flock file (the old broker here was
         # spawned directly, not through the lazy start that would create it).
-        allowed = {"broker.lock", "store.db-wal", "store.db-shm", "secrets.db-wal", "secrets.db-shm"}
+        allowed = {
+            "broker.lock",
+            "broker.rolling",
+            "store.db-wal",
+            "store.db-shm",
+            "secrets.db-wal",
+            "secrets.db-shm",
+        }
         assert after_files - before_files <= allowed, (
             after_files - before_files
         )
@@ -429,7 +454,9 @@ def test_stranded_sessions_defer_and_name_the_pids(
         def no_spawn(*_args: object) -> int:
             raise AssertionError("a deferred roll must not spawn")
 
-        result = roll_broker(config_root, generation_stale=lambda pid: pid == old_pid or None, spawn=no_spawn)
+        result = roll_broker(
+            config_root, generation_stale=lambda pid: pid == old_pid or None, spawn=no_spawn
+        )
         assert result.status == "deferred" and result.code == "sessions", result
         assert result.stranded == (os.getpid(),)
         assert str(os.getpid()) in result.reason
@@ -535,7 +562,7 @@ def test_restart_never_causes_the_unnotified_fallback(
         assert code == 0, err
         _await(lambda: os.getpid() in (_status(config_root).get("sessions") or ()))
         out, _ = _finish(_child_retrieve(config_root))
-        assert "FALLBACK" not in out, f"restart left the descendant on the unnotified fallback: {out}"
+        assert "FALLBACK" not in out, f"restart left the descendant on the fallback: {out}"
         if f"VALUE {SECRET_VALUE}" in out:
             assert SECRET_VALUE in seen, "served without the session's redaction notice"
         else:
@@ -591,14 +618,49 @@ def test_passphrase_restart_never_serves_unnotified(
 # --- protocol-level pins (no daemons) -------------------------------------------
 
 
+def _dispatched_operations() -> set[str]:
+    """Every op string the REAL dispatcher (``_handle_requests``) compares against.
+
+    Read from its AST rather than guessed (review CR7): ``operation == "x"``
+    and ``operation in ("x", ...)`` are the only two shapes it uses, so a new
+    verb cannot be added without appearing here.
+    """
+    import ast
+    import inspect
+
+    from local_operator.secrets import broker as broker_module
+
+    source = inspect.getsource(broker_module.SecretBroker._handle_requests)
+    tree = ast.parse(textwrap.dedent(source))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not (isinstance(node.left, ast.Name) and node.left.id == "operation"):
+            continue
+        for comparator in node.comparators:
+            if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+                found.add(comparator.value)
+            elif isinstance(comparator, (ast.Tuple, ast.List, ast.Set)):
+                found.update(
+                    element.value
+                    for element in comparator.elts
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str)
+                )
+    return found
+
+
 def test_no_wire_operation_starts_a_roll(config_root: Path, keyfile_store: bytes) -> None:
-    """R6: a roll is local-only; the broker has no verb that triggers one."""
+    """R6 / CR7: a roll is local-only; the dispatcher's op set has no roll verb at all."""
+    operations = _dispatched_operations()
+    assert operations == {"register", "ping", "status", "unlock", "key", "retrieve"}, operations
+    # And anything outside that set is refused as unknown (after the gate).
     broker = SecretBroker(config_root, key_provider=lambda: keyfile_store, idle_shutdown_s=0)
     broker.start()
     try:
-        for operation in ("roll", "handover", "successor"):
-            with pytest.raises(Exception, match="unauthorized|unknown operation|descend|no lop session is registered"):
-                client.request(operation, config_root)
+        refused = "unauthorized|unknown operation|descend|no lop session is registered"
+        with pytest.raises(Exception, match=refused):
+            client.request("roll", config_root)
     finally:
         broker.stop(timeout=5)
 
@@ -644,7 +706,9 @@ def test_a_symlinked_canonical_socket_is_not_rolled(
     canonical = socket_path(config_root)
     canonical.parent.mkdir(parents=True, exist_ok=True)
     canonical.symlink_to(tmp_path / "elsewhere")
-    monkeypatch.setattr(client, "request", lambda op, base=None, **_: {"ok": True, "pid": os.getpid()})
+    monkeypatch.setattr(
+        client, "request", lambda op, base=None, **_: {"ok": True, "pid": os.getpid()}
+    )
     result = roll.roll_broker(config_root, force=True)
     assert result.status == "deferred" and "not a socket" in result.reason, result
     assert canonical.is_symlink()
@@ -709,7 +773,8 @@ def test_roll_results_map_to_report_statuses() -> None:
     assert update._plist_status(deferred.kind) == "pending" and deferred.detail == reason
     rolled = update._broker_roll_refresh(RollResult("rolled", old_pid=1, new_pid=2))
     assert update._plist_status(rolled.kind) == "refreshed"
-    assert update._plist_status(update._broker_roll_refresh(RollResult("already")).kind) == "already"
+    already = update._broker_roll_refresh(RollResult("already"))
+    assert update._plist_status(already.kind) == "already"
     failed = update._broker_roll_refresh(RollResult("failed", "boom"))
     assert update._plist_status(failed.kind) == "failed"
 
@@ -724,7 +789,8 @@ def test_reconcile_keeps_the_deferral_reason() -> None:
     inventory = lambda: [StaleDaemon("secret broker", 99, "gen-old", "generic")]  # noqa: E731
     out = update._reconcile_with_processes(statuses, inventory=inventory)
     assert out == (update.DaemonStatus("secret broker", "pending", reason),)
-    assert "4242, 4343" in out[0].reason and "will roll once these sessions restart" in out[0].reason
+    assert "4242, 4343" in out[0].reason
+    assert "will roll once these sessions restart" in out[0].reason
 
 
 def test_the_successor_socket_fits_wherever_the_canonical_one_does(
@@ -748,3 +814,431 @@ def test_the_successor_socket_fits_wherever_the_canonical_one_does(
     assert canonical.parent == root / "secrets" and len(str(canonical)) == MAX_SOCKET_PATH
     assert len(str(successor_socket_path(root))) <= MAX_SOCKET_PATH
     assert successor_socket_path(root).parent == canonical.parent
+
+
+# --- round-1 remediation (ledger 4389-r1) ---------------------------------------
+
+
+def test_a_session_registered_mid_roll_aborts_the_switch(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper
+) -> None:
+    """S1 (re-read half): a session that registers with the OLD broker after the
+    successor's one-time snapshot is unknown to the successor. The roller
+    re-reads the old broker right before the rename and aborts; the old broker
+    keeps serving and the session's descendant is notified, never the fallback.
+    """
+    old_pid = _start_old_broker(config_root, reaper)
+    seen: list[str] = []
+    late: list[object] = []
+
+    def before_switch() -> None:
+        late.append(
+            session_module.register_session(
+                lambda _name, value: seen.append(value.decode()), base=config_root
+            )
+        )
+
+    from local_operator.secrets.roll import roll_broker
+
+    try:
+        result = roll_broker(config_root, force=True, before_switch=before_switch)
+        reaper.add(result.new_pid)
+        assert late and late[0] is not None
+        assert result.status == "failed" and result.code == "switch", result
+        assert str(os.getpid()) in result.reason
+        assert _status(config_root).get("pid") == old_pid
+        assert not client.rolling_in_progress(config_root), "a failed roll must clear its sentinel"
+        out, _ = _finish(_child_retrieve(config_root))
+        assert "FALLBACK" not in out and f"VALUE {SECRET_VALUE}" in out, out
+        assert SECRET_VALUE in seen
+    finally:
+        for registration in late:
+            if registration is not None:
+                registration.close()  # type: ignore[attr-defined]
+
+
+def test_a_late_session_is_covered_by_the_sentinel_after_the_rename(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1 (sentinel half), R1 WITHOUT #4388: even if a late registration slips
+    past the re-read (simulated by disabling it), the sentinel lives on for the
+    successor's hold after the rename, so the client retries the successor's
+    denial until the session has re-registered, and is then NOTIFIED. Deleting
+    the sentinel as soon as the old broker exited ended that retry early and
+    the denial reached the unnotified local decrypt.
+    """
+    from local_operator.secrets import roll as roll_module
+
+    _start_old_broker(config_root, reaper)
+    monkeypatch.setattr(roll_module, "_unknown_to_successor", lambda *_args: [])
+    monkeypatch.setattr(session_module, "_REREGISTER_DELAYS_S", (1.5, 0.6, 1.2))
+    seen: list[str] = []
+    late: list[object] = []
+
+    def before_switch() -> None:
+        late.append(
+            session_module.register_session(
+                lambda _name, value: seen.append(value.decode()), base=config_root
+            )
+        )
+
+    try:
+        result = roll_module.roll_broker(config_root, force=True, before_switch=before_switch)
+        reaper.add(result.new_pid)
+        assert result.status == "rolled", result
+        out, elapsed = _finish(_child_retrieve(config_root))
+        assert "FALLBACK" not in out, out
+        assert f"VALUE {SECRET_VALUE}" in out, out
+        assert SECRET_VALUE in seen, "served without the late session being notified"
+    finally:
+        for registration in late:
+            if registration is not None:
+                registration.close()  # type: ignore[attr-defined]
+
+
+def test_hold_plus_notice_fits_the_client_timeout() -> None:
+    """CR1 / S5: the successor's hold plus the notice (plus a margin for
+    write-lock queueing) must finish inside the client's request timeout, the
+    client's single roll budget must cover hold + notice, and the hold must
+    still cover the session's own re-registration schedule (+1 s watcher tick).
+    """
+    from local_operator.secrets import broker as broker_module
+
+    hold = broker_module.ROLL_GRACE_S
+    notice = broker_module.NOTIFY_ACK_TIMEOUT_S
+    assert hold + notice + broker_module.ROLL_HOLD_MARGIN_S <= client.REQUEST_TIMEOUT_S
+    assert broker_module.ROLL_HOLD_MARGIN_S >= 1.0
+    assert hold + notice <= client.ROLL_WAIT_S <= client.REQUEST_TIMEOUT_S
+    assert hold >= sum(session_module._REREGISTER_DELAYS_S) + 1.0
+
+
+def test_stop_drains_an_in_flight_retrieve_before_dropping_sessions(
+    config_root: Path, keyfile_store: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR2 / S4: a retrieve already authorized when ``stop()`` begins must still
+    find its session and notify it. Clearing the registry first made it find
+    none, skip the notice and send the value unscrubbed.
+    """
+    import threading
+
+    broker = SecretBroker(config_root, key_provider=lambda: keyfile_store, idle_shutdown_s=0)
+    broker.start()
+    seen: list[str] = []
+    registration = session_module.register_session(
+        lambda _name, value: seen.append(value.decode()), base=config_root
+    )
+    assert registration is not None
+    original = broker._master_key
+    entered = threading.Event()
+
+    def slow_key() -> bytes:
+        entered.set()
+        time.sleep(1.0)
+        return original()
+
+    monkeypatch.setattr(broker, "_master_key", slow_key)
+    stopper: threading.Thread | None = None
+    try:
+        child = _child_retrieve(config_root)
+        assert entered.wait(15), "the child's retrieve never reached the broker"
+        stopper = threading.Thread(target=broker.stop, kwargs={"timeout": 5})
+        stopper.start()
+        out, _ = _finish(child)
+        assert "FALLBACK" not in out, out
+        if f"VALUE {SECRET_VALUE}" in out:
+            assert SECRET_VALUE in seen, "a draining broker served the value with no notice"
+        assert f"VALUE {SECRET_VALUE}" in out, out
+    finally:
+        if stopper is not None:
+            stopper.join(10)
+        registration.close()
+        broker.stop(timeout=5)
+
+
+def test_a_stopping_broker_refuses_a_sessionless_read(
+    config_root: Path, keyfile_store: bytes
+) -> None:
+    """CR2 belt: past the drain, a stopping broker cannot tell \"no session\"
+    from \"session just dropped\", so it refuses as ``unredactable``."""
+    broker = SecretBroker(config_root, key_provider=lambda: keyfile_store, idle_shutdown_s=0)
+    sent: list[tuple[str, str]] = []
+
+    def capture(_conn: object, code: str, message: str, **_: object) -> None:
+        sent.append((code, message))
+
+    broker._reply_error = capture  # type: ignore[method-assign]
+    broker._stopping.set()
+    me = process_info(os.getpid())
+    assert me is not None
+    broker._handle_retrieve(None, me, {"name": SECRET_NAME})  # type: ignore[arg-type]
+    assert sent and sent[0][0] == "unredactable", sent
+
+
+def test_a_second_roll_while_sessions_reregister_defers(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1 (QA repro): slow re-registration, restart twice, one child read. The
+    second roll used to see no sessions (status listed only registered ones),
+    so its successor held nothing for the session and the child's read met the
+    unnotified fallback. Now the second roll defers while the first successor
+    is still holding, the child is notified, and a roll after settling works.
+    """
+    from local_operator.secrets.roll import roll_broker
+
+    _start_old_broker(config_root, reaper)
+    monkeypatch.setattr(session_module, "_REREGISTER_DELAYS_S", (2.5, 0.6, 1.2))
+    seen: list[str] = []
+    registration = session_module.register_session(
+        lambda _name, value: seen.append(value.decode()), base=config_root
+    )
+    assert registration is not None
+    try:
+        first = roll_broker(config_root, force=True)
+        reaper.add(first.new_pid)
+        assert first.status == "rolled", first
+        second = roll_broker(config_root, force=True)
+        reaper.add(second.new_pid)
+        assert second.status == "deferred" and second.code == "settling", second
+        assert _status(config_root).get("pid") == first.new_pid
+        out, _ = _finish(_child_retrieve(config_root))
+        assert "FALLBACK" not in out and f"VALUE {SECRET_VALUE}" in out, out
+        assert SECRET_VALUE in seen
+        assert _await(lambda: os.getpid() in (_status(config_root).get("sessions") or ()))
+        third = roll_broker(config_root, force=True)
+        reaper.add(third.new_pid)
+        assert third.status == "rolled", third
+    finally:
+        registration.close()
+
+
+def test_status_reports_held_sessions_and_a_stacked_successor_keeps_them(
+    config_root: Path, keyfile_store: bytes
+) -> None:
+    """Q1, the merge half: a broker still holding a predecessor's session lists
+    it in ``expected_lineage`` (with its caps) and ``settling``; a successor
+    snapshotting that broker carries the session into its own expected set."""
+    from local_operator.secrets.broker import _successor_inputs
+
+    me = process_info(os.getpid())
+    assert me is not None
+    broker = SecretBroker(
+        config_root,
+        key_provider=lambda: keyfile_store,
+        idle_shutdown_s=0,
+        expected_sessions={me.pid: me},
+        expected_caps={me.pid: ("reroll",)},
+    )
+    broker.start()
+    try:
+        status = _status(config_root)
+        assert status.get("settling") is True
+        assert status.get("expected_lineage") == [
+            {"pid": me.pid, "start_time": me.start_time, "caps": ["reroll"]}
+        ]
+        inputs = _successor_inputs(config_root, os.getpid())
+        assert inputs is not None and me.pid in inputs.expected
+        assert inputs.caps[me.pid] == ("reroll",)
+    finally:
+        broker.stop(timeout=5)
+
+
+_DYING_ROLLER = """
+import os, sys
+from pathlib import Path
+from local_operator.secrets import roll
+
+real = roll._write_sentinel
+
+def dying(path, old_pid, *, ttl=roll.SENTINEL_TTL_S, signalled=False):
+    if signalled:
+        os._exit(9)  # the roller dies between the rename and its SIGTERM
+    real(path, old_pid, ttl=ttl, signalled=signalled)
+
+roll._write_sentinel = dying
+roll.roll_broker(Path(sys.argv[1]), force=True)
+os._exit(1)
+"""
+
+
+def test_the_successor_retires_its_predecessor_when_the_roller_dies(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper
+) -> None:
+    """CR3: a roller that dies after the rename but before its SIGTERM used to
+    leave the old broker alive forever (it never idles out while sessions are
+    registered). The successor now signals its verified predecessor itself."""
+    old_pid = _start_old_broker(config_root, reaper)
+    roller = subprocess.run(
+        [sys.executable, "-c", _DYING_ROLLER, str(config_root)],
+        env={**os.environ, "PYTHONPATH": TREE},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert roller.returncode == 9, (roller.returncode, roller.stderr[-2000:])
+    new_pid = _status(config_root).get("pid")
+    reaper.add(new_pid)
+    assert isinstance(new_pid, int) and new_pid != old_pid
+
+    def old_gone() -> bool:
+        try:
+            return os.waitpid(old_pid, os.WNOHANG)[0] == old_pid
+        except ChildProcessError:
+            return process_info(old_pid) is None
+
+    assert _await(old_gone, timeout=10), "the orphaned predecessor was never retired"
+
+
+def test_a_swapped_canonical_socket_aborts_the_switch(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper
+) -> None:
+    """CR6 (rename-time inode re-check): a different socket at the canonical path
+    when the roller is about to commit aborts the roll; nothing is renamed."""
+    old_pid = _start_old_broker(config_root, reaper)
+    canonical = socket_path(config_root)
+    aside = canonical.with_name("broker.aside")
+    impostor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
+    def before_switch() -> None:
+        os.rename(canonical, aside)
+        impostor.bind(str(canonical))
+        os.chmod(canonical, 0o600)
+
+    from local_operator.secrets.roll import roll_broker
+
+    try:
+        result = roll_broker(config_root, force=True, before_switch=before_switch)
+        reaper.add(result.new_pid)
+        assert result.status == "failed" and result.code == "switch", result
+        assert "changed during the roll" in result.reason
+        assert process_info(old_pid) is not None
+        assert not successor_socket_path(config_root).exists()
+    finally:
+        impostor.close()
+        canonical.unlink(missing_ok=True)
+        if aside.exists():
+            os.rename(aside, canonical)
+
+
+def test_a_different_pid_at_the_canonical_socket_aborts_the_switch(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR6 (rename-time pid re-check): same inode, but the answering pid is not
+    the broker the roll started from ⇒ abort, old broker untouched."""
+    old_pid = _start_old_broker(config_root, reaper)
+    real_request = client.request
+
+    def before_switch() -> None:
+        def lying(operation: str, base: Path | None = None, **fields: object) -> dict:
+            reply = real_request(operation, base, **fields)  # type: ignore[arg-type]
+            if operation == "status" and fields.get("connection") is None:
+                reply = {**reply, "pid": 1}
+            return reply
+
+        monkeypatch.setattr(client, "request", lying)
+
+    from local_operator.secrets.roll import roll_broker
+
+    result = roll_broker(config_root, force=True, before_switch=before_switch)
+    reaper.add(result.new_pid)
+    assert result.status == "failed" and result.code == "switch", result
+    assert "different broker" in result.reason
+    assert process_info(old_pid) is not None
+
+
+def test_a_recycled_old_pid_is_never_signalled(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR6 (pid-reuse SIGTERM guard): if the old pid's start time no longer
+    matches after the rename, the roller sends nothing and says so."""
+    from local_operator.secrets import peer
+
+    old_pid = _start_old_broker(config_root, reaper)
+    real_info = peer.process_info
+
+    def before_switch() -> None:
+        def recycled(pid: int) -> ProcessIdentity | None:
+            identity = real_info(pid)
+            if identity is not None and pid == old_pid:
+                return ProcessIdentity(pid=pid, start_time=identity.start_time + 1)
+            return identity
+
+        monkeypatch.setattr(peer, "process_info", recycled)
+
+    from local_operator.secrets.roll import roll_broker
+
+    result = roll_broker(config_root, force=True, before_switch=before_switch)
+    reaper.add(result.new_pid)
+    assert result.status == "rolled", result
+    assert "no longer the old broker" in result.warning
+    assert real_info(old_pid) is not None, "a recycled pid was signalled"
+
+
+def test_channel_only_registration_does_not_advertise_reroll(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper
+) -> None:
+    """S2 / CR5: ``client.register_session`` returns a bare channel nothing
+    re-registers, so it must not claim ``reroll``; the roll defers and names it."""
+    old_pid = _start_old_broker(config_root, reaper)
+    channel = client.register_session(config_root)
+    assert channel is not None
+    try:
+        lineage = _status(config_root).get("session_lineage") or []
+        assert [entry["caps"] for entry in lineage if entry["pid"] == os.getpid()] == [[]]
+        from local_operator.secrets.roll import roll_broker
+
+        result = roll_broker(config_root, force=True)
+        assert result.status == "deferred" and result.code == "sessions", result
+        assert os.getpid() in result.stranded
+        assert _status(config_root).get("pid") == old_pid
+    finally:
+        channel.close()
+
+
+def test_a_successor_that_exits_early_is_reported_as_exited(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper
+) -> None:
+    """QA minor: an early exit is reported as such, not as \"not ready within 5s\"."""
+    old_pid = _start_old_broker(config_root, reaper)
+
+    def spawn(_base: Path | None, _args: tuple[str, ...]) -> int:
+        return subprocess.Popen(["true"]).pid
+
+    from local_operator.secrets.roll import roll_broker
+
+    result = roll_broker(config_root, force=True, spawn=spawn, ready_timeout=5.0)
+    assert result.status == "failed" and result.code == "readiness", result
+    assert "exited before answering" in result.reason and "within" not in result.reason
+    assert _status(config_root).get("pid") == old_pid
+
+
+def test_a_protocol_mismatch_deferral_names_a_working_remedy() -> None:
+    """CR4: ``restart`` refuses a broker speaking another protocol, so neither
+    the refusal nor the broker's own version error may point at ``restart``."""
+    import inspect
+
+    from local_operator.secrets import broker as broker_module
+    from local_operator.secrets import roll as roll_module
+
+    assert "lop secret broker stop" in inspect.getsource(roll_module._roll_locked)
+    handler = inspect.getsource(broker_module.SecretBroker._handle_requests)
+    assert "lop secret broker stop" in handler and "lop secret broker restart" not in handler
+
+
+def test_an_exited_session_does_not_abort_the_switch() -> None:
+    """S1 re-read, no false abort: a session the old broker still lists only
+    because its watcher has not ticked since it exited is not "late"."""
+    from local_operator.secrets.roll import _unknown_to_successor
+
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    me = process_info(os.getpid())
+    assert me is not None
+    old = {
+        "session_lineage": [
+            {"pid": gone.pid, "start_time": 1.0, "caps": ["reroll"]},
+            {"pid": me.pid, "start_time": me.start_time, "caps": ["reroll"]},
+        ]
+    }
+    assert _unknown_to_successor(old, {"session_lineage": [], "expected_lineage": []}) == [me.pid]
+    held = {"expected_lineage": [{"pid": me.pid, "start_time": me.start_time}]}
+    assert _unknown_to_successor(old, held) == []

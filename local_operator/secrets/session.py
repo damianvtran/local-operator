@@ -205,17 +205,24 @@ class SessionRegistration:
 def _open_registration(
     base: Path | None, session_id: str | None, *, ensure: bool
 ) -> tuple[socket.socket, int | None] | None:
-    """THE one place this module opens a registration, first or re-registration.
+    """THE one place this module opens a broker channel, first or re-registration.
 
     Both :func:`register_session` and :meth:`SessionRegistration._reregister`
-    go through here, so anything that must accompany EVERY registration (e.g.
-    the live-session lineage marker the fail-closed access PR #4388 publishes
-    from ``register_session``) has a single home and a re-registration after a
-    broker roll can never skip it.
+    go through here, so the wire contract of a registration (ticket, declared
+    ``reroll`` capability) is identical either way. Process-level side effects
+    of BECOMING a session — e.g. the live-session lineage marker that the
+    fail-closed access PR #4388 publishes — belong in :func:`register_session`
+    and deliberately NOT here: a re-registration is the same session moving to
+    a new broker, so republishing per roll would only add untracked markers.
+
+    Only this module's registrations advertise ``reroll``, because only
+    :class:`SessionRegistration` actually re-registers (security S2).
     """
     from local_operator.secrets import client
 
-    return client.register_session_channel(base, session_id=session_id, ensure=ensure)
+    return client.register_session_channel(
+        base, session_id=session_id, ensure=ensure, caps=client.REGISTRATION_CAPS
+    )
 
 
 def register_session(

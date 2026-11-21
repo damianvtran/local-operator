@@ -20,8 +20,10 @@ constraint it carries):
    under — so no third broker appears and a second roll defers (R4).
 2. Preflight with no side effects: ``status`` (pre-gate metadata only), the
    generation question, the TIER RULE (roll only when nothing would need the
-   passphrase again), and the CAPABILITY GATE (every registered session must be
-   able to re-register; otherwise defer and NAME the pids — R7).
+   passphrase again), the CAPABILITY GATE (every registered session must be
+   able to re-register; otherwise defer and NAME the pids — R7), and a
+   SETTLING check (a broker still holding sessions from its own roll defers a
+   second one until they re-register — QA Q1).
 3. Write the ``broker.rolling`` sentinel (old pid + deadline, no secret) so a
    retrieval that meets the hand-off waits instead of falling back (R1).
 4. Start the successor BESIDE the live broker on ``broker.next`` from THIS
@@ -32,11 +34,15 @@ constraint it carries):
    broker never noticed anything.
 6. Verify the temp socket (0600, ours, a socket, in the 0700 dir) and that the
    canonical path is still the SAME socket inode answered by the SAME pid
-   (R4), then ``rename`` atomically. This is the commit point: the old broker
-   stays authoritative until here.
-7. SIGTERM the old broker after re-checking its argv and start time (pid-reuse
-   guard). Its ``stop()`` drains in-flight requests before closing session
-   channels, so no notify/ack is cut (R3); each session sees EOF and registers
+   (R4), and that the old broker has no session the successor does not know
+   (S1: one registered after the successor's snapshot aborts the roll). Re-arm
+   the sentinel for the successor's hold, then ``rename`` atomically. This is
+   the commit point: the old broker stays authoritative until here.
+7. Mark the sentinel ``signalled``, then SIGTERM the old broker after
+   re-checking its argv and start time (pid-reuse guard). If the roller dies
+   before that, the successor does it (CR3). Its ``stop()`` drains in-flight
+   requests before closing session channels, so no notify/ack is cut (R3);
+   each session sees EOF and registers
    afresh with the successor, which HOLDS (never grants) their descendants'
    requests meanwhile (``broker.ROLL_GRACE_S``).
 8. Exactly one ``roll`` audit row: the successor writes it on success; the
@@ -55,7 +61,6 @@ import json
 import logging
 import os
 import signal
-import socket
 import stat
 import sys
 import time
@@ -181,6 +186,11 @@ def _check_private_socket(path: Path) -> str | None:
         parent = os.lstat(path.parent)
     except OSError as exc:
         return f"{path} vanished before the hand-off: {exc}"
+    # The roll only runs where `fcntl` exists (POSIX), but the guard is spelled
+    # here so the check stands on its own and `xplat_probe`'s static scan can
+    # see it: `os.getuid` does not exist on Windows. Refusing is the safe answer.
+    if not hasattr(os, "getuid"):
+        return "this platform cannot verify socket ownership"
     uid = os.getuid()
     if not stat.S_ISSOCK(info.st_mode):
         return f"{path} is not a socket"
@@ -214,15 +224,106 @@ def _record_failure(base: Path | None, old_pid: int, reason: str) -> None:
         logger.debug("could not record the failed roll", exc_info=True)
 
 
-def _write_sentinel(path: Path, old_pid: int) -> None:
-    """Create the 0600 roll sentinel; ``O_NOFOLLOW`` so a planted link is refused."""
-    payload = json.dumps({"old_pid": old_pid, "deadline": time.time() + SENTINEL_TTL_S})
+def _write_sentinel(
+    path: Path, old_pid: int, *, ttl: float = SENTINEL_TTL_S, signalled: bool = False
+) -> None:
+    """Create the 0600 roll sentinel; ``O_NOFOLLOW`` so a planted link is refused.
+
+    Written three times on a successful roll: before anything moves (``ttl`` =
+    :data:`SENTINEL_TTL_S`), just before the rename (``ttl`` = the successor's
+    hold, security S1) and once more before the SIGTERM with ``signalled``
+    set (review CR3: the successor reads it to know the roller did its part).
+    ``O_TRUNC`` on one fd, so a reader sees either the old or the new payload
+    or, at worst, an empty file it treats as "not rolling" for one poll.
+    """
+    payload = json.dumps(
+        {"old_pid": old_pid, "deadline": time.time() + ttl, "signalled": signalled}
+    )
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     handle = os.open(path, flags, 0o600)
     try:
         os.write(handle, payload.encode("utf-8"))
     finally:
         os.close(handle)
+
+
+def roller_signalled(base: Path | None, old_pid: int) -> bool:
+    """Did the roller record that it is signalling ``old_pid``? (review CR3)
+
+    Read by the SUCCESSOR, which retires its predecessor itself only when the
+    roller died first. Anything unreadable counts as NOT signalled: the
+    successor's other checks (roller gone, predecessor still the pinned broker
+    process) still have to hold before it sends anything.
+    """
+    from local_operator.secrets.protocol import rolling_path
+
+    try:
+        payload = json.loads(rolling_path(base).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("old_pid") == old_pid
+        and payload.get("signalled") is True
+    )
+
+
+def verified_broker_process(identity: object) -> bool:
+    """Is ``identity``'s pid still THAT process, and still a broker? (pid-reuse guard)
+
+    The one check both the roller and a successor make before sending SIGTERM
+    to an old broker: same pid AND start time (``same_process_as``), and an
+    argv that runs :data:`_BROKER_MODULE`. Anything unreadable is ``False`` —
+    not signalling is always the safe failure.
+    """
+    from local_operator.secrets.peer import process_info
+
+    pid = getattr(identity, "pid", None)
+    if not isinstance(pid, int):
+        return False
+    current = process_info(pid)
+    if current is None or not current.same_process_as(identity):  # type: ignore[arg-type]
+        return False
+    return _BROKER_MODULE in _argv_of(pid)
+
+
+def _unknown_to_successor(
+    old_status: dict[str, object], new_status: dict[str, object]
+) -> list[int]:
+    """Sessions the old broker has that the successor neither holds nor knows (S1).
+
+    The successor read its predecessor's sessions ONCE, at startup
+    (``broker._successor_inputs``), and ``ensure_broker`` takes no lock to
+    register, so a session can register with the old broker after that
+    snapshot. Unknown to the successor, its descendants would be DENIED (not
+    held) after the rename. Compared by pid AND start time.
+    """
+
+    def pinned(status: dict[str, object], *keys: str) -> set[tuple[object, object]]:
+        found: set[tuple[object, object]] = set()
+        for key in keys:
+            entries = status.get(key)
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, dict) and isinstance(entry.get("pid"), int):
+                        found.add((entry["pid"], entry.get("start_time")))
+        return found
+
+    from local_operator.secrets.peer import process_info
+
+    old = pinned(old_status, "session_lineage", "expected_lineage")
+    new = pinned(new_status, "session_lineage", "expected_lineage")
+    late = []
+    for pid, start in old - new:
+        # A session that EXITED after the successor's snapshot is still listed
+        # by the old broker until its watcher's next tick (≤1 s); it has no
+        # descendants left to protect, so it must not abort the roll (measured:
+        # a back-to-back `restart` right after a session closed failed on it).
+        current = process_info(pid)  # type: ignore[arg-type]
+        if current is None or (start is not None and current.start_time != start):
+            continue
+        late.append(pid)
+    return sorted(late)  # type: ignore[type-var]
 
 
 def stranded_sessions_reason(pids: tuple[int, ...]) -> str:
@@ -353,7 +454,10 @@ def _roll_locked(
     except incompatible as exc:
         return RollResult(
             "deferred",
-            f"the running secret broker speaks another protocol, so its sessions cannot be read: {exc}",
+            # CR4: a real remedy, since `restart` refuses this case too.
+            f"the running secret broker speaks another protocol, so its sessions cannot be read: "
+            f"{exc}. Stop it with `lop secret broker stop` once the sessions registered with it "
+            "have restarted; the next secret use starts a current broker",
             code="unreadable",
         )
     except store_error:
@@ -420,12 +524,27 @@ def _roll_locked(
     # unnotified fallback. A broker that reports caps answers for itself; for an
     # older broker a session counts as capable only if its process provably
     # runs the current generation (which carries the re-registration code).
+    # QA Q1: a broker that is itself a fresh successor still HOLDS sessions
+    # that have not re-registered with it yet. Rolling again now would hand the
+    # next successor a snapshot without them; wait for them instead. Bounded by
+    # the broker's own hold (`settling` ends with ROLL_GRACE_S), so a session
+    # that never comes back delays the next roll by seconds, not forever.
+    held = status.get("expected_lineage")
+    if status.get("settling") is True and isinstance(held, list) and held:
+        return RollResult(
+            "deferred",
+            "the secret broker was just replaced and its sessions are still re-registering; "
+            "try again in a few seconds",
+            code="settling",
+            old_pid=old_pid,
+        )
     lineage = status.get("session_lineage")
+    sessions: list[tuple[int, tuple[object, ...]]]
     if isinstance(lineage, list):
         sessions = [
-            (entry.get("pid"), tuple(entry.get("caps") or ()))
-            for entry in lineage
-            if isinstance(entry, dict) and isinstance(entry.get("pid"), int)
+            (pid, tuple(entry.get("caps") or ()))
+            for entry in [*lineage, *(held if isinstance(held, list) else [])]
+            if isinstance(entry, dict) and isinstance(pid := entry.get("pid"), int)
         ]
     else:
         sessions = [(pid, ()) for pid in status.get("sessions") or () if isinstance(pid, int)]
@@ -443,10 +562,12 @@ def _roll_locked(
 
     # --- 3. sentinel, 4. successor, 5. readiness ----------------------------
     _write_sentinel(sentinel, old_pid)
+    result: RollResult | None = None
     try:
-        return _hand_off(
+        result = _hand_off(
             base,
             canonical=canonical,
+            sentinel=sentinel,
             canonical_inode=canonical_info.st_ino,
             temp=temp,
             protocol=protocol,
@@ -459,8 +580,17 @@ def _roll_locked(
             before_switch=before_switch,
             store_error=store_error,
         )
+        return result
     finally:
-        sentinel.unlink(missing_ok=True)
+        # SECURITY S1: on success the sentinel is NOT removed. `_hand_off`
+        # re-wrote it at the rename with deadline = rename + ROLL_GRACE_S, the
+        # window in which sessions are still re-registering; deleting it here
+        # (as soon as the old broker exited) ended the client's retry before
+        # they had, and a denial then reached the unnotified fallback. It
+        # expires by its own deadline (`client.rolling_in_progress`). Any
+        # other outcome removes it: nothing moved, so nothing needs waiting out.
+        if result is None or result.status != "rolled":
+            sentinel.unlink(missing_ok=True)
 
 
 def _hand_off(
@@ -468,6 +598,7 @@ def _hand_off(
     *,
     canonical: Path,
     canonical_inode: int,
+    sentinel: Path,
     temp: Path,
     protocol: int,
     old_pid: int,
@@ -480,7 +611,7 @@ def _hand_off(
     store_error: type[Exception],
 ) -> RollResult:
     from local_operator.secrets import client
-    from local_operator.secrets.peer import process_info
+    from local_operator.secrets.broker import ROLL_GRACE_S
 
     def fail(new_pid: int | None, reason: str, code: str) -> RollResult:
         if new_pid is not None:
@@ -498,8 +629,10 @@ def _hand_off(
     ready = False
     while time.monotonic() < deadline:
         if _reaped(new_pid):
-            last = "it exited before answering"
-            break
+            # QA minor: an early exit is its own cause (commonly: the canonical
+            # socket was no longer answered by the old broker), not slowness.
+            reason = "the new broker exited before answering on its temporary socket"
+            return fail(new_pid, reason, "readiness")
         try:
             ping = _status_at(temp, "ping")
             fresh = _status_at(temp, "status")
@@ -521,11 +654,13 @@ def _hand_off(
         if fresh.get("version") != version:
             mismatches.append(f"version {fresh.get('version')!r} is not {version!r}")
         if mismatches:
-            return fail(new_pid, "the new broker failed readiness: " + "; ".join(mismatches), "readiness")
+            reason = "the new broker failed readiness: " + "; ".join(mismatches)
+            return fail(new_pid, reason, "readiness")
         ready = True
         break
     if not ready:
-        return fail(new_pid, f"the new broker was not ready within {ready_timeout:g}s: {last}", "readiness")
+        reason = f"the new broker was not ready within {ready_timeout:g}s: {last}"
+        return fail(new_pid, reason, "readiness")
 
     if before_switch is not None:
         before_switch()
@@ -541,12 +676,29 @@ def _hand_off(
             problem = f"{canonical} vanished during the roll: {exc}"
     if problem is None:
         try:
-            if client.request("ping", base).get("pid") != old_pid:
+            old_status = client.request("status", base)
+            if old_status.get("pid") != old_pid:
                 problem = "a different broker answers the canonical socket"
-        except store_error as exc:
+            else:
+                # SECURITY S1, second half: re-read the old broker's sessions
+                # right before the commit point and abort if any is unknown to
+                # the successor (it registered after the successor's one-time
+                # snapshot). Aborting is free: the old broker never noticed
+                # anything, and the next roll snapshots it.
+                late = _unknown_to_successor(old_status, _status_at(temp, "status"))
+                if late:
+                    problem = (
+                        "session(s) registered with the old broker during the roll (pid "
+                        + ", ".join(str(pid) for pid in late)
+                        + "); the next roll will include them"
+                    )
+        except (store_error, OSError) as exc:
             problem = f"the old broker stopped answering during the roll: {exc}"
     if problem is not None:
         return fail(new_pid, problem, "switch")
+    # S1: from the rename the successor holds for ROLL_GRACE_S; the client keeps
+    # retrying a denial or a silence for exactly as long as this sentinel lives.
+    _write_sentinel(sentinel, old_pid, ttl=ROLL_GRACE_S)
     try:
         os.rename(temp, canonical)
     except OSError as exc:
@@ -556,13 +708,23 @@ def _hand_off(
     # From here the successor is authoritative and the old broker is not
     # resurrectable, so a problem is a WARNING on a rolled result, never a
     # kill -9 and never a rollback.
+    from local_operator.secrets.peer import process_info
+
     warning = ""
     current = process_info(old_pid)
     if current is None:
         pass
-    elif not current.same_process_as(old_identity) or _BROKER_MODULE not in _argv_of(old_pid):  # type: ignore[arg-type]
+    elif not verified_broker_process(old_identity):
         warning = f"pid {old_pid} is no longer the old broker; nothing was signalled"
     else:
+        # CR3: record the intent BEFORE the signal, so a successor that sees
+        # this roller gone never sends a second SIGTERM into the old broker's
+        # draining stop(). Dying between this write and the kill leaves the
+        # same orphan as before CR3, over a window of one syscall.
+        try:
+            _write_sentinel(sentinel, old_pid, ttl=ROLL_GRACE_S, signalled=True)
+        except OSError:
+            pass
         try:
             os.kill(old_pid, signal.SIGTERM)
         except OSError as exc:
@@ -571,7 +733,11 @@ def _hand_off(
             exit_deadline = time.monotonic() + OLD_EXIT_TIMEOUT_S
             while time.monotonic() < exit_deadline:
                 now = process_info(old_pid)
-                if now is None or not now.same_process_as(old_identity) or _reaped(old_pid):  # type: ignore[arg-type]
+                if (
+                    now is None
+                    or not now.same_process_as(old_identity)  # type: ignore[arg-type]
+                    or _reaped(old_pid)
+                ):
                     break
                 time.sleep(0.05)
             else:

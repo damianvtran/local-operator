@@ -217,8 +217,11 @@ class BrokerRolling(SecretStoreError):
 
 
 #: Ceiling on how long a retrieval waits out a roll before failing closed
-#: (security R1: "waits (bounded, ≤8 s) or fails"). Matches the successor's
-#: own hold, ``broker.ROLL_GRACE_S``.
+#: (security R1: "waits (bounded, ≤8 s) or fails"). The ONE client-side budget
+#: (review S5): it covers the successor's hold (``broker.ROLL_GRACE_S``, 6 s)
+#: plus the redaction notice (``broker.NOTIFY_ACK_TIMEOUT_S``, 2 s), and every
+#: retry's request timeout is clipped to what remains of it. Pinned by
+#: ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
 ROLL_WAIT_S = 8.0
 
 
@@ -769,12 +772,33 @@ def _retrieve_through_roll(name: str, base: Path | None, *, role: str) -> dict[s
     budget the caller gets :class:`BrokerRolling`, which no fallback catches.
     Outside a roll this is exactly one ``request`` — no behaviour change.
     """
+    # **One budget, and silence never falls open once a roll was seen (review
+    # S5/CR1).** Every retry's request timeout is clipped to what is left of
+    # ROLL_WAIT_S, so a retrieval that meets a roll costs at most ~ROLL_WAIT_S
+    # in total instead of stacking full REQUEST_TIMEOUT_S waits. Because that
+    # clipping (or a hold + notice running long) can make a retry time out
+    # AFTER the sentinel expired, a `BrokerUnavailable` raised once a roll was
+    # observed is answered with `BrokerRolling`, never re-raised into the
+    # fallback. A DENIAL after the sentinel is gone stays final: by then the
+    # successor's own hold has ended, and it answers a predecessor's session
+    # that never re-registered with `unredactable`, not a denial.
     deadline = time.monotonic() + ROLL_WAIT_S
+    seen_roll = False
     while True:
         try:
-            return request("retrieve", base, name=name, role=role)
+            if not seen_roll:
+                return request("retrieve", base, name=name, role=role)
+            remaining = max(deadline - time.monotonic(), 0.1)
+            link = _connect(socket_path(base), timeout=min(CONNECT_TIMEOUT_S, remaining))
+            try:
+                link.settimeout(min(REQUEST_TIMEOUT_S, remaining))
+                return request("retrieve", base, connection=link, name=name, role=role)
+            finally:
+                link.close()
         except (BrokerUnavailable, BrokerDenied) as exc:
-            if not rolling_in_progress(base):
+            rolling = rolling_in_progress(base)
+            seen_roll = seen_roll or rolling
+            if not rolling and not (seen_roll and isinstance(exc, BrokerUnavailable)):
                 raise
             if time.monotonic() >= deadline:
                 raise BrokerRolling(
@@ -803,7 +827,11 @@ def register_session(
     The channel-only form, kept for callers that do not re-register; see
     :func:`register_session_channel` for the full contract.
     """
-    registered = register_session_channel(base, session_id=session_id)
+    # S2/CR5: this form hands back a bare channel that NOTHING re-registers, so
+    # it must not advertise ``reroll`` — otherwise a roller counts it as
+    # capable, rolls, and the session is silently stranded instead of being
+    # named in the deferral (security R7).
+    registered = register_session_channel(base, session_id=session_id, caps=())
     return registered[0] if registered is not None else None
 
 
@@ -812,6 +840,7 @@ def register_session_channel(
     *,
     session_id: str | None = None,
     ensure: bool = True,
+    caps: tuple[str, ...] = REGISTRATION_CAPS,
 ) -> tuple[socket.socket, int | None] | None:
     """Register this process as a live lop session; returns ``(channel, broker pid)``.
 
@@ -856,7 +885,7 @@ def register_session_channel(
                 "op": "register",
                 "session_id": session_id,
                 "ticket": encode_bytes(ticket),
-                "caps": list(REGISTRATION_CAPS),
+                "caps": list(caps),
             },
         )
         reply = recv_frame(connection)
