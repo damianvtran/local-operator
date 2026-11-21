@@ -744,6 +744,11 @@ def test_every_code_the_doctor_can_print_has_a_reading_too() -> None:
     reasons = {value for name, value in vars(handshake).items() if name.startswith("REASON_")}
     assert len(reasons) >= 10, reasons  # a truncated enumeration is not evidence
     for code in sorted(reasons | {"pair_phase_requires_the_ceremony"}):
+        if code in resume.DOCTOR_DETAIL_WORDS:
+            # A refusal with its OWN stated per-address reading (the dialer's listener
+            # refusals, mesh-listener-auth): the table entry, never the fallback.
+            assert resume.doctor_detail_words(code) == resume.DOCTOR_DETAIL_WORDS[code], code
+            continue
         assert resume.doctor_detail_words(code) == resume._BARE_CODE_WORDS, code  # noqa: SLF001
     # THE STATE Q-R24-2 IS ABOUT. An address that ANSWERED while the doctor's own
     # budget expired: this build's spelling, from the listing's own producer with the
@@ -959,7 +964,9 @@ def _row(
 
 def test_a_member_a_peer_knows_is_adopted() -> None:
     record = _record(SELF)
-    changed, added = relay.adopt_members(record, [_row(PEER)], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [_row(PEER)], sender_device_id=SELF, supplier_verified=True
+    )
     assert changed is True
     assert added == [PEER]
     assert record.member(PEER) is not None
@@ -971,7 +978,9 @@ def test_a_tombstoned_device_is_never_revived_by_a_peers_table() -> None:
     next asks somebody for their table."""
     record = _record(SELF)
     record.removed_ids.append(PEER)
-    changed, added = relay.adopt_members(record, [_row(PEER)], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [_row(PEER)], sender_device_id=SELF, supplier_verified=True
+    )
     assert (changed, added) == (False, [])
     assert record.member(PEER) is None
 
@@ -992,6 +1001,7 @@ def test_a_row_we_already_hold_keeps_its_local_authority() -> None:
         record,
         [_row(PEER, role="admin", endpoints=["10.0.0.9:9", "10.0.0.9:10"])],
         sender_device_id=SELF,
+        supplier_verified=True,
     )
     held = record.member(PEER)
     assert held is not None
@@ -1010,7 +1020,9 @@ def test_a_peers_older_table_never_shrinks_ours() -> None:
     record.members.append(
         types.MemberRecord(device_id=PEER, public_key=wire.b64u(b"b" * 32), role="drive")
     )
-    changed, added = relay.adopt_members(record, [_row(SELF)], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [_row(SELF)], sender_device_id=SELF, supplier_verified=True
+    )
     assert (changed, added) == (False, [])
     assert record.member(PEER) is not None
 
@@ -1066,10 +1078,14 @@ def test_a_nonadmin_can_assert_only_its_proven_rotation_with_admitted_standing(r
     record = _record(SELF)
     held, published, _statement, old, new = _rotated(record, root)
     # The signature binds identity continuity, not a larger capability grant.
-    assert relay.adopt_members(record, [published], sender_device_id=old.device_id) == (False, [])
+    assert relay.adopt_members(
+        record, [published], sender_device_id=old.device_id, supplier_verified=True
+    ) == (False, [])
     published["role"] = held.role
     published["capabilities"] = list(held.capabilities)
-    assert relay.adopt_members(record, [published], sender_device_id=old.device_id) == (
+    assert relay.adopt_members(
+        record, [published], sender_device_id=old.device_id, supplier_verified=True
+    ) == (
         True,
         [new.device_id],
     )
@@ -1094,7 +1110,9 @@ def test_a_row_carrying_the_rotation_statement_retires_the_row_it_succeeded(root
     record = _record(SELF)
     held, published, statement, _old, _new = _rotated(record, root)
 
-    changed, added = relay.adopt_members(record, [published], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [published], sender_device_id=SELF, supplier_verified=True
+    )
 
     assert (changed, added) == (True, [published["device_id"]])
     surviving = record.member(published["device_id"])
@@ -1139,7 +1157,9 @@ def test_a_rotation_claim_this_record_cannot_verify_retires_nothing(
     else:
         published["rotation_proof"] = {**statement, "sig_old": wire.b64u(b"0" * 64)}
 
-    changed, added = relay.adopt_members(record, [published], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [published], sender_device_id=SELF, supplier_verified=True
+    )
 
     assert (changed, added) == (False, []), f"{tamper} moved a row"
     assert record.member(held.device_id) is held
@@ -1179,7 +1199,12 @@ def test_the_dialler_learns_the_member_table_from_the_peer_it_dialled(
     _add_member(server_a.root, record.network_id, NEWCOMER)
     assert store.load(record.network_id, server_b.root).member(NEWCOMER) is None
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     learned = store.load(record.network_id, server_b.root)
     newcomer_row = learned.member(NEWCOMER)
@@ -1201,7 +1226,12 @@ def test_the_listener_learns_the_member_table_from_the_peer_that_dialled_it(
     _add_member(server_b.root, record.network_id, NEWCOMER)
     assert store.load(record.network_id, server_a.root).member(NEWCOMER) is None
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     # The listener's pull runs on its own handshake thread — `dial` returns when
     # THIS side's handshake is done, and the peer may not have finished its end — so
@@ -1226,7 +1256,12 @@ def test_learning_a_member_is_audited(peer_pair: Devices, monkeypatch: pytest.Mo
     record, _host, _port = _pair(peer_pair, monkeypatch, role="admin")
     _add_member(server_a.root, record.network_id, NEWCOMER)
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     events = [
         row

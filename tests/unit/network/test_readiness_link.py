@@ -647,7 +647,12 @@ def test_a_link_that_cannot_be_pinned_never_names_its_source_socket(
     live = _bind_and_start(server_b, record)
     # The PEER is the dialer: B completes the handshake into A, so A's link
     # records B's ephemeral source socket rather than any declared address.
-    peer_link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    peer_link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert peer_link is not None, reason
     link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001 — the one link seam
     assert link is not None
@@ -707,7 +712,12 @@ def test_a_private_candidate_off_this_devices_networks_is_excluded_and_still_rep
     live = _bind_and_start(server_b, record)
     # An inbound link, like the drill's transport forward: A's record of B is
     # an ephemeral socket, so the accept cannot be pinned (connected_unpinned).
-    peer_link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    peer_link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert peer_link is not None, reason
     link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001
     assert link is not None
@@ -778,7 +788,12 @@ def test_the_same_private_candidate_stays_red_when_this_device_shares_its_networ
     capsys.readouterr()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     live = _bind_and_start(server_b, record)
-    peer_link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    peer_link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert peer_link is not None, reason
     link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001
     assert link is not None

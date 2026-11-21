@@ -572,6 +572,10 @@ class RemoteNotice(NamedTuple):
     #: owner did not say (an older build). The origin raises only a notice newer
     #: than its first-seen baseline and writes it at this time (2026-11-13).
     at_ms: int = 0
+    #: ``SessionRow.remote_started_by_agent_on``: the device whose agent started
+    #: the session, for a forwarded ask's body. ``""`` is no label (the plain
+    #: "runs on <device>" body). Display-only.
+    started_by_agent_on: str = ""
 
 
 def _carry_silent(
@@ -640,6 +644,7 @@ def notice_edges(
                 name=_chosen_name(row),
                 # A 4-tuple (a parse older than ``at``) has no time: 0.
                 at_ms=int(claim[4]) if len(claim) > 4 else 0,
+                started_by_agent_on=str(getattr(row, "remote_started_by_agent_on", "") or ""),
             )
     state: dict[NoticeKey, int] = dict(current)
     _carry_silent(previous, state, unanswered)
@@ -706,6 +711,56 @@ def _bound_nodes(root: Path) -> frozenset[str]:
         return bound_devices(root)
     except Exception:  # noqa: BLE001 — no binding, no started-on-owner notices
         return frozenset()
+
+
+def _agent_starter_label(origin: Any, names: Mapping[str, str]) -> str:
+    """The name of the device whose AGENT started a row's session, or ``""``.
+
+    WHY: a forwarded ask from an agent-started session (the agent-child leg of
+    ``remote_attention.signed_card_target``) otherwise reads exactly like one
+    from a session the operator opened. Derived HERE, on the receiving device,
+    from what it already holds rather than from a new wire field: the owner's
+    stamp ``origin`` (``kind`` and ``source_device``, which the owner wrote from
+    the creating link's authenticated device id, ``relay`` peer create) and THIS
+    device's own names for device ids (``names``: its identity plus the peers
+    answer). A peer create carries no starter session id or agent name
+    (``source_session_id: ""``), so the device is the most specific honest
+    answer, and no peer-supplied free text is ever shown. Display-only: routing
+    reads ``origin`` through ``remote_attention.notice_origin``, never this.
+
+    ``""`` — the caller keeps the plain body — when the origin is not a mapping,
+    is not ``kind: agent``, names no source device, or names one this device
+    cannot put a name to (an id is not a label a reader can use).
+    """
+    from local_operator.notifications.remote_attention import notice_origin
+
+    source, agent_child = notice_origin(origin)
+    if not agent_child or not source:
+        return ""
+    return str(names.get(source) or "")
+
+
+def _device_names(root: Path | None, peers: Mapping[str, Any]) -> dict[str, str]:
+    """Device id -> human name, from THIS device's identity and peers answer.
+
+    This device's own identity is included because the usual starter of an
+    agent-child session is an agent running HERE (the operator's Mac), and a
+    device does not list itself among its peers. Guarded on ``root`` for the
+    same reason as ``_network_names``: a root-less call is a test's injected
+    catalogue and must not read the developer's real identity. Never raises.
+    """
+    names = {device_id: str(getattr(facts, "name", "") or "") for device_id, facts in peers.items()}
+    if root is None:
+        return names
+    try:
+        from local_operator.network import identity
+
+        mine = identity.load(root)
+    except Exception:  # noqa: BLE001 — no identity, no self label
+        return names
+    if mine is not None and mine.device_id and mine.name:
+        names[mine.device_id] = mine.name
+    return names
 
 
 def _started_on_owner(origin: Any, owner_device: str) -> bool:
@@ -958,6 +1013,7 @@ def _read(
     # its root.
     network_names = _network_names(root) if root is not None else {}
     bound_nodes = _bound_nodes(root) if root is not None else frozenset()
+    device_names = _device_names(root, peers)
     rows: list[SessionRow] = []
     # Key by (owner_device, session_id), not id alone: a cross-device collision
     # is a routing ambiguity the reader must see, not silently collapse. Within
@@ -1039,6 +1095,9 @@ def _read(
                 remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
                 pending_queued=bool(getattr(peer_row, "pending_queued", False)),
                 remote_asks_unknown=bool(getattr(peer_row, "asks_unknown", False)),
+                remote_started_by_agent_on=_agent_starter_label(
+                    getattr(peer_row, "origin", None), device_names
+                ),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

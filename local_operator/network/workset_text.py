@@ -141,7 +141,12 @@ def source_label(block: Mapping[str, Any], fallback: str = "") -> str:
 
 
 def summary_lines(
-    block: Mapping[str, Any], *, session: str, device: str = "", without_button: str = ""
+    block: Mapping[str, Any],
+    *,
+    session: str,
+    device: str = "",
+    without_button: str = "",
+    advice: bool = True,
 ) -> list[str]:
     """The confirmation summary: warning, counts, one line per worktree, withheld
     files, what is never copied, and the closing advice (design §11.2 text shape).
@@ -277,6 +282,11 @@ def summary_lines(
     lines.extend("  " + text for text in probe_block_lines(block, device=label))
     if mentioned:
         lines.append("  " + _t(_ws.mentioned(paths=", ".join(mentioned[:_LIST_LIMIT]))))
+    if not advice:
+        # ``advice=False``: the CLI's agent-shell refusal (UX U2, #4380) lists what
+        # WOULD be sent for the agent to relay, but "Only continue if…" invites a
+        # continuation that is the operator's to make, not the reader's.
+        return lines
     lines.append(
         _t(
             _ws.advice_sends(device=label)

@@ -56,6 +56,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "delivery",
         "extensions",
         "failover",
+        "google-vertex",
         "guardrails",
         "harness-import",
         "highlights",
@@ -146,6 +147,7 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("what are the highlights under my answer and how do I turn them off", "highlights"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
+        ("my google vertex sign-in keeps expiring", "google-vertex"),
         (
             "turn on the smart agent hints and check which vendor served the call",
             "classification",

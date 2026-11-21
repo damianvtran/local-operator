@@ -447,13 +447,94 @@ async def test_a_resumed_unsupervised_run_installs_the_ask_surface(
 async def test_a_fresh_unsupervised_run_installs_no_ask_surface(
     isolated_config: Path,
 ) -> None:
-    """The control for the cell above: no ``--resume``, no ask surface (SA-D2)."""
+    """The control for the cell above: no ``--resume``, no ask surface (SA-D2).
+
+    Narrowed, not flipped: this stays true for plain ``lop exec`` and ephemeral
+    spawns (no ``--workstream``), whose queue nobody owns. A ``sessions spawn``
+    WORKSTREAM is the exception pinned in the next cell — it is listed,
+    operator-visible work whose questions must reach the inbox without waiting
+    for a resume.
+    """
     session = FakeSession()
     control = await start_exec_control(session, cwd="/tmp", supervised=False)
     try:
         assert getattr(session, "_ask_handler", None) is None
     finally:
         await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_unsupervised_workstream_installs_the_ask_surface(
+    isolated_config: Path,
+) -> None:
+    """A fresh ``sessions spawn`` workstream owns a queued ask from turn one.
+
+    Before this, ``sessions spawn`` (``lop exec --workstream``, no ``--resume``)
+    had no ``ask`` until somebody resumed it, so a spawned review/QA workstream
+    that needed the operator could only guess or stop. The approval half stays
+    absent exactly as for a resume worker: nobody is there to answer a card.
+    """
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False, workstream=True)
+    try:
+        assert session._ask_handler is not None
+        assert getattr(session, "_approval_handler", None) is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_kill_switch_leaves_a_fresh_workstream_with_no_ask_surface(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LOP_ASK_NONBLOCKING=0`` wins over ``workstream`` as it does over ``resumed``."""
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    session = FakeSession()
+    control = await start_exec_control(session, cwd="/tmp", supervised=False, workstream=True)
+    try:
+        assert getattr(session, "_ask_handler", None) is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workstream", [True, False])
+async def test_run_session_hands_the_workstream_flag_to_exec_control(
+    monkeypatch: pytest.MonkeyPatch, workstream: bool
+) -> None:
+    """``--workstream`` on the exec args reaches ``start_exec_control``.
+
+    The flag is what ``sessions spawn`` sets and what the detached worker
+    re-parses, so the runner is the one seam both paths share. Captured by
+    stopping the run at the control start: the kwargs are the whole contract.
+    """
+    from local_operator import exec_session
+    from local_operator.session.runtime import exec_control
+
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def _capture(_session: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise _Stop
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(exec_control, "start_exec_control", _capture)
+    monkeypatch.setattr(exec_session, "apply_startup", lambda *_a, **_k: None)
+    monkeypatch.setattr(exec_session, "apply_saver_startup", _noop)
+    session = FakeSession()
+    args = SimpleNamespace(yolo=False, control=False, resume=None, workstream=workstream)
+    with pytest.raises(_Stop):
+        await exec_session.run_session(session, "hi", args, None)
+    assert seen["workstream"] is workstream
+    assert seen["resumed"] is False
+    assert seen["supervised"] is False
 
 
 @pytest.mark.asyncio

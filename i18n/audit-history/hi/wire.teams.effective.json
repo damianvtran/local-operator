@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.teams.effective",
+  "history_sha256": "746996c5bc1b7db2f917ab5b37ebb4efc827d49df8c30e0ad54de4e32a72c067",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.teams.effective",
+      "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+      "target_sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92",
+      "context_sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "47e37aebb87c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19",
+        "actual_model_source": "Host session-state Model: openai/gpt-6.1-sol",
+        "fallback": "none observed"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "1a6e70595b8d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19",
+        "independent_from_translator_session": "47e37aebb87c",
+        "actual_model_source": "Host session Model: openai/gpt-6.1-sol",
+        "fallback": "none observed",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "First independent text audit: 9/9, 0 B/M. Record: i18n/audits/evidence/hi/wire.teams.effective/h1-1a6e/record.json (scratch-staged; not tracked/applied). Second audit and rendered/runtime evidence outstanding."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.teams.effective",
+      "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "47e37aebb87c",
+        "model": "openai/gpt-6.1-sol",
+        "identity_source": "Delegation specifies translator and actual model",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "2851856c6680",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "47e37aebb87c",
+        "independent_from_first_auditor_session": "1a6e70595b8d",
+        "actual_model_source": "Host session model declaration: openai/gpt-6.1-sol",
+        "fallback": "none used",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Second independent pass: 9/9; no unresolved blocker/major. Prepared evidence: i18n/audits/evidence/hi/wire.teams.effective/hi2/record.json; scratch-only, not yet tracked/applied.",
+      "target_sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92",
+      "context_sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    }
+  ]
+}

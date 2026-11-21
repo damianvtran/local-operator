@@ -1,0 +1,22 @@
+{
+  "wire.providers.reauth.sign_in_expired": {
+    "role": "warning sentence",
+    "tone": "plain, calm, actionable",
+    "note": "Shown once when a provider's stored OAuth sign-in was refused for good by the identity provider, so requests fall back to another model. {label} is the provider's product name (e.g. 'Google Vertex AI'); {provider} is the provider id used in commands (e.g. 'google-vertex'). '/login {provider}' and 'lop login {provider}' are commands: keep them verbatim."
+  },
+  "wire.providers.reauth.session_policy": {
+    "role": "warning sentence",
+    "tone": "plain, calm, actionable",
+    "note": "As sign_in_expired, but the cause is the user's Google Workspace admin policy 'Google Cloud session control', which forces a fresh sign-in every few hours. Use the product's own localized name for that admin setting when Google has one; otherwise keep it in English. Google Workspace is a product name. Commands stay verbatim."
+  },
+  "wire.providers.reauth.status_sign_in_required": {
+    "role": "status word in a table column",
+    "tone": "terse",
+    "note": "State of a stored OAuth credential in `lop login-status`, after 'oauth, '. The provider refused the sign-in for good; the user must sign in again."
+  },
+  "wire.providers.reauth.status_session_policy": {
+    "role": "status word in a table column",
+    "tone": "terse",
+    "note": "As status_sign_in_required, caused by a Google Workspace session-length policy. 'Workspace' is the product name Google Workspace."
+  }
+}

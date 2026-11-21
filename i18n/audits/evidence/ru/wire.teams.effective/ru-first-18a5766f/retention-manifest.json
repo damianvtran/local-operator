@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original provenance and verdict unchanged. Retention mapping is not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/validation.log",
+      "original_path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/validation.log",
+      "sha256": "4eafe4f4ae6415a691092c54b5210302f979ea6e9858bf10f2f62732da24e978"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/record.json",
+      "sha256": "b8e319ca2fe46021b9ec1a279898607bf7cf2f321123edfba7766e91b3ec160b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/append-dry-run.log",
+      "original_path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/append-dry-run.log",
+      "sha256": "8ed2066343b019eac9ff5ac4d29572b6300b6a5e08fa13c9a614ad12808f1441"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/validate.py",
+      "original_path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/validate.py",
+      "sha256": "8d23d8ce03cfe42e34b3f7a69137dfe65033177d56161baa2c1cb9cd568158fa"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/append-verification.json",
+      "original_path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/append-verification.json",
+      "sha256": "f77d4b2af98451a89dc5d981929f42f65d2aa2d650d001dce01c5252abf27dc3"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/receipt.json",
+      "sha256": "8e06df43849a1626952e5396195b4081d776089ba5ba3189ba5ed2bbe91fbe28"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/per-key-report.json",
+      "original_path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/per-key-report.json",
+      "sha256": "c845da4c44e718ff00924818fa96bfecc2d6ed0f85059a8b4468d550b0ac96fb"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/translator-receipt.json",
+      "sha256": "71261e4589b0bbacce7d1605a841f5a7fe5f1fed54c64f5ca413b89eb5cfb35b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator/validation.log",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/validation.log",
+      "sha256": "aff3292f1cd226af2ff3e4a216bf36845f4adde52be2188fb9f77a99629fdb28"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/translator-receipt.json",
+      "sha256": "71261e4589b0bbacce7d1605a841f5a7fe5f1fed54c64f5ca413b89eb5cfb35b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator/validate-package.py",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/validate-package.py",
+      "sha256": "872e4a562cceed080ee5a000263dee76268973fb5fa35994b9ca165436081749"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator/catalogues/ru/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/catalogues/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator/catalogues/en/wire.teams.effective.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-first-18a5766f/translator/catalogues/en/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    }
+  ]
+}

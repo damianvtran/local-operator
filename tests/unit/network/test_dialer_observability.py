@@ -25,7 +25,15 @@ def test_a_real_member_dial_records_the_dialer_and_keeps_the_listener_row(
     record, _, _ = _pair_settled(devices, monkeypatch)
     before = borrower.audit.recorded_through
     listener_before = owner.audit.recorded_through
-    link, reason = borrower.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    # A member dial names the listener it expects (mesh-listener-auth): the owner
+    # then proves that identity with a signature under its stored key, as any real
+    # member dial does, so the audit rows below are the ones a proven link writes.
+    link, reason = borrower.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=owner.identity.device_id,
+    )
     assert link is not None, reason
     assert wait_for(
         lambda: any(

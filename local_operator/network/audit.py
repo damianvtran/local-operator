@@ -116,6 +116,9 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # manifest, and a destination probed remotes at a peer's request.
         "session.workset.preflight",
         "session.workset.probe",
+        # The owner accepted a working-set consent: which surface, which scope
+        # digest, whether the files travel (mobility.AUDIT_WORKSET_CONSENT).
+        "session.workset.consent",
         # A moved session's working set (move-working-set.md §8.3; workset_move).
         "session.workset.serve",
         "session.workset.restore",
@@ -144,6 +147,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
+        # A dialled endpoint answered with a POSITIVE wrong listener proof (wrong
+        # device, bad signature, bad MAC) and was removed from the member row it
+        # was dialled from (mesh-listener-auth §6, G4 heal-on-negative-proof).
+        "endpoint_demoted",
         # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME (F4, drill
         # 2026-10-04): not a refusal — nothing decided anything — and the row that
         # answers "the relay saw it" when a join stops before any pairing record
@@ -242,6 +249,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # counts only, never the token.
         "credential.held_served",
         "credential.held_lapsed",
+        # A SUBAGENT session first using its ancestor session's held GitHub grant
+        # while the owner was away (credentials/client.py ``_bridge_ancestor_hold``,
+        # 2026-11-21): names the child as the consumer and the ancestor it came from,
+        # so the serve is never silently attributed to the parent. Ids only.
+        "credential.held_bridged",
         # The BORROWER's own record that a dial did not get a grant (credentials/client.py
         # ``_note_borrow_failed``): the 2026-11-17 owner_busy burst was visible only in
         # the owner's log. Coalesced per (owner, key) per window, codes only.
@@ -503,6 +515,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
+    "endpoint_demoted": frozenset({"endpoint", "code"}),
     "handshake_refused": frozenset(
         {
             "cause",
@@ -661,6 +674,12 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "credential.held_lapsed": frozenset(
         {"credential_key", "act", "sub", "grant_id", "serves", "pending", "bound"}
+    ),
+    # `consumer` is the session that used the grant, `bridged_from` the ancestor
+    # session whose held grant it was (both opaque session ids), `grant_id` the
+    # ORIGINAL grant, `hold_until` that grant's (never extended) hold end.
+    "credential.held_bridged": frozenset(
+        {"credential_key", "act", "sub", "grant_id", "consumer", "bridged_from", "hold_until"}
     ),
     # `code`/`reason` are the owner's machine answer (never its sentence), `held`
     # whether this device's held grant bridged it, `retry_after_ms` the owner's
@@ -841,6 +860,14 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # fixed result codes only — never a path, a URL path, userinfo or git output.
     "session.workset.preflight": frozenset({"peer", "worktrees", "planned", "bytes", "excluded"}),
     "session.workset.probe": frozenset({"peer", "hosts", "results", "refused"}),
+    # ``surface`` is a closed token (mobility.CONSENT_SURFACES, or "unattributed"),
+    # CLAIMED by the requesting surface and not verified: attribution, never proof;
+    # ``digest`` the scope digest the gate matched (a hash of the manifest, never a
+    # path); ``carry_decision`` "carry"/"stay"; ``lease_epoch`` binds the row to the
+    # move it gated.
+    "session.workset.consent": frozenset(
+        {"peer", "surface", "consent", "digest", "carry_decision", "lease_epoch"}
+    ),
     # A moved session's working set (design move-working-set.md §8.3). Bounded
     # metadata only — ids, sizes, one home-relative path, reason codes — never
     # bytes or file contents. ``serve`` is the required row written before the

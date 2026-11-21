@@ -1,0 +1,20 @@
+{
+  "tui.tool_card.status.cut_off": "bị cắt ngang",
+  "tui.tool_card.status.error": "lỗi",
+  "tui.tool_card.status.interrupted": "bị ngắt",
+  "tui.tool_card.status.not_run": "không chạy",
+  "tui.tool_card.status.partial": "Một phần",
+  "tui.tool_card.status.queued": "chờ",
+  "tui.tool_card.status.running": "chạy",
+  "tui.tool_card.status.send.delivery_unconfirmed": "chưa xác nhận đã gửi",
+  "tui.tool_card.status.send.no_new_wake": "không gọi lại",
+  "tui.tool_card.status.send.not_delivered": "chưa gửi được",
+  "tui.tool_card.status.send.receipt_reused": "lấy biên nhận cũ",
+  "tui.tool_card.status.send.wake_unconfirmed": "thức dậy chưa xác nhận",
+  "tui.tool_card.status.session_reset": "phiên đã đặt lại",
+  "tui.tool_card.status.switch.partial": "đã chuyển (lỗi)",
+  "tui.tool_card.status.switch.pending": "đang chờ",
+  "tui.tool_card.status.switch.switched": "đã chuyển",
+  "tui.tool_card.status.switch.unchanged": "không đổi",
+  "tui.tool_card.status.waiting": "chờ bạn"
+}

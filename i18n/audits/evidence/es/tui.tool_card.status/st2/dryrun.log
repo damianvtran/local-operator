@@ -1,0 +1,3 @@
+$ ledger.py append --dry-run (expected history 5a16d0af6164ba90746d546f595c3066684cb64d60c6ae403682314492d40b8a)
+i18n/audit-history/es/tui.tool_card.status.json
+exit 0

@@ -96,7 +96,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -117,13 +117,14 @@ from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_tool_card as _tc
+from local_operator.i18n.keys import tui_tool_card_status as _ts
 from local_operator.i18n.text import active_locale, tr, tr_record
 from local_operator.tools import diff_archive
 from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
-from local_operator.tui.i18n_status import localized_display
+from local_operator.tui.i18n_status import display_tr, localized_display
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TOOL_NAME_COL_MAX,
@@ -162,6 +163,23 @@ def _more_marker(msg) -> str:
     return f"… {_t_tc(msg)}"
 
 
+# The status words (status column, reason slot, send/switch outcome words) live
+# in a CHILD namespace, `tui.tool_card.status`, rather than as more keys in
+# `tui.tool_card`: that namespace's bytes are already audited, and adding keys
+# to it would stale every locale's ledger row for it (the precedent is
+# `wire.tool_rows.bridge.skipped` in `harness/bridge_copy.py`). Resolved at
+# RENDER time like the chrome above. The STATE TOKENS the card stores and
+# compares (`self._state == "running"`, `"interrupted"`, …) are not copy and
+# stay English; only the word painted for them is keyed.
+#
+# `display_tr`, not bare `tr`: it is the render adapter every other painted TUI
+# namespace goes through, and for Urdu it wraps the resolved word in ONE
+# balanced RLI…PDI isolate so the LTR technical text around it on the row
+# (targets, pids, durations) keeps its own direction (review round 1, R2). Every
+# other language gets the plain word back. Each status word is projected here
+# and nowhere else, so no composed string carries a second projection; a cut
+# through an isolate is closed again by :func:`truncate_cells`.
+_t_st = display_tr("tui.tool_card.status")
 _profile_copy = tr_record("tui.profile_actions")
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -204,13 +222,18 @@ ICON_PARTIAL = "◐"
 #: leads with something else, therefore keeps the ordinary crop instead of
 #: promoting a line that is not the claim.
 _PARTIAL_LEADS = ("Partial results:", "Partial search:")
+
+
 #: The word the collapsed row falls back to when the payload says the result is
 #: partial but its text carries no disclosure to promote. It is the word both
 #: shipped leads open with, so the row reads the same either way, and it exists
 #: because a bare `◐` and nothing else is a state mark the operator cannot
 #: interpret: a foreign or older payload still has to say WHICH state it is in
 #: (design review round 2, D2-3).
-_PARTIAL_LABEL = "Partial"
+def _partial_label() -> str:
+    return _t_st(_ts.partial())
+
+
 #: The lead the reset notice is composed with by ``tools/eval.py``
 #: (``_build_render_result``). A flag alone is not enough, for the same reason
 #: :data:`_PARTIAL_LEADS` exists: ``details["kernel_reset"]`` says the CALL ran
@@ -219,12 +242,15 @@ _PARTIAL_LABEL = "Partial"
 #: anything else, keeps the ordinary crop instead of promoting a line that is
 #: not the claim (design review round 1, D1).
 _RESET_LEADS = ("Session state was reset",)
+
+
 #: The word the collapsed row falls back to when ``kernel_reset`` is set but
 #: the result text carries no notice to promote — the reset twin of
-#: :data:`_PARTIAL_LABEL`, and it exists for the same reason: the flag says the
+#: :func:`_partial_label`, and it exists for the same reason: the flag says the
 #: session was reset, so the row must state that even where there is no notice
 #: sentence to promote (design review round 1, D2).
-_RESET_LABEL = "session reset"
+def _reset_label() -> str:
+    return _t_st(_ts.session_reset())
 
 
 #: The word a stopped row states when the owner ACCEPTED the stop but had not
@@ -483,6 +509,11 @@ NAME_GROWTH_MIN_ROW = 70
 #: of it lands in the same column whether the tool took 0.4s or 12.3s. Five
 #: cells covers every duration the format produces up to ``9999s``.
 DURATION_COL = 5
+#: Cells the settled spine occupies (`<glyph> ` + :data:`DURATION_COL`), the
+#: width the live status word is padded to; see :func:`running_label`.
+_RUNNING_SPINE = cell_len(f"{ICON_SUCCESS} ") + DURATION_COL
+
+
 #: What a live row with no clock puts in the status column (see
 #: ``_status_runs``). Its LENGTH is load-bearing, not just its wording: it is
 #: sized to the settled spine — ``<glyph> `` plus :data:`DURATION_COL` — so the
@@ -490,7 +521,16 @@ DURATION_COL = 5
 #: the summary beside it is budgeted identically at both ends. A label of any
 #: other width makes the row reflow on settling at narrow widths. Any
 #: replacement must keep that equality; assert it rather than eyeballing it.
-RUNNING_LABEL = "running"
+#:
+#: Translated, the equality can only be kept from one side: a SHORTER word is
+#: padded to the spine by :func:`running_label`, a longer one is a translator
+#: constraint (`maxCells` in the context sidecar), and the cap check measures
+#: terminal CELLS, not code points, so a CJK word is shed when it does not fit.
+def running_label() -> str:
+    word = _t_st(_ts.running())
+    return " " * max(0, _RUNNING_SPINE - cell_len(word)) + word
+
+
 #: What a call that has been announced but NOT started puts in the status
 #: column (see ``_status_runs``). A state word rather than a clock, because
 #: there is no execution to time and the dictation clock it replaces has ended.
@@ -504,7 +544,15 @@ RUNNING_LABEL = "running"
 #: the summary is the same text on both sides of the width change, which is why
 #: a shadow of it here would buy nothing and cost a trailing cell that would
 #: push the whole status run one cell off the right edge.
-QUEUED_LABEL = "queued"
+def queued_label() -> str:
+    return _t_st(_ts.queued())
+
+
+def _interrupt_word(token: str) -> str:
+    """The interrupted row's word for its stored token (`cut_off` / `interrupted`)."""
+    return _t_st(_ts.cut_off() if token == "cut_off" else _ts.interrupted())
+
+
 #: Minimum summary budget before we drop the expand hint (D8 floor).
 _SUMMARY_FLOOR = 16
 #: Indent of the expanded output block, aligned under the tool name column.
@@ -831,7 +879,12 @@ def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
     # visible on the error row, whose whole job is to read cleanly beside the
     # outcome glyph. Every caller benefits (band model label, picker
     # descriptions, tool arguments), and the result is never WIDER than before.
-    return "".join(out).rstrip() + ellipsis
+    # Close any bidi isolate the cut left open (an Urdu status word projected by
+    # `_t_st`) BEFORE the ellipsis, so the rest of the row is not laid out
+    # inside it. Text without isolates is untouched.
+    head = "".join(out).rstrip()
+    depth = sum(head.count(c) for c in "\u2066\u2067\u2068") - head.count("\u2069")
+    return head + "\u2069" * max(0, depth) + ellipsis
 
 
 def compact_path(text: str) -> str:
@@ -916,12 +969,16 @@ def _send_summary(args: dict[str, object]) -> str:
 #: D6). Without it `switched`, `already on` and an `accepted` switch that can
 #: still fail all painted the same `✓` row, and only the expansion told them
 #: apart. Keyed by the tool result's ``details["outcome"]``.
-SWITCH_OUTCOME_WORDS: dict[str, str] = {
-    "switched": "switched",
-    "unchanged": "no change",
-    "pending": "pending",
-    "partial": "switched (error)",
-}
+#: A function rather than the old constant dict so the words follow a live
+#: language change; the dict KEYS are ``details["outcome"]`` tokens, not copy.
+def switch_outcome_words() -> dict[str, str]:
+    return {
+        "switched": _t_st(_ts.switch_switched()),
+        "unchanged": _t_st(_ts.switch_unchanged()),
+        "pending": _t_st(_ts.switch_pending()),
+        "partial": _t_st(_ts.switch_partial()),
+    }
+
 
 #: The collapsed-row word for a settled send whose delivery is honest but not
 #: whole (design note A.4's ``details.delivery.state``).
@@ -938,15 +995,23 @@ SWITCH_OUTCOME_WORDS: dict[str, str] = {
 #: buries it. ``wake unconfirmed`` rather than a bare ``unconfirmed`` on the
 #: mailbox arm because that is the fact that failed: the message is in the
 #: mailbox and the WAKE is what did not answer.
-DELIVERY_OUTCOME_WORDS: dict[str, str] = {
-    "mailbox": "wake unconfirmed",
-    # ``delivery unconfirmed``, not a bare ``unconfirmed`` (design round 1, D2 =
-    # UX round 1, U3): the residual sits beside the mailbox row and differs from
-    # it by one glyph and one dropped word, so the word has to say WHAT is
-    # unconfirmed -- the delivery, not the wake. It is also the word the desktop
-    # row and the model-facing copy already use.
-    "unconfirmed": "delivery unconfirmed",
-}
+#:
+#: Keyed for the same live-language reason as :func:`switch_outcome_words`. The
+#: desktop row ships the same two words as ``ui.chat.trace.send.delivery.
+#: {mailbox,unconfirmed}.word`` (local-operator-ui); the context sidecar points
+#: translators at them so one state reads the same on both surfaces. The
+#: model-facing copies in ``tools/builtin.py`` stay English by design.
+def delivery_outcome_words() -> dict[str, str]:
+    return {
+        "mailbox": _t_st(_ts.send_wake_unconfirmed()),
+        # ``delivery unconfirmed``, not a bare ``unconfirmed`` (design round 1,
+        # D2 = UX round 1, U3): the residual sits beside the mailbox row and
+        # differs from it by one glyph and one dropped word, so the word has to
+        # say WHAT is unconfirmed -- the delivery, not the wake. It is also the
+        # word the desktop row and the model-facing copy already use.
+        "unconfirmed": _t_st(_ts.send_delivery_unconfirmed()),
+    }
+
 
 #: The constant word a FAILED send's status cap leads with (design round 1, D3).
 #: ``failed`` is deliberately NOT in the table above: there the word REPLACES the
@@ -954,7 +1019,10 @@ DELIVERY_OUTCOME_WORDS: dict[str, str] = {
 #: on restating the target. On a failed row the cap is where the outcome belongs
 #: (the ``interrupted`` precedent), and this word is the same one the desktop row
 #: paints, so one state reads the same on both surfaces.
-SEND_NOT_DELIVERED_WORD = "not delivered"
+#: Desktop twin: ``ui.chat.trace.send.delivery.failed.word``.
+def send_not_delivered_word() -> str:
+    return _t_st(_ts.send_not_delivered())
+
 
 #: The prefix a SEND's result line opens with, which is what makes it eligible to
 #: be the expanded body's claimed lead (UX round 1, U1). A flag alone is not
@@ -982,10 +1050,11 @@ def _delivery_outcome_summary(summary: str, args: dict[str, object], details: ob
         marker = _scalar_text(peer_send_mode_label(args))
         prefix = f"{marker} · "
         rest = summary[len(prefix) :] if summary.startswith(prefix) else summary
-        return f"receipt reused · no new wake · {rest}"
+        reused, no_wake = _t_st(_ts.send_receipt_reused()), _t_st(_ts.send_no_new_wake())
+        return f"{reused} · {no_wake} · {rest}"
     delivery = details.get("delivery")
     state = delivery.get("state") if isinstance(delivery, Mapping) else None
-    word = DELIVERY_OUTCOME_WORDS.get(state) if isinstance(state, str) else None
+    word = delivery_outcome_words().get(state) if isinstance(state, str) else None
     if not word:
         return summary
     #: The legacy top-level flag, which is the REQUEST (see the nested payload's
@@ -1046,9 +1115,36 @@ def _failed_delivery_reason(details: object) -> str:
     return reason if isinstance(reason, str) else ""
 
 
-def _delivery_word_run(
-    summary: str, *, partial: bool, is_send: bool, marker: str
-) -> tuple[str, str, str]:
+def _send_outcome_codes(summary: str, args: dict[str, object], details: object) -> tuple[str, str]:
+    """The STABLE tokens of the outcome word a send row's summary leads with.
+
+    ``(delivery_state, switch_outcome)`` -- ``details`` tokens such as
+    ``"mailbox"`` or ``"partial"``, or ``""`` when that arm put no word on the
+    row. The paint-time readers (the no-double-word guard and the amber word run)
+    classify the row by THESE, never by matching the summary against the active
+    language's words: the summary may have been composed in another language, and
+    a localized word is copy, not a value to parse (review round 1, R1).
+
+    "Put a word on the row" is decided by running the very composers that build
+    the summary and seeing whether they changed it, so the eligibility rules
+    (the ``model · `` marker, the mode-marker prefix, duplicate suppression) live
+    in one place and cannot drift from this classifier. Both sides of each
+    comparison are built in the same call, in the same language.
+    """
+    if not isinstance(details, Mapping):
+        return "", ""
+    switched = _switch_outcome_summary(summary, details)
+    outcome = details.get("outcome")
+    switch_code = outcome if switched != summary and isinstance(outcome, str) else ""
+    if details.get("duplicate_suppressed") is True:
+        return "", switch_code
+    delivery = details.get("delivery")
+    state = delivery.get("state") if isinstance(delivery, Mapping) else None
+    applied = _delivery_outcome_summary(switched, args, details) != switched
+    return (state if applied and isinstance(state, str) else ""), switch_code
+
+
+def _delivery_word_run(summary: str, *, word: str, marker: str) -> tuple[str, str, str]:
     """Split a settled send summary into its delivery word and the rest.
 
     The word is the state's carrier on the collapsed row, and it was painted in
@@ -1060,22 +1156,24 @@ def _delivery_word_run(
     its own. An empty first element means "paint the whole summary as one run",
     which is every other tool and every send whose state carries no word.
     """
-    if not (partial and is_send):
+    # ``word`` is THIS row's word, chosen by the caller from the row's stored
+    # delivery-state token (``""`` = not a partial send, one run), in the same
+    # language the summary was composed in -- so locating it is splitting text
+    # this module built, never guessing which language's word it is (R1).
+    if not word:
         return "", "", summary
-    for word in DELIVERY_OUTCOME_WORDS.values():
-        prefix = f"{word} · "
-        if summary.startswith(prefix):
-            return "", prefix, summary[len(prefix) :]
-        # The PREFIXED form: the mode marker leads and the state word follows it
-        # (design round 1, N2), so the word is the middle run. The marker is
-        # THIS row's, asked of the same function that built the summary -- the
-        # first version enumerated ``quiet`` and therefore missed the ``now``
-        # marker a steer with ``wake=false`` carries, which painted the word in
-        # the summary's ink AND the ``Partial`` fallback beside it (agent review
-        # round 2, MINOR-1).
-        marker_prefix = f"{marker} · {prefix}" if marker else ""
-        if marker_prefix and summary.startswith(marker_prefix):
-            return f"{marker} · ", prefix, summary[len(marker_prefix) :]
+    prefix = f"{word} · "
+    if summary.startswith(prefix):
+        return "", prefix, summary[len(prefix) :]
+    # The PREFIXED form: the mode marker leads and the state word follows it
+    # (design round 1, N2), so the word is the middle run. The marker is THIS
+    # row's, asked of the same function that built the summary -- the first
+    # version enumerated ``quiet`` and therefore missed the ``now`` marker a
+    # steer with ``wake=false`` carries, which painted the word in the summary's
+    # ink AND the ``Partial`` fallback beside it (agent review round 2, MINOR-1).
+    marker_prefix = f"{marker} · {prefix}" if marker else ""
+    if marker_prefix and summary.startswith(marker_prefix):
+        return f"{marker} · ", prefix, summary[len(marker_prefix) :]
     return "", "", summary
 
 
@@ -1087,7 +1185,7 @@ def _switch_outcome_summary(summary: str, details: object) -> str:
     outcome keeps the argument summary unchanged.
     """
     outcome = details.get("outcome") if isinstance(details, Mapping) else None
-    word = SWITCH_OUTCOME_WORDS.get(outcome) if isinstance(outcome, str) else None
+    word = switch_outcome_words().get(outcome) if isinstance(outcome, str) else None
     if not word or not summary.startswith("model · "):
         return summary
     return f"{word} · {summary[len('model · '):]}"
@@ -1899,6 +1997,11 @@ class ToolCard(ExpandableActionBlock):
         self._frame_timer_ms: float = 0.0
         self._duration: float | None = None
         self._error: str = ""
+        #: Which keyed word stands in for an EMPTY error text (`error` for a
+        #: failed call, `not_run` for one that never started). A token, not the
+        #: word, so the fallback follows a live language change; read through
+        #: :meth:`_error_text`, never ``self._error`` directly.
+        self._error_fallback: str = "error"
         #: The word this card's ``interrupted`` state prints. Set by
         #: :meth:`mark_interrupted` from the turn's verdict — an involuntary
         #: cut-off earns ``cut off``, because ``interrupted`` is now reserved for
@@ -1907,6 +2010,9 @@ class ToolCard(ExpandableActionBlock):
         #: removed (design review round 1, D2). Defaulted to the historical word
         #: because every other route into this state (a replayed row with no
         #: result, a viewer teardown that knows no verdict) still means it.
+        #: Stored as a STATE TOKEN (`interrupted` / `cut_off`), resolved to the
+        #: keyed word only at paint time (:func:`_interrupt_word`), so a live
+        #: language change repaints a settled row too.
         self._interrupt_label: str = "interrupted"
         #: When THIS card's execution began, or ``None`` when the card cannot
         #: know. ``None`` is the replay case and it is not a missing value to
@@ -2058,6 +2164,19 @@ class ToolCard(ExpandableActionBlock):
         #: it from the structured payload is what keeps the card from parsing the
         #: result prose.
         self._delivery_failed_reason = ""
+        #: The stable outcome tokens the send row's summary leads with (see
+        #: :func:`_send_outcome_codes`): ``details.delivery.state`` and
+        #: ``details.outcome``, ``""`` when that arm put no word on the row.
+        self._send_delivery_code = ""
+        self._send_switch_code = ""
+        #: What the settled send summary was composed FROM, the summary it
+        #: produced and the language it was produced in. The summary carries
+        #: keyed words, so a language change recomposes it from these inputs
+        #: (:meth:`_refresh_localized_summary`) -- the summary twin of
+        #: :meth:`_refresh_localized_output` (review round 1, R1).
+        self._send_summary_details: object = None
+        self._send_summary_built = ""
+        self._send_summary_locale = ""
         #: True when the result came back from a call that ran on a FRESH kernel
         #: after a reset (``details["kernel_reset"]``, set by ``tools/eval.py``
         #: only for a call that really ran). Read by the COLLAPSED row the way
@@ -2188,7 +2307,8 @@ class ToolCard(ExpandableActionBlock):
             self._duration = parse_duration(measured_s)
         self._set_peer_cycle_communication(None)
         self._state = "error"
-        self._error = _strip_control_sequences(" ".join(error.split())) or "error"
+        self._error = _strip_control_sequences(" ".join(error.split()))
+        self._error_fallback = "error"
         self._absorb_result(result_text or error, details)
         self.remove_class("tool-running")
         self.add_class("tool-error")
@@ -2313,7 +2433,8 @@ class ToolCard(ExpandableActionBlock):
             self.remove_class("tool-running", "tool-error")
             self.add_class("tool-interrupted")
         else:
-            self._error = _strip_control_sequences(" ".join((reason or "").split())) or "not run"
+            self._error = _strip_control_sequences(" ".join((reason or "").split()))
+            self._error_fallback = "not_run"
             self._state = "error"
             self.remove_class("tool-running")
             self.add_class("tool-error")
@@ -2419,7 +2540,7 @@ class ToolCard(ExpandableActionBlock):
             self._absorb_result(reason, None)
         self._set_peer_cycle_communication(None)
         self._state = "interrupted"
-        self._interrupt_label = "cut off" if cut_off else "interrupted"
+        self._interrupt_label = "cut_off" if cut_off else "interrupted"
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
         self._refresh_row()
@@ -2633,7 +2754,8 @@ class ToolCard(ExpandableActionBlock):
             return
         self.remove_class("tool-running")
         if state == "error":
-            self._error = _strip_control_sequences(" ".join(error.split())) or "error"
+            self._error = _strip_control_sequences(" ".join(error.split()))
+            self._error_fallback = "error"
             self._absorb_result(result_text or error, details)
             self.add_class("tool-error")
         elif state == "interrupted":
@@ -3313,13 +3435,8 @@ class ToolCard(ExpandableActionBlock):
             # delivery word wins over the model-switch one: one result cannot be
             # both, and reading the nested delivery state first is what keeps a
             # future switch arm from claiming a send row.
-            self._summary = _delivery_outcome_summary(
-                _switch_outcome_summary(
-                    _strip_control_sequences(_summary_from_args("send", self._args)), details
-                ),
-                self._args,
-                details,
-            )
+            self._send_summary_details = details
+            self._compose_send_summary()
         # Reset per result, with the fetch flags below and for the same reason: a
         # card is written once, but a rebuilt card must never inherit the previous
         # body's partial state.
@@ -3473,6 +3590,33 @@ class ToolCard(ExpandableActionBlock):
             (result_text, details) if (search_output or fetch_output) else None
         )
         self._output_locale = active_locale()
+
+    def _compose_send_summary(self) -> None:
+        """Build the settled send row's summary, in the active language."""
+        details = self._send_summary_details
+        base = _strip_control_sequences(_summary_from_args("send", self._args))
+        self._summary = _delivery_outcome_summary(
+            _switch_outcome_summary(base, details), self._args, details
+        )
+        self._send_delivery_code, self._send_switch_code = _send_outcome_codes(
+            base, self._args, details
+        )
+        self._send_summary_built = self._summary
+        self._send_summary_locale = active_locale()
+
+    def _refresh_localized_summary(self) -> None:
+        """Recompose a settled send summary when the language changed since.
+
+        Only the summary THIS card composed: a later writer (a bridge or
+        compose path rewriting ``_summary``) owns its own text and is left as is.
+        """
+        if (
+            self._is_send
+            and self._send_summary_built
+            and self._summary == self._send_summary_built
+            and self._send_summary_locale != active_locale()
+        ):
+            self._compose_send_summary()
 
     def _refresh_localized_output(self) -> None:
         """Recompose structured result rows when the language changed since."""
@@ -4282,12 +4426,18 @@ class ToolCard(ExpandableActionBlock):
         indent = " " * OUTPUT_INDENT
         view = self._imagegen_live or imagegen_mod.ImagegenLive()
         word = imagegen_mod.imagegen_state_word(self._state, view.state)
-        # The queued row already says `queued` in its status cell (`QUEUED_LABEL`),
+        # The queued row already says `queued` in its status cell (`queued_label`),
         # and repainting it here is the double-print class this repo polices
         # (design round 1, D4). The line is skipped exactly when it would only
         # repeat that cell — a provider interim, a running elapsed or the
         # cancelling word all add something and keep it.
-        repeats_status = self._state == "queued" and word == QUEUED_LABEL
+        # Both spellings: the cell's word is keyed, while `imagegen`'s own state
+        # word is a separate (still English) slice, so equality with the cell
+        # alone would stop matching the moment a language is chosen.
+        repeats_status = self._state == "queued" and word in (
+            imagegen_mod.STATE_QUEUED,
+            queued_label(),
+        )
         if word is not None and not repeats_status:
             header = f"⋯ {word}"
             # Elapsed only for a RUNNING card: a queued call has not started,
@@ -4505,7 +4655,7 @@ class ToolCard(ExpandableActionBlock):
             return ""
         head = self._output[0]
         collapsed = " ".join(head.split())
-        reason = self._error.strip()
+        reason = self._error_text().strip()
         if not collapsed or not reason:
             return ""
         if collapsed != reason and not reason.startswith(f"{collapsed} "):
@@ -4523,7 +4673,12 @@ class ToolCard(ExpandableActionBlock):
         """
         if self.tool_name.lower() != "send":
             return False
-        words = (*SWITCH_OUTCOME_WORDS.values(), *DELIVERY_OUTCOME_WORDS.values())
+        # Classified by the stored tokens, not by matching the summary against
+        # the active language's words (review round 1, R1).
+        if self._is_send and self._send_summary_built and self._summary == self._send_summary_built:
+            return bool(self._send_delivery_code or self._send_switch_code)
+        delivery_words = delivery_outcome_words().values()
+        words = (*switch_outcome_words().values(), *delivery_words)
         prefixes = [f"{word} · " for word in words]
         # A send that asked for no turn carries its mode marker IN FRONT of the
         # word (``_delivery_outcome_summary``, design round 1 N2), and that form
@@ -4534,10 +4689,14 @@ class ToolCard(ExpandableActionBlock):
         # ``wake=false`` reads ``now · delivery unconfirmed · …`` (agent review
         # round 2, MINOR-1).
         if self._send_mode_marker:
-            prefixes += [
-                f"{self._send_mode_marker} · {word} · " for word in DELIVERY_OUTCOME_WORDS.values()
-            ]
+            prefixes += [f"{self._send_mode_marker} · {word} · " for word in delivery_words]
         return self._summary.startswith(tuple(prefixes))
+
+    def _error_text(self) -> str:
+        """The error reason the row paints: the call's own text, else the keyed fallback word."""
+        if self._error:
+            return self._error
+        return _t_st(_ts.not_run() if self._error_fallback == "not_run" else _ts.error())
 
     def _stop_pending_reason(self) -> str:
         """The stop receipt's own line when the stop was not confirmed.
@@ -4631,7 +4790,7 @@ class ToolCard(ExpandableActionBlock):
         """
         if not self._delivery_failed_reason:
             return ""
-        return f"{SEND_NOT_DELIVERED_WORD}: {self._delivery_failed_reason}"
+        return f"{send_not_delivered_word()}: {self._delivery_failed_reason}"
 
     def _promoted_lead(self) -> str:
         """The lead line the collapsed row claims, whichever state owns it."""
@@ -5347,6 +5506,9 @@ class ToolCard(ExpandableActionBlock):
 
     def _build_row(self, width: int) -> Text:
         """The single summary row — the ONE-LINE guarantee lives here."""
+        # Before any read of `_summary` this frame: a settled send row composed
+        # in another language repaints in the active one (review round 1, R1).
+        self._refresh_localized_summary()
         dim = bindings.style("tool.row.dim")
         # See `bindings.BY_ELEMENT["tool.row.name_running"].note` for the
         # two-step fade this implements. `queued` is live but not executing, and
@@ -5591,11 +5753,13 @@ class ToolCard(ExpandableActionBlock):
             row.append(row_chip, style=bindings.style(chip_element))
         # The state word leads the summary and takes the amber ink on its own run
         # (design round 1, D4); every other summary is one run.
+        state_word = (
+            delivery_outcome_words().get(self._send_delivery_code, "")
+            if self._partial and self._is_send and self._send_delivery_code
+            else ""
+        )
         before, word_run, rest = _delivery_word_run(
-            summary,
-            partial=self._partial,
-            is_send=self._is_send,
-            marker=self._send_mode_marker,
+            summary, word=state_word, marker=self._send_mode_marker
         )
         if word_run:
             if before:
@@ -5681,7 +5845,10 @@ class ToolCard(ExpandableActionBlock):
             # A pending approval is not an interruption or an execution clock.
             # At very narrow widths omit the label, never replace it with an
             # outcome glyph that falsely says the tool completed.
-            text = "waiting" if not cap or cap >= len("waiting") else ""
+            # Measured in terminal CELLS: a translated word may be wide (CJK),
+            # and `len` would let it overrun the cap it was checked against.
+            word = _t_st(_ts.waiting())
+            text = word if not cap or cap >= cell_len(word) else ""
             return [(text, bindings.style("tool.status.running_duration"))]
         if self._state == "queued":
             # Announced, dictated, not started. The state word is the whole
@@ -5692,7 +5859,8 @@ class ToolCard(ExpandableActionBlock):
             # answer before (see `mark_queued`). Shed whole below its width,
             # never truncated into a meaningless fragment — and never replaced
             # by an outcome glyph, which would claim the call completed.
-            text = QUEUED_LABEL if not cap or cap >= len(QUEUED_LABEL) else ""
+            word = queued_label()
+            text = word if not cap or cap >= cell_len(word) else ""
             return [(text, bindings.style("tool.status.running_duration"))]
         if self._state == "composing":
             # Nothing has RUN, so there is no execution time to report. The
@@ -5747,7 +5915,8 @@ class ToolCard(ExpandableActionBlock):
             # would falsely claim the tool completed.
             elapsed = self._elapsed()
             if elapsed is None:
-                text = RUNNING_LABEL if not cap or cap >= len(RUNNING_LABEL) else ""
+                word = running_label()
+                text = word if not cap or cap >= cell_len(word) else ""
                 return [(text, dim)]
             text = format_duration(max(0, int(elapsed)))
             return [("  ", dim), (text.rjust(DURATION_COL), dim)]
@@ -5898,7 +6067,7 @@ class ToolCard(ExpandableActionBlock):
                 # does not: the flag is what says the RESULT is partial, so the row
                 # must be able to state that even where there is no disclosure
                 # sentence to promote (design review round 2, D2-3).
-                reason = self._partial_reason() or _PARTIAL_LABEL
+                reason = self._partial_reason() or _partial_label()
                 if self._switch_row_names_its_outcome():
                     # A model switch that took but raised afterwards: the row
                     # already leads with `switched (error)`, and "Partial" would
@@ -5917,7 +6086,7 @@ class ToolCard(ExpandableActionBlock):
                 # cannot show the note still names the state. Nothing here claims
                 # the call failed: it is a fact about the session it ran on.
                 glyph = ICON_SUCCESS
-                reason = self._reset_reason() or _RESET_LABEL
+                reason = self._reset_reason() or _reset_label()
                 tint = bindings.style("tool.status.partial_glyph")
                 abbreviates = True
         elif self._state == "interrupted":
@@ -5927,13 +6096,14 @@ class ToolCard(ExpandableActionBlock):
             # `surface` — under the 4.5:1 text floor — and the word is the
             # state's carrier, so it takes `muted` (7.93:1) while the ⊘ keeps
             # `dim` (the 3:1 icon floor).
-            glyph, reason = ICON_INTERRUPTED, self._interrupt_label
+            glyph, reason = ICON_INTERRUPTED, _interrupt_word(self._interrupt_label)
             tint = bindings.style("tool.status.interrupted")
             word_tint = bindings.style("tool.status.interrupted_word")
             abbreviates = False
         else:
             danger = bindings.style("tool.status.error_glyph")
-            glyph, reason, tint = ICON_ERROR, self._send_failed_reason() or self._error, danger
+            reason = self._send_failed_reason() or self._error_text()
+            glyph, tint = ICON_ERROR, danger
             if self._bridge_word:
                 # `refused · not_permitted` beats the tool's own sentence in a
                 # cap a third of the row wide: the code is what an operator
@@ -5992,16 +6162,48 @@ class ToolCard(ExpandableActionBlock):
 #: ``from tool_card import EXPAND_HINT`` gets the active language rather than
 #: the English captured at import. A module-level import still freezes the value
 #: of the moment it ran — prefer the functions in new code.
-_LEGACY_COPY = {
+_LEGACY_COPY: dict[str, Callable[[], str | dict[str, str]]] = {
     "EXPAND_HINT": expand_hint,
     "COLLAPSE_HINT": collapse_hint,
     "IMAGE_INTERRUPT_HINT": image_interrupt_hint,
     "LIVE_HEADER_RUNNING": live_header_running,
     "LIVE_HEADER_PENDING": live_header_pending,
+    # `tui.tool_card.status` (status words). `DELIVERY_OUTCOME_WORDS` is read
+    # by the mobile parity test; the rest by tests only.
+    "RUNNING_LABEL": running_label,
+    "QUEUED_LABEL": queued_label,
+    "_PARTIAL_LABEL": _partial_label,
+    "_RESET_LABEL": _reset_label,
+    "SEND_NOT_DELIVERED_WORD": send_not_delivered_word,
+    "DELIVERY_OUTCOME_WORDS": delivery_outcome_words,
+    "SWITCH_OUTCOME_WORDS": switch_outcome_words,
 }
 
 
-def __getattr__(name: str) -> str:
+# Type checkers resolve a module's missing attribute through `__getattr__`'s
+# return type, so a single union (str for the labels, dict for the two outcome
+# maps) would make every `EXPAND_HINT` read `str | dict` and break callers that
+# measure it with `cell_len`. Declaring each legacy name with its exact type
+# here gives importers the precise type; the bare annotations bind nothing at
+# runtime (and sit under TYPE_CHECKING besides), so PEP 562 still resolves the
+# live, active-language value on every access. Keep this list in step with
+# `_LEGACY_COPY`.
+if TYPE_CHECKING:
+    EXPAND_HINT: str
+    COLLAPSE_HINT: str
+    IMAGE_INTERRUPT_HINT: str
+    LIVE_HEADER_RUNNING: str
+    LIVE_HEADER_PENDING: str
+    RUNNING_LABEL: str
+    QUEUED_LABEL: str
+    _PARTIAL_LABEL: str
+    _RESET_LABEL: str
+    SEND_NOT_DELIVERED_WORD: str
+    DELIVERY_OUTCOME_WORDS: dict[str, str]
+    SWITCH_OUTCOME_WORDS: dict[str, str]
+
+
+def __getattr__(name: str) -> str | dict[str, str]:
     try:
         return _LEGACY_COPY[name]()
     except KeyError:

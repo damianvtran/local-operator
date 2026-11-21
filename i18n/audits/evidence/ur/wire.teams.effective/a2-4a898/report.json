@@ -1,0 +1,34 @@
+{
+  "locale": "ur",
+  "namespace": "wire.teams.effective",
+  "audit_pass": "Second independent instance, all nine keys assessed anew",
+  "audit_date": "2026-11-19",
+  "auditor": {"agent":"i18n-auditor","session":"4a898e257f9c","model":"openai/gpt-6.1-sol","actual_model_source":"Host session Model declaration","fallback":"none used","independent_from_translator_session":"8dce6c4d11c0","independent_from_first_auditor_session":"da45f1eea614"},
+  "assessment_order": "English source/context and Urdu target read and independently assessed before opening first auditor receipt. This report's linguistic verdict was written before that receipt was read.",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "per_key": [
+    {"key":"wire.teams.effective.team_missing","status":"passed","reason":"{role} نام کی کوئی ٹیم correctly treats the opaque placeholder as a team name, not a translated role. Feminine ملی agrees with ٹیم. No launch implication or missing-name omission."},
+    {"key":"wire.teams.effective.registry_unreadable","status":"passed","reason":"رجسٹری پڑھی نہیں جا سکی preserves read failure without inventing corruption or a file path. ایجنٹ کی تعریفیں دیکھیں اور دوبارہ کوشش کریں gives both original remedies in respectful imperative."},
+    {"key":"wire.teams.effective.config_unreadable","status":"passed","reason":"ماڈل کی ترتیبات is idiomatic configuration prose; plural feminine پڑھی نہیں جا سکیں agrees with ترتیبات. Inspection and retry remain explicit; no exposed exception details."},
+    {"key":"wire.teams.effective.tier_invalid_value","status":"passed","reason":"درج قدر درست نہیں marks invalidity, not missing configuration. The two permitted alternatives remain selector string or mapping object. میپنگ is ordinary technical Urdu here, not a geographical map. subagents.models.{tier} and provider/model remain literal."},
+    {"key":"wire.teams.effective.tier_invalid_mapping","status":"passed","reason":"model میں ... درج کریں is an unconditional required model assignment. اور، اگر چاہیں، effort میں ... درج کریں makes only effort optional. استدلال کی کوئی معاونت یافتہ سطح preserves supported reasoning effort rather than arbitrary effort; slight formal technical register is acceptable. Mapping and selector wording is consistent."},
+    {"key":"wire.teams.effective.tier_unconfigured","status":"passed","reason":"کوئی ماڈل مقرر نہیں ہے correctly denotes absence of configured model, distinct from invalid value. The full config path and tier placeholder are preserved."},
+    {"key":"wire.teams.effective.tier_invalid_selector","status":"passed","reason":"ماڈل منتخب کرنے کی عبارت correctly names the selector, and provider/model کی شکل استعمال کریں is an actionable respectful format remedy. Does not echo the invalid raw value."},
+    {"key":"wire.teams.effective.model_unresolvable","status":"passed","reason":"ماڈل {selector} کا تعین نہیں ہو سکا conveys inability to resolve the selected model without pretending it is a network error or absent file. Both selector and provider-configuration checks remain; فراہم کنندہ is suitable native terminology."},
+    {"key":"wire.teams.effective.unavailable","status":"passed","reason":"ٹیم کا یہ رکن دستیاب نہیں is native present-state wording. اس کے ... دیکھیں refers naturally to this member and retains both model configuration and agent definition. No claim of launch or execution."}
+  ],
+  "cross_key": {
+    "accuracy_safety":"No missing negation, wrong subject, unsafe/destructive instruction or added diagnostic specificity.",
+    "grammar_register":"Respectful دیکھیں، کریں، درج کریں، استعمال کریں throughout. Urdu rather than Hindi vocabulary; no padding honorifics or exclamation marks. Loanwords ماڈل، ایجنٹ، ٹیم، رجسٹری، میپنگ fit the developer-facing configuration context.",
+    "terminology":"Glossary ماڈل، ایجنٹ، ٹیم respected. Selector wording ماڈل منتخب کرنے کی عبارت is consistent. model and effort are Latin only as explicit config keys.",
+    "fit":"Context specifies natural wrapping and no fixed cell-width cap for every key. No maxCells/maxChars present. Long mapping remedy requires wrapping; no evidenced overflow finding. Native Arabic joining, ligatures and font-dependent widths cannot be certified by character counts.",
+    "rtl":"Logical-order Urdu prose is correct; Latin identifiers/path/placeholder tokens retain original bytes and adjacency. No manual bidi controls. Embedded provider/model, config paths and opaque role/selector values need actual client isolation/rendering review; no rendered visual or runtime-boundary proof is claimed.",
+    "mechanical":"Independent normal check.py --catalogues-only admission on scratch fixture: zero problems. Separate duplicate-key JSON, exact nine-key set/order, placeholder/token/bidi and frozen hash checks passed. Source and target contain no ICU plural/select; CLDR branch obligations do not arise. No markup/backtick code is present. See mechanical.json and actual audit.log."
+  },
+  "evidence_classification": "This report is audit_notes_not_execution_log. audit.log contains actual validator stdout; no notes are runtime evidence.",
+  "evidence_limits": {"pseudo":"not performed","fallback":"not performed","runtime_boundary":"not exercised","mixed_direction_visual":"not performed","rendered_fit":"not performed","inherited_proof":"none used","scope":"linguistic and catalogue mechanical audit only; not shipping/client RTL approval"},
+  "authority_resolution":"Requested guide://i18n/coreHOWTO+Urduglossary was unavailable. Read guide://i18n, frozen docs/I18N.md, docs/design/i18n.md receipt contract, i18n/style-guides/ur.md and i18n/glossary.md instead. No MT/translation service used.",
+  "retention":"Explicit scratch-only assignment: no repository edits, ledger apply, PR, build, installation or server. Coordinator must preserve this bundle under canonical tracked i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/ before claiming durable tracked retention."
+}

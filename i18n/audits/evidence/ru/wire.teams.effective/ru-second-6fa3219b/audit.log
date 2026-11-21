@@ -1,0 +1,16 @@
+$ /Users/damian/local-operator/.venv/bin/python validate.py /Users/damian/local-operator/.worktrees/i18n-effective-reasons /Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/fixture/catalogues
+Repository check.check_catalogues() scoped to exact en/context/ru bytes: []
+wire.teams.effective.team_missing arguments/types= (('role', 'simple'),) PARITY PASS
+wire.teams.effective.registry_unreadable arguments/types= () PARITY PASS
+wire.teams.effective.config_unreadable arguments/types= () PARITY PASS
+wire.teams.effective.tier_invalid_value arguments/types= (('tier', 'simple'),) PARITY PASS
+wire.teams.effective.tier_invalid_mapping arguments/types= (('tier', 'simple'),) PARITY PASS
+wire.teams.effective.tier_unconfigured arguments/types= (('tier', 'simple'),) PARITY PASS
+wire.teams.effective.tier_invalid_selector arguments/types= (('tier', 'simple'),) PARITY PASS
+wire.teams.effective.model_unresolvable arguments/types= (('selector', 'simple'),) PARITY PASS
+wire.teams.effective.unavailable arguments/types= () PARITY PASS
+9 keys; token/backtick parity; no plural/select; no embedded bidi controls: PASS
+
+exit_code=0
+
+Independent Python assertions (executed in persistent eval): duplicate-member rejection on en/context/ru PASS; exact model/effort tokens PASS; literal opaque Research/QA-42 and vendor/model-x substitution checks PASS (string-only, not runtime/client proof).

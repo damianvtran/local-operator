@@ -363,7 +363,12 @@ def test_a_grant_opens_the_move_op_on_an_already_open_link(
     blocked it before)."""
     server_a, server_b, host, port = devices
     record, _host, _port = _pair(devices, monkeypatch, role="drive")
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     try:
         frame = {"op": "net_session_move", "phase": "status", "locality": "remote"}
@@ -504,7 +509,11 @@ def test_a_peer_table_never_brings_a_receiver_local_grant() -> None:
         added_via="invite",
     ).to_json()
 
-    changed, added = relay.adopt_members(record, [row], sender_device_id=admin, allow_new=True)
+    # Verified supplier: an unverified one is refused outright, which would make the
+    # "no receiver-local grant" check pass vacuously; this is about a VERIFIED admin's table.
+    changed, added = relay.adopt_members(
+        record, [row], sender_device_id=admin, allow_new=True, supplier_verified=True
+    )
 
     assert changed and added == [newcomer]
     adopted = record.member(newcomer)
@@ -788,7 +797,12 @@ def test_the_onboarding_grant_opens_a_full_auto_create_on_an_already_open_link(
         fresh.self_role = "drive"
         fresh.self_capabilities = sorted(types.capabilities_for_role("drive"))
         store.save(fresh, server_a.root)
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     try:
         frame = {"op": "net_session_create", "req": 71, "cwd": "", "yolo": True}

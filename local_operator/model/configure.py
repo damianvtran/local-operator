@@ -83,6 +83,11 @@ from local_operator.session.request_observation import (
 
 logger = logging.getLogger("local_operator.model.configure")
 
+#: Quota-latch token of the one-shot "sign in again" notice
+#: (``SessionStreamFn._announce_sign_in_required``); discarded when the route
+#: returns to the primary so a later expiry in the same session re-announces.
+SIGN_IN_REQUIRED_TOKEN = "auth:sign-in-required"
+
 if TYPE_CHECKING:
     # Import-time cost only for type checkers: the listing clients pull in the
     # whole requests/provider surface, and this module is on the CLI startup
@@ -5783,6 +5788,54 @@ class SessionStreamFn:
     async def _on_route_change(self, target: Any, reason: str) -> None:
         effort = f" ({target.effort} effort)" if target.effort else ""
         await self._notice(f"{reason} — falling back to {target.selector}{effort}")
+        # On EVERY route change, not only when ``reason`` reads ``auth``: the
+        # reason names the walk's highest-ranked error, and quota outranks auth,
+        # so a dead primary followed by a hop answering 429 settles as "quota"
+        # and would hide the one remedy. The announce checks the store's own
+        # dead-grant verdict itself and dedupes on its latch token, so a live
+        # primary stays silent and a multi-hop walk still speaks once.
+        await self._announce_sign_in_required()
+
+    async def _announce_sign_in_required(self) -> None:
+        """Tell the user ONCE, in their language, that the primary needs a sign-in.
+
+        The fallback line above only says ``provider failure: auth``. When the
+        primary's every stored login is a grant its IdP refused for good (a dead
+        refresh token, or Google Cloud session control forcing a Vertex sign-in
+        to expire), that is not a failure the user can wait out, and the turn
+        silently serving from another model is exactly what made the expired
+        Vertex sign-in look like a quota problem. So the exact next step is
+        named here, from the store's persisted verdict (no refresh is sent).
+
+        Deduped through the quota latch on its own ``auth:`` token, so a sticky
+        fallback does not repeat it every message; the route returning to the
+        primary (``_on_route_settle``) discards the token, so a real recurrence
+        later in the same session announces again. Never fails the turn: a
+        notice is advisory.
+        """
+        primary = self._primary_selector
+        if not primary:
+            return
+        provider = primary.split("/", 1)[0]
+        try:
+            from local_operator.i18n.resolve import resolve_language
+            from local_operator.providers.failover import (
+                dead_grant_reason,
+                sign_in_required_text,
+            )
+
+            dead, cause = await asyncio.to_thread(dead_grant_reason, self._auth_store, provider)
+            if not dead:
+                return
+            # The CONFIGURED language, not ``text.active_locale``: only the TUI
+            # moves the process locale live, and this also runs in `serve` and
+            # `lop exec` (see ``messages.render_resolved``).
+            # ``display=True``: this is the copy a person reads, so the two
+            # commands are kept whole in an RTL (Urdu) paragraph.
+            text = sign_in_required_text(provider, cause, locale=resolve_language(), display=True)
+            await self._announce_quota_change(primary, SIGN_IN_REQUIRED_TOKEN, text)
+        except Exception as exc:  # noqa: BLE001 - a notice must never fail the turn
+            logger.debug("sign-in notice failed (%s)", type(exc).__name__)
 
     async def _on_route_settle(self, target: Any, reason: str) -> None:
         """Forward the effective-route edge (fallback pinned / primary back)."""
@@ -5794,6 +5847,16 @@ class SessionStreamFn:
             # "back to" — the failure edge's "falling back to" and this pair
             # off the same preposition (design D1).
             await self._notice(f"back to {self._primary_selector}", "info")
+            # Re-arm the sign-in notice. Its latch token is otherwise cleared
+            # only by a healthy usage reading, and providers without a usage
+            # fetcher (google-vertex) never produce one, so the NEXT expiry in
+            # this same long-lived session (Workspace session control repeats
+            # every 1-24 h) would fall back with no "sign in again" at all.
+            # The primary serving again is the proof the sign-in was repaired.
+            primary = self._primary_selector
+            announced = self._last_quota_state.get(primary) if primary else None
+            if announced is not None:
+                announced.discard(SIGN_IN_REQUIRED_TOKEN)
         if self._route_handler is None:
             return
         result = self._route_handler(target, reason)
@@ -8348,6 +8411,7 @@ class SessionStreamFn:
         try:
             from local_operator.providers.clients import (
                 ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK,
+                GOOGLE_CACHE_DIAGNOSIS_NO_BREAK,
             )
 
             if (
@@ -8357,6 +8421,10 @@ class SessionStreamFn:
             ):
                 return
             if provider in ("google", "google-vertex"):
+                if miss_type in GOOGLE_CACHE_DIAGNOSIS_NO_BREAK:
+                    # Includes ``unchanged_block_tail``: a healthy read short
+                    # by Google's block granularity is never a break.
+                    return
                 # Google includes cache reads in input and reports no writes.
                 # A large NEW suffix is not a lost cache prefix: require both
                 # locally diagnosed loss and actual uncached input to qualify.
@@ -8398,6 +8466,11 @@ class SessionStreamFn:
         if self._closed:
             return
         self._closed = True
+        # This stream fn's Google comparison chain can never be used again;
+        # evict it now instead of leaving it to the module-level LRU bound.
+        from local_operator.providers.clients import forget_google_cache_chain
+
+        forget_google_cache_chain(self._cache_diagnostics_chain)
         self._transport.owners -= 1
         if self._transport.owners == 0:
             await self._http.aclose()

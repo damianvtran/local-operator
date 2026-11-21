@@ -1,0 +1,30 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "e3f89fb6164f30c9627638f4663adc6a64af26f6103b9b9e1dc35d78b1777558",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "fallback": "unknown; identity supplied in delegation, not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor/status-audit-zh-CN",
+    "session": "ab5f0ac80cb5",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "none observed",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "keys_read": 18,
+  "findings": [],
+  "note": "Independent full read of all 18 English and Chinese values and context notes, with glossary and zh-CN style guide. Accuracy, idiom, terse register, terminology, placeholder/ICU/markup integrity, Latin and bidi checked. running=运行中 (executing); waiting=待批准 (approval); session_reset=会话已重置 (not a new session); cut_off=意外中止 distinguishes involuntary cutoff from 已中断. All declared maxCells pass using rich.cells.cell_len; running/queued/waiting each 6/7 cells. runtime.message_arguments and render_message checked for all 18 with the repository .venv Python and worktree PYTHONPATH; no parameters/plurals/markup in this namespace. tool_card.py running_label/_status_runs, outcome reason slot and send/model outcome consumers inspected. Exact shipped desktop matches at origin/main 373c82426889982335585786e56b5f8a22464b99: ui.chat.trace.send.delivery.failed.word=未送达, mailbox.word=唤醒未确认, unconfirmed.word=送达未确认; ui.chat.canonical.tool_row.outcome.interrupted=已中断, never_ran=未运行. Parent en/tui.tool_card.json read, but zh-CN/tui.tool_card.json is absent (confirmed filesystem and git tracked paths), so same-locale parent comparison unavailable; no full-interface localization approval implied. No rendered terminal screenshot claimed. Source checkout HEAD 66c87c0755e264db07ea375c67242cffbe302bc0; target new/untracked. Translator identity is delegation-sourced; actual auditor model above. No repository modifications."
+}

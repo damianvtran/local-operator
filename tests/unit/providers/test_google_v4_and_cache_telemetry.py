@@ -53,6 +53,10 @@ def _isolated_prefixes():
             "gemini-5-pro",
             "gemini-10-ultra",
             "google/gemini-4-neon",
+            # Vertex version suffixes (PR #4340 review #3).
+            "gemini-4@001",
+            "gemini-4-neon@default",
+            "publishers/google/models/gemini-3@002",
         )
     ]
     + [
@@ -63,6 +67,7 @@ def _isolated_prefixes():
             "gemini-exp-1206",
             "gemma-3-27b",
             "xgemini-4",
+            "gemini-2@001",
         )
     ],
 )
@@ -176,10 +181,17 @@ async def test_multi_turn_prefix_diagnosis(provider: str) -> None:
         await check("evicted_or_rerouted", 30_000)
         cached = 20_000
         await check("partial_eviction", 10_000)
-        cached = 27_952  # 2048-token tolerance, inclusive
+        # PR #4340 QA Q-O1: a healthy Vertex append reads back up to exactly
+        # 2049 tokens short of the previous prompt (one block tail). That is a
+        # non-break label with honest missed tokens; one token more is not.
+        cached = 29_287  # 713 short, the smallest live shortfall
+        await check("unchanged_block_tail", 713)
+        cached = 27_951  # exactly 2049 short, the recurring live shape
+        await check("unchanged_block_tail", 2049)
+        cached = 27_950
+        await check("partial_eviction", 2050)
+        cached = 30_001  # Vertex's warm read is prev_prompt + 1
         await check("unchanged", 0)
-        cached = 27_951
-        await check("partial_eviction", 2049)
         prompt = 1000
         cached = 0
         await check("evicted_or_rerouted", 30_000)
@@ -348,6 +360,7 @@ async def test_real_configure_records_sqlite_silently(
         ("unchanged", 30_000, 0, False),
         ("pending", 30_000, 0, False),
         ("partial_eviction", 30_000, 0, False),
+        ("unchanged_block_tail", 30_000, 0, False),
     ],
 )
 def test_google_log_gate(
@@ -451,3 +464,64 @@ def test_long_tool_argument_elision_keeps_a_signature(model_id: str) -> None:
     call_part = body["contents"][1]["parts"][0]
     assert "functionCall" in call_part
     assert call_part.get("thoughtSignature") == "skip_thought_signature_validator"
+
+
+@pytest.mark.parametrize("broken", ["_google_prefix_snapshot", "_google_cache_diagnosis"])
+@pytest.mark.asyncio
+async def test_telemetry_failure_never_fails_the_turn(monkeypatch, broken: str) -> None:
+    """PR #4340 review #1: a raising hash or classifier loses only the diagnosis."""
+
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("synthetic telemetry bug")
+
+    monkeypatch.setattr(clients, broken, boom)
+    handler = lambda _request: httpx.Response(200, content=_sse())  # noqa: E731
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        events = [
+            e async for e in GoogleClient(http_client=http).stream(_request(), "synthetic-key")
+        ]
+    end = next(event for event in events if isinstance(event, StreamEndEvent))
+    assert end.error is None and end.stop_reason == "stop"
+    assert end.usage is not None and end.usage.input_tokens == 30_000
+    assert (end.cache_miss_type, end.cache_missed_tokens) == (None, 0)
+    assert not clients._GOOGLE_PREFIX_SNAPSHOTS, "no telemetry may be recorded"
+
+
+@pytest.mark.asyncio
+async def test_close_evicts_only_its_own_chain(tmp_path, monkeypatch) -> None:
+    """PR #4340 review #2: a closed stream fn's snapshots leave the module store."""
+    from local_operator import analytics
+
+    monkeypatch.setattr(analytics, "record_call", lambda _snapshot: None)
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("google", {"key": "synthetic-key", "source": "login"})
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_sse()))
+    )
+    stream = create_stream_fn(store, {}, session_id="synthetic-parent", http_client=http)
+    fork = stream.fork("synthetic-child")
+    request = _request(cache_diagnostics=False, cache_diagnostics_chain=None)
+    try:
+        for fn in (stream, fork):
+            [event async for event in fn(request, None)]
+        chains = {key[0] for key in clients._GOOGLE_PREFIX_SNAPSHOTS}
+        assert chains == {stream._cache_diagnostics_chain, fork._cache_diagnostics_chain}
+        await fork.close()
+        assert {key[0] for key in clients._GOOGLE_PREFIX_SNAPSHOTS} == {
+            stream._cache_diagnostics_chain
+        }
+        await fork.close()  # idempotent
+    finally:
+        await stream.close()
+        await http.aclose()
+        store.close()
+    assert not clients._GOOGLE_PREFIX_SNAPSHOTS
+
+
+def test_snapshot_keeps_raw_digests() -> None:
+    """PR #4340 review #4: 32-byte digests, not 64-char hex strings."""
+    snapshot = clients._google_prefix_snapshot(
+        {"systemInstruction": {"parts": [{"text": "s"}]}, "contents": [{"role": "user"}]}
+    )
+    assert all(len(d) == 32 and isinstance(d, bytes) for d in snapshot[:3])
+    assert [len(d) for d in snapshot.contents_hashes] == [32]

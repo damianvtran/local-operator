@@ -121,6 +121,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.github",
         "wire.errors.bedrock",
         "wire.login.bedrock",
+        "wire.providers.reauth",
         "wire.errors.sdk_spec",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "

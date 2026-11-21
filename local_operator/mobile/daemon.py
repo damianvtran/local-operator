@@ -111,6 +111,7 @@ from local_operator.mobile.start_receipts import (
     StartRefusal,
     canonical_request,
     start_effort,
+    start_target,
 )
 from local_operator.mobile.transfer_receipts import (
     ReceiptsUnreadable,
@@ -10765,6 +10766,14 @@ def build_app(daemon: MobileDaemon):
                         chosen["effort"] = intent["effort"]
                     if intent.get("temporary"):
                         chosen["temporary"] = "1"
+                    # Already off the loop (the receipt store runs ``resolve``
+                    # in a thread). The CANONICAL name is frozen under the same
+                    # key the intent used, keeping ``set(chosen)==set(intent)``;
+                    # ``_resolve_start_target`` raises typed refusals so the
+                    # store's handler cannot misreport them as a broken store.
+                    for kind in ("agent", "team"):
+                        if intent.get(kind):
+                            chosen[kind] = _resolve_start_target(kind, intent[kind])
                     return chosen
 
                 async def spawn_start(chosen: dict[str, str], sid: str) -> int:
@@ -10775,6 +10784,16 @@ def build_app(daemon: MobileDaemon):
                             # its refusal carries the same code/status/sid body.
                             code = json.loads(bytes(refused.body))["code"]
                             raise StartRefusal(code, refused.status_code, session_id=sid)
+                    # Bound HERE, on the fresh start only: a completed replay
+                    # never reaches ``spawn_start``, so it cannot clobber a
+                    # later ``/team clear`` the user made in that chat.
+                    for kind in ("agent", "team"):
+                        if chosen.get(kind):
+                            bound = await asyncio.to_thread(
+                                _bind_started_session, sid, kind, chosen[kind]
+                            )
+                            if not bound:
+                                raise StartRefusal("start_target_unsaved", 503, session_id=sid)
                     return await daemon.spawn_session(
                         chosen["cwd"],
                         provider=chosen["provider"],
@@ -10787,7 +10806,7 @@ def build_app(daemon: MobileDaemon):
                     body, resolve_start, spawn_start, daemon.recover_started_session
                 )
             except StartRefusal as exc:
-                payload: dict[str, Any] = {"error": exc.code, "code": exc.code}
+                payload: dict[str, Any] = {"error": exc.code, "code": exc.code, **exc.detail}
                 if exc.session_id is not None:
                     payload["session_id"] = exc.session_id
                 return JSONResponse(payload, status_code=exc.status)
@@ -10801,8 +10820,25 @@ def build_app(daemon: MobileDaemon):
         # the same validator the keyed path applies inside ``canonical_request``.
         try:
             effort = start_effort(body.get("effort"))
+            target = start_target(body)
         except StartRefusal as exc:
             return JSONResponse({"error": exc.code, "code": exc.code}, status_code=exc.status)
+        # Validated BEFORE the session id is minted, so every refusal leaves
+        # nothing on disk. Off the loop: it builds both registries and walks a
+        # team's roster. The capability flags (``session_start.agent/team``)
+        # exist because THIS path, on an older relay, drops unknown fields: a
+        # phone that sent ``team`` blind would get an unbound chat.
+        canonical_target: tuple[str, str] | None = None
+        if target is not None:
+            try:
+                canonical_target = (
+                    target[0],
+                    await asyncio.to_thread(_resolve_start_target, *target),
+                )
+            except StartRefusal as exc:
+                return JSONResponse(
+                    {"error": exc.code, "code": exc.code, **exc.detail}, status_code=exc.status
+                )
         # NO DIRECTORY NAMED MEANS "WHERE THE USER HAS BEEN WORKING LATELY".
         # The one-tap start posts no cwd at all, so the resolution lives here,
         # server-side, and is the SAME function ``GET /api/directories``
@@ -10836,6 +10872,14 @@ def build_app(daemon: MobileDaemon):
             refused = await _mark_started_temporary(session_id)
             if refused is not None:
                 return refused
+        if canonical_target is not None:
+            # Sidecar before spawn: the child's restore binds the persona at
+            # construction, so the first turn already runs as the chosen one.
+            if not await asyncio.to_thread(_bind_started_session, session_id, *canonical_target):
+                return JSONResponse(
+                    {"error": "start_target_unsaved", "code": "start_target_unsaved"},
+                    status_code=503,
+                )
         try:
             pid = await daemon.spawn_session(
                 cwd,
@@ -11488,6 +11532,17 @@ def build_app(daemon: MobileDaemon):
             payload = await models_memo.get()
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
+        return _maybe_gzip(request, JSONResponse(payload))
+
+    async def api_start_targets(request: Request) -> Response:
+        """What a new chat may be bound to: agents and teams, for the phone's
+        start picker. Licensed by ``capabilities.session_start.agent/team``.
+        Built off the loop (two registries, ~0.3 s); never 500s -- a registry
+        failure answers ``degraded: true`` with empty lists."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        payload = await asyncio.to_thread(_start_targets_payload)
         return _maybe_gzip(request, JSONResponse(payload))
 
     async def api_transcribe(request: Request) -> Response:
@@ -12689,6 +12744,9 @@ def build_app(daemon: MobileDaemon):
         # needs it BEFORE the composer is usable, and it is a pure read.
         Route("/api/skills", api_skills),
         Route("/api/models", api_models),
+        # The new-chat target picker's listing (agents + teams); gated by the
+        # ``session_start.agent/team`` capability flags.
+        Route("/api/start-targets", api_start_targets),
         Route("/api/usage", api_usage),
         # The ONLY phone usage path that reaches vendors and writes the cache;
         # GET /api/usage above stays write-free (see PAID_USAGE.md "Refresh").
@@ -13132,6 +13190,139 @@ def _default_start_cwd() -> str:
         if path.is_dir() and _spawn_dir_allowed(path):
             return str(path)
     return str(Path.home())
+
+
+def _resolve_start_target(kind: str, name: str) -> str:
+    """The canonical name of a Start request's ``agent``/``team``, or a typed refusal.
+
+    BLOCKING (it builds both registries and walks a team's whole roster graph,
+    ~0.3 s on a populated machine), so callers run it via ``asyncio.to_thread``.
+    The SAME validator the desktop create uses (``validate_target``), against the
+    same global registries, so a target one surface accepts the other does too,
+    and validation canonicalises case (``LOPDEV`` -> ``lopdev``).
+
+    It raises :class:`StartRefusal` ITSELF rather than letting ``KeyError`` /
+    ``ValueError`` escape, and that is load-bearing on the keyed path: the
+    receipt store's ``_database`` handler turns any ``KeyError``/``ValueError``
+    raised inside ``resolve()`` into ``create_receipts_unavailable`` -- which
+    would tell the phone its store is broken when the user simply picked a
+    deleted team. ``ProfileRegistryUnavailable`` IS a ``ValueError``, so it is
+    caught first.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+    from local_operator.server.utils.desktop_profiles import (
+        UnresolvedTarget,
+        validate_target,
+    )
+    from local_operator.session.errors import ProfileRegistryUnavailable
+    from local_operator.teams import TeamRegistry
+
+    try:
+        root = config_dir()
+        return validate_target(AgentRegistry(root), TeamRegistry(root), kind, name)
+    except UnresolvedTarget as exc:
+        raise StartRefusal("unknown_start_target", 404, detail=exc.wire_fields()) from exc
+    except KeyError as exc:
+        raise StartRefusal("unknown_start_target", 404) from exc
+    except (ProfileRegistryUnavailable, OSError) as exc:
+        raise StartRefusal("start_target_registry_unavailable", 503) from exc
+    except ValueError as exc:
+        # A roster cycle or one past the nesting limit: the request named a
+        # team that can never launch, which is the caller's answer (400).
+        raise StartRefusal("invalid_start_target", 400) from exc
+
+
+def _bind_started_session(session_id: str, kind: str, name: str) -> bool:
+    """Write and read back ``attachment.json`` for a not-yet-spawned session.
+
+    BLOCKING; run via ``asyncio.to_thread``. The sidecar must exist BEFORE the
+    child spawns: ``Session.__init__`` restores it unconditionally, so the
+    manager role, the team briefs and the roster are bound at construction and
+    the first turn already runs as the chosen identity. The child adopts this
+    directory (``resume=<sid>`` under ``config_dir()/sessions``), as it adopts
+    the temporary mark's. ``False`` means "do not spawn".
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import bind_session_attachment
+
+    if not session_id or Path(session_id).name != session_id:
+        return False
+    directory = config_dir() / "sessions" / session_id
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return bind_session_attachment(
+        directory,
+        agent=name if kind == "agent" else "",
+        team=name if kind == "team" else "",
+    )
+
+
+def _start_targets_payload() -> dict[str, Any]:
+    """The body of ``GET /api/start-targets``: what a new chat may be bound to.
+
+    BLOCKING; run via ``asyncio.to_thread``. Projected from the desktop menu's
+    OWN catalogues (``profile_catalogue`` / ``team_catalogue``), never a second
+    listing, so the phone offers exactly the names the desktop offers and the
+    start route will accept. ``label`` is pre-painted through the shared display
+    rules so the phone never reimplements them; ``avatar_sha256`` comes from the
+    same ``agent_avatar.agent_index`` session rows use, so the image is fetched
+    through the existing ``/v1/agents/{agent_id}/avatar?v=`` route.
+
+    A registry failure answers ``degraded: true`` with empty lists (the listing
+    convention), so the picker can say "couldn't load" instead of "you have no
+    agents".
+    """
+    from local_operator import display_labels
+    from local_operator import teams as teams_module
+    from local_operator.agent_avatar import agent_index
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+    from local_operator.server.utils.desktop_profiles import (
+        profile_catalogue,
+        team_catalogue,
+    )
+    from local_operator.teams import TeamRegistry
+
+    root = config_dir()
+    try:
+        profiles = profile_catalogue(AgentRegistry(root))
+        team_rows = team_catalogue(TeamRegistry(root))
+    except Exception:  # noqa: BLE001 -- a degraded listing, never a 500
+        logger.warning("start targets: registry unreadable", exc_info=True)
+        return {"agents": [], "teams": [], "degraded": True}
+    try:
+        avatars = agent_index(root)
+    except Exception:  # noqa: BLE001 -- avatars are decoration; names still list
+        avatars = {}
+    agents = []
+    for row in profiles:
+        name = str(row["name"])
+        identity = avatars.get(name)
+        agents.append(
+            {
+                "name": name,
+                "label": display_labels.display_form(name, str(row.get("label") or "")),
+                "kind": row.get("kind"),
+                "source": row.get("source"),
+                "description": str(row.get("description") or ""),
+                "agent_id": row.get("agent_id"),
+                "avatar_sha256": identity.avatar_sha256 if identity is not None else None,
+            }
+        )
+    teams = [
+        {
+            "name": str(row["name"]),
+            "label": teams_module.display_form(str(row["name"]), str(row.get("label") or "")),
+            "description": str(row.get("description") or ""),
+            "manager": str(row.get("manager") or ""),
+            "member_count": len(row.get("members") or []),
+        }
+        for row in team_rows
+    ]
+    return {"agents": agents, "teams": teams, "degraded": False}
 
 
 class _PhoneResetLogin(NamedTuple):
@@ -14000,8 +14191,14 @@ def _models_payload() -> dict[str, Any]:
     which the phone renders as "unavailable". Raises whatever ``_list_models``
     raises, which the route answers as a 502.
     """
-    models = _list_models()
-    return {"models": models, "default": _configured_default()}
+    models, provider_status = _list_models()
+    payload: dict[str, Any] = {"models": models, "default": _configured_default()}
+    if provider_status:
+        # ADDITIVE and omitted when empty, the ``efforts`` convention: an older
+        # relay never sends it, so a client already has to read absence as
+        # "nothing to act on", and a healthy owner's body stays byte-identical.
+        payload["provider_status"] = provider_status
+    return payload
 
 
 def _file_stat(path: Path) -> tuple[int, int, int] | None:
@@ -14362,8 +14559,16 @@ def _efforts_field(
     return {} if ladder is None else {"efforts": ladder}
 
 
-def _list_models() -> list[dict[str, Any]]:
+def _list_models() -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
     """The model sheet's rows: what the owner can run, ranked exactly as ``/model``.
+
+    Returns ``(rows, provider_status)``. ``provider_status`` is
+    :meth:`ProviderController.provider_notices` over the live pass's statuses
+    -- provider id -> ``{"status", "name"}`` for a state the owner must act on
+    (today only ``reauth_required``: a stored sign-in whose grant the IdP
+    refused for good). It is the same map the desktop route publishes, so the
+    phone and the desktop say "sign in again" from one fact; it carries no
+    credential detail because it crosses the tunnel.
 
     THE SAME CATALOGUE AND THE SAME ORDER AS THE DESKTOP, by construction rather
     than by convention. This used to walk ``model/registry.SupportedHostingProviders``
@@ -14444,7 +14649,8 @@ def _list_models() -> list[dict[str, Any]]:
             usable=None,
             use_max_context=use_max_context,
         )
-        return _model_rows(cached_rows)
+        # No live pass ran, so there are no statuses to report.
+        return _model_rows(cached_rows), {}
     with closing(store):
         controller = ProviderController(store, directory)
         admitted = controller.persisted_providers()
@@ -14491,7 +14697,7 @@ def _list_models() -> list[dict[str, Any]]:
                 f"Model catalogue unavailable for {', '.join(unavailable)}; "
                 "retry or log in again"
             )
-    return _model_rows(rows)
+    return _model_rows(rows), ProviderController.provider_notices(statuses)
 
 
 #: The login page is server-rendered (not part of the SPA) so the auth gate
