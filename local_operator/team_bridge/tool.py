@@ -723,6 +723,34 @@ def _failure_text(failure: BaseException) -> str:
     this a content-free projection rather than a second decoder.
     """
 
+    footer = _refusal_footer(failure)
+    return f"{failure} {footer}" if footer else str(failure)
+
+
+def _refusal_footer(failure: BaseException, *, include_details: bool = True) -> str:
+    """The closed ``[refusal code=… field=… rule=…]`` footer, or ``""``.
+
+    Split out of :func:`_failure_text` (unchanged output) so a caller that must
+    NOT quote ``str(failure)`` — the agent-file arm, whose exceptions can name
+    user paths — can still carry the coded half. Every rule documented on
+    :func:`_failure_text` about when a footer appears and what it may hold
+    lives here.
+
+    ``include_details=False`` is the CODE-ONLY sink (``[refusal code=…]``):
+    nothing read from ``details`` (``field``/``rule``, the edge's
+    ``server``/``content_type``/``trace``/``cf_ray``) and no ``retry_after_s``
+    or ``status`` is appended. ``code`` is the one value the client already
+    fullmatches against an identifier GRAMMAR (``client._refusal``) — a
+    pattern, not an enum, so a caller needing a finite vocabulary maps it
+    itself (:func:`_file_stage_failure_text` does); ``details`` values are only
+    whitespace-flattened and cut at 64 characters, so a hub can write anything
+    into them — including the file name and the sha256 of the bytes it was just
+    sent (security review PR #4359, comment 7051482491, measured). WHEN a
+    footer appears is decided exactly as with details included, so a caller
+    switching the flag changes content, never presence. The default keeps every
+    other caller byte-identical.
+    """
+
     field_rule: list[str] = []
     details = getattr(failure, "details", None)
     if isinstance(details, Mapping):
@@ -734,11 +762,14 @@ def _failure_text(failure: BaseException) -> str:
     # hub having answered at all (a 400 with only a code still diagnoses more
     # than the sentence alone). Neither means there is nothing to add.
     if not field_rule and getattr(failure, "http_status", None) is None:
-        return str(failure)
+        return ""
     pairs: list[str] = []
     code = _refusal_token(getattr(failure, "code", ""))
     if code:
         pairs.append(f"code={code}")
+    if not include_details:
+        # Code-only sink: stop before any details-derived or edge token.
+        return f"[refusal {pairs[0]}]" if pairs else ""
     pairs.extend(field_rule)
     # A throttle's WAIT is the one actionable half (incident 2026-11-17): an
     # agent that retries at once keeps a per-address edge block alive for every
@@ -777,8 +808,99 @@ def _failure_text(failure: BaseException) -> str:
                 if value and value == raw and " " not in value:
                     pairs.append(f"{label}={value}")  # i18n: ignore machine footer token
     if not pairs:
-        return str(failure)
-    return f"{failure} [refusal {' '.join(pairs)}]"
+        return ""
+    return f"[refusal {' '.join(pairs)}]"
+
+
+def _file_stage_failure_text(failure: BaseException) -> str:
+    """A failed agent-FILE stage: the fixed sentence plus the hub's coded footer.
+
+    WHY (incident 2026-11-19, two DM file sends from one endpoint): both
+    attempts read only "the file upload did not confirm; nothing was sent".
+    Whatever the hub answered — 415 ``file_class_disabled`` (a ``.tar`` is
+    class ``other``), 409 ``attachment_stage_conflict`` (identical bytes still
+    staged), 403 ``agent_not_permitted`` — was dropped here while the image
+    arm beside it already quoted :func:`_failure_text`. Each of those needs a
+    different human decision (tenant class policy, a stale twin expiring,
+    membership), and none of them is "retry", so the code is the actionable
+    half.
+
+    WHY NOT :func:`_failure_text` VERBATIM. Its prefix is ``str(failure)``:
+    the hub's free-text ``error`` sentence for a refusal, and for anything
+    else an arbitrary exception string (a transport error, a local ``OSError``
+    that can name a path). File sends carry user file names and paths, so this
+    arm quotes ONLY the code-only footer ``[refusal code=…]``
+    (:func:`_refusal_footer` with ``include_details=False``), and only under
+    the same rule that makes it print one at all: the hub answered
+    (``http_status``) or named a field/rule pair.
+
+    WHY CODE ONLY, NOT field/rule. Hub metadata is untrusted, and on this arm
+    the hub has just received the file's name and bytes, so ``details`` can
+    echo either back (a name, a 64-hex digest, an encoded slice of the
+    payload; measured in PR #4359 review). File payload and its identity must
+    not reach the agent's context through this result. The same holds for
+    ``code`` itself: the client checks it against a grammar, which a lowercase
+    digest or payload marker fits, so this arm quotes it only when it is in
+    the finite :data:`_FILE_STAGE_REFUSAL_CODES` vocabulary and otherwise
+    WITHHOLDS it as ``code=bridge_error``. A typed vocabulary is the contract,
+    not a pattern guessing which values look safe (a digest fits any
+    identifier shape).
+    The client also synthesizes two coded refusals with no hub answer — 502
+    ``bridge_invalid_response`` and 409 ``account_mismatch`` — so a footer
+    names the code the client holds; it does not prove the hub refused.
+
+    WHAT STAYS EXACT. A timeout, a lost response or any exception without a
+    hub answer reads byte-identically to before: still "did not confirm",
+    never "refused" and never "safe to retry". "nothing was sent" stays true on
+    every path into here: staging precedes the message POST in both ``dm`` and
+    ``channel_post``, so no message can have been committed when this runs.
+    """
+
+    sentence = "the file upload did not confirm; nothing was sent"
+    footer = _refusal_footer(failure, include_details=False)
+    if footer and getattr(failure, "code", None) not in _FILE_STAGE_REFUSAL_CODES:
+        # The client's code check is a GRAMMAR, not an enum: a 64-character
+        # lowercase digest of the file, or a lowercase payload marker, fits it.
+        # An unknown code is withheld and read as the generic one, never quoted.
+        footer = "[refusal code=bridge_error]"
+    return f"{sentence} {footer}" if footer else sentence
+
+
+#: The finite vocabulary a file-STAGE footer may quote (data minimization for
+#: :func:`_file_stage_failure_text`; every other op keeps the grammar-checked
+#: code of :func:`_refusal_footer`). Hub codes are the ones read in
+#: agent-server origin/main 0e35bd0a for ``POST /messaging/conversations/{id}/
+#: attachments``: ``messaging_attachments.go`` (controller),
+#: ``bridge_attachment_service.go`` and ``bridge_file_name.go`` (stage), and
+#: ``loadForMember``/``conversationTenant`` (conversation guards); plus the
+#: generic 404 ``not_found`` and the throttle ``rate_limited`` (the edge's
+#: nested WAF code, incident 2026-11-17). Client codes are the refusals this
+#: client attaches to a stage with an ``http_status``. A code missing here
+#: (e.g. an auth middleware code not traced) reads as ``bridge_error``; add it
+#: when the hub publishes it, never by widening the check to a pattern.
+_FILE_STAGE_REFUSAL_CODES: frozenset[str] = frozenset(
+    {
+        # hub, stage route
+        "agent_not_permitted",
+        "attachment_invalid",
+        "attachment_quota_exceeded",
+        "attachment_stage_conflict",
+        "attachment_type_unsupported",
+        "bridge_not_available",
+        "conversation_not_found",
+        "file_class_disabled",
+        "invalid_request",
+        "invalid_tenant",
+        "not_found",
+        "payload_too_large",
+        "rate_limited",
+        # client-synthesized (no hub refusal proven by these)
+        "account_mismatch",
+        "bridge_error",
+        "bridge_invalid_response",
+        "edge_blocked",
+    }
+)
 
 
 #: The conversation id family, shared with the desktop routes' S-RSA-5 guard:
@@ -1542,9 +1664,16 @@ async def _direct_message(
     except Exception as failure:
         if file_batch:
             await file_batch.cleanup(conversation_id)
+            # The batch's own closed refusals (``owner_changed``, a duplicate
+            # staged id, an unconfirmed receipt) keep their code, exactly as
+            # ``channel_post``'s ``AttachmentRefused`` arm already does; before
+            # this the DM path flattened them into the generic sentence. Gated
+            # on ``file_batch`` so an image-only DM reads as it always has.
+            if isinstance(failure, agent_attachments.AttachmentRefused):
+                return _error(failure.message, code=failure.code)
         return _error(
             (
-                "the file upload did not confirm; nothing was sent"
+                _file_stage_failure_text(failure)
                 if file_batch
                 else (
                     "the image upload did not confirm; nothing was sent: "
@@ -3169,7 +3298,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 await file_batch.cleanup(channel_id)
             return _error(
                 (
-                    "the file upload did not confirm; nothing was sent"
+                    _file_stage_failure_text(failure)
                     if file_batch
                     else (
                         "the image upload did not confirm; nothing was sent: "
