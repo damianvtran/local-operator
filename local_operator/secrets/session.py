@@ -30,6 +30,7 @@ every `$(lop secret get …)` its own agent ran.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import threading
 from pathlib import Path
@@ -61,6 +62,7 @@ class SessionRegistration:
         base: Path | None = None,
         session_id: str | None = None,
         broker_pid: int | None = None,
+        lineage_marker: Path | None = None,
     ) -> None:
         """``broker_pid`` enables re-registration; ``None`` keeps the old one-shot life.
 
@@ -76,6 +78,12 @@ class SessionRegistration:
         #: Guards the channel SWAP against ``close()``: a re-registration that
         #: completes after close began must not leave a live channel behind.
         self._swap_lock = threading.Lock()
+        #: This registration's entry in :func:`lineage_dir`; withdrawn on
+        #: :meth:`close`. ``None`` when it could not be published. Published
+        #: ONCE per session by :func:`register_session` and kept across every
+        #: re-registration: the session (and so its redactor) is unchanged by
+        #: a broker roll, only its channel moves.
+        self._lineage_marker = lineage_marker
         self._stopping = threading.Event()
         self._thread = threading.Thread(
             target=self._read_loop,
@@ -191,6 +199,11 @@ class SessionRegistration:
         with self._swap_lock:
             self._stopping.set()
             channel = self._channel
+        # Withdrawn FIRST: a session closing on purpose has stopped redacting,
+        # so its descendants should get the out-of-session behaviour from now
+        # on rather than a refusal that names a session which is going away.
+        _withdraw_lineage_marker(self._lineage_marker)
+        self._lineage_marker = None
         try:
             channel.shutdown(socket.SHUT_RDWR)
         except OSError:  # pragma: no cover - already gone
@@ -210,10 +223,13 @@ def _open_registration(
     Both :func:`register_session` and :meth:`SessionRegistration._reregister`
     go through here, so the wire contract of a registration (ticket, declared
     ``reroll`` capability) is identical either way. Process-level side effects
-    of BECOMING a session — e.g. the live-session lineage marker that the
-    fail-closed access PR #4388 publishes — belong in :func:`register_session`
-    and deliberately NOT here: a re-registration is the same session moving to
-    a new broker, so republishing per roll would only add untracked markers.
+    of BECOMING a session — the live-session lineage marker
+    (:func:`_publish_lineage_marker`, which the fail-closed read path in
+    ``access`` consults) — belong in :func:`register_session` and deliberately
+    NOT here: a re-registration is the same session moving to a new broker, and
+    the marker published at boot stays valid across it (it is keyed on this
+    process, not on the broker), so republishing per roll would only leave
+    untracked markers that :meth:`SessionRegistration.close` never withdraws.
 
     Only this module's registrations advertise ``reroll``, because only
     :class:`SessionRegistration` actually re-registers (security S2).
@@ -262,8 +278,147 @@ def register_session(
         except Exception:  # noqa: BLE001 — re-registration is best effort
             broker_pid = None
     return SessionRegistration(
-        channel, on_secret, base=base, session_id=session_id, broker_pid=broker_pid
+        channel,
+        on_secret,
+        base=base,
+        session_id=session_id,
+        broker_pid=broker_pid,
+        lineage_marker=_publish_lineage_marker(base, session_id),
     )
+
+
+# --- lineage markers ---------------------------------------------------------
+#
+# **Why a marker on disk at all.** `access.retrieve_secret` must refuse the
+# unnotified local decrypt for a descendant of a session whose redactor is
+# registered, and the case that matters is the broker being GONE (crashed,
+# killed, rolling) — so the broker's in-memory session table, the authority
+# while it runs, is exactly what is unavailable when the question is asked. A
+# freshly respawned daemon has an empty table and denies the descendant, which
+# is indistinguishable on the wire from "no session ever registered". So the
+# registering session leaves its own record, and the client answers the
+# question the way the broker does: by walking its ancestry.
+#
+# **Why ancestry and not ``LOCAL_OPERATOR_SESSION_ID``.** That variable is set
+# for every session's tool children whether or not the session ever reached a
+# broker (a session booted before the store existed, or one whose registration
+# was refused, has no redactor to notify), and it is attribution only. The
+# marker is published only after the broker ACCEPTED the registration, so it
+# means precisely "a redactor is listening for this lineage".
+#
+# **Identity, not pid.** Each name carries the process start time
+# (``peer.ProcessIdentity``), so a session that died without closing leaves a
+# marker that matches nothing once its pid is recycled; stale entries are
+# pruned on the next publish. A random suffix keeps two registrations from one
+# process (one runtime hosting several sessions) from withdrawing each other.
+#
+# **Not a security boundary, and it does not need to be.** In the keyfile tier
+# a same-uid process can read the key file directly (§8); the marker only
+# decides whether an ORDINARY retrieval may silently degrade. Deleting it
+# restores today's fallback, which is no more than reading the key already
+# allows. Forging one only refuses the forger.
+
+
+def lineage_dir(base: Path | None = None) -> Path:
+    """Where live registrations leave their lineage markers (inside the 0700 secrets dir)."""
+    from local_operator.secrets.keys import secrets_dir
+
+    return secrets_dir(base) / "live-sessions"
+
+
+def _marker_key(pid: int, start_time: int) -> str:
+    return f"{pid}-{start_time}"
+
+
+def _publish_lineage_marker(base: Path | None, session_id: str | None) -> Path | None:
+    """Record this process as a registered session. Best-effort: ``None`` on failure.
+
+    A failed publish keeps today's behaviour for this session's descendants
+    (the fallback), which is the §13 direction; it must never fail a boot.
+    """
+    import secrets as _random
+
+    try:
+        from local_operator.secrets.peer import process_info
+
+        identity = process_info(os.getpid())
+        if identity is None:
+            return None
+        directory = lineage_dir(base)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _prune_stale_markers(directory)
+        path = (
+            directory / f"{_marker_key(identity.pid, identity.start_time)}-{_random.token_hex(4)}"
+        )
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(session_id or "")
+        return path
+    except Exception:  # noqa: BLE001 — the store is optional; boot must not fail on it
+        logger.debug("could not publish the secret session lineage marker", exc_info=True)
+        return None
+
+
+def _withdraw_lineage_marker(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _prune_stale_markers(directory: Path) -> None:
+    """Drop markers whose process is gone (a session that crashed without closing)."""
+    from local_operator.secrets.peer import process_info
+
+    for entry in directory.iterdir():
+        pid_text, _, rest = entry.name.partition("-")
+        start_text = rest.partition("-")[0]
+        if not (pid_text.isdigit() and start_text.isdigit()):
+            continue
+        identity = process_info(int(pid_text))
+        if identity is None or identity.start_time != int(start_text):
+            _withdraw_lineage_marker(entry)
+
+
+def registered_session_ancestor(base: Path | None = None) -> tuple[int, str] | None:
+    """The registered session this process descends from, as ``(pid, session_id)``.
+
+    Walks from the PARENT, not from this process: a process that hosts a
+    session itself (the runtime, whose own in-process fetch the broker serves
+    without a notice) is not a tool child of it, and refusing its fallback would
+    break the host's own reads after a broker crash for no transcript benefit.
+    ``None`` when no ancestor holds a live registration, or the directory is
+    absent — the overwhelmingly common case outside a session, answered by one
+    ``stat``.
+    """
+    directory = lineage_dir(base)
+    try:
+        names = [entry.name for entry in directory.iterdir()]
+    except OSError:
+        return None
+    if not names:
+        return None
+    markers: dict[str, str] = {}
+    for name in names:
+        pid_text, _, rest = name.partition("-")
+        markers.setdefault(f"{pid_text}-{rest.partition('-')[0]}", name)
+    from local_operator.secrets.peer import _walk, parent_pid
+
+    parent = parent_pid(os.getpid())
+    if parent is None:
+        return None
+    for ancestor in _walk(parent):
+        name = markers.get(_marker_key(ancestor.pid, ancestor.start_time))
+        if name is None:
+            continue
+        try:
+            session_id = (directory / name).read_text(encoding="utf-8").strip()
+        except OSError:
+            session_id = ""
+        return ancestor.pid, session_id
+    return None
 
 
 def register_variable_store_session(

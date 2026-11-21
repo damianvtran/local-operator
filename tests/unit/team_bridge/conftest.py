@@ -29,3 +29,29 @@ def _empty_directory_cache() -> Iterator[None]:
     tb_client._DIRECTORY_CACHE.clear()
     yield
     tb_client._DIRECTORY_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _pre_triage_wakes(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``team_bridge.ambient_triage = off`` unless a test opts in to triage.
+
+    WHY: the suites here pin the WAKE MECHANICS that predate channel-wake triage
+    (cards, coalescing, routing, replay) with ambient channel traffic as their
+    fixture, and ``off`` is defined as exactly that pre-triage behaviour — so they
+    keep proving it unchanged. The triage itself (default ``on``) is pinned by
+    ``test_wake_triage.py``, which is exempt here and reads the real config-driven
+    settings. Settings beyond the mode keep their defaults.
+    """
+
+    if request.module.__name__.rsplit(".", 1)[-1] == "test_wake_triage":
+        return
+    from dataclasses import replace
+
+    from local_operator.team_bridge.connector import conversation
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    monkeypatch.setattr(
+        conversation,
+        "_triage_settings",
+        lambda _config_dir: replace(TeamBridgeSettings(), ambient_triage="off"),
+    )

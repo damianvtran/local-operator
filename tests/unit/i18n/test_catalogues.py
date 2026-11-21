@@ -71,6 +71,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The Bedrock sign-in flow's progress/prompt copy (`providers/bedrock/login.py`,
         # `sso_login.py`) shown by `lop login bedrock`, the TUI and desktop connect.
         "wire.login.bedrock",
+        # A refused-for-good OAuth sign-in (Google Cloud session control): the
+        # failover notice and the `lop login-status` state words. DEFERRED.
+        "wire.providers.reauth",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
         # imaging_unavailable, empty_body), rendered by the desktop and phone
@@ -195,6 +198,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; its seven
         # locales ride the same PR with their own ledger rows.
         "wire.github",
+        # Effective-team provenance reasons are an approved populated child,
+        # not a stub or a prefix-wide exemption from the exact inventory.
+        "wire.teams.effective",
         # Per-session voice mode: its route refusals, spoken phrases and its
         # settings section. Its own namespace so no audited catalogue's hash
         # moves; all seven locales carry it, each with its own audit ledger rows.
@@ -215,6 +221,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
+    assert catalogues.load_catalogue("en", "wire.teams.effective") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
@@ -234,7 +241,12 @@ def test_shipped_wire_namespaces_exist() -> None:
 
 @pytest.mark.parametrize(
     "target_namespace",
-    ["wire.errors.files", "wire.errors.sdk_spec", "wire.settings.account_policy"],
+    [
+        "wire.errors.files",
+        "wire.errors.sdk_spec",
+        "wire.settings.account_policy",
+        "wire.teams.effective",
+    ],
 )
 @pytest.mark.parametrize("mutation", ["unexpected-namespace", "missing-declared", "empty-declared"])
 def test_exact_wire_namespace_contract_rejects_mutations(

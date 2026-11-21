@@ -549,6 +549,7 @@ _AMBIENT_VARS = (
     "GOOGLE_VERTEX_OAUTH_CLIENT_ID",
     "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET",
     "GOOGLE_VERTEX_TOKEN_URI",
+    "GOOGLE_VERTEX_OAUTH_TOKEN_URI",
     "GOOGLE_VERTEX_ALLOW_CUSTOM_TOKEN_URI",
     "XAI_API_KEY",
     # Amazon Bedrock (``providers/bedrock``). The bearer token is a live

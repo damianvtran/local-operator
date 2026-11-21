@@ -1,0 +1,62 @@
+{
+  "locale": "ru",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "audit_pass": 1,
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "effective-reasons-ru-audit",
+    "session": "18a5766f5b20",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "9588c120c894",
+    "date": "2026-11-19"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    "translator_receipt": {
+      "path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/translator-receipt.json",
+      "sha256": "71261e4589b0bbacce7d1605a841f5a7fe5f1fed54c64f5ca413b89eb5cfb35b"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/per-key-report.json",
+      "sha256": "c845da4c44e718ff00924818fa96bfecc2d6ed0f85059a8b4468d550b0ac96fb"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/validate.py",
+      "sha256": "8d23d8ce03cfe42e34b3f7a69137dfe65033177d56161baa2c1cb9cd568158fa"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/validation.log",
+      "sha256": "4eafe4f4ae6415a691092c54b5210302f979ea6e9858bf10f2f62732da24e978"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "execution_log": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/validation.log",
+  "audit_notes_not_execution_log": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/per-key-report.json",
+  "source_revision": "e70bc818b8553dca1fad007705257817be49ee37",
+  "artifact_scope": "Scratch-only per explicit task; not tracked, appended, merged, or shipped. Manager must preserve artifacts at canonical tracked root if/when authorized.",
+  "remaining_gates": [
+    "Second independent audit instance for this high-visibility configuration-remedy namespace",
+    "Pseudo-localization and actual client/runtime rendered verification; no visual, terminal shaping or overflow proof performed"
+  ]
+}

@@ -1182,6 +1182,10 @@ export type MessageParams = {
   "wire.phone_access.away_after.label": undefined;
   "wire.phone_access.description": undefined;
   "wire.phone_access.title": undefined;
+  "wire.providers.reauth.session_policy": { "label": string; "provider": string };
+  "wire.providers.reauth.sign_in_expired": { "label": string; "provider": string };
+  "wire.providers.reauth.status_session_policy": undefined;
+  "wire.providers.reauth.status_sign_in_required": undefined;
   "wire.push_alert.attention_count": { "total": number; "count": string };
   "wire.radient_saver.command.badge": undefined;
   "wire.radient_saver.command.description": undefined;
@@ -2311,6 +2315,15 @@ export type MessageParams = {
   "wire.slash.library.help": undefined;
   "wire.slash.library.librarian_help": undefined;
   "wire.slash.notifications_page.help": undefined;
+  "wire.teams.effective.config_unreadable": undefined;
+  "wire.teams.effective.model_unresolvable": { "selector": string };
+  "wire.teams.effective.registry_unreadable": undefined;
+  "wire.teams.effective.team_missing": { "role": string };
+  "wire.teams.effective.tier_invalid_mapping": { "tier": string };
+  "wire.teams.effective.tier_invalid_selector": { "tier": string };
+  "wire.teams.effective.tier_invalid_value": { "tier": string };
+  "wire.teams.effective.tier_unconfigured": { "tier": string };
+  "wire.teams.effective.unavailable": undefined;
   "wire.tool_rows.bridge.count.conversations": { "count": number };
   "wire.tool_rows.bridge.count.members": { "count": number };
   "wire.tool_rows.bridge.count.messages": { "count": number };

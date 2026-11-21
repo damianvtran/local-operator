@@ -2131,7 +2131,21 @@ _BODY_RESERVATION_COLUMNS = frozenset(
 #: Closed lifecycle vocabulary. ``completed`` and ``retired`` are terminal;
 #: every other transition is retryable by a later turn, so a refusal never
 #: silently consumes an admitted message.
-BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
+BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired", "deferred")
+
+#: Why a row was written ``deferred`` instead of ``pending`` (the additive
+#: ``wake_class`` column; see :meth:`Store._ensure_wake_class_column`).
+#: ``passive``: the hub marked the delivery non-waking. ``ambient``: unaddressed
+#: channel traffic triage chose not to wake for. ``staggered``: an urgent ambient
+#: message whose failover slot may still wake this agent if nobody answers first
+#: (:meth:`Store.promote_staggered_reservation`). NULL = an ordinary woken row.
+WAKE_CLASSES = ("passive", "ambient", "staggered")
+
+#: How long a ``deferred`` row stays readable before the sweep retires it as
+#: ``ambient_not_shown``. Deferred rows are never served as turns in this build
+#: (the next-turn digest is a later, session-side change), so this only bounds
+#: table growth; 24 h covers a working day of catch-up reads.
+DEFERRED_RESERVATION_TTL_S = 24 * 3600.0
 
 #: The hold-row upsert every writer shares (PR #3063 review m10): a hold
 #: re-written for the same message keeps the row's FIRST ``created_at`` — the
@@ -2232,6 +2246,11 @@ BODY_TERMINAL_CODES = (
     "consent_revoked",
     "binding_mismatch",
     "admission_drift_terminal",
+    # A ``deferred`` row (non-waking by triage or by the hub's passive bit) that
+    # aged out unread as a turn. Distinct from ``expired_unconsumed``, which means
+    # a WOKEN row nobody consumed — a missed delivery; this one was never meant
+    # to wake anyone, so counting it as missed would be a false alarm.
+    "ambient_not_shown",
 )
 
 
@@ -3609,13 +3628,33 @@ class Store:
             except sqlite3.OperationalError:
                 noticed = set()  # a store that predates B4b has no such notice
                 reviewed = set()
+            # #4371 QA Q1: a hold whose owner release is SETTLED LOCALLY
+            # (``OWNER_RELEASE_LOCAL_TERMINAL``) is something the person already
+            # answered and nothing else will move, so alerting "long-held" for
+            # it nags about a decision already taken. Keyed exactly as the
+            # holds list keys ``actionable`` (``owner_releases`` by owner and
+            # bare message id). Only that outcome leaves: a ``pending`` or
+            # refused release keeps counting, since that hold has not settled.
+            # Its own try so a store without the table (created lazily with the
+            # first work-scope write) keeps the two exemptions read above.
+            try:
+                settled = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM owner_releases WHERE owner_key = ? "
+                        "AND outcome = ?",
+                        (_owner_key(owner), OWNER_RELEASE_LOCAL_TERMINAL),
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                settled = set()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
             if row["hold_code"] in excluded:
                 continue
             bare = screening_hold_message_id(str(row["message_id"]))
-            if bare in noticed:
+            if bare in noticed or bare in settled:
                 continue
             if not is_conversation_message_id(bare):
                 continue
@@ -3701,8 +3740,14 @@ class Store:
         designated_session: str,
         now: float,
         routed_session: str | None = None,
+        wake_class: str | None = None,
     ) -> bool:
         """Record one admitted message. Idempotent by primary key.
+
+        ``wake_class`` (one of :data:`WAKE_CLASSES`) writes the row ``deferred``:
+        admitted and readable through the channel reads, but NOT a turn — no
+        pending lookup selects it and its card status reads ``settled``. ``None``
+        is the ordinary ``pending`` row. A replay never rewrites it either.
 
         Returns True only when THIS call created the row. The connector's own
         retry path may emit the same reservation again after a crash; a second
@@ -3737,6 +3782,8 @@ class Store:
             raise StoreRefused("invalid_body_reservation", "conversation_seq")
         if conversation_seq < 1:
             raise StoreRefused("invalid_body_reservation", "conversation_seq")
+        if wake_class is not None and wake_class not in WAKE_CLASSES:
+            raise StoreRefused("invalid_body_reservation", "wake_class")
 
         with self._connect() as conn:
             self._init(conn)
@@ -3744,6 +3791,7 @@ class Store:
             self._require_live(conn, owner)
             self._ensure_routed_session_column(conn)
             self._ensure_card_handoff_column(conn)
+            self._ensure_wake_class_column(conn)
             # ``card_handoff_id = ''`` is the PROVENANCE mark: this row was
             # written by a build that binds a card identity before dispatch, so
             # an unbound value later means "no card attempted yet". A NULL can
@@ -3754,8 +3802,8 @@ class Store:
                 "endpoint_id, credential_id, canonical_base_url, enrollment_generation, "
                 "conversation_id, message_id, conversation_seq, mention, body_sha256, "
                 "screening_fingerprint, policy_epoch, consent_version, designated_session, "
-                "state, created_at, updated_at, card_handoff_id, routed_session) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'',?) "
+                "state, created_at, updated_at, card_handoff_id, routed_session, "
+                "wake_class) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',?,?) "
                 "ON CONFLICT(owner_key, conversation_id, message_id) DO NOTHING",
                 (
                     _owner_key(owner),
@@ -3774,12 +3822,73 @@ class Store:
                     int(policy_epoch),
                     consent_version,
                     designated_session,
+                    "pending" if wake_class is None else "deferred",
                     float(now),
                     float(now),
                     routed_session,
+                    wake_class,
                 ),
             )
             return cursor.rowcount == 1
+
+    def promote_staggered_reservation(
+        self, owner: OwnerSnapshot, *, conversation_id: str, message_id: str, now: float
+    ) -> bool:
+        """CAS one ``deferred``/``staggered`` row into an ordinary ``pending`` one.
+
+        The urgent-failover wake (``connector/conversation.py``): a standby agent
+        whose slot came due and found the message still unanswered takes it as a
+        normal woken row. ``wake_class`` is cleared so the row is exactly what an
+        immediate wake would have written (and the expired-claim arm, which skips
+        classed rows, treats it as one). False when anything else moved it first.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'pending', wake_class = NULL, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND state = 'deferred' AND wake_class = 'staggered' "
+                "AND card_posted_at IS NULL",
+                (float(now), _owner_key(owner), conversation_id, message_id),
+            )
+            return cursor.rowcount == 1
+
+    def retire_deferred_reservations(
+        self, owner: OwnerSnapshot, *, older_than: float, now: float | None = None
+    ) -> int:
+        """Retire ``deferred`` rows admitted at or before ``older_than``.
+
+        Bounds the table: a deferred row is never served as a turn, so without a
+        sweep it would sit forever. Read-first on a read-only handle, like
+        :meth:`reclaim_routed`, so an idle connector never takes the write lock.
+        """
+
+        moment = time.time() if now is None else float(now)
+        with self._connect_readonly() as probe:
+            if probe is None:
+                return 0
+            due = probe.execute(
+                "SELECT 1 FROM body_reservations WHERE owner_key = ? "
+                "AND state = 'deferred' AND created_at <= ? LIMIT 1",
+                (_owner_key(owner), float(older_than)),
+            ).fetchone()
+            if due is None:
+                return 0
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'retired', "
+                "terminal_code = 'ambient_not_shown', updated_at = ? "
+                "WHERE owner_key = ? AND state = 'deferred' AND created_at <= ?",
+                (moment, _owner_key(owner), float(older_than)),
+            )
+            return int(cursor.rowcount)
 
     def reclaim_routed(
         self, owner: OwnerSnapshot, *, older_than: float, now: float | None = None
@@ -3960,7 +4069,11 @@ class Store:
             }
             if any(row[key] != value for key, value in expected.items()):
                 return None
-            if row["state"] not in ("pending", "claimed", "completed"):
+            # ``deferred`` is admitted exactly like ``pending`` (screened, hub-
+            # accepted, reserved for this session); triage only withheld the wake.
+            # An agent that reads it in channel history may answer it, as it could
+            # a passive reply before deferral existed.
+            if row["state"] not in ("pending", "claimed", "completed", "deferred"):
                 return None
             return {"conversation_id": row["conversation_id"], "message_id": row["message_id"]}
 
@@ -3997,9 +4110,15 @@ class Store:
                     if self._has_routed_session_column(conn)
                     else "designated_session"
                 )
+                # A row triage DEFERRED (or the sweep later retired as never
+                # shown) woke nobody, so it is not a delivery: counting it would
+                # shrink the "N messages since your last delivery" line exactly
+                # when it matters most, after ambient traffic was skipped.
                 row = conn.execute(
                     "SELECT MAX(conversation_seq) FROM body_reservations "
                     "WHERE owner_key = ? AND conversation_id = ? AND conversation_seq < ? "
+                    "AND state != 'deferred' "
+                    "AND COALESCE(terminal_code, '') != 'ambient_not_shown' "
                     f"AND {serving} = ?",
                     (_owner_key(owner), conversation_id, before_seq, session_id),
                 ).fetchone()
@@ -4043,6 +4162,31 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    @staticmethod
+    def _ensure_wake_class_column(conn: sqlite3.Connection) -> None:
+        """Add ``wake_class`` to a carrying table that predates it.
+
+        WHY A NEW STATE PLUS A COLUMN (channel-wake triage, 2026-11-21): a row the
+        connector chose NOT to wake for is written ``deferred``, a state no older
+        binary selects — every older reader asks for ``pending`` or an expired
+        ``claimed`` row — so a rollback or a mixed-version session can never drain
+        a deferred row as a full turn (the leak the passive bit had: its rows sat
+        ``pending`` and a session's follow-up re-arm served each one). The column
+        records WHY (:data:`WAKE_CLASSES`). ADDITIVE AND NULLABLE, no schema stamp
+        moves, NOT in ``_BODY_RESERVATION_COLUMNS`` — the same rule as
+        :meth:`_ensure_card_posted_column`.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "wake_class" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN wake_class TEXT")
+
+    @staticmethod
+    def _has_wake_class_column(conn: sqlite3.Connection) -> bool:
+        return any(
+            row[1] == "wake_class" for row in conn.execute("PRAGMA table_info(body_reservations)")
+        )
 
     @staticmethod
     def _ensure_card_handoff_column(conn: sqlite3.Connection) -> None:
@@ -4385,6 +4529,11 @@ class Store:
             # that failed). Only a ``pending`` reservation can still owe one.
             if row["state"] == "claimed":
                 return CARD_POSTED
+            # ``deferred`` (channel-wake triage) reads SETTLED on purpose: the
+            # connector chose not to wake for it, so a replay or hold re-drive of
+            # its ref must post no card either. A staggered failover wake goes
+            # through :meth:`promote_staggered_reservation` first, which makes the
+            # row ``pending`` (owed) before its card is handed off.
             return CARD_OWED if row["state"] == "pending" else CARD_SETTLED
 
     def card_handoff_bindings(
@@ -4593,6 +4742,13 @@ class Store:
         the card owed (re-posted once on the replay — at-least-once, never a
         loss). Conditional on the column still being unset, so a replay never
         moves the original time. Live-owner fenced.
+
+        NEVER on a ``deferred`` row (review r1 m1/n1): no card went out for it, and
+        its card status already reads settled without the mark. Marking it used
+        to break the urgent failover — a replay of a parked standby set the column
+        and :meth:`promote_staggered_reservation` (which requires it unset) then
+        refused, so the standby never woke — and it made ``card_posted_at`` claim a
+        card the failover measurement would count.
         """
 
         with self._connect() as conn:
@@ -4602,7 +4758,8 @@ class Store:
             self._ensure_card_posted_column(conn)
             updated = conn.execute(
                 "UPDATE body_reservations SET card_posted_at = ? WHERE owner_key = ? "
-                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL",
+                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL "
+                "AND state != 'deferred'",
                 (float(now), _owner_key(owner), conversation_id, message_id),
             )
             return bool(updated.rowcount)
@@ -4678,6 +4835,16 @@ class Store:
             # (a designation move kills it, as it kills an ordinary row), so a
             # stale routed row is not claimed only to drift on its first call.
             # An old-shape table (no column yet) is the designated-only predicate.
+            # A CLASSED row (``wake_class`` set) is never selected through the
+            # expired-claim arm: only a deferred row carries a class, and if a
+            # later digest reader claims one and lets the lease lapse, that must
+            # not turn it into a full turn here. Old-shape tables have no column.
+            expired_arm = (
+                "(state = 'claimed' AND claim_expires_at IS NOT NULL "
+                "AND claim_expires_at < ?"
+                + (" AND wake_class IS NULL" if self._has_wake_class_column(conn) else "")
+                + ")"
+            )
             if self._has_routed_session_column(conn):
                 serving = (
                     "COALESCE(routed_session, designated_session) = ? "
@@ -4693,9 +4860,7 @@ class Store:
                 conn.execute(
                     "SELECT * FROM body_reservations WHERE owner_key = ? "
                     "AND credential_id = ? AND enrollment_generation = ? "
-                    f"AND {serving}AND (state = 'pending' OR "
-                    "(state = 'claimed' AND claim_expires_at IS NOT NULL "
-                    "AND claim_expires_at < ?)) "
+                    f"AND {serving}AND (state = 'pending' OR {expired_arm}) "
                     + "".join(filters)
                     + "ORDER BY created_at ASC, rowid ASC LIMIT 1",
                     bindings,
@@ -4728,13 +4893,15 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            # Same expired-claim exclusion as ``pending_body_reservation_for``.
             cursor = conn.execute(
                 "UPDATE body_reservations SET state = 'claimed', claim_token = ?, "
                 "turn_token = ?, claim_expires_at = ?, attempts = attempts + 1, "
                 "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
                 "AND message_id = ? AND (state = 'pending' OR "
                 "(state = 'claimed' AND claim_expires_at IS NOT NULL "
-                "AND claim_expires_at < ?))",
+                "AND claim_expires_at < ? AND wake_class IS NULL))",
                 (
                     claim_token,
                     turn_token,
@@ -5296,7 +5463,7 @@ class Store:
                 "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
                 "updated_at = ? WHERE owner_key = ? "
                 "AND (credential_id != ? OR enrollment_generation != ?) "
-                "AND state IN ('pending', 'claimed')",
+                "AND state IN ('pending', 'claimed', 'deferred')",
                 (
                     time.time(),
                     _owner_key(owner),
@@ -10296,8 +10463,10 @@ class Store:
     ) -> dict[str, Any]:
         """Write a signed Discard ALREADY SETTLED locally, plus its audit row, atomically.
 
-        WHY (follow-on to PR #4358). A Discard the person signs for a hold whose
-        body can no longer be loaded, past its Deliver window, is consumed by
+        WHY (follow-on to PR #4358). A Discard the person signs with a hold
+        receipt instead of a body hash (no body was presented, so no hub
+        confirmation was obtained — the server does not verify why), past its
+        Deliver window, is consumed by
         the connector only when the hub serves the envelope again; a message
         the hub no longer serves therefore sat ``pending`` forever. This
         records the person's decision as the terminal ``outcome`` (a LOCAL
@@ -10323,25 +10492,58 @@ class Store:
             written = self._insert_owner_release(
                 conn, owner, row, outcome=outcome, outcome_at=float(now)
             )
-            conn.execute(
-                "INSERT INTO owner_release_local_terminals (owner_key, message_id, "
-                "conversation_id, creator_generation, outcome, reason, key_id, account_id, "
-                "decided_at, deliver_until, at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    _owner_key(owner),
-                    row["message_id"],
-                    row["conversation_id"],
-                    owner.enrollment_generation,
-                    outcome[:64],
-                    reason[:64],
-                    row["key_id"],
-                    row["account_id"],
-                    float(row["decided_at"]),
-                    float(deliver_until),
-                    float(now),
-                ),
-            )
+            # #4371 security review S-2: ``drop_review_decision`` deletes the
+            # ``owner_releases`` row but never its audit row (audit rows are
+            # never deleted), so a second local terminal for the same message
+            # would collide on this table's primary key. That must be a typed
+            # refusal the route maps to 409, never a raw IntegrityError (a 500).
+            # Raising inside ``with conn`` rolls back the release row above
+            # too, so a settled row never exists without its own receipt.
+            try:
+                self._insert_local_terminal_audit(
+                    conn,
+                    owner,
+                    row,
+                    outcome=outcome,
+                    reason=reason,
+                    deliver_until=deliver_until,
+                    now=now,
+                )
+            except sqlite3.IntegrityError as error:
+                raise StoreRefused(
+                    "state_unavailable", "local terminal audit row already recorded"
+                ) from error
             return written
+
+    def _insert_local_terminal_audit(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        row: Mapping[str, Any],
+        *,
+        outcome: str,
+        reason: str,
+        deliver_until: float,
+        now: float,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO owner_release_local_terminals (owner_key, message_id, "
+            "conversation_id, creator_generation, outcome, reason, key_id, account_id, "
+            "decided_at, deliver_until, at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _owner_key(owner),
+                row["message_id"],
+                row["conversation_id"],
+                owner.enrollment_generation,
+                outcome[:64],
+                reason[:64],
+                row["key_id"],
+                row["account_id"],
+                float(row["decided_at"]),
+                float(deliver_until),
+                float(now),
+            ),
+        )
 
     def owner_release_local_terminal(
         self, owner: OwnerSnapshot, message_id: str

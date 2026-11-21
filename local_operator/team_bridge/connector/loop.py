@@ -936,6 +936,7 @@ async def run_iteration(
     # per-message screen/admit/reserve path inside is unchanged.
     with CONNECTOR_COALESCER.scope(), prescreen_scope(), routing.iteration_scope():
         _sweep_routed(owner, config_dir)
+        _sweep_deferred(owner, config_dir)
         try:
             summary = await _run_iteration_inner(
                 owner,
@@ -953,7 +954,10 @@ async def run_iteration(
             # flush, i.e. never when the flush was the thing that died).
             try:
                 summary_wakes = await CONNECTOR_COALESCER.flush_due(
-                    deliver=_coalesced_deliver, owner_filter=owner, config_dir=config_dir
+                    deliver=_coalesced_deliver,
+                    owner_filter=owner,
+                    config_dir=config_dir,
+                    promote=_staggered_promoter(auth_store, access),
                 )
             finally:
                 # Groups still inside their window survive a crash as holds.
@@ -1009,6 +1013,59 @@ def _events_wait_s() -> int:
     if pending is None:
         return EVENTS_WAIT_S
     return max(1, min(EVENTS_WAIT_S, math.ceil(pending)))
+
+
+#: Time of the last deferred-row sweep, per config dir (same cadence as routed).
+_LAST_DEFERRED_SWEEP: dict[str, float] = {}
+
+
+def _sweep_deferred(owner: Any, config_dir: Path, *, now: float | None = None) -> int:
+    """Retire ``deferred`` reservations older than the TTL as ``ambient_not_shown``.
+
+    Channel-wake triage writes unaddressed traffic ``deferred``: readable, never a
+    turn. Nothing else ever moves such a row, so without this the table only
+    grows. Throttled like :func:`_sweep_routed` and read-first in the store; never
+    raises (a failed sweep only retries a minute later).
+    """
+
+    from local_operator.team_bridge.store import DEFERRED_RESERVATION_TTL_S, Store
+
+    moment = time.time() if now is None else now
+    key = str(config_dir)
+    if moment - _LAST_DEFERRED_SWEEP.get(key, 0.0) < routing.ROUTED_SWEEP_EVERY_S:
+        return 0
+    _LAST_DEFERRED_SWEEP[key] = moment
+    try:
+        return Store(config_dir).retire_deferred_reservations(
+            owner, older_than=moment - DEFERRED_RESERVATION_TTL_S, now=moment
+        )
+    except Exception:  # noqa: BLE001 — closed code, never content
+        logger.warning("bridge: deferred-row sweep failed code=deferred_sweep_failed")
+        return 0
+
+
+def _staggered_promoter(auth_store: Any, access: Any) -> Any:
+    """The flush's urgent-failover check, bound to THIS iteration's access.
+
+    The client is built only if a staggered standby actually comes due, so an
+    iteration with none pays nothing for it.
+    """
+
+    async def promote(group_owner: Any, metadata: Any, *, config_dir: Path) -> bool:
+        from . import conversation as _conversation
+
+        try:
+            client = await _conversation._wire_for(group_owner, config_dir, auth_store)
+        except Exception:  # noqa: BLE001 — closed code, never content
+            # No wire = no hub read, NOT no wake (review r1 m1): the check falls
+            # back to the free local record, and an unconfirmed answer promotes.
+            logger.warning("bridge: staggered wake check unwired code=wire_unavailable")
+            client = None
+        return await _conversation.promote_staggered(
+            group_owner, metadata, config_dir=config_dir, client=client, access=access
+        )
+
+    return promote
 
 
 async def _coalesced_deliver(owner: Any, metadata: Any, **kwargs: Any) -> str:

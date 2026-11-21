@@ -384,6 +384,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic swap of a sibling pid-temp FILE onto the derived cache record "
         "under <config>/cache; never a session path.",
     ),
+    # ``_record_absence`` publishes the absence-proof sidecar beside that record:
+    # ``<config>/cache/cold_replay/<id>.absence.json``, named by
+    # ``absence_proof_path`` (``with_name`` on the record path, so the same
+    # directory), from a pid/thread-suffixed temp FILE in that directory. Its
+    # only caller passes ``safe_metadata_path`` (config root + a _SESSION_STEM-
+    # validated id), so neither side is ever a session directory.
+    (
+        "local_operator/session/replay_cache.py::_record_absence",
+        "<path>.replace",
+        "Atomic swap of a sibling pid/thread-temp FILE onto the derived absence-proof "
+        "sidecar under <config>/cache/cold_replay; never a session path.",
+    ),
     (
         "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
         "os.replace",
@@ -2284,6 +2296,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/secrets/broker.py::SecretBroker._unlink_own_socket",
         "<path>.unlink",
         "the broker's own socket file, at a fixed basename it bound, matched by inode",
+    ),
+    # Withdrawing a secret-session lineage marker. Both callers pass a path
+    # under `session.lineage_dir()` = config_dir()/secrets/live-sessions: the
+    # `<pid>-<start>-<hex8>` FILE `_publish_lineage_marker` O_EXCL-created for
+    # this registration (on close), or an entry of that same directory whose
+    # name starts `<digits>-<digits>` and whose process is gone (stale-marker
+    # pruning). Never under sessions/, and unlink refuses directories.
+    (
+        "local_operator/secrets/session.py::_withdraw_lineage_marker",
+        "<path>.unlink",
+        "a <pid>-<start>-<hex> marker FILE under config_dir()/secrets/live-sessions",
     ),
     # Same path, same reasoning, opposite direction: a socket left behind by a
     # broker that was SIGKILLed is a corpse, and it is only removed after a
@@ -5376,6 +5399,9 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # receiver is the config dir plus the session id, and it names a FILE
         # under cache/, so neither side can be a session directory.
         "local_operator/session/cold_metadata.py::write_cold_metadata",
+        # tmp FILE -> <config>/cache/cold_replay/<id>.absence.json: the absence-proof
+        # sidecar beside that record, same directory, same derived-cache argument.
+        "local_operator/session/replay_cache.py::_record_absence",
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
         # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)

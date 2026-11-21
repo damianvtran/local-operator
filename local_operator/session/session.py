@@ -7921,10 +7921,31 @@ class Session:
         # symbols this seam always has — ``test_read_only_prompt_bound``'s stub
         # session mirrors exactly those, and routing through an instance method
         # it cannot know about broke the aside-equals-turn equality it pins.
+        # Bridge journal cards carry bounded replay excerpts on the main turn
+        # (``_bridge_history_transform``, frozen in ``_bridge_excerpt_memo``).
+        # Skipping that transform here rendered every card as ids-only,
+        # diverging the wire prefix at the very first excerpted card and
+        # forcing full cache rewrites (220k-315k tokens) on clearance/aside/
+        # compaction-advisor calls. Run it read-only so a racing helper never
+        # mutates ``_bridge_excerpt_memo`` or runs side-effecting store purges;
+        # guard both attributes so minimal stub sessions remain compatible.
+        # KNOWN TRADE-OFF (PR #4370): a Team Bridge body turn anchors its
+        # ephemeral body frame right after the wake card (PendingTurn
+        # ._insert_index), and this read-only prompt deliberately never carries
+        # that frame (it holds no admission). So during a body turn an aside or
+        # clearance matches the main prefix only up to the wake card and
+        # re-writes the turn's tool steps, where it used to match through
+        # tool_result N-1. Accepted for the per-step frame re-write the anchor
+        # saves; watch clearance cache_read on body turns after deploy.
+        combined: list[AgentMessage] = [*history, *turns]
+        if getattr(self, "bridge_runtime", None) is not None and hasattr(
+            self, "_bridge_history_transform"
+        ):
+            combined = self._bridge_history_transform(combined, read_only=True)
         return blocks, normalise_replay_tool_names(
             bound_replay_payloads(
                 with_attachment_hints(
-                    self._render_history([*history, *turns]),
+                    self._render_history(combined),
                     world_root=self._confinement_root,
                 )
             ),
@@ -22944,7 +22965,9 @@ class Session:
         self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
         return stranded
 
-    def _bridge_history_transform(self, messages: list[Any]) -> list[Any]:
+    def _bridge_history_transform(
+        self, messages: list[Any], *, read_only: bool = False
+    ) -> list[Any]:
         """Attach bounded replay excerpts to recent Team Bridge journal cards.
 
         WHY here: the excerpt is a STANDING decision (live owner, consent,
@@ -22958,6 +22981,14 @@ class Session:
         move. NOT covered: the stranded-card reorder
         (``_fallback_card_wake_initial``) still moves a card to the tail, which
         re-writes the cache from its old position; the memo leaves it alone.
+
+        ``read_only=True`` is for auxiliary requests (``_read_only_prompt``:
+        aside, clearance, compaction advisor) that can race the main turn. It
+        reads a shallow copy of ``_bridge_excerpt_memo`` so the prefix stays
+        byte-identical to the main turn's frozen decisions, while NEVER
+        mutating ``_bridge_excerpt_memo`` and NEVER running side-effecting
+        store purges on standing refusal (it still fails closed by returning
+        ``messages`` unchanged, i.e., ids-only).
         """
         runtime = getattr(self, "bridge_runtime", None)
         if runtime is None or not any(
@@ -22982,21 +23013,22 @@ class Session:
             memo = getattr(self, "_bridge_excerpt_memo", None)
             refusal = authority_fence(runtime)
             if refusal is not None:
-                if memo is not None:
-                    memo.clear()
-                code = refusal.get("code")
-                if code == "feature_off":
-                    # A torn config read also answers ``feature_off``; only a
-                    # definite OFF is an opt-out worth a purge.
-                    purge_if_bridge_off(Path(runtime.config_dir))
-                elif code == "consent_revoked":
-                    # The consent-revoke path as THIS process sees
-                    # it: the retained bodies lost their standing, so they go
-                    # now rather than at the next card view (review R3 / QA
-                    # Q1). ``owner_changed`` is deliberately not here: the new
-                    # owner's rows are not this session's to delete, and an
-                    # account switch already purges at enrollment commit.
-                    DisplayBodyStore(Path(runtime.config_dir)).purge()
+                if not read_only:
+                    if memo is not None:
+                        memo.clear()
+                    code = refusal.get("code")
+                    if code == "feature_off":
+                        # A torn config read also answers ``feature_off``; only a
+                        # definite OFF is an opt-out worth a purge.
+                        purge_if_bridge_off(Path(runtime.config_dir))
+                    elif code == "consent_revoked":
+                        # The consent-revoke path as THIS process sees
+                        # it: the retained bodies lost their standing, so they go
+                        # now rather than at the next card view (review R3 / QA
+                        # Q1). ``owner_changed`` is deliberately not here: the new
+                        # owner's rows are not this session's to delete, and an
+                        # account switch already purges at enrollment commit.
+                        DisplayBodyStore(Path(runtime.config_dir)).purge()
                 return messages
             if not radient_signed_in(
                 runtime.config_dir, getattr(runtime.owner, "credential_id", None)
@@ -23005,14 +23037,15 @@ class Session:
                 # sign-in itself is part of the standing (QA Q1). The logout
                 # hook purged the rows already; this withholds excerpts even
                 # if a row survived (fail closed: the ids-only marker).
-                if memo is not None:
+                if not read_only and memo is not None:
                     memo.clear()
                 return messages
+            effective_memo = dict(memo) if (read_only and memo is not None) else memo
             return attach_history_excerpts(
                 messages,
                 config_dir=runtime.config_dir,
                 owner_key=_owner_key(runtime.owner),
-                memo=memo,
+                memo=effective_memo,
             )
         except Exception:  # noqa: BLE001 — excerpts are optional; never fail a request
             logger.debug("bridge: history excerpts skipped", exc_info=False)

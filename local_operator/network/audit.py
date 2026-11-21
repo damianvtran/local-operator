@@ -116,6 +116,9 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # manifest, and a destination probed remotes at a peer's request.
         "session.workset.preflight",
         "session.workset.probe",
+        # The owner accepted a working-set consent: which surface, which scope
+        # digest, whether the files travel (mobility.AUDIT_WORKSET_CONSENT).
+        "session.workset.consent",
         # A moved session's working set (move-working-set.md §8.3; workset_move).
         "session.workset.serve",
         "session.workset.restore",
@@ -144,6 +147,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
+        # A dialled endpoint answered with a POSITIVE wrong listener proof (wrong
+        # device, bad signature, bad MAC) and was removed from the member row it
+        # was dialled from (mesh-listener-auth §6, G4 heal-on-negative-proof).
+        "endpoint_demoted",
         # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME (F4, drill
         # 2026-10-04): not a refusal — nothing decided anything — and the row that
         # answers "the relay saw it" when a join stops before any pairing record
@@ -508,6 +515,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
+    "endpoint_demoted": frozenset({"endpoint", "code"}),
     "handshake_refused": frozenset(
         {
             "cause",
@@ -852,6 +860,14 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # fixed result codes only — never a path, a URL path, userinfo or git output.
     "session.workset.preflight": frozenset({"peer", "worktrees", "planned", "bytes", "excluded"}),
     "session.workset.probe": frozenset({"peer", "hosts", "results", "refused"}),
+    # ``surface`` is a closed token (mobility.CONSENT_SURFACES, or "unattributed"),
+    # CLAIMED by the requesting surface and not verified: attribution, never proof;
+    # ``digest`` the scope digest the gate matched (a hash of the manifest, never a
+    # path); ``carry_decision`` "carry"/"stay"; ``lease_epoch`` binds the row to the
+    # move it gated.
+    "session.workset.consent": frozenset(
+        {"peer", "surface", "consent", "digest", "carry_decision", "lease_epoch"}
+    ),
     # A moved session's working set (design move-working-set.md §8.3). Bounded
     # metadata only — ids, sizes, one home-relative path, reason codes — never
     # bytes or file contents. ``serve`` is the required row written before the

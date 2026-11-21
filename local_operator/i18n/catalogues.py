@@ -248,6 +248,20 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; "
         "callbacks and operation snapshots carry finished text, never a catalogue key"
     ),
+    # Deferred rather than raising the eager total ceiling (PR #4356): with
+    # these four keys hi's eager total reached 78,943 B against
+    # EAGER_TOTAL_MAX_BYTES (77,824 B), and no client resolves one of them.
+    # The failover notice is rendered by ``sign_in_required_text`` and handed
+    # to every host as a finished NoticeEvent ``text`` (no ``code``); the
+    # ``lop login-status`` / ``/login status`` state word is rendered by
+    # ``_sign_in_required_state`` into a plain line.
+    "wire.providers.reauth": (
+        "Google sign-in recovery notice and login-status state words rendered "
+        "in-process: providers/failover.py::sign_in_required_text (render_record) "
+        "and providers/auth_cli.py::_sign_in_required_state (render_resolved); "
+        "the session notice and the login-status line carry finished text, never "
+        "a catalogue key"
+    ),
     # Deferred rather than raising the eager total ceiling (PR #4349, merge gate
     # run 44849201008): adding mcp_ready_timeout_invalid took hi's eager total to
     # 77,924 B, 100 B past EAGER_TOTAL_MAX_BYTES (77,824 B); this namespace alone

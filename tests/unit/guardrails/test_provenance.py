@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from local_operator.guardrails.check import (
     check_tool_call,
 )
 from local_operator.guardrails.classify import Risk, classify_bash
-from local_operator.guardrails.preview import preview_tool_call
+from local_operator.guardrails.preview import PreviewReport, preview_tool_call
 from local_operator.guardrails.resolve import resolve_command
 from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
@@ -190,6 +191,39 @@ def test_subagent_creation_is_visible_to_parent(home: Path) -> None:
     _create(home, "mkdir ~/child-rig", sid=CHILD, ancestors=(SID,))
     assert _verdict(home, "rm -rf ~/child-rig", sid=SID).risk is Risk.LOW
     assert _verdict(home, "rm -rf ~/child-rig", sid=OTHER).risk is Risk.HIGH
+
+
+def test_explicit_mktemp_ownership_carries_into_later_preview(home: Path) -> None:
+    env = {**_env(home), "PATH": os.defpath}
+    argv = ["/usr/bin/mktemp", "-d", str(home / "qa-rig.XXXXXXXX")]
+    pending = prov.plan_creations(shlex.join(argv), cwd=str(home), env=env)
+    assert pending is not None
+    result = subprocess.run(argv, cwd=home, env=env, check=True, capture_output=True, text=True)
+    target = Path(result.stdout.rstrip("\n"))
+    assert target.parent == home and target.is_dir()
+
+    def preview(command: str, sid: str = CHILD) -> PreviewReport:
+        # A later call gets a fresh context, with no shell binding or scratch exemption.
+        ctx = CallContext(cwd=str(home), env=env, scratchpad=None, session_id=sid)
+        return preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+
+    literal = shlex.join(["rm", "-rf", str(target)])
+    # The same existing path is HIGH until its creation is recorded.
+    assert preview(literal).builtin_risk == "HIGH"
+    assert prov.commit_creations(
+        pending, session_id=CHILD, ancestors=(SID,), env=env, scratchpad=None
+    ) == [str(target.resolve())]
+    for sid in (CHILD, SID):
+        owned = preview(literal, sid)
+        assert (owned.builtin_risk, owned.action) == ("LOW", "allow")
+    assert preview(literal, OTHER).builtin_risk == "HIGH"
+
+    protected = preview(shlex.join(["rm", "-rf", str(home / ".local-operator")]))
+    assert (protected.builtin_risk, protected.action) == ("CRITICAL", "refuse")
+    # The opaque relative operand could resolve to the protected cwd itself.
+    opaque = preview('rm -rf "$(unknown-target)"')
+    assert (opaque.builtin_risk, opaque.action) == ("CRITICAL", "refuse")
+    assert target.is_dir()  # Every delete-shaped call above was preview-only.
 
 
 def test_glob_low_only_when_every_match_is_owned(home: Path) -> None:

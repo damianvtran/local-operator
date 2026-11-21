@@ -1,0 +1,101 @@
+{
+  "locale": "fr",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "a88a7b4dbe53fa5d48529186d141e8ae46a341061e21bcfc926f022b7c84a1ff",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "delegator-supplied"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "4822d80227b0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0,
+    "fallback_used": false
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "round": 2,
+  "scope": [
+    "tui.settings_view.editor.contract_unset",
+    "tui.settings_view.pane.empty_hint",
+    "tui.settings_view.scope.new_sessions"
+  ],
+  "head": "464c2500c7ab94c2c2335cfb2c277eb801d7b858",
+  "working_tree_catalogues": true,
+  "keys_read": 21,
+  "changed_keys_audited": 3,
+  "findings": [
+    {
+      "id": "FR-R2-1",
+      "severity": "minor",
+      "key": "tui.settings_view.scope.new_sessions",
+      "current": "nouvelles sessions",
+      "proposed": "sessions suiv.",
+      "reason": "Accurate French, but 18 cells exceeds maxCells 14 (English 12); settings_view.py:4157 drops even the bare scope when fewer than 18 value-column cells remain, so the timing tag can disappear where English fits. Optional compact 14-cell form; otherwise request a narrow-header rendered check."
+    }
+  ],
+  "checks": [
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "params": {
+        "save_key": "enter",
+        "cancel_key": "esc"
+      },
+      "en": "enter saves · esc cancels · clear to unset",
+      "fr": "enter enreg. · esc annuler · vider = aucun",
+      "en_cells": 42,
+      "cells": 42,
+      "maxCells": 23,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.pane.empty_hint",
+      "params": {
+        "command": "/agent"
+      },
+      "en": "/agent lists and attaches them",
+      "fr": "/agent les liste et attache",
+      "en_cells": 30,
+      "cells": 27,
+      "maxCells": 38,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.pane.empty_hint",
+      "params": {
+        "command": "/team"
+      },
+      "en": "/team lists and attaches them",
+      "fr": "/team les liste et attache",
+      "en_cells": 29,
+      "cells": 26,
+      "maxCells": 38,
+      "arguments_parity": true
+    },
+    {
+      "key": "tui.settings_view.scope.new_sessions",
+      "params": {},
+      "en": "new sessions",
+      "fr": "nouvelles sessions",
+      "en_cells": 12,
+      "cells": 18,
+      "maxCells": 14,
+      "arguments_parity": true
+    }
+  ],
+  "notes": [
+    "Delta-only semantic re-audit plus neighbour composition; not a renewed full-namespace approval.",
+    "vider = aucun is an acceptable terse no-configured-value cue in this empty_unsets-only editor. _commit_edit calls reset_setting after saving an empty buffer; no claim that clearing alone saves. No semantic blocker.",
+    "contract_unset is 42/23 cells, identical to English width; settings_view.py:4482-4486 uses the full hint only if its two-space-prefixed form fits, otherwise retains the basic save/cancel contract. No new width regression.",
+    "pane.empty_hint is 27 cells with /agent and 26 with /team, both below 38; les correctly composes with either agents or équipes and distributes over liste et attache.",
+    "Scope composes as prise d’effet : nouvelles sessions. No address-form mismatch, unapproved English prose, ICU/plural, markup or RTL issue in the three changed keys.",
+    "No screenshot or native-speaker certification claimed."
+  ]
+}

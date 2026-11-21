@@ -12,7 +12,7 @@
   "cli.sessions_move_workset.prompt_sends": "¿Enviar estos archivos de trabajo a {device}? [y/N] ",
   "cli.sessions_move_workset.prompt_stays": "¿Mover {session} a {device} y dejar estos archivos de trabajo en {source}? [y/N] ",
   "cli.sessions_move_workset.aborted": "No se movió: los archivos de trabajo no se confirmaron.",
-  "cli.sessions_move_workset.needs_confirmation": "Esta conversación tiene archivos de trabajo en {source}. Revísalos con --dry-run y vuelve a ejecutar con --confirm-working-set {digest} (o --yes), o con --without-working-set para dejarlos allí.",
+  "cli.sessions_move_workset.needs_confirmation": "Esta conversación tiene archivos de trabajo en {source}. Revísalos con --dry-run y vuelve a ejecutar con --confirm-working-set {digest}, o con --without-working-set para dejarlos allí.",
   "cli.sessions_move_workset.changed": "Los archivos de trabajo cambiaron desde que se mostraron; esta es la lista actual.",
   "cli.sessions_move_workset.unknown": "No se pudieron leer los archivos de trabajo en {source} (repositorio: {repo}), así que no se movió nada. Repara ese repositorio o vuelve a ejecutar con --without-working-set para dejar allí todos los archivos de trabajo.",
   "cli.sessions_move_workset.unsupported": "{device} usa una versión de lop demasiado antigua para listar los archivos de trabajo de esta conversación. Actualiza lop allí o vuelve a ejecutar con --without-working-set para dejarlos en ese dispositivo.",
@@ -23,7 +23,7 @@
   "cli.sessions_move_workset.help_dry_run": "mostrar los archivos de trabajo de la conversación (worktrees de git, trabajo sin push o sin commit) que afectaría este movimiento, sin mover nada",
   "cli.sessions_move_workset.help_confirm": "confirmar los archivos de trabajo que mostró --dry-run: pasa su working_set.scope_digest",
   "cli.sessions_move_workset.help_without": "mover la conversación y dejar sus archivos de trabajo donde están",
-  "cli.sessions_move_workset.help_yes": "confirmar los archivos de trabajo sin preguntar (para scripts)",
+  "cli.sessions_move_workset.help_yes": "enviar los archivos de trabajo sin preguntar cuando el destino puede recibirlos; si no, se niega, igual que desde el shell de un agente (usa --without-working-set para dejarlos)",
   "cli.sessions_move_workset.reason.contended": "otra conversación activa lo está usando",
   "cli.sessions_move_workset.reason.outside_home": "está fuera de tu carpeta personal",
   "cli.sessions_move_workset.reason.unmerged": "tiene conflictos de fusión sin resolver",
@@ -85,5 +85,9 @@
   "cli.sessions_move_workset.probe_refused_by_policy": "{device} no contactará con {remote}: la política rechaza su dirección (no es un host público)",
   "cli.sessions_move_workset.receipt_sent": "Los archivos de trabajo se enviaron a {device}: {count, plural, one {# worktree recibido} other {# worktrees recibidos}} allí; {device} los restaura cuando llega la conversación.",
   "cli.sessions_move_workset.receipt_sent_row": "{path} se envió a {device}.",
-  "cli.sessions_move_workset.receipt_sent_unknown": "Los archivos de trabajo se enviaron a {device}, pero su respuesta no llegó a este dispositivo; comprueba en {device} qué worktrees se restauraron. Este dispositivo conserva su copia."
+  "cli.sessions_move_workset.receipt_sent_unknown": "Los archivos de trabajo se enviaron a {device}, pero su respuesta no llegó a este dispositivo; comprueba en {device} qué worktrees se restauraron. Este dispositivo conserva su copia.",
+  "cli.sessions_move_workset.yes_preflight_failed": "--yes no confirmó nada: {device} no respondió si puede recibir los archivos de trabajo, así que no se movió nada. Comprueba con lop network peers que {device} está accesible y vuelve a intentarlo, o ejecuta de nuevo con --without-working-set para dejar los archivos donde están.",
+  "cli.sessions_move_workset.yes_carry_unavailable": "--yes no confirmó nada: {device} no puede recibir los archivos de trabajo, así que se quedarían donde están. No se movió nada. Vuelve a ejecutar con --without-working-set para mover solo la conversación, o inténtalo de nuevo cuando {device} pueda recibirlos.",
+  "cli.sessions_move_workset.agent_needs_operator": "{flag} no confirmó nada: enviar archivos de trabajo a otro dispositivo requiere la confirmación del operador, y este comando se ejecutó desde el shell de un agente. No se movió nada; los archivos se quedan donde están. El operador puede confirmarlo en la tarjeta para mover de la app de escritorio o móvil, o en su propia terminal ejecutando:\n  {command}\no pasando --confirm-working-set con el digest que muestra esto:\n  {dry_run_command}\nPara mover solo la conversación, vuelve a ejecutar con --without-working-set.",
+  "cli.sessions_move_workset.plan_not_honoured": "Los archivos de trabajo no se enviaron. Confirmaste enviarlos a {device}, pero cuando se ejecutó el movimiento {device} ya no podía recibirlos, así que solo se movió la conversación; los archivos siguen en {source} y no se perdió nada. Comprueba que {device} sigue permitiendo que {source} le envíe archivos de trabajo y que tiene una versión actual de lop; después mueve la conversación de vuelta a {source} y muévela otra vez, o haz push del trabajo desde {source}."
 }

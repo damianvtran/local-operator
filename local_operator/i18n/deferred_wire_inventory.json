@@ -536,6 +536,25 @@
         "tui/app.py": 1
       }
     },
+    "wire.providers.reauth": {
+      "reason": "Google sign-in recovery notice and login-status state words rendered in-process: providers/failover.py::sign_in_required_text (render_record) and providers/auth_cli.py::_sign_in_required_state (render_resolved); the session notice and the login-status line carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/providers/failover.py",
+          "symbol": "sign_in_required_text",
+          "note": "render_record finishes the sentence in-process; the English copy becomes ProviderError text and the user-locale copy (display=True) becomes a NoticeEvent text with no code"
+        },
+        {
+          "path": "local_operator/providers/auth_cli.py",
+          "symbol": "_sign_in_required_state",
+          "note": "render_resolved finishes the state word before format_logins composes the plain login-status line"
+        }
+      ],
+      "references": {
+        "providers/auth_cli.py": 1,
+        "providers/failover.py": 3
+      }
+    },
     "wire.errors.sdk_spec": {
       "reason": "SDK specification refusals rendered in-process by session/spec.py and sdk.py through spec_refusal_text (active locale) and raised as a one-string SessionSpecError; the exception carries finished text, never a catalogue key",
       "render_points": [

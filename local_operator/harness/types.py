@@ -1203,6 +1203,12 @@ class Message(BaseModel):
     # not silently turn this raw-bearing row into apparently safe public JSON.
     _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
 
+    # Non-serialized internal marker for request-local transient frames (e.g.,
+    # PendingTurn's admitted Team Bridge body frame). Never enters wire JSON or
+    # transcript dumps; tells provider cache-breakpoint placement not to anchor
+    # the tail cache_control marker on a message that vanishes after this turn.
+    _ephemeral: bool = PrivateAttr(default=False)
+
     def _assert_publicly_serializable(self) -> None:
         if self._one_turn_secret is not None:
             raise OneTurnSecretSerializationError(
@@ -1534,6 +1540,10 @@ class CustomMessage(BaseModel):
     on_discard: Callable[[], None] | None = Field(
         default=None, exclude=True, json_schema_extra={"compare": False}
     )
+    # Non-serialized internal marker propagated to the rendered Message so
+    # transient frames (PendingTurn body frames) are skipped when placing the
+    # tail prompt-cache breakpoint.
+    _ephemeral: bool = PrivateAttr(default=False)
 
 
 class StaleAside:

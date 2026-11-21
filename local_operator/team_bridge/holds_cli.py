@@ -293,7 +293,7 @@ def collect(
     """The whole answer as data: what ``--json`` prints and the table renders."""
 
     from local_operator.server.utils import desktop_team_bridge_holds as holds
-    from local_operator.team_bridge.store import Store
+    from local_operator.team_bridge.store import OWNER_RELEASE_LOCAL_TERMINAL, Store
 
     now = time.time() if now is None else float(now)
     # ``active_owner_readonly``: the same exactly-one-committed-row rule the
@@ -313,7 +313,17 @@ def collect(
             "items": [],
         }
     payload = holds.list_holds(root, owner, now=now)
-    items = list(payload["items"])
+    # #4371 review m2: a hold whose owner release is SETTLED LOCALLY
+    # (``discarded_local_unconfirmed``) is answered and nothing will move it, so
+    # it is not "held" here: not listed, not in ``count``, and not a reason to
+    # print "Deliver or discard them". ``list_holds`` keeps the row (the
+    # desktop list shows the settled outcome), so the filter lives here, keyed
+    # on the same release row that makes the row non-``actionable`` there.
+    items = [
+        item
+        for item in payload["items"]
+        if (item.get("decision") or {}).get("outcome") != OWNER_RELEASE_LOCAL_TERMINAL
+    ]
     audit_state, audit_detail, joined = ("skipped", None, {})
     if audit and items:
         audit_state, audit_detail, joined = asyncio.run(

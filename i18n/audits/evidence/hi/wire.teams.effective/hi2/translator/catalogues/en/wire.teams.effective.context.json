@@ -1,0 +1,47 @@
+{
+  "wire.teams.effective.team_missing": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "{role} is an opaque user-authored team name, not translated. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.registry_unreadable": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "The existing broad resolver catch includes registry/role lookup failures. Do not imply a specific corrupt file or include exception details. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.config_unreadable": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "No raw error details are shown; asks the user to inspect model configuration. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.tier_invalid_value": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "{tier} is a literal tier identifier (lo, med, hi). Preserve subagents.models. and provider/model as technical syntax. A model mapping is a configuration object. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.tier_invalid_mapping": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "{tier} is literal. Preserve subagents.models., model, effort and provider/model as configuration syntax. Both sentences are one complete instruction; effort is optional, model is required. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.tier_unconfigured": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "{tier} is literal (lo, med, hi); preserve subagents.models. as a configuration path. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.tier_invalid_selector": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "{tier} is literal; preserve subagents.models. and provider/model as technical syntax. The invalid raw value is intentionally not exposed. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.model_unresolvable": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "{selector} is a literal provider/model identifier; never translate its components. No raw exception detail is included. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  },
+  "wire.teams.effective.unavailable": {
+    "role": "Inline unavailable-member warning in the desktop saved team read view and team editor",
+    "tone": "Neutral, concise, actionable; not a launch result",
+    "note": "Defensive fallback for a legacy/unknown resolver classification; do not suggest that the member was launched. Wrap naturally; no fixed cell-width limit. Urdu: preserve logical storage order, no embedded bidi controls; mixed-direction technical identifiers remain literal and require rendered client review."
+  }
+}

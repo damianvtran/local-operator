@@ -1,0 +1,81 @@
+{
+  "locale": "vi",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "aea0cec3b3489f5d25a22757751ef64d6b7d73398d5ea4e55a4374c7e3811438",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by delegating brief; no independent translator execution claim."
+  },
+  "auditor": {
+    "agent": "translation-auditor (status-audit-vi)",
+    "session": "fb7a98e20635",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "none",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 2,
+    "unresolved_blocker_major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "keys_read": 18,
+  "findings": [
+    {
+      "id": "VI-S1",
+      "severity": "minor",
+      "key": "tui.tool_card.status.send.receipt_reused",
+      "current": "biên nhận cũ",
+      "proposed": "dùng lại biên nhận",
+      "proposed_cells": 18,
+      "reason": "The current label says only old receipt, omitting that it was reused; the collapsed duplicate-suppressed branch leads with this phrase (tool_card.py:1031-1038). Proposed full wording is 18 cells versus the 16-cell editorial budget and requires a rendered fit check; the consumer is a right-truncated summary, not a fixed 16-cell status slot. No in-budget idiomatic substitute that preserves biên nhận is asserted."
+    },
+    {
+      "id": "VI-S2",
+      "severity": "minor",
+      "key": "tui.tool_card.status.send.no_new_wake",
+      "current": "không gọi dậy",
+      "proposed": "không gọi lại",
+      "proposed_cells": 13,
+      "reason": "The current fragment says no wake-up, losing the new/additional qualifier. In the duplicate-suppressed row, no repeat wake request was made, not necessarily no prior wake; lại restores that distinction within 14 cells."
+    }
+  ],
+  "desktop_comparisons": [
+    {
+      "desktop_key": "ui.chat.trace.send.delivery.failed.word",
+      "target_key": "tui.tool_card.status.send.not_delivered",
+      "text": "chưa gửi được",
+      "result": "identical"
+    },
+    {
+      "desktop_key": "ui.chat.trace.send.delivery.mailbox.word",
+      "target_key": "tui.tool_card.status.send.wake_unconfirmed",
+      "text": "thức dậy chưa xác nhận",
+      "result": "identical"
+    },
+    {
+      "desktop_key": "ui.chat.trace.send.delivery.unconfirmed.word",
+      "target_key": "tui.tool_card.status.send.delivery_unconfirmed",
+      "text": "chưa xác nhận đã gửi",
+      "result": "identical"
+    },
+    {
+      "desktop_key": "ui.chat.canonical.tool_row.outcome.interrupted",
+      "target_key": "tui.tool_card.status.interrupted",
+      "text": "bị ngắt",
+      "result": "identical"
+    },
+    {
+      "desktop_key": "ui.chat.canonical.tool_row.outcome.never_ran",
+      "target_key": "tui.tool_card.status.not_run",
+      "text": "không chạy",
+      "result": "identical"
+    }
+  ],
+  "note": "Independent full semantic audit of all 18 English/vi/context entries at 66c87c0755e264db07ea375c67242cffbe302bc0; target is uncommitted. Exact key and empty message_arguments parity; render_message(target, {}, vi) identity for all 18; all strings NFC; all 16 declared maxCells budgets pass using rich.cells.cell_len; no ICU branches/placeholders/markup or English words in the target. Vietnamese Latin script is native, not unsanctioned English. No RTL controls required. Running chạy denotes execution (not launched/active); waiting chờ bạn is an idiomatic compact waiting-on-user label, distinct from queued chờ; session-reset phiên đã đặt lại explicitly denotes reset, not a new session. Existing shipped desktop comparisons match byte-for-byte at UI origin/main 373c82426889982335585786e56b5f8a22464b99. vi/tui.tool_card.json does not exist in worktree or HEAD, so cross-namespace Vietnamese comparison is unavailable; English tui.tool_card.json read (16 keys), including live.running. Consumer checks: status words shed whole at tool_card.py:5720-5740/5792-5796; reset/partial reasons truncate and interrupted/cut-off drop whole at 5946-6018; send/model outcomes lead right-truncated summary at 958-1038. No over-cap findings. Two minor terse duplicate-send wording losses remain; no blocker/major. No terminal frame or native-speaker certification claimed. Read-only repository audit; only this scratch receipt written."
+}

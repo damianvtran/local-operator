@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "wire.providers.reauth",
+  "history_sha256": "7a94c4a455645d9c0c8a17bc15673304c5a4a4ce1b4000a6745cd4b9a038cd38",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "wire.providers.reauth",
+      "source_sha256": "e65b54faf66049e3f6501e9545d5e97d9cf36954c66bf871aecfafbe34c4ad95",
+      "context_sha256": "ac8ccb7bfc2d8a117d562eab77a90b3c4e9f3883f7d876e3beb655a4dd1c800a",
+      "target_sha256": "ed38e51281deb45401b83aee789bf2a5442e5f362180ecccc5e8a9813cc54759",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "served model as relayed in the manager's delegation brief (no fallback)"
+      },
+      "status": "passed",
+      "note": "Independent audit (single round) of the new wire.providers.reauth namespace (4 keys) at commit 6e1581210b1c, English source sha256 e65b54faf66049e3f6501e9545d5e97d9cf36954c66bf871aecfafbe34c4ad95. Result passed: no translation findings; the auditor's separate code MINOR (leading '/' of /login detached in an RTL paragraph) is fixed in code by isolating the commands as TechnicalSpans, not in the catalogue. target_sha256 is the committed file after applying the auditor's exact replacements. One independent audit suffices by manager decision: this is a recovery notice and status text, not destructive or safety copy, so no second audit was run. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "rr1"
+    }
+  ]
+}

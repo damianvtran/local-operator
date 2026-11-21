@@ -1,0 +1,91 @@
+{
+  "locale": "es",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "audit_instance": "second-independent",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "289d6604993c",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "8fba0458db34",
+    "independent_from_first_auditor_session": "2fb9f8e55f96",
+    "actual_model_source": "Developer-provided runtime model declaration in this session",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed or invoked."
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8fba0458db34",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Runtime session model declaration in developer context",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed in this session. No translation service/API/SDK used."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/wire.teams.effective/es2-289d/es.effective.second.report.json",
+      "staging_path": "/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/es.effective.second.report.json",
+      "sha256": "ab44147906a4148fa1e15dbadaaf38a07dcd0cf22dc84d96fed1e7fd1727a5ca",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.teams.effective/es2-289d/es.second.audit.log",
+      "staging_path": "/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/es.second.audit.log",
+      "sha256": "65dd06f837e523e7243b86c2fb31323324c311fbd6fc2357cb3eb345c8c4a4b7",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.teams.effective/es2-289d/validate_es_second.py",
+      "staging_path": "/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/validate_es_second.py",
+      "sha256": "f98b3f49f9378e1b900c88ba30eaa6780f93421a850525dbe875809202d90e20",
+      "kind": "executed_validator_driver"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.teams.effective/es2-289d/es.second.mechanical.json",
+      "staging_path": "/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/es.second.mechanical.json",
+      "sha256": "a39529d4b6394da94e9513d3ae01aff4f060b3fa112eaf6e3134d321d6c552ed",
+      "kind": "actual_execution_result"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "first_audit_consistency_check": {
+    "performed_after_independent_report_finalized": true,
+    "receipt_path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.receipt.json",
+    "receipt_sha256": "4094a8200d93a19e12257a40955961b004a316777dea76d6cefc4b3efe9871f6",
+    "source": "Receipt read directly after completing independent source/target assessment",
+    "result": "First receipt also passed and pins same source/context/target; no runtime claims inherited."
+  },
+  "frozen_core_commit": "e70bc818b8553dca1fad007705257817be49ee37",
+  "coverage_gaps": [
+    "Runtime resolution/fallback execution NOT RUN",
+    "Pseudo-localization NOT RUN",
+    "Rendered wrapping/visual fit NOT RUN; sidecar has no fixed-width hints",
+    "Bidi runtime/rendering NOT RUN; Spanish LTR and no embedded bidi controls in stored target"
+  ],
+  "retention_status": "STAGED ONLY: canonical tracked paths above are intended retention destinations, not existing or committed artifacts. Manager must retain before ledger append. This task forbids repo edits and ledger application.",
+  "original_lost_evidence": {
+    "status": "not_lost"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

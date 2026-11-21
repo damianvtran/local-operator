@@ -448,6 +448,15 @@ def read_effort_tier_targets(root: Path | None = None) -> dict[str, tuple[Any, s
     return targets
 
 
+MemberModelUnavailableKind = Literal[
+    "config_unreadable",
+    "tier_invalid_value",
+    "tier_invalid_mapping",
+    "tier_unconfigured",
+    "tier_invalid_selector",
+]
+
+
 @dataclass(frozen=True)
 class MemberModelResolution:
     """Which model and reasoning depth ONE roster slot resolves to (design §4).
@@ -492,6 +501,9 @@ class MemberModelResolution:
     #: honoured -- and the launch receipt has to name that difference, because
     #: "your tier was ignored" is only honest when something ignored it.
     role_pins_inherit: bool = False
+    #: Presentation classification only: shared launch/model diagnostics above
+    #: stay English. The desktop wire boundary localizes without parsing prose.
+    unavailable_kind: MemberModelUnavailableKind | None = None
 
     @property
     def decided_by_team(self) -> bool:
@@ -594,6 +606,7 @@ def resolve_member_model(
     tier_effort: str | None = None
     unavailable = ""
     unavailable_quiet = False
+    unavailable_kind: MemberModelUnavailableKind | None = None
 
     def _effort_of(
         tier_level: str | None,
@@ -628,19 +641,25 @@ def resolve_member_model(
                 effort=effort,
                 effort_source=effort_source,
                 unavailable=f"config could not be read ({exc})",
+                unavailable_kind="config_unreadable",
             )
         raw_selector, tier_effort = targets.get(tier, (None, None))
         if raw_selector is not None and not isinstance(raw_selector, str):
             unavailable = malformed_tier_reason(tier, raw_selector)
+            unavailable_kind = (
+                "tier_invalid_mapping" if isinstance(raw_selector, dict) else "tier_invalid_value"
+            )
         elif is_inherit_tier_sentinel(raw_selector):
             selector = INHERIT_TIER_SENTINEL
         elif not raw_selector:
             unavailable = f"no model configured at subagents.models.{tier}"
             unavailable_quiet = True
+            unavailable_kind = "tier_unconfigured"
         else:
             provider, _, model_id = str(raw_selector).partition("/")
             if not provider or not model_id:
                 unavailable = f"subagents.models.{tier}={raw_selector!r} lacks provider/model"
+                unavailable_kind = "tier_invalid_selector"
             else:
                 selector = str(raw_selector)
 
@@ -658,6 +677,7 @@ def resolve_member_model(
         unavailable=unavailable,
         unavailable_quiet=unavailable_quiet,
         role_pins_inherit=role_pins_inherit,
+        unavailable_kind=unavailable_kind,
     )
 
 

@@ -73,6 +73,7 @@ LATE_ASK_ID = "a-resumeask00002"
 MARK_WITHDRAW = "RESUMEQ1"
 MARK_DEADLINE = "RESUMEQ2"
 MARK_SESSIONS = "RESUMES"
+MARK_SPAWN = "RESUMEQ3"
 
 TITLE_SYSTEM_PROMPT = "Name this conversation"
 
@@ -494,6 +495,35 @@ def test_a_deadline_that_passed_is_delivered_inside_the_resumed_run(resume_serve
         "the row appeared in the prompt turn itself; this cell no longer proves "
         "the delivery path for a row owed BEFORE the resume"
     )
+
+
+@pytest.mark.parametrize("workstream", [True, False], ids=["workstream", "plain-exec"])
+def test_a_fresh_spawned_workstream_advertises_the_queued_ask(
+    resume_server, workstream: bool
+) -> None:
+    """A fresh ``sessions spawn`` run (``exec --workstream``, no ``--resume``)
+    carries ``ask``/``ask_withdraw`` on its FIRST turn, so its questions reach
+    the operator's inbox without a resume. Plain ``exec`` is the control: no
+    ``--workstream``, nobody owns its queue, no ask (SA-D2).
+    """
+    run, requests, _root, _workers = resume_server
+    marker = f"{MARK_SPAWN}{'W' if workstream else 'P'}"
+    argv = ["exec", "--background", *(["--workstream"] if workstream else []), "--"]
+    launched = run(*argv, f"{marker} status?")
+    assert launched.returncode == 0, launched.stderr
+    job_id = _job_id_from(launched.stderr)
+    assert job_id, launched.stderr
+    assert _await_terminal(job_id)["status"] == "succeeded"
+
+    turns = _turn_requests(requests, marker)
+    assert turns, "the spawned turn never reached the provider"
+    names = _tool_names(turns[0])
+    if workstream:
+        assert (
+            "ask" in names and "ask_withdraw" in names
+        ), f"a fresh workstream did not advertise the queued-ask tools; got {names}"
+    else:
+        assert "ask" not in names, f"plain exec advertised `ask`; got {names}"
 
 
 def test_the_kill_switch_leaves_a_resumed_run_without_an_ask(resume_server) -> None:

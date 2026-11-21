@@ -1,0 +1,6 @@
+{
+  "wire.providers.reauth.sign_in_expired": "Votre connexion à {label} a expiré et ne peut pas être renouvelée automatiquement. Reconnectez-vous : /login {provider} dans l’application ou lop login {provider} dans un terminal.",
+  "wire.providers.reauth.session_policy": "Votre organisation Google Workspace exige une nouvelle connexion à {label} (Contrôle des sessions Google Cloud) ; la connexion ne peut donc pas être renouvelée automatiquement. Reconnectez-vous : /login {provider} dans l’application ou lop login {provider} dans un terminal.",
+  "wire.providers.reauth.status_sign_in_required": "reconnexion requise",
+  "wire.providers.reauth.status_session_policy": "reconnexion requise (règle Workspace)"
+}

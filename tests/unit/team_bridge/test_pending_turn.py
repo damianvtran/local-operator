@@ -492,3 +492,228 @@ def test_a_designation_move_makes_the_routed_turn_drift_and_release(tmp_path) ->
     store.update_designated_session(_owner(), "sess_new")
 
     assert routed.for_call() is None  # the per-call fence no longer holds
+
+
+def test_pending_turn_anchors_frame_index_across_mid_turn_tool_calls(tmp_path) -> None:
+    """REGRESSION (cache): Call 1 pins the ephemeral frame index right after
+    pre-turn history; Call 2+ (after assistant tool_use and tool_result are
+    appended) keeps the frame at that anchored index instead of teleporting it
+    to ``messages[-1]`` and busting the prefix cache."""
+    from local_operator.harness.render import _default_convert_to_llm
+    from local_operator.harness.types import Message, TextContent, ToolCall
+    from local_operator.team_bridge.card_projection import presented_bridge_ref
+
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    turn = _turn(tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch)) is True
+
+    card = Message.user("wake card")
+    call1_input = [card]
+    call1 = turn.transform(call1_input)
+    assert len(call1_input) == 1, "transform must not mutate its input list"
+    assert len(call1) == 2
+    assert call1[0] is card
+    frame1 = call1[1]
+    assert getattr(frame1, "_ephemeral", False) is True
+    assert "_ephemeral" not in frame1.model_dump()
+    assert BODY_TEXT in frame1.details["text"]
+
+    # Mid-turn: assistant calls a tool and receives a result.
+    asst = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="c1", name="noop", arguments={})],
+    )
+    tool = Message(
+        role="tool",
+        tool_call_id="c1",
+        tool_name="noop",
+        content=[TextContent(text="ok")],
+    )
+    call2_input = [card, asst, tool]
+    call2 = turn.transform(call2_input)
+    assert len(call2_input) == 3, "transform must not mutate its input list"
+    assert len(call2) == 4
+    # Frame stays anchored at index 1 — BEFORE the assistant/tool messages.
+    assert call2[0] is card
+    frame2 = call2[1]
+    assert call2[2] is asst
+    assert call2[3] is tool
+    assert frame2.id == frame1.id
+    assert frame2.details == frame1.details
+    assert getattr(frame2, "_ephemeral", False) is True
+
+    # Rendered Messages propagate _ephemeral and preserve admission proof.
+    rendered1 = _default_convert_to_llm(call1)
+    rendered2 = _default_convert_to_llm(call2)
+    assert getattr(rendered1[1], "_ephemeral", False) is True
+    assert getattr(rendered2[1], "_ephemeral", False) is True
+    assert "_ephemeral" not in rendered1[1].model_dump()
+    assert [m.model_dump() for m in rendered2[:2]] == [m.model_dump() for m in rendered1]
+    assert presented_bridge_ref(rendered1) is not None
+    assert presented_bridge_ref(rendered2) == presented_bridge_ref(rendered1)
+
+    # Mid-turn history shrink (e.g., compaction) clamps cleanly without IndexError.
+    shrunk = turn.transform([])
+    assert len(shrunk) == 1 and BODY_TEXT in shrunk[0].details["text"]
+
+
+# -- anchor survives mid-turn compaction (PR #4370 round 1: R1 / Q1) ----------
+
+
+def _asst_calls(*ids: str) -> Any:
+    from local_operator.harness.types import Message, ToolCall
+
+    return Message(
+        role="assistant", tool_calls=[ToolCall(id=i, name="noop", arguments={}) for i in ids]
+    )
+
+
+def _tool_reply(call_id: str) -> Any:
+    from local_operator.harness.types import Message, TextContent
+
+    return Message(
+        role="tool", tool_call_id=call_id, tool_name="noop", content=[TextContent(text="ok")]
+    )
+
+
+def _frame_positions(shaped: list[Any]) -> list[int]:
+    return [i for i, m in enumerate(shaped) if getattr(m, "custom_type", None)]
+
+
+def _wire_pairing_failures(shaped: list[Any]) -> list[str]:
+    """Build BOTH real wire bodies and check every tool call is answered next.
+
+    Anthropic: an assistant ``tool_use`` must be followed by a user message
+    whose FIRST block is its ``tool_result``. OpenAI-compat: assistant
+    ``tool_calls`` must be followed by ``tool`` messages. Either violation is a
+    provider 400, which is the failure mode the index anchor produced.
+    """
+    from local_operator.harness.render import _default_convert_to_llm
+    from local_operator.harness.types import ChatRequest, ModelSpec
+    from local_operator.providers.clients import AnthropicClient, OpenAICompatClient
+
+    rendered = _default_convert_to_llm(shaped)
+    anthropic = AnthropicClient()._build_body(
+        ChatRequest(
+            model=ModelSpec(provider="anthropic", model_id="claude-opus-5", context_window=200_000),
+            system_blocks=["s"],
+            messages=rendered,
+        )
+    )
+    openai = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(
+            model=ModelSpec(
+                provider="radient",
+                model_id="anthropic/claude-sonnet-5.5",
+                context_window=200_000,
+                supports_prompt_cache=True,
+            ),
+            system_blocks=["s"],
+            messages=rendered,
+        )
+    )
+    failures: list[str] = []
+    msgs = anthropic["messages"]
+    for i, m in enumerate(msgs):
+        if m["role"] == "assistant" and any(b.get("type") == "tool_use" for b in m["content"]):
+            nxt = msgs[i + 1] if i + 1 < len(msgs) else {}
+            first = (nxt.get("content") or [{}])[0]
+            if nxt.get("role") != "user" or first.get("type") != "tool_result":
+                failures.append(f"anthropic[{i}]")
+    msgs = openai["messages"]
+    for i, m in enumerate(msgs):
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            nxt = msgs[i + 1] if i + 1 < len(msgs) else {}
+            if nxt.get("role") != "tool":
+                failures.append(f"openai_compat[{i}]")
+    return failures
+
+
+def _open_turn(tmp_path) -> PendingTurn:
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    turn = _turn(tmp_path)
+    assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch)) is True
+    return turn
+
+
+def test_compaction_swap_never_splits_a_tool_pair(tmp_path) -> None:
+    """REGRESSION (R1/Q1): Call 1 sees ``[prior, wake]`` (old anchor index 2);
+    mid-turn compaction then hands a NEW, longer list whose index 2 sits
+    between ``tool_use c5`` and its result. The frame must not land there:
+    its predecessor (the wake card) is gone, so it goes last."""
+    from local_operator.harness.types import Message
+
+    turn = _open_turn(tmp_path)
+    call1 = turn.transform([Message.user("prior"), Message.user("wake card")])
+    assert _frame_positions(call1) == [2]
+
+    compacted = [
+        Message.user("[compaction summary]"),
+        _asst_calls("c5"),
+        _tool_reply("c5"),
+        _asst_calls("c6"),
+        _tool_reply("c6"),
+    ]
+    shaped = turn.transform(compacted)
+    assert _frame_positions(shaped) == [5]
+    assert _wire_pairing_failures(shaped) == []
+    # The QA shape: the compacted list KEEPS a wake card, but a different one.
+    shaped = turn.transform([Message.user("[summary]"), Message.user("wake card"), *compacted[1:]])
+    assert _frame_positions(shaped) == [6]
+    assert _wire_pairing_failures(shaped) == []
+
+
+def test_anchor_follows_its_predecessor_when_compaction_keeps_it(tmp_path) -> None:
+    """A compaction that keeps the wake card keeps the frame right after it,
+    at its NEW position, and by ``id`` even when the caller re-copied it."""
+    from local_operator.harness.types import Message
+
+    turn = _open_turn(tmp_path)
+    wake = Message.user("wake card")
+    turn.transform([Message.user("prior"), Message.user("older"), wake])
+
+    kept = [Message.user("[summary]"), wake.model_copy(), _asst_calls("c5"), _tool_reply("c5")]
+    shaped = turn.transform(kept)
+    assert _frame_positions(shaped) == [2]
+    assert shaped[1] is kept[1]
+    assert _wire_pairing_failures(shaped) == []
+
+
+def test_anchor_never_lands_inside_a_parallel_tool_batch(tmp_path) -> None:
+    """Predecessor followed by a tool result (a parallel batch answered in two
+    rows) or predecessor carrying tool calls: either insert would split a
+    pair, so the frame goes last instead."""
+    from local_operator.harness.types import Message
+
+    turn = _open_turn(tmp_path)
+    first_reply = _tool_reply("a")
+    turn.transform([Message.user("u"), _asst_calls("a", "b"), first_reply])
+    batch = [Message.user("u"), _asst_calls("a", "b"), first_reply, _tool_reply("b")]
+    shaped = turn.transform(batch)
+    assert _frame_positions(shaped) == [4]
+    assert _wire_pairing_failures(shaped) == []
+
+    turn2 = _open_turn(tmp_path / "second")
+    caller = _asst_calls("x")
+    turn2.transform([Message.user("u"), caller])
+    shaped = turn2.transform([Message.user("u"), caller, _tool_reply("x")])
+    assert _frame_positions(shaped) == [3]
+
+
+def test_anchor_holds_a_stable_prefix_across_ordinary_tool_steps(tmp_path) -> None:
+    """No compaction: every tool step keeps the frame at the same position and
+    the request prefix through the frame byte-identical (the cache saving)."""
+    from local_operator.harness.types import Message
+
+    turn = _open_turn(tmp_path)
+    history = [Message.user("prior"), Message.user("wake card")]
+    shapes = [turn.transform(list(history))]
+    for step in range(3):
+        history += [_asst_calls(f"c{step}"), _tool_reply(f"c{step}")]
+        shapes.append(turn.transform(list(history)))
+    assert {tuple(_frame_positions(s)) for s in shapes} == {(2,)}
+    prefix = [m.model_dump() for m in shapes[0][:3]]
+    assert all([m.model_dump() for m in s[:3]] == prefix for s in shapes)
+    assert all(_wire_pairing_failures(s) == [] for s in shapes)
