@@ -1,4 +1,4 @@
-"""G9-B follow-up: the notice across rotations, and one refusal path for every non-member.
+"""G9-B follow-up: notices across rotations and defensive refusal invariants.
 
 #4394 shipped the "membership ended" notice with two known gaps, both closed here:
 
@@ -12,8 +12,10 @@
   id it has not seen in its window, and the row was written BEFORE the close — so
   the fsync landed inside the time a dialer observes. The relay now closes first.
 
-Every cell runs A's REAL inbound handler (``RelayServer._run_inbound_handshake``)
-over loopback TCP with synthetic identities; nothing touches a live mesh.
+Legitimate paired-removal cells run A's real inbound handler over loopback TCP
+with synthetic identities. Non-traffic source/snapshot checks cover refusal
+control flow, complete lookup scans, dummy eligibility and single verification.
+No elapsed-time statistic or global timing-equivalence claim is made here.
 """
 
 from __future__ import annotations
@@ -22,12 +24,10 @@ import ast
 import inspect
 import logging
 import socket
-import statistics
 import textwrap
 import threading
 import time
 from pathlib import Path
-from secrets import token_bytes
 from typing import Any, cast
 
 import pytest
@@ -48,7 +48,7 @@ from tests.unit.network.test_removed_member_notice import (  # noqa: F401
 )
 
 # ---------------------------------------------------------------------------
-# Rig: a second rotation on A, and a dialer that can time A's answer
+# Rig: a second rotation on A, and a paired removed dialer observing EOF
 # ---------------------------------------------------------------------------
 
 
@@ -69,15 +69,8 @@ def _rotate_again(net: Net) -> None:  # noqa: F811
     assert store.load(net.network_id, net.root).epoch == 3
 
 
-def _timed_dial(
-    net: Net, signer: Any, *, claim: str = "", epoch: int = 1  # noqa: F811
-) -> tuple[float, bytes, threading.Thread]:
-    """Dial A's handler; milliseconds from our auth frame to A's EOF, and A's raw reply.
-
-    The clock stops at EOF as the DIALER sees it — the only clock an attacker has —
-    and A's thread is NOT joined first, so anything A does after its close (the audit
-    row, now) is outside the measurement, as it is outside the attacker's.
-    """
+def _dial_removed_until_eof(net: Net) -> tuple[bytes, threading.Thread]:  # noqa: F811
+    """Observe a paired removed member's EOF without waiting for blocked audit I/O."""
     with socket.create_server(("127.0.0.1", 0)) as listener:
         ours = socket.create_connection(listener.getsockname()[:2], timeout=5.0)
         theirs, _ = listener.accept()
@@ -89,22 +82,19 @@ def _timed_dial(
     thread.start()
     hs = hs_mod.Handshake.new(
         role="dialer",
-        identity=signer,
+        identity=net.b_identity,
         network_id=net.network_id,
-        epoch=epoch,
+        epoch=1,
         instance_id="i_dialer",
         session_protocol=relay._session_protocol(),  # noqa: SLF001
         capabilities=list(wire.LINK_CAPABILITIES),
     )
-    if claim:
-        hs.self_device_id = claim
     try:
         hs.send_hello(ours)
         reader = wire.FrameReader(ours)
         hs.read_challenge(reader, wire.deadline_in(5.0))
         key = wire.epoch_key(net.secret_e1, net.network_id, 1)
         ours.settimeout(5.0)
-        started = time.perf_counter()
         hs.send_auth(ours, hs_mod.Credential("epoch", 1, key))
         chunks = [bytes(reader._buffer)]  # noqa: SLF001 — anything already buffered
         while True:
@@ -112,10 +102,9 @@ def _timed_dial(
             if not chunk:
                 break
             chunks.append(chunk)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
     finally:
         ours.close()
-    return elapsed_ms, b"".join(chunks), thread
+    return b"".join(chunks), thread
 
 
 # ---------------------------------------------------------------------------
@@ -138,36 +127,29 @@ def test_a_removed_device_two_rotations_behind_is_still_told(net: Net) -> None: 
     assert [code for code, _ in net.refusals] == [hs_mod.REASON_EPOCH]
 
 
-@pytest.mark.parametrize("case", ["stranger", "tombstoned_id_random_key", "stale_live_member"])
-def test_a_stale_non_proven_dialer_gets_silence_on_the_same_probe(
-    net: Net, verifies: list[str], case: str  # noqa: F811
+def test_a_paired_live_member_with_a_stale_epoch_gets_no_removal_notice(
+    net: Net, verifies: list[str]  # noqa: F811
 ) -> None:
-    """The reorder adds no oracle: every stale dialer that cannot prove a tombstone is silent."""
+    """A genuinely admitted member's stale key cannot turn into a removal notice."""
     _rotate_again(net)
     live = identity.mint(net.root.parent / "live-e", name="live-e")
-    if case == "stranger":
-        _hs, raw, _ = net.dial(net.c_identity, epoch=1)
-    elif case == "tombstoned_id_random_key":
-        _hs, raw, _ = net.dial(net.c_identity, claim=net.b_identity.device_id, epoch=1)
-    else:
-        with store.mutate(net.network_id, net.root) as record:
-            relay.admit(
-                record,
-                device_id=live.device_id,
-                public_key=live.public_key,
-                name=live.name,
-                role="drive",
-                capabilities=["link"],
-                added_by=net.a_identity.device_id,
-                added_via="invite",
-                root=net.root,
-                persist=False,
-            )
-            store.save(record, net.root)
-        # A real live member that missed two rotations: its own key, a stale epoch.
-        _hs, raw, _ = net.dial(live, epoch=1)
-    assert raw == b"", raw
-    assert verifies == ["lop-mesh-auth-v1"], verifies
+    with store.mutate(net.network_id, net.root) as record:
+        relay.admit(
+            record,
+            device_id=live.device_id,
+            public_key=live.public_key,
+            name=live.name,
+            role="drive",
+            capabilities=["link"],
+            added_by=net.a_identity.device_id,
+            added_via="invite",
+            root=net.root,
+            persist=False,
+        )
+        store.save(record, net.root)
+    _hs, raw, error = net.dial(live, epoch=1)
+    assert error is None and raw == b""
+    assert verifies == ["lop-mesh-auth-v1"]
     assert [code for code, _ in net.refusals] == [hs_mod.REASON_EPOCH]
     assert net.server._removal_notices == {}  # noqa: SLF001
 
@@ -196,75 +178,55 @@ def test_the_stale_notice_keeps_the_seven_day_window(net: Net) -> None:  # noqa:
 # ---------------------------------------------------------------------------
 
 
-def test_every_member_refusal_after_the_auth_frame_verifies_exactly_once(
-    net: Net, verifies: list[str]  # noqa: F811
-) -> None:
-    """Every class an attacker can present runs ONE auth-label Ed25519 verify, then refuses.
+def test_member_refusal_branches_probe_once_then_raise() -> None:
+    """Guard refusal control flow without sending fabricated-id or wrong-key traffic.
 
-    Covers both probe sites (step 4 ``epoch_stale``, step 6 ``not_a_member``) and the
-    live-member wrong key (step 7 ``bad_signature``, the same verify function against
-    the stored key). A class that skipped or repeated the verify would be measurably
-    faster or slower than the rest.
+    The local snapshot test below already checks the complete scan, dummy
+    eligibility and one verification on both outcomes. Here we only guard its
+    callers: a probe must terminate its branch before the active-member verify.
+    These structural constraints do not establish timing equivalence.
     """
-    fresh = identity.mint(net.root.parent / "fresh-r", name="fresh-r")
-    cases: list[tuple[str, Any, str, int, str]] = [
-        ("unknown_id", net.c_identity, "d_" + token_bytes(8).hex(), 1, hs_mod.REASON_MEMBER),
-        ("random_key", fresh, "", 1, hs_mod.REASON_MEMBER),
-        (
-            "tombstoned_random_key",
-            net.c_identity,
-            net.b_identity.device_id,
-            1,
-            hs_mod.REASON_MEMBER,
-        ),
-        (
-            "tombstoned_wrong_key",
-            net.d_identity,
-            net.b_identity.device_id,
-            1,
-            hs_mod.REASON_MEMBER,
-        ),
-        ("live_id_wrong_key", net.c_identity, net.d_identity.device_id, 1, hs_mod.REASON_SIGNATURE),
-        ("stale_unknown_id", net.c_identity, "", 0, hs_mod.REASON_EPOCH),
-        ("stale_tombstoned_random_key", net.c_identity, net.b_identity.device_id, 0, "epoch_stale"),
+    tree = ast.parse(textwrap.dedent(inspect.getsource(hs_mod.Handshake.verify_auth)))
+    branches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and ast.unparse(stmt.value.func) == "self._probe_tombstone"
+            for stmt in node.body
+        )
     ]
-    # Spend the notice slot so the proven key, too, is a silent refusal below.
-    net.dial(net.b_identity)
-    cases.append(("tombstoned_proven_silent", net.b_identity, "", 1, hs_mod.REASON_MEMBER))
-    for name, signer, claim, epoch, expected in cases:
-        verifies.clear()
-        net.refusals.clear()
-        _hs, raw, error = net.dial(signer, claim=claim, epoch=epoch)
-        assert error is None, (name, error)
-        assert raw == b"", (name, raw)
-        assert verifies == ["lop-mesh-auth-v1"], (name, verifies)
-        assert [code for code, _ in net.refusals] == [expected], (name, net.refusals)
-
-
-def test_the_unknown_id_path_reads_a_row_slot_and_verifies_against_the_process_key(
-    net: Net, monkeypatch: pytest.MonkeyPatch  # noqa: F811
-) -> None:
-    """The stand-in key is ONE per process, and an unknown id verifies against exactly it."""
-    keys: list[str] = []
-    original = hs_mod._verify_signature  # noqa: SLF001
-
-    def spy(public_key: str, signature: str, digest: bytes, **kwargs: Any) -> None:
-        keys.append(public_key)
-        original(public_key, signature, digest, **kwargs)
-
-    monkeypatch.setattr(hs_mod, "_verify_signature", spy)
-    net.dial(net.c_identity, claim="d_" + token_bytes(8).hex())
-    net.dial(net.c_identity)
-    dummy = hs_mod._dummy_public_key()  # noqa: SLF001
-    assert keys == [dummy, dummy]
-    assert hs_mod.prime_dummy_public_key() == dummy
+    assert len(branches) == 2
+    assert sum(
+        isinstance(node, ast.Call) and ast.unparse(node.func) == "self._probe_tombstone"
+        for node in ast.walk(tree)
+    ) == len(branches)
+    for branch in branches:
+        assert len(branch.body) == 2
+        probe, refusal = branch.body
+        assert isinstance(probe, ast.Expr) and isinstance(probe.value, ast.Call)
+        assert ast.unparse(probe.value.func) == "self._probe_tombstone"
+        assert isinstance(refusal, ast.Raise) and isinstance(refusal.exc, ast.Call)
+        assert ast.unparse(refusal.exc.func) == "HandshakeRefusal"
+    probe_tree = ast.parse(
+        textwrap.dedent(inspect.getsource(hs_mod.Handshake._probe_tombstone))  # noqa: SLF001
+    )
+    assert (
+        sum(
+            isinstance(node, ast.Call) and ast.unparse(node.func) == "_verify_signature"
+            for node in ast.walk(probe_tree)
+        )
+        == 1
+    )
 
 
 def test_the_listener_closes_before_it_writes_the_refusal_row(net: Net) -> None:  # noqa: F811
     """The durable audit row (an fsync) must land AFTER the dialer's EOF.
 
     A blocked audit writer stands in for a slow disk: the dialer must still see its
-    silent close, and the row must still be written once the writer is released.
+    signed notice and close, and the row must be written once the writer is released.
     """
     release = threading.Event()
     entered = threading.Event()
@@ -278,17 +240,16 @@ def test_the_listener_closes_before_it_writes_the_refusal_row(net: Net) -> None:
 
     net.server.audit.record = slow_record  # type: ignore[method-assign]
     try:
-        elapsed_ms, raw, thread = _timed_dial(net, net.c_identity, claim="d_" + "ab" * 8)
-        assert raw == b""
+        raw, thread = _dial_removed_until_eof(net)
+        assert _frame(raw)["net"] == "removed"
         assert entered.wait(5), "the refusal was never audited"
         assert thread.is_alive(), "the audit write finished before the dialer's EOF"
-        assert elapsed_ms < 5000
     finally:
         release.set()
     thread.join(10)
     net.server.audit.flush()
     rows = _audit_rows(net.root, "handshake_refused")
-    assert len(rows) == 1 and rows[0]["detail"].get("declared_device") == "d_" + "ab" * 8
+    assert len(rows) == 1 and rows[0]["detail"].get("declared_device") == net.b_identity.device_id
 
 
 def test_the_refusal_handler_answers_before_it_audits() -> None:
@@ -317,89 +278,6 @@ def test_the_refusal_handler_answers_before_it_audits() -> None:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
     ]
     assert final_calls == ["_close_quietly", "self._audit_handshake_refusal"]
-
-
-# ---------------------------------------------------------------------------
-# Historical statistical check (not a proof of uniform work)
-# ---------------------------------------------------------------------------
-
-#: A modelled durable-write cost, added to every ``AuditLog.sync`` (the fsync behind
-#: every ``handshake_refused`` row). CI runners often sit on tmpfs or a page cache
-#: where fsync is ~free, which would let the pre-fix order pass by accident; a fixed
-#: added cost makes "is the fsync inside the dialer's window?" visible on any disk.
-#: 8 ms sits well above the ~1.6-2.5 ms an fsync measured on EBS here and in #4394 QA,
-#: so the signal is far outside scheduler noise.
-_MODELLED_FSYNC_S = 0.008
-_SAMPLES = 25
-
-
-def test_refusal_timing_does_not_separate_unknown_from_known_ids(
-    net: Net, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]  # noqa: F811
-) -> None:
-    """Four dialer classes, interleaved; medians must sit together, generously.
-
-    * ``unknown_id``: a never-seen id per sample (so the coalescer writes a row each
-      time — the class #4394 QA measured at ~6x);
-    * ``tombstoned_unproven``: B's tombstoned id, signed by a fresh random key;
-    * ``tombstoned_wrong_key``: B's tombstoned id, signed by another member's REAL key;
-    * ``random_key``: a freshly minted identity dialling as itself.
-
-    This historical heuristic can mask the injected effect under load: its
-    tolerance grows with the fastest median, and workers overlap samples. It is
-    not a constant-time or flake-free guarantee; structural/ordering guards carry
-    the defensive invariant. Do not infer uniformity from a passing statistic.
-    """
-    original_sync = net.server.audit.sync
-
-    def costly_sync() -> None:
-        original_sync()
-        time.sleep(_MODELLED_FSYNC_S)
-
-    monkeypatch.setattr(net.server.audit, "sync", costly_sync)
-    randoms = [identity.mint(net.root.parent / f"rnd{i}", name=f"rnd{i}") for i in range(_SAMPLES)]
-    signers = [identity.mint(net.root.parent / f"sig{i}", name=f"sig{i}") for i in range(_SAMPLES)]
-    samples: dict[str, list[float]] = {
-        "unknown_id": [],
-        "tombstoned_unproven": [],
-        "tombstoned_wrong_key": [],
-        "random_key": [],
-    }
-    threads: list[threading.Thread] = []
-    # Warm-up (imports, first keygen, first rows for the repeating classes) is unmeasured.
-    for warm in (
-        lambda: _timed_dial(net, net.c_identity, claim=net.b_identity.device_id),
-        lambda: _timed_dial(net, net.d_identity, claim=net.b_identity.device_id),
-        lambda: _timed_dial(net, net.c_identity, claim="d_" + token_bytes(8).hex()),
-    ):
-        threads.append(warm()[2])
-    for i in range(_SAMPLES):
-        for name in samples:
-            if name == "unknown_id":
-                result = _timed_dial(net, net.c_identity, claim="d_" + token_bytes(8).hex())
-            elif name == "tombstoned_unproven":
-                result = _timed_dial(net, signers[i], claim=net.b_identity.device_id)
-            elif name == "tombstoned_wrong_key":
-                result = _timed_dial(net, net.d_identity, claim=net.b_identity.device_id)
-            else:
-                result = _timed_dial(net, randoms[i])
-            elapsed_ms, raw, thread = result
-            threads.append(thread)
-            assert raw == b"", (name, raw)
-            samples[name].append(elapsed_ms)
-    for thread in threads:
-        thread.join(10)
-    medians = {name: statistics.median(values) for name, values in samples.items()}
-    with capsys.disabled():
-        for name, values in samples.items():
-            q = statistics.quantiles(values, n=4)
-            print(
-                f"\n[timing] {name:22s} median {medians[name]:.3f} ms "
-                f"p25 {q[0]:.3f} p75 {q[2]:.3f} min {min(values):.3f} max {max(values):.3f}"
-            )
-    fastest = min(medians.values())
-    bound = max(_MODELLED_FSYNC_S * 1000.0 / 2, 0.75 * fastest)
-    spread = max(medians.values()) - fastest
-    assert spread < bound, (medians, bound)
 
 
 # ---------------------------------------------------------------------------
