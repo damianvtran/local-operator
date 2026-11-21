@@ -1,0 +1,276 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+  "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+  "target_sha256": "cba7d4afe5a3b22f229f3f31e8c3a7eb8dfcdc3aceb9562f78c07d76cfb4341b",
+  "status": "passed",
+  "verdict": "clean",
+  "round": "voice-choice-r1",
+  "date": "2026-11-21T18:52:21.039842+00:00",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-voice-choice-backfill",
+  "head": "0bf4305da8f4b113f3ce2120bfdf58845b3218c9",
+  "scope_base": "4128f2a2",
+  "scope_note": "Eight uncommitted target display-label replacements relative to base at pinned HEAD. This receipt certifies these eight keys only, not an unread complete namespace or rendered layout.",
+  "keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label",
+    "wire.settings.speech_voice_tone.choice.neutral.label",
+    "wire.settings.speech_voice_tone.choice.bright.label",
+    "wire.settings.speech_voice_tone.choice.calm.label",
+    "wire.settings.speech_voice_tone.choice.authoritative.label",
+    "wire.settings.speech_voice_expressiveness.choice.low.label",
+    "wire.settings.speech_voice_expressiveness.choice.medium.label",
+    "wire.settings.speech_voice_expressiveness.choice.high.label"
+  ],
+  "keys_audited": 8,
+  "supporting_description_keys_read": 8,
+  "additional_parent_label_help_keys_read": 4,
+  "distinct_source_target_keys_read": 20,
+  "context_entries_read": 16,
+  "contribution_key_coverage": "8/8 exact; target delta contains exactly these keys; descriptions unchanged",
+  "independent": true,
+  "translator": {
+    "agent": "separate translator agent; exact identity/session not provided in delegation",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "provider quota fallback per manager delegation; translator receipt not independently available",
+    "provenance_source": "manager task brief, not independently derived"
+  },
+  "auditor": {
+    "agent": "translation-auditor / voice-audit-zh-CN",
+    "session": "9b99eabc9436",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "actual model-switch message: provider quota failure from anthropic/claude-opus-5-5",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    }
+  },
+  "namespace_verdicts": {
+    "wire.settings": "clean for eight-key contribution; terminal linguistic audit, no full-namespace re-audit claimed"
+  },
+  "findings": [],
+  "per_key_semantic_review": [
+    {
+      "key": "wire.settings.speech_voice_tone.choice.warm.label",
+      "current": "亲切",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "亲切 naturally describes friendly, approachable delivery, not literal heat; directly agrees with 友好而亲切。"
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+      "current": "中性",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "中性 is idiomatic for emotionally unmarked tone under 语气; the nearby description disambiguates it from the separate gender setting."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.bright.label",
+      "current": "明快",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "明快 naturally describes upbeat, energetic speaking rhythm/tone; not literal visual brightness. It can coexist with any expressiveness level: tone quality and degree of animation are distinct controls."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.calm.label",
+      "current": "沉稳",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "沉稳 naturally describes steady, composed delivery and agrees with 从容而沉稳。; it does not turn this tone choice into a speed or volume slider."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "current": "笃定",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "笃定 means confident/assured, matching the source explanation and sidecar rather than the misleading 权威/专横 readings."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "current": "低",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "低 is the natural scalar label under 表现力, not an instruction to lower volume or pitch; description correctly anchors restrained delivery."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "current": "中",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "中 is the natural middle member of 低/中/高. The unchanged 当前固定使用的值。 describes the existing standard value, not a mathematical constant or a claim that the voice never varies."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+      "current": "高",
+      "proposed": null,
+      "verdict": "clean",
+      "reason": "高 is the natural scalar label under 表现力; 活泼而有表现力。 anchors expressive variation, not higher pitch or volume."
+    }
+  ],
+  "controls_tested": {
+    "placeholder_and_markup_empty_sequence_parity": "PASS 8/8",
+    "no_ascii_english_display_labels": "PASS 8/8",
+    "no_hidden_bidi_controls": "PASS 8/8",
+    "stable_machine_id_order": "PASS 5 tone + 3 expressiveness",
+    "localized_labels_rejected_as_machine_values": "PASS 8/8",
+    "unchanged_descriptions": "PASS 8/8",
+    "actual_registry_and_tr_record_provenance": "PASS 8/8 zh-CN",
+    "forced_english_negative_control": "PASS; English differs from localized target; restored via real configured boot",
+    "source_context_target_unchanged_during_probe": "PASS"
+  },
+  "fit": {
+    "tool": "rich.cells.cell_len",
+    "measurements": [
+      {
+        "key": "wire.settings.speech_voice_tone.choice.warm.label",
+        "machine_id": "warm",
+        "english": "warm",
+        "target": "亲切",
+        "english_cells": 4,
+        "target_cells": 4,
+        "english_row_label_description_cells": 32,
+        "target_row_label_description_cells": 18,
+        "resolved": "亲切",
+        "source_locale": "zh-CN",
+        "description_en": "Friendly and approachable.",
+        "description_zh": "友好而亲切。"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+        "machine_id": "neutral",
+        "english": "neutral",
+        "target": "中性",
+        "english_cells": 7,
+        "target_cells": 4,
+        "english_row_label_description_cells": 27,
+        "target_row_label_description_cells": 22,
+        "resolved": "中性",
+        "source_locale": "zh-CN",
+        "description_en": "Even and unmarked.",
+        "description_zh": "平稳而不带色彩。"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.bright.label",
+        "machine_id": "bright",
+        "english": "bright",
+        "target": "明快",
+        "english_cells": 6,
+        "target_cells": 4,
+        "english_row_label_description_cells": 29,
+        "target_row_label_description_cells": 22,
+        "resolved": "明快",
+        "source_locale": "zh-CN",
+        "description_en": "Upbeat and energetic.",
+        "description_zh": "明快而充满活力。"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.calm.label",
+        "machine_id": "calm",
+        "english": "calm",
+        "target": "沉稳",
+        "english_cells": 4,
+        "target_cells": 4,
+        "english_row_label_description_cells": 27,
+        "target_row_label_description_cells": 18,
+        "resolved": "沉稳",
+        "source_locale": "zh-CN",
+        "description_en": "Unhurried and steady.",
+        "description_zh": "从容而沉稳。"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+        "machine_id": "authoritative",
+        "english": "authoritative",
+        "target": "笃定",
+        "english_cells": 13,
+        "target_cells": 4,
+        "english_row_label_description_cells": 37,
+        "target_row_label_description_cells": 18,
+        "resolved": "笃定",
+        "source_locale": "zh-CN",
+        "description_en": "Confident and assured.",
+        "description_zh": "自信而笃定。"
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+        "machine_id": "low",
+        "english": "low",
+        "target": "低",
+        "english_cells": 3,
+        "target_cells": 2,
+        "english_row_label_description_cells": 26,
+        "target_row_label_description_cells": 16,
+        "resolved": "低",
+        "source_locale": "zh-CN",
+        "description_en": "Restrained and plain.",
+        "description_zh": "克制而平淡。"
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+        "machine_id": "medium",
+        "english": "medium",
+        "target": "中",
+        "english_cells": 6,
+        "target_cells": 2,
+        "english_row_label_description_cells": 25,
+        "target_row_label_description_cells": 22,
+        "resolved": "中",
+        "source_locale": "zh-CN",
+        "description_en": "Today's constant.",
+        "description_zh": "当前固定使用的值。"
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+        "machine_id": "high",
+        "english": "high",
+        "target": "高",
+        "english_cells": 4,
+        "target_cells": 2,
+        "english_row_label_description_cells": 28,
+        "target_row_label_description_cells": 20,
+        "resolved": "高",
+        "source_locale": "zh-CN",
+        "description_en": "Lively and expressive.",
+        "description_zh": "活泼而有表现力。"
+      }
+    ],
+    "result": "All 8 labels and label+two-space+description contents are no wider than English. Five tone labels are 4 cells each; three level labels 2 each. No fixed per-field cap invented; consumer truncates complete rows with ellipsis rather than wrapping. Measurements omit list indentation/default marker and are not visual proof.",
+    "consumer": "local_operator/tui/widgets/settings_view.py:3939-3947,4219-4245"
+  },
+  "plurals": "N/A: eight plain labels contain no ICU plural/select, count, skeleton or date. Exact placeholder/markup sequence is empty in each source and target. zh-CN CLDR other-only rule reviewed.",
+  "rtl": "N/A for zh-CN; labels scanned for Unicode Cf controls, none present. Urdu logical bidi audit is outside this locale contribution.",
+  "glossary_register": "No unsanctioned English, literal-temperature/brightness mistranslation, gender agreement issue, pronoun/register mismatch, punctuation or glossary drift found in scoped labels. No extra synonyms proposed where current native wording is natural.",
+  "preflight_reconciliation": {
+    "preflight_source": "docs/qa/i18n-voice-choice-preflight.json",
+    "result": "Preflight is explicitly historical: it records missing contexts and English labels before translation. Actual current source hash matches; current context e5c44bf0... contains all 16 NEW entries and current target has the exact 8 localized label changes. Historical missing_context_keys was not treated as current defect."
+  },
+  "actual_runtime": "Isolated real ConfigManager persisted language=zh-CN; resolve.config_value and resolve.resolve_language returned zh-CN; boot.activate_resolved_locale activated zh-CN; settings_io choices and tr_record output/provenance matched all 8 catalogue labels. No resolver/config monkeypatch, no shipped-set override. Ordered raw IDs retained and translated labels rejected as enum inputs. English negative control produced English values and differed from target; real configured boot restored zh-CN.",
+  "not_run": [
+    "pseudo-localization",
+    "rendered TUI frames and layout at actual viewport widths (independent QA later)",
+    "browser/native/simulator/device paths",
+    "plural branch execution (no plurals in contribution)",
+    "full suites/pytest suite",
+    "dependency installation",
+    "repo or audit-history writes",
+    "full namespace linguistic re-audit"
+  ],
+  "evidence_paths": [
+    "/Users/damian/.local-operator/sessions/9b99eabc9436/scratchpad/audit_zh_CN.py",
+    "/Users/damian/.local-operator/sessions/9b99eabc9436/scratchpad/zh-CN-probe.json"
+  ],
+  "inputs_sha256": {
+    "i18n/style-guides/zh-CN.md": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "docs/qa/i18n-voice-choice-preflight.json": "f7db934c8284b92b94e0e2adbb82360d0f70fafe93e0efec14e71ce60424e059",
+    "local_operator/settings_io.py": "c61477a612061c86b70c8626813ad2f21b4a6d4e1e05f477640e420ae51deb59"
+  },
+  "note": "Read-only catalogue review. No repository files edited. Mechanical output establishes resolver/parity/measurement only; semantic judgments above are this independent auditor’s review."
+}
