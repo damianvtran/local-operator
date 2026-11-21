@@ -455,7 +455,7 @@ def test_child_cannot_remove_parents_tree_with_unverified_ignored_files(
     assert prov.worktree_state(str(wt), own=True) == "clean"
     verdict = _rank(home, _remove(wt), C)
     assert verdict.risk is Risk.HIGH and verdict.targets[0].cleanup_hold, verdict.reasons
-    assert "unverified ignored files" in verdict.targets[0].reason
+    assert "ignored entries the guard cannot prove regenerable" in verdict.targets[0].reason
 
 
 def test_child_removes_parents_tree_with_tracked_change_is_high(home: Path, infra: Path) -> None:
@@ -487,7 +487,7 @@ def test_rm_rf_of_parents_tree_with_ignored_env_is_judged(home: Path, infra: Pat
     assert _rank(home, f"rm -rf {wt}", C).risk is Risk.HIGH
     plain = _rank(home, _remove(wt), C)
     assert plain.risk is Risk.HIGH and plain.targets[0].cleanup_hold, plain.reasons
-    assert "preserve unverified ignored files separately" in plain.targets[0].reason
+    assert "the guard cannot prove regenerable" in plain.targets[0].reason
     assert _rank(home, f"rm -rf {wt}", P).risk is Risk.LOW
 
 

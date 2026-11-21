@@ -265,9 +265,16 @@ session made. Everything CRITICAL is still refused.
   link goes, not the dependencies. Real dependency directories, stores,
   virtualenvs, Cargo targets, build outputs and Python caches remain unverified.
 
-  If held, preserve unknown files, commit or stash edits, push commits that
-  must survive, and verify the canonical path and Git registration with
-  `git worktree list --porcelain`. Report the hold for your own checkout rather
+  The hold names the condition that failed. Ignored files the guard cannot
+  prove regenerable (the reason counts them, never lists them): there is
+  nothing to commit, stash or push for that hold, and it is not the open-PR
+  refusal (that one is CRITICAL and says "has open PR"). Copy or move what
+  you need out of the checkout; whether the rest may be deleted is the
+  operator's decision. Ignored files that could not be read: the guard could
+  not verify them; check the path and registration. Otherwise (tracked or
+  untracked changes, tracked deletions): preserve unknown files, commit or
+  stash edits, push commits that must survive, and verify the canonical path
+  and Git registration with `git worktree list --porcelain`. Report the hold for your own checkout rather
   than asking the operator. These steps neither authorize a retry nor change
   the two refusal exceptions above. This route excludes unregistered residue:
   it cannot verify durable prior registered identity, a reachable preserved
