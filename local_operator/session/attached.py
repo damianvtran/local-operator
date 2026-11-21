@@ -7267,7 +7267,13 @@ class AttachedSession:
         if trace is not None:
             trace.fields["metadata_record"] = "hit" if record is not None else "miss"
         if record is None:
-            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path)
+            # ``stats`` names which proof a MISS paid (incremental after growth,
+            # full after a rewrite) in the open trace, so a slow open can be
+            # attributed without re-instrumenting.
+            stats: dict[str, Any] = {}
+            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path, stats)
+            if trace is not None:
+                trace.fields.update(stats)
         if record is None:
             return None
         self._cold_checkpoint = record.checkpoint
