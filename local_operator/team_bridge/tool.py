@@ -175,7 +175,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
@@ -2822,7 +2822,9 @@ async def _post_progress_ack(
             None,
             config_dir=Path(runtime.config_dir),
             access=access,
-            client=runtime.client,
+            # Same adapter as pull._client_for: the SDK has narrower
+            # keyword-only signatures than the injectable wire protocol.
+            client=cast(_pull.WireClient, runtime.client),
         )
     except (_pull.PullRefused, StoreRefused) as failure:
         return {"hub_ack": "refused", "code": failure.code}

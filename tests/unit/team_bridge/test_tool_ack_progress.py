@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -133,7 +133,7 @@ async def test_read_working_done_posts_once_each_in_order(tmp_path) -> None:
         receipt,
         config_dir=tmp_path,
         access=await runtime.client.current_access(),
-        client=runtime.client,
+        client=cast(pull.WireClient, runtime.client),
     )
     assert read.state == ACK_CONFIRMED
 
