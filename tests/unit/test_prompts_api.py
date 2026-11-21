@@ -2087,10 +2087,16 @@ _GATED_TOOL_NAMES = sorted(
 
 
 def _gated_blocks(names: list[str], **kwargs: Any) -> list[str]:
+    from local_operator.harness.intent import apply_intent_schema
     from local_operator.prompts_api import build_system_blocks
 
+    tools = [_tool(name, f"{name} tool") for name in names]
+    for tool in tools:
+        # The production shape (``apply_intent_schema`` runs on every tool), so
+        # the schema-derived ``has_intent`` keeps the ``i`` rule like a session.
+        tool.parameters = apply_intent_schema(tool.parameters)
     return build_system_blocks(
-        [_tool(name, f"{name} tool") for name in names],
+        tools,
         skills_block="",
         env_details="env",
         date_str="2026-01-01",
@@ -2123,8 +2129,9 @@ def test_a_session_holding_every_gated_tool_renders_the_ungated_bytes() -> None:
     )
     assert plain == stated
     # build_system_blocks appends its own sections AFTER the template render, so
-    # the gated session's head must begin with the whole ungated render.
-    assert gated.startswith(plain)
+    # the gated session's head must begin with the whole ungated render (its
+    # trailing blank lines normalised to the one before the state section).
+    assert gated.startswith(plain.rstrip("\n") + "\n\n## Session state updates")
     for marker in (
         "## Library",
         "Keep the todo list honest",

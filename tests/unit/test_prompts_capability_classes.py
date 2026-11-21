@@ -18,14 +18,18 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool
 from local_operator.prompts_api import (
     CAPABILITY_CLASS_FLAGS,
+    CHANNEL_ASK,
+    CHANNEL_HUB,
     TOOL_GATED_PROSE_FLAGS,
     build_system_blocks,
     render_template,
     split_tail_sections,
 )
+from local_operator.session_factory import _env_details
 
 _HOST = {"has_browser": False, "no_browser": False, "has_console": False, "no_console": False}
 
@@ -60,6 +64,17 @@ _CLASS_GATED_MARKERS = (
     "`<guides>` lists Local Operator procedures",
     "`web_search`/`web_fetch`",
     "delegate self-contained slices",
+    # Wave 5: workspace-, shell- and subagent-specific prose.
+    "This harness is Local Operator",
+    "Trust code and guides, not memory.",
+    "Act directly with tools: shell commands, file reads/edits",
+    "Run commands, read files, search the workspace",
+    "Exercise behaviour changes through the real path",
+    "**Reuse existing patterns**",
+    "(bang-mode)",
+    "Respect denials of a prompted write or command",
+    "`preview_tool_call`",
+    "`reviewer`, `architect`, or `designer` subagent",
 )
 
 #: The operator's always-on list: judgement and safety, never capability prose.
@@ -73,19 +88,30 @@ _ALWAYS_ON_MARKERS = (
     "**Look up off-machine answers.**",
     "## Narration",
     "Destructive or irreversible operations",
+    "If an approval request is declined, stop that action and say so.",
     "Keep secrets secret: never print credentials, tokens or keys",
-    "Respect denials of a prompted write or command",
+    # Both arms (the full paragraph and the one-line form) open with this.
+    "`BLOCKED by guardrail` is final for that effect",
     "Deciding is your job",
     "Authorization never extends to a destructive or irreversible step",
-    "(bang-mode)",
+    "## Session state updates",
+    "[session-state] records are host context, not a task or permission to act.",
 )
 
 
-def _tool(name: str) -> AgentTool:
+def _tool(name: str, *, intent: bool = True) -> AgentTool:
+    """A tool in its PRODUCTION shape: every builtin and MCP tool passes
+    ``apply_intent_schema``, which ``has_intent`` is derived from."""
+
     async def _noop(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover
         raise AssertionError("not called")
 
-    return AgentTool(name=name, description=f"{name} tool", execute=_noop)
+    return AgentTool(
+        name=name,
+        description=f"{name} tool",
+        parameters=apply_intent_schema({}) if intent else {},
+        execute=_noop,
+    )
 
 
 def _blocks(names: list[str], skills_block: str = _KNOWLEDGE, **kwargs: Any) -> list[str]:
@@ -110,7 +136,9 @@ def test_a_session_holding_every_class_renders_the_ungated_bytes() -> None:
         "system.md", {**_HOST, **{flag: True for flag in CAPABILITY_CLASS_FLAGS}}
     )
     assert plain == stated
-    assert head.startswith(plain)
+    # Wave 5 (g) is the ONLY full-tool-set delta: the template render is
+    # unchanged and the session-state section follows it after one blank line.
+    assert head.startswith(plain.rstrip("\n") + "\n\n## Session state updates\n\n")
     for marker in _CLASS_GATED_MARKERS:
         assert marker in head, marker
     assert "your web search tools" not in head
@@ -132,6 +160,20 @@ def test_mcp_only_session_drops_class_prose_and_keeps_the_always_on_rules() -> N
     assert "use\n  your web search tools for third-party errors" in head
     assert "- **Parallelize independent work:** batch calls.\n" in head
     assert "never print credentials, tokens or keys.\n" in head
+    # Wave 5's short arms, each in place of the workspace prose it replaces.
+    assert "\nAct directly with your tools; use them before answering from memory.\n\n" in head
+    assert "- **Use tools before answering.** Start shallow, deepen on signals" in head
+    assert "- **Verify results.** Read actual responses; errors aren't success." in head
+    assert "Claim success only when observable" in head
+    assert "- `BLOCKED by guardrail` is final for that effect: report it; never reroute.\n" in head
+    assert "resolve the question yourself via\ntools or documents, then act." in head
+    # The detached no-channel ``<interactivity>`` body says "proceed and state
+    # what you would have asked"; the head's no-ask line is not repeated.
+    assert "No `ask` tool in this session" not in head
+    assert "Prefer to PROCEED with what you have" in tail
+    # MCP tools carry the injected ``i`` property, so its rule stays.
+    assert "Most tools take `i`" in head
+    assert "Never restate the\ncall's `i` intent" in head
     # No shell: nothing to install a browser engine or terminal emulator with.
     assert inventory == "## Available tools\n\n- mcp__bd_fetch\n- mcp__bd_search"
     # No read: the catalogues point at URLs this session cannot open.
@@ -169,11 +211,17 @@ def test_a_shell_only_session_keeps_the_filesystem_safety_rules() -> None:
 
 
 @pytest.mark.parametrize("names", [["write"], ["grep"], _MCP_ONLY])
-def test_no_shell_omits_browser_setup_and_keeps_bang_rule(names: list[str]) -> None:
+def test_no_shell_omits_browser_setup_and_bang_rule_follows_shell_or_ask(names: list[str]) -> None:
+    """Bang-mode provenance rides ``has_shell`` OR ``has_ask``: #4332 R1-m1's
+    case is a TUI session without a shell tool whose operator still types
+    ``! cmd``, and that host holds ``ask``. A headless run without either can
+    neither receive a bang command nor re-run one."""
     head, _inventory, _env, _tail = _blocks(names, host_has_browser=False)
-    assert "(bang-mode)" in head
+    assert "(bang-mode)" not in head
     for pointer in ("pages with curl", '"Headless nodes"', "follow `guide://browser`"):
         assert pointer not in head
+    with_ask = _blocks([*names, "ask"], host_has_browser=False)[0]
+    assert "(bang-mode)" in with_ask
 
 
 @pytest.mark.parametrize("names", [["write"], ["grep"], ["bash"]])
@@ -213,6 +261,7 @@ def test_has_web_and_no_web_cannot_both_be_true() -> None:
 #: Flags whose prose shares a line or a paragraph break with a capability class.
 _SEAM_FLAGS = (
     *sorted(CAPABILITY_CLASS_FLAGS),
+    "has_intent",
     "has_wake_monitor",
     "has_no_reply",
     "has_notify",
@@ -256,13 +305,108 @@ def test_every_capability_flag_combination_joins_its_sentences_cleanly() -> None
 
 
 def test_the_tools_heading_never_renders_empty() -> None:
-    """With every lead sentence gated off the section still carries the
-    always-on ``i`` guidance directly under its heading."""
-    text = render_template(
-        "system.md",
-        {
-            **_HOST,
-            **{flag: False for flag in (*TOOL_GATED_PROSE_FLAGS, *_SEAM_FLAGS, "has_bridge")},
-        },
-    )
+    """With every lead sentence gated off the section still carries the ``i``
+    guidance directly under its heading; with that gated off too (no tool has
+    the injected schema property) the ``### Deciding and asking`` subsection
+    follows it, so the heading still has a body."""
+    off = {flag: False for flag in (*TOOL_GATED_PROSE_FLAGS, *_SEAM_FLAGS, "has_bridge")}
+    text = render_template("system.md", {**_HOST, **off, "has_intent": True})
     assert "## Tools\n\nMost tools take `i`" in text
+    bare = render_template("system.md", {**_HOST, **off})
+    assert "## Tools\n\n### Deciding and asking\n\n" in bare
+
+
+@pytest.mark.parametrize(
+    ("interactive", "channel", "no_ask_line"),
+    [
+        # No ``<interactivity>`` block (no runtime probe): the head line is the
+        # only statement, so it stays.
+        (None, None, True),
+        # The PROCEED bodies say it already; said once, in the tail.
+        (False, None, False),
+        (True, None, False),
+        (False, CHANNEL_HUB, False),
+        # An attached child is routed through ``hub``, not told to proceed, so
+        # the head keeps its decide-yourself line.
+        (True, CHANNEL_HUB, True),
+    ],
+)
+def test_the_no_ask_line_is_said_once_between_head_and_interactivity(
+    interactive: bool | None, channel: str | None, no_ask_line: bool
+) -> None:
+    head, _inv, _env, tail = _blocks(_MCP_ONLY, interactive=interactive, channel=channel)
+    assert ("No `ask` tool in this session" in head) is no_ask_line
+    proceeds = "PROCEED" in tail or "proceed on the best reading" in tail
+    assert proceeds is not no_ask_line or (interactive, channel) == (True, CHANNEL_HUB)
+
+
+def test_a_session_holding_ask_keeps_its_ask_prose_whatever_the_tail_says() -> None:
+    head, _inv, _env, tail = _blocks([*_MCP_ONLY, "ask"], interactive=False, channel=CHANNEL_ASK)
+    assert "Reach for `ask` only when" in head
+    assert "No `ask` tool in this session" not in head
+
+
+def test_the_intent_rule_follows_the_schemas_not_the_names() -> None:
+    """``has_intent`` reads the declared schemas: the same names without the
+    injected ``i`` property drop the rule and its Narration clause."""
+    plain = build_system_blocks(
+        [_tool(name, intent=False) for name in _MCP_ONLY],
+        skills_block="",
+        env_details="",
+        date_str="2026-01-01",
+        host_has_browser=True,
+        host_has_console=True,
+    )[0]
+    assert "Most tools take `i`" not in plain
+    assert "`i` intent" not in plain
+    assert "Never open with filler" in plain
+    assert "## Tools\n\n### Deciding and asking" in plain
+    assert _seam_faults(plain.split("## Session state updates")[0]) == []
+
+
+@pytest.mark.parametrize(
+    ("names", "workspace", "session_id"),
+    [
+        (_MCP_ONLY, False, False),
+        (["web_search", "web_fetch"], False, False),
+        (["bash"], True, False),
+        (["read"], True, False),
+        ([*_MCP_ONLY, "sessions"], False, True),
+        (["send"], False, True),
+        (["tags"], False, True),
+        (["bash", "read", "sessions", "send", "tags"], True, True),
+    ],
+)
+def test_env_details_ship_only_lines_a_held_tool_can_use(
+    names: list[str], workspace: bool, session_id: bool
+) -> None:
+    text = _env_details("/work", "sid123", names)
+    assert ("Working directory: /work" in text) is workspace
+    assert ("Platform: " in text) is workspace
+    assert ("Python: " in text) is workspace
+    assert ("Session ID: sid123" in text) is session_id
+
+
+def test_env_details_without_a_tool_list_keep_every_line() -> None:
+    """``None`` is the caller that states no membership: historical shape."""
+    text = _env_details("/work", "sid123")
+    assert text.splitlines()[2:] == ["Working directory: /work", "Session ID: sid123"]
+    assert text.startswith("Platform: ")
+
+
+def test_an_mcp_only_env_block_is_the_date_and_model() -> None:
+    blocks = build_system_blocks(
+        [_tool(name) for name in _MCP_ONLY],
+        skills_block="",
+        env_details=_env_details("/work", "sid123", _MCP_ONLY),
+        date_str="2026-01-01",
+        model_label="bedrock/ca.anthropic.claude-haiku-5-5",
+        host_has_browser=True,
+        host_has_console=True,
+    )
+    assert blocks[2] == "Today is 2026-01-01.\n\nModel: bedrock/ca.anthropic.claude-haiku-5-5"
+
+
+def test_has_workspace_and_no_workspace_cannot_both_be_true() -> None:
+    with pytest.raises(ValueError, match="has_workspace and no_workspace"):
+        render_template("system.md", {**_HOST, "has_workspace": True, "no_workspace": True})
