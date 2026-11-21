@@ -363,12 +363,13 @@ async def test_real_resolver_prices_one_actual_prompt_tier(
     session._last_usage = Usage(context_tokens=context)
     factor = 2 if context > 200_000 else 1
     expected = (0.2 * factor, (8 if provider == "anthropic" else 5) * factor, 4 * factor)
-    assert tuple(x * 1e6 for x in await session._economic_prices(context)) == pytest.approx(
-        expected
-    )
+    prices = await session._economic_prices(context)
+    assert prices is not None
+    assert tuple(x * 1e6 for x in prices) == pytest.approx(expected)
     # Same Session crosses the tariff boundary: no stale size-insensitive cache.
     other = 300_000 if context == 100_000 else 100_000
     actual = await session._economic_prices(other)
+    assert actual is not None
     assert actual[2] * 1e6 == (8 if other == 300_000 else 4)
     await session.dispose()
 
@@ -534,23 +535,27 @@ async def test_r2_actual_archive_rejects_the_32k_counterexample(tmp_path, monkey
     )
     user = Message.user(" ".join(f"rule{i}: constraint{i*i}" for i in range(6500)))
     assistant = Message.assistant(" ".join(f"item{i}: value{i*i}" for i in range(13000)))
-    history = [user, assistant]
-    session._context.messages = history
+    history: list[Message] = [user, assistant]
+    session._context.messages = list(history)
     before = api.estimate_messages_tokens(history)
     plan = _CompactionPlan(api, CompactionSettings(), "snapcompact", history, 2, before, before)
     projected = await session._economic_exact_residual(
         plan, prefix_tokens=0, provider_context=before
     )
-    archive = snapcompact.Archive.model_validate(plan.economic_summary[0][1]["snapcompact"])
+    archive_metadata = plan.economic_summary[0][1]
+    assert archive_metadata is not None
+    archive = snapcompact.Archive.model_validate(archive_metadata["snapcompact"])
     actual_archive = snapcompact.estimate_archive_tokens(
         archive
     ) + snapcompact.replayed_frame_count(archive) * (
         snapcompact.frame_token_estimate_for(BIG_MODEL.provider, BIG_MODEL.model_id)
         - snapcompact.FRAME_TOKEN_ESTIMATE
     )
-    preserved = sum(
-        count_text_tokens(t["text"]) for t in api.extract_preserved_user_turns(history, {user.id})
-    )
+    preserved = 0
+    for turn in api.extract_preserved_user_turns(history, {user.id}):
+        text = turn["text"]
+        assert isinstance(text, str)
+        preserved += count_text_tokens(text)
     assert actual_archive > 32_000
     assert projected >= actual_archive + preserved
     assert projected / before > 0.6
