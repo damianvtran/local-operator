@@ -2743,6 +2743,26 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
 ARRIVAL_NOTE_MARKER = "move-arrival-note.json"
 
 
+def _pending_setup(server: "RelayServer", session_id: str) -> list[tuple[str, str]]:
+    """``(cwd, run)`` for each dependency recipe this device's setup plan has not run.
+
+    Read from THIS device's restore record and tree (``workset_setup.plan_setup``),
+    never the peer's block, and computed only: nothing runs here (the arrival note
+    may name the plan, never start it). Any failure is "nothing pending" — the note
+    is advice and the move has already committed.
+    """
+    try:
+        from local_operator.network import workset_move, workset_setup
+
+        plan = workset_setup.plan_setup(Path(server.root), workset_move.home_of(server), session_id)
+    except Exception:  # noqa: BLE001 — advice only
+        logger.debug("mobility: no setup plan for %s", session_id, exc_info=True)
+        return []
+    if plan is None:
+        return []
+    return [(row.cwd, row.run) for row in plan.rows if row.state == "not_run"]
+
+
 def _arrival_resume_note(
     server: "RelayServer",
     session_id: str,
@@ -2791,6 +2811,7 @@ def _arrival_resume_note(
             session_id=session_id,
             source=source,
             destination=str(server._own_label()),  # noqa: SLF001
+            setup_pending=_pending_setup(server, session_id),
         )
         written = append_inbox(
             directory,

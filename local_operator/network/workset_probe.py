@@ -64,7 +64,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -982,6 +982,7 @@ def arrival_note(
     session_id: str,
     source: str,
     destination: str,
+    setup_pending: Sequence[tuple[str, str]] = (),
 ) -> str:
     """The system note a moved ACTIVE conversation receives once on arrival.
 
@@ -989,6 +990,14 @@ def arrival_note(
     model which paths it worked in, that they did NOT come (PR A carries no files),
     where they are and how to get them, what was left behind, and which toolchains
     this device lacks (recomputed HERE from the block's marker names).
+
+    ``setup_pending`` is ``(cwd, run)`` per dependency recipe THIS device's own setup
+    plan (``workset_setup.plan_setup``) still has to run. The note says so and names
+    ONLY the non-executing ``lop sessions setup-deps <id> --status``. The receiver
+    boundary (security ruling on #4378): moving the files, the mesh authority and
+    the agent's shell are not consent to run a package manager's lifecycle scripts
+    here, so the note never tells the agent to run setup and never offers ``--yes``;
+    running it stays a decision the operator makes on this device.
     """
     lines = [
         f"[session move] This conversation was just moved from {source} to {destination} "
@@ -1033,6 +1042,20 @@ def arrival_note(
     excluded = [item for item in (block or {}).get("excluded") or [] if isinstance(item, Mapping)]
     for item in excluded[:20]:
         lines.append(f"- Withheld (secret-shaped): {item.get('path')}")
+    pending = [(str(cwd), str(run)) for cwd, run in setup_pending][:20]
+    if pending:
+        lines.append(
+            "Dependency trees (node_modules, .venv) did not move and are not set up on "
+            "this device yet:"
+        )
+        lines.extend(f"- {cwd}: {run}" for cwd, run in pending)
+        lines.append(
+            "Creating them runs a package manager, which can execute the repository's "
+            "install scripts, so it needs the user's own decision on this device; moving "
+            "the conversation did not approve it. Do not run the setup or these commands "
+            "yourself: tell the user it is pending. To show the plan and its status "
+            f"without running anything: lop sessions setup-deps {session_id} --status"
+        )
     if len(lines) == 1:
         lines.append("No working files were recorded for this conversation.")
     lines.append(

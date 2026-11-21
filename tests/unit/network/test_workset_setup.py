@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -30,6 +31,7 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -440,3 +442,76 @@ def test_a_tree_that_appears_after_the_plan_is_still_never_replaced(
     assert receipt["rows"][0]["state"] == "present"
     assert (wt / "node_modules" / "mine.js").read_text() == "keep\n"
     assert not (wt / "node_modules").is_symlink()
+
+
+# ------------------------------------------------- the arrival note (receiver boundary)
+
+
+_SETUP_CMD = re.compile(r"lop sessions setup-deps\b[^\n]*")
+
+
+def _assert_never_executes(text: str) -> None:
+    """The receiver boundary (#4378): name only ``--status``; never ``--yes``."""
+    assert "--yes" not in text and " -y" not in text
+    commands = _SETUP_CMD.findall(text)
+    assert commands, text
+    assert all(c.rstrip(". ").endswith(f"setup-deps {SID} --status") for c in commands), commands
+    assert "Do not run the setup" in text
+
+
+def test_the_arrival_note_names_pending_setup_as_status_only() -> None:
+    from local_operator.network import workset_probe
+
+    text = workset_probe.arrival_note(
+        None,
+        session_id=SID,
+        source="laptop",
+        destination="desk",
+        setup_pending=[("~/src/app", "npm ci")],
+    )
+
+    assert "- ~/src/app: npm ci" in text
+    _assert_never_executes(text)
+
+
+def test_the_arrival_note_says_nothing_about_setup_when_none_is_pending() -> None:
+    from local_operator.network import workset_probe
+
+    text = workset_probe.arrival_note(None, session_id=SID, source="laptop", destination="desk")
+
+    assert "setup-deps" not in text and "Dependency trees" not in text
+
+
+def test_the_spooled_first_turn_note_carries_this_devices_pending_plan(
+    env: dict[str, Path],
+) -> None:
+    """Through ``mobility._arrival_resume_note``: the plan is computed here, nothing runs."""
+    from types import SimpleNamespace
+
+    from local_operator.network import mobility
+    from local_operator.session.runtime.inbox import peek_inbox
+
+    wt = _worktree(env["home"], "src/app", {"package-lock.json": "{}"})
+    _record_tool(env["bin"], "npm")
+    present = _worktree(env["home"], "src/done", {"package-lock.json": "{}"})
+    (present / "node_modules").mkdir()
+    (present / "node_modules" / "x.js").write_text("1\n")
+    _restored(env["config"], ["~/src/app", "~/src/done"])
+    (env["config"] / "sessions" / SID).mkdir(parents=True)
+    # The note path reads only ``root``, ``workset_home`` and ``_own_label``.
+    server: Any = SimpleNamespace(
+        root=env["config"], workset_home=str(env["home"]), _own_label=lambda: "desk"
+    )
+
+    state = mobility._arrival_resume_note(
+        server, SID, lease_epoch="e1", block=None, source="laptop"
+    )
+
+    assert state == "delivered"
+    (row,) = peek_inbox(env["config"] / "sessions" / SID)
+    assert "- ~/src/app: npm ci" in row.text
+    assert "~/src/done" not in row.text  # already present: nothing pending there
+    _assert_never_executes(row.text)
+    # Computing the note started nothing and wrote no setup receipt.
+    assert not (wt / ".calls").exists() and not (wt / "node_modules").exists()
+    assert workset_setup.read_receipt(env["config"], SID) is None

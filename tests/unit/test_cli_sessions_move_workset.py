@@ -664,5 +664,10 @@ def test_setup_deps_command_without_yes_off_a_terminal_runs_nothing(
     assert "not_run · ~/src/app: npm ci" in out.out
     assert "install scripts" in out.err
     assert not (arrived / "setup.json").exists() and not (wt / "node_modules").exists()
+    # `--status` before any run (the one command the arrival note names) shows the
+    # pending plan, runs nothing, and does not claim that no working set arrived.
     status = cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION, "--status"])
-    assert cli.sessions_setup_deps_command(status) == 1  # no receipt yet
+    assert cli.sessions_setup_deps_command(status) == 1
+    shown = capsys.readouterr()
+    assert "not_run · ~/src/app: npm ci" in shown.out and "No working set" not in shown.err
+    assert not (arrived / "setup.json").exists() and not (wt / "node_modules").exists()

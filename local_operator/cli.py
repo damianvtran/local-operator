@@ -8093,6 +8093,7 @@ def sessions_setup_deps_command(args: argparse.Namespace) -> int:
     caller without ``--yes`` gets the plan and exit 1, never a silent install.
     Exit 0 when every row is done/present/skipped, else 1.
     """
+    import json as _json
 
     from local_operator.network import workset_setup
 
@@ -8100,8 +8101,20 @@ def sessions_setup_deps_command(args: argparse.Namespace) -> int:
     if bool(getattr(args, "status", False)):
         receipt = workset_setup.read_receipt(Path(config_dir()), session_id)
         if receipt is None:
-            print(render_resolved(_wsh.setup_none(session=session_id)), file=sys.stderr)
-            return 1
+            # No run yet: the PLAN, computed and printed, never run. This is the one
+            # command the arrival note names (receiver boundary, #4378), so before
+            # any setup it must still answer "what is pending here" rather than
+            # claim no working set arrived.
+            plan = workset_setup.plan_setup(Path(config_dir()), Path.home(), session_id)
+            if plan is None:
+                print(render_resolved(_wsh.setup_none(session=session_id)), file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(_json.dumps(workset_setup.plan_json(plan), indent=2, sort_keys=True))
+            else:
+                _print_setup_rows([vars(r) for r in plan.rows], plan.not_restored)
+            ok = all(r.state in workset_setup.OK_STATES for r in plan.rows)
+            return 0 if ok and not plan.not_restored else 1
         if getattr(args, "json", False):
             print(workset_setup.receipt_json(receipt))
         else:
