@@ -37,10 +37,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +52,38 @@ _LOCK = threading.Lock()
 
 
 def lends_path(network_id: str, root: Path | None = None) -> Path:
-    """The ledger's path. NEVER CREATES anything (placement's discipline)."""
+    """The ledger's path. NEVER CREATES anything (placement's discipline).
+
+    ``network_id`` passes ``store.safe_component`` first, as
+    ``placement.credentials_dir_for`` does (security review S3): the id comes from
+    the local record today, but a path component is validated where it is joined,
+    not trusted to every future caller. It raises ``MeshRefusal`` on a bad id;
+    every caller here sits inside its own never-raise guard.
+    """
+    from local_operator.network import store
     from local_operator.network.credentials import placement as placement_mod
 
-    return placement_mod.credentials_root(root) / network_id / LENDS_FILENAME
+    return placement_mod.credentials_root(root) / store.safe_component(network_id) / LENDS_FILENAME
+
+
+def _set_aside(path: Path) -> None:
+    """Rename an unparsable ledger to ``lends.json.corrupt`` beside itself (review R1-6).
+
+    The next ``_save`` starts a fresh ledger; without this it would overwrite the
+    bad bytes, and whatever made the file unreadable (a torn disk, a hand edit)
+    would leave no evidence. A rename, never a delete, and only within this
+    network's ``network/credentials/<network_id>/`` directory — the same
+    quarantine shape as ``store._quarantine``, whose stderr wording names a
+    network record and so is not reused here. A second corruption replaces the
+    first ``.corrupt``: one set-aside copy bounds the directory's growth.
+    """
+    # The store's own suffix, so every set-aside network file shares one spelling.
+    from local_operator.network.store import CORRUPT_SUFFIX
+
+    try:
+        os.replace(path, path.with_name(path.name + CORRUPT_SUFFIX))
+    except OSError:
+        logger.warning("could not set the unreadable lend ledger %s aside", path, exc_info=True)
 
 
 def _load(path: Path) -> list[dict[str, Any]]:
@@ -63,7 +92,12 @@ def _load(path: Path) -> list[dict[str, Any]]:
     except FileNotFoundError:
         return []
     except (OSError, ValueError):
-        logger.warning("lend ledger %s is unreadable; starting it again", path, exc_info=True)
+        logger.warning(
+            "lend ledger %s is unreadable; setting it aside (.corrupt) and starting it again",
+            path,
+            exc_info=True,
+        )
+        _set_aside(path)
         return []
     rows = document.get("lends") if isinstance(document, dict) else None
     return [dict(row) for row in rows or [] if isinstance(row, dict)]
@@ -98,8 +132,9 @@ def note_lend(
     ``until_ms`` is the latest moment the lease may be served on the holder:
     ``max(grant_expires_at_ms, hold_until_ms)`` — the hold, when the owner stated
     one, outlives the grant window, and it is the hold a lost member keeps using.
-    ``revocable`` marks a lend the removal path revokes at the issuer (a GitHub
-    App installation token); those are counted as revoked, never as left usable.
+    ``revocable`` marks a lend the issuer CAN revoke (a GitHub App installation
+    token). Whether a removal actually asks for that is decided at removal time,
+    against the live broker (:func:`removal_lends`), not by this flag alone.
     """
     if not (network_id and holder and key and until_ms):
         return
@@ -166,25 +201,38 @@ def removal_lends(
     *,
     told: bool,
     revokes_at_issuer: bool = True,
+    revoke_tracked: Callable[[str, str], bool] | None = None,
     audit: Any = None,
     now_ms: int | None = None,
 ) -> dict[str, Any]:
     """The lend half of a ``member rm`` receipt. Never raises.
 
-    - ``lends_revoked``: lends ended at the source — App installation tokens (the
-      relay's removal revoke DELETEs them at GitHub right after this) plus renewal
-      lends ended here (``renewal.end_lends``; the revoke thread's own call then
-      finds none, so nothing is ended or audited twice).
-    - ``lends_open``: when the member was NOT told over a live link, each lend no
-      issuer can revoke, with the moment it stops being servable on that device —
-      ids and times only. Its remedy is the copies' remedy: rotate at the source.
+    - ``lends_revoked``: App installation lends whose revocation was REQUESTED at
+      the source — counted only when ``revoke_tracked(key, holder)`` says the live
+      broker still holds that token, because the removal's DELETE
+      (``owner.revoke_lent_on_removal``) reaches only the lender's IN-MEMORY
+      registry. After an owner relay restart the ledger row survives but the
+      registry is empty, so nothing is DELETEd: such a row is listed as open
+      (review R1-1 / S1 / QA-F1). The DELETE runs off-thread after this receipt
+      and retries while the relay lives, so the receipt says "requested", never
+      "revoked" — a DELETE GitHub keeps refusing must not read as done.
+    - ``lends_renewal_ended``: renewal lends ended here (``renewal.end_lends``).
+      Its own count (review R1-2): ending one only means this owner renews that
+      login itself again; nothing on the member is revoked, so it must never sit
+      beside "stays usable" for the same credential under a "revoked" heading.
+      (The revoke thread's own ``end_lends`` call then finds none, so nothing is
+      ended or audited twice.)
+    - ``lends_open``: when the member was NOT told over a live link, every other
+      lend, with the moment it stops being servable on that device — ids and
+      times only. Its remedy is the copies' remedy: rotate at the source.
     - ``lends_told``: when the member WAS told, how many such lends its client was
       told to drop. "Told", not "confirmed": the frame was accepted by a live link,
       and the client's drop is the member's own act.
 
     ``revokes_at_issuer=False`` is the CLI's relay-less spelling: no broker runs
     there, so nothing DELETEs an App token and it is reported as left usable like
-    any other lend rather than counted as revoked.
+    any other lend. A missing ``revoke_tracked`` likewise counts nothing as
+    requested: without proof a DELETE will be attempted, the honest default is open.
     """
     from local_operator.network.credentials import renewal as renewal_mod
 
@@ -196,14 +244,23 @@ def removal_lends(
     except Exception:  # noqa: BLE001 — the removal already committed
         logger.warning("member removal: ending renewal lends failed", exc_info=True)
         renewal_ended = 0
-    revocable = [r for r in rows if revokes_at_issuer and r.get("revocable")]
-    unrevocable = [r for r in rows if not (revokes_at_issuer and r.get("revocable"))]
+
+    def _requested(row: dict[str, Any]) -> bool:
+        if not (revokes_at_issuer and row.get("revocable") and revoke_tracked is not None):
+            return False
+        try:
+            return bool(revoke_tracked(str(row.get("key")), device_id))
+        except Exception:  # noqa: BLE001 — unknown means open, never "requested"
+            logger.warning("member removal: could not read the lent-token registry", exc_info=True)
+            return False
+
+    requested = [r for r in rows if _requested(r)]
+    rest = [r for r in rows if r not in requested]
     return {
-        "lends_revoked": len(revocable) + int(renewal_ended or 0),
+        "lends_revoked": len(requested),
+        "lends_renewal_ended": int(renewal_ended or 0),
         "lends_open": (
-            []
-            if told
-            else [{"key": str(r["key"]), "until_ms": int(r["until_ms"])} for r in unrevocable]
+            [] if told else [{"key": str(r["key"]), "until_ms": int(r["until_ms"])} for r in rest]
         ),
-        "lends_told": len(unrevocable) if told else 0,
+        "lends_told": len(rest) if told else 0,
     }

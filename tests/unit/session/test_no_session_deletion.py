@@ -1544,6 +1544,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         1,
     ),
     (
+        "local_operator/network/credentials/lends.py::_set_aside",
+        "os.replace",
+        "Renames an unparsable lend ledger FILE to lends.json.corrupt beside itself: both "
+        "paths are <config>/network/credentials/<network_id>/ (lends_path joins a "
+        "safe_component network id under credentials_root), a child of network/ and a "
+        "sibling of sessions/ — never a session directory. A rename, never a delete (G9 R1-6)",
+    ),
+    (
         "local_operator/network/store.py::purge_identity",
         "<path>.unlink",
         "`uninstall --purge-identity`: the keypair FILE <config>/network/identity/"

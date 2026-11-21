@@ -5070,6 +5070,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             revoked=int(live.get("lends_revoked") or 0),
             open_lends=list(live.get("lends_open") or []),
             told=int(live.get("lends_told") or 0),
+            renewal_ended=int(live.get("lends_renewal_ended") or 0),
         )
         return _emit(
             args,
@@ -5148,6 +5149,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
                 revoked=int(lends["lends_revoked"]),
                 open_lends=list(lends["lends_open"]),
                 told=0,
+                renewal_ended=int(lends["lends_renewal_ended"]),
             ),
         ],
     )

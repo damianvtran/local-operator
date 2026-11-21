@@ -1671,6 +1671,20 @@ class MeshCredentialBroker:
             return 0
         return lender.revoke_holder(holder, key=key, cause=cause)
 
+    def tracks_lent_token(self, key: str, holder: str) -> bool:
+        """Whether :meth:`revoke_outstanding` would find a token for ``(key, holder)`` now.
+
+        The ``member rm`` receipt asks this before counting an App lend as
+        "revocation requested" (G9 review R1-1): the DELETE reaches only the
+        lender's IN-MEMORY registry, so after a relay restart a ledger row can name
+        a token nothing will revoke. Deliberately NOT :meth:`lent_hold_until_ms` —
+        that map also records PAT/``gh`` arms, which no DELETE reaches.
+        """
+        lender = self._github_lender
+        if lender is None or not github_app.is_github_key(key):
+            return False
+        return lender.outstanding(key=key, holder=holder) > 0
+
     def revoke_all_outstanding(self, *, cause: str = "panic") -> int:
         """DELETE every outstanding lent GitHub token, for every holder, now.
 
@@ -3929,6 +3943,21 @@ def revoke_lent_on_removal(server: Any, network_id: str, device_ids: Iterable[st
         except Exception:  # noqa: BLE001 — the tombstone holds; the token's hour bounds it
             logger.warning("member removal: revoking lent GitHub tokens failed", exc_info=True)
     return revoked
+
+
+def lent_token_tracked(server: Any, network_id: str, key: str, holder: str) -> bool:
+    """Whether :func:`revoke_lent_on_removal` will DELETE ``holder``'s ``key`` token.
+
+    The same broker lookup and network guard as that function, and the same key
+    (``GITHUB_KEY``) it revokes, so the receipt's "revocation requested" count
+    cannot claim a DELETE the removal will not attempt (G9 review R1-1).
+    """
+    broker = getattr(server, _BROKER_ATTR, None)
+    if broker is None or (network_id and broker.network_id != network_id):
+        return False
+    if key != github_app.GITHUB_KEY:
+        return False
+    return broker.tracks_lent_token(key, holder)
 
 
 def _end_renewal_lends(

@@ -15156,13 +15156,21 @@ class RelayServer:
             record, state, reason="member_removed", removed=outcome.removed
         )
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        from local_operator.network.credentials import owner as owner_mod
         from local_operator.network.credentials.lends import removal_lends
 
+        # Read BEFORE the off-thread revoke below starts, while the lender still
+        # holds the token: an App lend counts as "revocation requested" only if
+        # that DELETE will actually be attempted (review R1-1; ``lends.py``).
+        network_id = record.network_id
         lends = removal_lends(
             self.root,
-            record.network_id,
+            network_id,
             device_id,
             told=device_id in told,
+            revoke_tracked=lambda key, holder: owner_mod.lent_token_tracked(
+                self, network_id, key, holder
+            ),
             audit=self.audit,
         )
         # The owner half of "membership loss ends a held GitHub token" (#3947 M2).

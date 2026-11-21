@@ -103,7 +103,8 @@ def test_an_unreachable_member_rm_names_each_lend_left_usable(
     assert MCP_KEY in open_keys, receipt
     assert open_keys[MCP_KEY] == max(held.mcp.grant_expires_at_ms, held.mcp.hold_until_ms)
     assert open_keys[MCP_KEY] > held.mcp.grant_expires_at_ms
-    # The App token is DELETEd at GitHub by the removal, so it is revoked, not open.
+    # The live broker still tracks the App token, so the removal asks GitHub to
+    # DELETE it: counted as requested, not open (a restarted relay is the next test).
     assert github_mod.GITHUB_KEY not in open_keys, receipt
     assert receipt["lends_revoked"] >= 1 and receipt["lends_told"] == 0, receipt
     assert net_fixtures.wait_for(lambda: not held.api.live(held.gh.access_token), timeout_s=10.0)
@@ -115,10 +116,9 @@ def test_an_unreachable_member_rm_names_each_lend_left_usable(
         told=receipt["lends_told"],
         now_ms=held.mcp.grant_expires_at_ms - 1,
     )
-    assert any(
-        f"'{MCP_KEY}' stays usable on qa-b until" in line and "rotate" in line for line in lines
-    ), lines
-    assert any("revoked at the source" in line for line in lines), lines
+    assert any("qa-b was not reachable" in line and "rotate" in line for line in lines), lines
+    assert any(line.strip().startswith("MCP server ") and "until" in line for line in lines)
+    assert any("revocation requested at the source" in line for line in lines), lines
     # The removed member's rows leave the ledger: nothing is ever lent to it again.
     assert lends_mod.close_holder(net.a.root, net.network_id, net.borrower) == []
 
@@ -277,3 +277,168 @@ def test_a_ledger_that_cannot_be_written_never_breaks_the_grant(tmp_path: Any) -
         tmp_path, "n_x", holder="d_b", key="k", grant_id="g", until_ms=10**13, revocable=False
     )
     assert lends_mod.close_holder(tmp_path, "n_x", "d_b") == []
+
+
+# --- round-1 remediation (G9 review R1-1..R1-6, S1, S3, QA-F1) ----------------
+
+
+def _owner_broker(net: Any) -> Any:
+    from local_operator.network.credentials import owner as owner_mod
+
+    return getattr(net.a, owner_mod._BROKER_ATTR)  # noqa: SLF001
+
+
+def test_an_app_lend_the_restarted_owner_no_longer_tracks_is_listed_open(
+    held: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """R1-1 / S1: RED on 93359481 — a ledger row alone was counted as revoked.
+
+    The lender's registry is in memory by design, so an owner relay restart
+    empties it while ``lends.json`` survives. Emptying the registry here is that
+    restart's exact effect on the removal path: no DELETE happens, so the App
+    token must be named open, with its end, and nothing counted as requested.
+    """
+    lender = _owner_broker(held.mesh)._github_lender  # noqa: SLF001
+    assert lender.outstanding(key=github_mod.GITHUB_KEY, holder=held.mesh.borrower) >= 1
+    with lender._lock:  # noqa: SLF001
+        lender._tracked.clear()  # noqa: SLF001
+    receipt, server = _remove_while_offline(held, monkeypatch)
+    server.stop()
+    open_keys = {lend["key"]: lend["until_ms"] for lend in receipt["lends_open"]}
+    assert receipt["lends_revoked"] == 0, receipt
+    assert github_mod.GITHUB_KEY in open_keys, receipt
+    assert open_keys[github_mod.GITHUB_KEY] >= held.gh.grant_expires_at_ms
+    # Honest: the token really is still live at GitHub, as the receipt now says.
+    assert held.api.live(held.gh.access_token)
+
+
+def test_a_delete_github_keeps_refusing_never_reads_as_revoked(
+    held: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """QA-F1 / S1: RED on 93359481 — it printed "revoked at the source" regardless."""
+    held.api.fail_next_revokes = 1000
+    receipt, server = _remove_while_offline(held, monkeypatch)
+    server.stop()
+    assert receipt["lends_revoked"] >= 1, receipt
+    lines = messages_mod.render_removal_lends(
+        "qa-b",
+        revoked=receipt["lends_revoked"],
+        open_lends=receipt["lends_open"],
+        told=receipt["lends_told"],
+        renewal_ended=receipt["lends_renewal_ended"],
+    )
+    assert any("revocation requested at the source" in line for line in lines), lines
+    assert not any(" revoked" in line for line in lines), lines
+    assert held.api.live(held.gh.access_token)
+
+
+def test_renewal_ends_have_their_own_count_and_never_read_as_revoked(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: RED on 93359481 — a renewal end was added to ``lends_revoked``."""
+    from local_operator.network.credentials import renewal as renewal_mod
+
+    now = int(time.time() * 1000)
+    lends_mod.note_lend(
+        tmp_path,
+        "n_x",
+        holder="d_b",
+        key="openai",
+        grant_id="g",
+        until_ms=now + 60_000,
+        revocable=False,
+    )
+    monkeypatch.setattr(renewal_mod, "end_lends", lambda *a, **k: 1)
+    out = lends_mod.removal_lends(tmp_path, "n_x", "d_b", told=False)
+    assert out["lends_revoked"] == 0 and out["lends_renewal_ended"] == 1, out
+    lines = messages_mod.render_removal_lends(
+        "qa-b",
+        revoked=out["lends_revoked"],
+        open_lends=out["lends_open"],
+        told=0,
+        renewal_ended=out["lends_renewal_ended"],
+        now_ms=now,
+    )
+    # One credential never reads as both revoked and usable.
+    assert not any("revoked" in line for line in lines), lines
+    assert any("stopped waiting on qa-b for 1 lent login" in line for line in lines), lines
+    assert any(line.strip().startswith("openai until") for line in lines), lines
+
+
+def test_a_revocable_row_with_no_registry_reader_is_open(tmp_path: Any) -> None:
+    """R1-1: without proof a DELETE will be attempted, the honest default is open."""
+    now = int(time.time() * 1000)
+    for tracked in (None, lambda key, holder: False):
+        lends_mod.note_lend(
+            tmp_path,
+            "n_x",
+            holder="d_b",
+            key="github",
+            grant_id="g",
+            until_ms=now + 60_000,
+            revocable=True,
+        )
+        out = lends_mod.removal_lends(tmp_path, "n_x", "d_b", told=False, revoke_tracked=tracked)
+        assert out["lends_revoked"] == 0, out
+        assert out["lends_open"] == [{"key": "github", "until_ms": now + 60_000}], out
+    lends_mod.note_lend(
+        tmp_path,
+        "n_x",
+        holder="d_b",
+        key="github",
+        grant_id="g",
+        until_ms=now + 60_000,
+        revocable=True,
+    )
+    out = lends_mod.removal_lends(
+        tmp_path, "n_x", "d_b", told=False, revoke_tracked=lambda key, holder: True
+    )
+    assert out["lends_revoked"] == 1 and out["lends_open"] == [], out
+
+
+def test_the_receipt_shows_labels_names_the_peer_and_says_rotate_once() -> None:
+    """R1-3 + R1-5: RED on 93359481 — raw ``mcp:<url>?query`` keys, "it", one tail per key."""
+    future = int(time.time() * 1000) + 3_600_000
+    lines = messages_mod.render_removal_lends(
+        "qa-b",
+        revoked=0,
+        open_lends=[
+            {"key": "mcp:https://mcp.example.com:8443/sse?session=q-fake-7", "until_ms": future},
+            {"key": "secret:CRM_API_KEY", "until_ms": future},
+            {"key": "anthropic", "until_ms": future},
+        ],
+        told=0,
+    )
+    text = "\n".join(lines)
+    assert "mcp:" not in text and "q-fake-7" not in text and "/sse" not in text, text
+    assert "MCP server mcp.example.com until" in text, text
+    assert "CRM_API_KEY until" in text and "secret:" not in text, text
+    assert "anthropic until" in text, text
+    assert "qa-b was not reachable" in text and "it was not reachable" not in text, text
+    assert text.count("rotate") == 1, text
+
+
+def test_a_corrupt_ledger_is_set_aside_not_overwritten(tmp_path: Any) -> None:
+    """R1-6: RED on 93359481 — the next write replaced the unreadable bytes."""
+    path = lends_mod.lends_path("n_x", tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+    lends_mod.note_lend(
+        tmp_path, "n_x", holder="d_b", key="k", grant_id="g", until_ms=10**13, revocable=False
+    )
+    aside = path.with_name(path.name + ".corrupt")
+    assert aside.read_text(encoding="utf-8") == "{not json"
+    assert json.loads(path.read_text(encoding="utf-8"))["lends"][0]["holder"] == "d_b"
+
+
+@pytest.mark.parametrize("bad", ["../escape", "a/b", "..", "x:y"])
+def test_an_unsafe_network_id_never_becomes_a_path(tmp_path: Any, bad: str) -> None:
+    """S3: RED on 93359481 — ``lends_path`` joined the id unchecked."""
+    from local_operator.network.store import MeshRefusal
+
+    with pytest.raises(MeshRefusal):
+        lends_mod.lends_path(bad, tmp_path)
+    lends_mod.note_lend(
+        tmp_path, bad, holder="d_b", key="k", grant_id="g", until_ms=10**13, revocable=False
+    )
+    assert not list(tmp_path.rglob("lends.json"))
