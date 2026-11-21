@@ -139,6 +139,11 @@ UNLOCK_BACKOFF_MAX_S = 8.0
 ROLL_HOLD_MARGIN_S = 2.0
 ROLL_GRACE_S = REQUEST_TIMEOUT_S - NOTIFY_ACK_TIMEOUT_S - ROLL_HOLD_MARGIN_S
 
+#: What the ``roll`` audit row says when the old broker's build cannot be read
+#: (Q3). Brokers released before the roll existed have no ``version`` in their
+#: ``status``; "unknown" read like a fault, while this names the actual cause.
+PREDECESSOR_VERSION_UNREPORTED = "version not reported; a broker that predates the roll"
+
 #: A successor that has not been renamed onto the canonical path within this
 #: long exits by itself. The roller kills a successor whose hand-off failed, but
 #: a roller that itself died mid-roll would otherwise leave an orphan listening
@@ -445,7 +450,10 @@ class SecretBroker:
         current_roller = process_info(roller.pid)
         if current_roller is not None and current_roller.same_process_as(roller):
             return False  # the roller is alive and owns the signal
-        from local_operator.secrets.roll import roller_signalled, verified_broker_process
+        from local_operator.secrets.roll import (
+            roller_signalled,
+            verified_broker_process,
+        )
 
         if roller_signalled(self._base, predecessor.pid):
             return True
@@ -481,7 +489,7 @@ class SecretBroker:
         # S3: both builds, so the chain alone answers "what did this update move
         # the broker from?" — the old version comes from the predecessor's own
         # pre-gate `status`, read once by `_successor_inputs`.
-        old_version = self._predecessor_version or "unknown"
+        old_version = self._predecessor_version or PREDECESSOR_VERSION_UNREPORTED
         self._audit(
             me,
             "roll",
@@ -1748,9 +1756,30 @@ def _successor_inputs(base: Path | None, predecessor_pid: int) -> _SuccessorInpu
         expected[pid] = identity
         caps[pid] = declared
     version = status.get("version")
-    return _SuccessorInputs(
-        predecessor, expected, caps, version if isinstance(version, str) else ""
-    )
+    if not isinstance(version, str) or not version:
+        version = _predecessor_build_version(predecessor_pid)
+    return _SuccessorInputs(predecessor, expected, caps, version)
+
+
+def _predecessor_build_version(pid: int) -> str:
+    """The old broker's build read off its own image, for a broker too old to report it (Q3).
+
+    ``status`` only grew a ``version`` field with the roll itself, so the FIRST
+    roll after this ships always starts from a broker that cannot name its
+    build, and the audit row read "(unknown)" for exactly the roll an operator
+    most wants to read. :func:`local_operator.update.version_of_process` reads
+    the running process's own argv/image (a generation or an installed tree),
+    which is the same observation the update path trusts. Best effort: ``""``
+    on any failure, which :meth:`SecretBroker._audit_roll` renders as "not
+    reported" rather than guessing.
+    """
+    try:
+        from local_operator.update import version_of_process
+
+        return version_of_process(pid) or ""
+    except Exception:  # noqa: BLE001 — a label for an audit row must never abort a roll
+        logger.debug("could not read the predecessor broker's version", exc_info=True)
+        return ""
 
 
 def run_broker(

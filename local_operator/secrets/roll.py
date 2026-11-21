@@ -212,7 +212,10 @@ def _record_failure(base: Path | None, old_pid: int, reason: str) -> None:
     failure it describes. No secret name or value is part of ``reason``.
     """
     try:
-        from local_operator.secrets.keys import key_of_record_is_plaintext, load_master_key
+        from local_operator.secrets.keys import (
+            key_of_record_is_plaintext,
+            load_master_key,
+        )
         from local_operator.secrets.store import SecretStore
 
         if not key_of_record_is_plaintext(base):
@@ -313,6 +316,22 @@ def _unknown_to_successor(
 
     old = pinned(old_status, "session_lineage", "expected_lineage")
     new = pinned(new_status, "session_lineage", "expected_lineage")
+    if "session_lineage" not in old_status:
+        # S7: a broker released before the roll reports only bare ``sessions``
+        # pids, and the FIRST roll after an update always starts from one; a
+        # lineage-only compare saw nothing there and the re-read was a no-op.
+        # Its pids carry no start time (``None``), so they are matched on pid
+        # against the successor's lineage, and the start-time check below is
+        # skipped for them — a recycled pid can only make this abort a roll the
+        # next attempt retries, never let one through.
+        known = {pid for pid, _start in new}
+        legacy = old_status.get("sessions")
+        old = {
+            (pid, None)
+            for pid in (legacy if isinstance(legacy, list) else [])
+            if isinstance(pid, int) and pid not in known
+        }
+        new = set()
     late = []
     for pid, start in old - new:
         # A session that EXITED after the successor's snapshot is still listed
@@ -738,6 +757,17 @@ def _hand_off(
                     or not now.same_process_as(old_identity)  # type: ignore[arg-type]
                     or _reaped(old_pid)
                 ):
+                    # S6: re-arm the sentinel from the moment the old broker is
+                    # GONE, not from the rename. A session that registered with
+                    # it in the re-read→rename gap (or sat in its listen
+                    # backlog) is unknown to the successor and only re-registers
+                    # after this exit, i.e. after the old broker's drain; with
+                    # the window counted from the rename, a slow drain let the
+                    # sentinel expire first and its descendants' denials stood.
+                    try:
+                        _write_sentinel(sentinel, old_pid, ttl=ROLL_GRACE_S, signalled=True)
+                    except OSError:
+                        pass
                     break
                 time.sleep(0.05)
             else:

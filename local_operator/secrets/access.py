@@ -33,6 +33,7 @@ tier is live decides everything:
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from local_operator.secrets.crypto import key_fingerprint
@@ -404,7 +405,13 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
     # Imported inside the function, matching `master_key_for` above: this
     # module is on the path of every `lop secret` verb, and the client drags in
     # socket/fcntl machinery the write verbs never need.
-    from local_operator.secrets.client import BrokerDenied, ensure_broker, retrieve
+    from local_operator.secrets.client import (
+        ROLL_WAIT_S,
+        BrokerDenied,
+        ensure_broker,
+        retrieve,
+        rolling_in_progress,
+    )
 
     hardened = key_mode(base) == "passphrase"
     owner = None if hardened else in_live_session_lineage(base)
@@ -413,9 +420,15 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
         # notify. A registered session's tool child has one, so it never takes
         # it; see `_retrieve_inside_session` for the bounded wait and refusal.
         return _retrieve_inside_session(name, base, role=role, owner=owner)
+    # QA Q2: while a roll is under way the WHOLE call, liveness ping included,
+    # gets the client's one roll budget; before, the ping alone could wait a
+    # full request timeout against a silent successor before that budget began
+    # (measured 14 s). Passed only during a roll, so the ordinary path — and
+    # every double standing in for these two calls — is unchanged.
+    bounded = {"deadline": time.monotonic() + ROLL_WAIT_S} if rolling_in_progress(base) else {}
     try:
-        if ensure_broker(base):
-            return retrieve(name, base, role=role)
+        if ensure_broker(base, **bounded):
+            return retrieve(name, base, role=role, **bounded)
         # No broker could be started. In the hardened tier there is no
         # unwrapped key on disk to fall back to, so let the local path raise
         # its own accurate message rather than inventing one here.
@@ -436,12 +449,18 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
 
 
 #: Upper bound on how long a retrieval inside a session waits for a broker to
-#: serve it before failing closed. Sized from the client's own spawn budget,
-#: ``client.STARTUP_TIMEOUT_S`` (5 s, the bound a respawned daemon gets to start
-#: listening), plus one second for the session to re-register with it — under
-#: the 8 s ceiling the security owner set for a `$(lop secret get …)` to stall.
+#: serve it before failing closed — the WHOLE wait, every ping, spawn poll and
+#: request clipped to it (#4388 R1 / #4389 S5: the two PRs' budgets used to
+#: stack to ~16 s). Equal to ``client.ROLL_WAIT_S`` (8 s, the ceiling the
+#: security owner set for a `$(lop secret get …)` to stall) on purpose: a read
+#: that meets a broker ROLL is held by the successor for ``broker.ROLL_GRACE_S``
+#: plus the redaction notice, which is exactly that budget, so a shorter wait
+#: here would refuse reads an update roll was about to serve. It still covers a
+#: crash: ``client.STARTUP_TIMEOUT_S`` (5 s) to respawn plus the session's
+#: re-registration (≤ ~2 s, ``session._REREGISTER_DELAYS_S``). Pinned by
+#: ``test_session_fail_closed.py::test_session_wait_matches_the_roll_budget``.
 #: Module-level so tests can shrink it rather than sleeping through it.
-SESSION_BROKER_WAIT_S = 6.0
+SESSION_BROKER_WAIT_S = 8.0
 
 #: Pause between attempts inside that window. Each attempt is a socket
 #: connect plus, when nothing listens, a non-blocking spawn-lock probe, so a
@@ -490,6 +509,11 @@ def _retrieve_inside_session(
     fall back — the retry only asks the same broker again — so a genuine policy
     refusal costs a bounded delay and then the same refusal.
 
+    **A roll is part of the same wait.** ``BrokerRolling`` (the client's roll
+    budget ran out) is folded into this refusal rather than escaping as its own
+    class, and the client gets this function's deadline, so a roll, a crash and
+    a late re-registration (security S6) all end in ONE bounded refusal.
+
     Everything else the broker answers propagates on the first attempt, as on
     the out-of-session path: a served value, ``SecretNotFound`` (so
     ``secrets.get(name, default)`` still sees its miss, R11/Q5), the structural
@@ -498,11 +522,11 @@ def _retrieve_inside_session(
     The error names the remedy rather than the mechanism: the session has to
     re-register with a running broker, which today means restarting it.
     """
-    import time
 
     from local_operator.secrets.client import (
         STARTUP_TIMEOUT_S,
         BrokerDenied,
+        BrokerRolling,
         ensure_broker,
         retrieve,
     )
@@ -515,12 +539,14 @@ def _retrieve_inside_session(
         try:
             # `ensure_broker`'s own spawn poll is clipped to the window so one
             # slow start cannot carry the total past the bound.
-            if ensure_broker(base, timeout=max(0.1, min(STARTUP_TIMEOUT_S, remaining))):
-                return retrieve(name, base, role=role)
+            if ensure_broker(
+                base,
+                timeout=max(0.1, min(STARTUP_TIMEOUT_S, remaining)),
+                deadline=deadline,
+            ):
+                return retrieve(name, base, role=role, deadline=deadline)
             last = "no secret broker could be started"
-        except BrokerUnavailable as exc:
-            last = str(exc)
-        except BrokerDenied as exc:
+        except (BrokerUnavailable, BrokerDenied, BrokerRolling) as exc:
             last = str(exc)
         if time.monotonic() + _SESSION_BROKER_RETRY_S > deadline:
             break

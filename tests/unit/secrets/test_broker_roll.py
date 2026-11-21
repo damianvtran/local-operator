@@ -274,9 +274,9 @@ def test_roll_swaps_the_broker_and_the_session_is_notified_again(
         assert not successor_socket_path(config_root).exists()
         # S1: the sentinel outlives the old broker by the successor's hold.
         assert client.rolling_in_progress(config_root)
-        assert _await(lambda: os.getpid() in (_status(config_root).get("sessions") or ())), (
-            "the session did not re-register with the successor"
-        )
+        assert _await(
+            lambda: os.getpid() in (_status(config_root).get("sessions") or ())
+        ), "the session did not re-register with the successor"
 
         out, _ = _finish(_child_retrieve(config_root))
         assert "FALLBACK" not in out, out
@@ -311,9 +311,7 @@ def test_roll_swaps_the_broker_and_the_session_is_notified_again(
             "secrets.db-wal",
             "secrets.db-shm",
         }
-        assert after_files - before_files <= allowed, (
-            after_files - before_files
-        )
+        assert after_files - before_files <= allowed, after_files - before_files
         for directory in {secrets_dir, runtime_dir}:
             for path in directory.iterdir():
                 if path.is_file() and path.name != key_path(config_root).name:
@@ -387,8 +385,7 @@ def test_readiness_mismatch_aborts_and_leaves_the_old_broker(
     """(c) / R5: a successor answering with another build is killed before the rename."""
     old_pid = _start_old_broker(config_root, reaper)
     fake = tmp_path / "fake_successor.py"
-    fake.write_text(
-        textwrap.dedent("""
+    fake.write_text(textwrap.dedent("""
             import json, os, socket, struct, sys
             path = sys.argv[sys.argv.index("--bind") + 1]
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -402,8 +399,7 @@ def test_readiness_mismatch_aborts_and_leaves_the_old_broker(
                 body = json.dumps(reply).encode()
                 conn.sendall(struct.pack(">I", len(body)) + body)
                 conn.close()
-            """)
-    )
+            """))
 
     def spawn(_base: Path | None, args: tuple[str, ...]) -> int:
         process = subprocess.Popen([sys.executable, str(fake), *args])
@@ -1242,3 +1238,135 @@ def test_an_exited_session_does_not_abort_the_switch() -> None:
     assert _unknown_to_successor(old, {"session_lineage": [], "expected_lineage": []}) == [me.pid]
     held = {"expected_lineage": [{"pid": me.pid, "start_time": me.start_time}]}
     assert _unknown_to_successor(old, held) == []
+
+
+# --- round-2 convergence (S6, S7, S8/CR8/CR9, Q3) ----------------------------------
+
+
+def _silent_broker(config_root: Path) -> socket.socket:
+    """Accepts and never answers: a held/wedged broker as the client sees it."""
+    path = socket_path(config_root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(64)
+    return listener
+
+
+def test_a_held_first_attempt_that_outlives_the_sentinel_never_falls_open(
+    config_root: Path, keyfile_store: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8/CR8/CR9: the FIRST attempt is inside the roll budget too.
+
+    The sentinel is live when the read starts and expires while the broker
+    holds it. Before, the first attempt ran unclipped with ``seen_roll`` unset,
+    timed out after the sentinel was gone, and its ``BrokerUnavailable`` went
+    to the fallback; now ``seen_roll`` is seeded from the sentinel present at
+    the start, the attempt is clipped to ``ROLL_WAIT_S``, and it fails CLOSED.
+    """
+    from local_operator.secrets.roll import _write_sentinel
+
+    monkeypatch.setattr(client, "ROLL_WAIT_S", 0.8)
+    monkeypatch.setattr(client, "REQUEST_TIMEOUT_S", 2.5)
+    listener = _silent_broker(config_root)
+    try:
+        _write_sentinel(rolling_path(config_root), 1, ttl=0.3)
+        started = time.monotonic()
+        with pytest.raises(client.BrokerRolling):
+            client.retrieve(SECRET_NAME, config_root)
+        elapsed = time.monotonic() - started
+    finally:
+        listener.close()
+    # CR9: bounded by the roll budget, not by a full request timeout.
+    assert elapsed < client.ROLL_WAIT_S + 0.6, f"took {elapsed:.2f}s"
+
+
+def test_a_legacy_broker_session_registered_mid_roll_is_still_found() -> None:
+    """S7: a broker from before the roll reports bare ``sessions`` pids only.
+
+    The first roll after an update always starts from such a broker; reading
+    only ``session_lineage`` made the pre-rename re-read a no-op there.
+    """
+    from local_operator.secrets.roll import _unknown_to_successor
+
+    me = process_info(os.getpid())
+    assert me is not None
+    legacy: dict[str, object] = {"pid": 1, "sessions": [me.pid]}
+    successor: dict[str, object] = {"session_lineage": [], "expected_lineage": []}
+    assert _unknown_to_successor(legacy, successor) == [me.pid]
+    known: dict[str, object] = {"session_lineage": [{"pid": me.pid, "start_time": me.start_time}]}
+    assert _unknown_to_successor(legacy, known) == []
+    # An exited legacy session is not "late" either.
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    exited: dict[str, object] = {"sessions": [gone.pid]}
+    assert _unknown_to_successor(exited, successor) == []
+
+
+def test_the_sentinel_counts_from_the_old_brokers_exit(
+    config_root: Path, keyfile_store: bytes, reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S6: a late registrant re-registers only after the old broker's drain, so
+    the client's retry window (the sentinel) must run ROLL_GRACE_S from the
+    observed EXIT, not from the rename. A slow exit is simulated by delaying
+    the SIGTERM itself; before the fix the sentinel's deadline stayed pinned
+    to the pre-signal write and expired that much earlier.
+    """
+    import json
+
+    from local_operator.secrets import broker as broker_module
+    from local_operator.secrets import roll as roll_module
+
+    old_pid = _start_old_broker(config_root, reaper)
+    real_kill = os.kill
+    delay_s = 1.5
+
+    def slow_term(pid: int, sig: int) -> None:
+        if pid == old_pid and sig == signal.SIGTERM:
+            time.sleep(delay_s)
+        real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", slow_term)
+    result = roll_module.roll_broker(config_root, force=True)
+    finished = time.time()
+    monkeypatch.setattr(os, "kill", real_kill)
+    reaper.add(result.new_pid)
+    assert result.status == "rolled", result
+    sentinel = json.loads(rolling_path(config_root).read_text(encoding="utf-8"))
+    assert sentinel["deadline"] >= finished + broker_module.ROLL_GRACE_S - 0.5, (
+        sentinel["deadline"] - finished
+    )
+
+
+def test_a_legacy_predecessor_version_is_read_off_its_process(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q3: a predecessor whose ``status`` has no ``version`` is labelled from its image."""
+    from local_operator.secrets import broker as broker_module
+
+    me = os.getpid()
+    monkeypatch.setattr(client, "request", lambda *_a, **_k: {"pid": me, "sessions": []})
+    monkeypatch.setattr(
+        broker_module, "_predecessor_build_version", lambda pid: "0.110.1", raising=False
+    )
+    inputs = broker_module._successor_inputs(config_root, me)
+    assert inputs is not None and inputs.version == "0.110.1"
+
+
+def test_an_unreadable_predecessor_version_says_why(
+    config_root: Path, keyfile_store: bytes
+) -> None:
+    """Q3: the audit row names the cause instead of "(unknown)"."""
+    from local_operator.secrets import broker as broker_module
+
+    successor = SecretBroker(
+        config_root,
+        key_provider=lambda: keyfile_store,
+        idle_shutdown_s=0,
+        predecessor_version="",
+    )
+    successor._audit_roll(4242)
+    rows = _roll_rows(keyfile_store, config_root)
+    assert len(rows) == 1, rows
+    assert "(unknown)" not in rows[0].outcome
+    assert f"({broker_module.PREDECESSOR_VERSION_UNREPORTED})" in rows[0].outcome

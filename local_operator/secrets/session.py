@@ -343,6 +343,7 @@ def _publish_lineage_marker(base: Path | None, session_id: str | None) -> Path |
 
         identity = process_info(os.getpid())
         if identity is None:
+            logger.warning(_MARKER_LOST_WARNING, "this process's identity could not be read")
             return None
         directory = lineage_dir(base)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -354,9 +355,21 @@ def _publish_lineage_marker(base: Path | None, session_id: str | None) -> Path |
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(session_id or "")
         return path
-    except Exception:  # noqa: BLE001 — the store is optional; boot must not fail on it
-        logger.debug("could not publish the secret session lineage marker", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — the store is optional; boot must not fail on it
+        # WARNING, not debug (#4388 R4/S3): without a marker this session's
+        # tool children silently regain the unnotified keyfile fallback after
+        # a broker crash, i.e. lose the fail-closed property. Boot still goes
+        # on (§13); the operator just gets to see what was lost.
+        logger.warning(_MARKER_LOST_WARNING, exc, exc_info=True)
         return None
+
+
+#: Logged once per registration whose lineage marker could not be published.
+_MARKER_LOST_WARNING = (
+    "could not publish this session's secret lineage marker (%s); if the secret "
+    "broker stops mid-session, this session's commands will read secrets without "
+    "the redaction notice instead of being refused"
+)
 
 
 def _withdraw_lineage_marker(path: Path | None) -> None:
@@ -378,8 +391,26 @@ def _prune_stale_markers(directory: Path) -> None:
         if not (pid_text.isdigit() and start_text.isdigit()):
             continue
         identity = process_info(int(pid_text))
-        if identity is None or identity.start_time != int(start_text):
+        if identity is not None:
+            if identity.start_time != int(start_text):
+                _withdraw_lineage_marker(entry)  # the pid was recycled: definitively stale
+            continue
+        # `None` is "could not identify", not "gone" (#4388 S3): a transient
+        # lookup failure used to delete ANOTHER live session's marker, silently
+        # reopening its children's fallback. Prune only on proof of absence.
+        if _pid_definitively_gone(int(pid_text)):
             _withdraw_lineage_marker(entry)
+
+
+def _pid_definitively_gone(pid: int) -> bool:
+    """True only when the kernel says no process has ``pid`` (``ESRCH``)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:  # EPERM: it exists, just not ours to signal
+        return False
+    return False
 
 
 def registered_session_ancestor(base: Path | None = None) -> tuple[int, str] | None:
