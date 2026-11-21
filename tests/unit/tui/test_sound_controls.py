@@ -264,9 +264,7 @@ async def _assert_preview_exits(
         # this exact earlier child explains SIGTERM; the final audition must
         # finish successfully even if some unrelated stop was observed for it.
         allowed = (
-            (0, -signal.SIGTERM)
-            if child is not players[-1] and child.pid in superseded
-            else (0,)
+            (0, -signal.SIGTERM) if child is not players[-1] and child.pid in superseded else (0,)
         )
         assert status in allowed, (child.pid, status, allowed)
 
