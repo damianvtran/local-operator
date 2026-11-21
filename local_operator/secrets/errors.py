@@ -132,6 +132,27 @@ class BrokerIncompatible(SecretStoreError):
         self.protocol = protocol
 
 
+class SessionBrokerLost(SecretStoreError):
+    """A retrieval inside a live session's lineage found no broker to serve it.
+
+    **Its own class because the alternative was a silent, unnotified decrypt.**
+    Outside a session, an unreachable broker degrades to reading the key file
+    (§13: the store must not depend on a daemon). Inside one — a tool child of a
+    session whose redactor registered with the broker — that same degrade hands
+    the value to a process whose output streams straight into the transcript,
+    without the §6 notice that tells the session to scrub it. A broker crash
+    mid-session is the routine trigger, so
+    :func:`local_operator.secrets.access.retrieve_secret` raises this instead.
+
+    Deliberately NOT a subclass of :class:`BrokerUnavailable` or ``BrokerDenied``:
+    callers that catch those to mean "transient, try again later" or "locked"
+    must not mistake a refused-for-safety retrieval for either. It is a plain
+    :class:`SecretStoreError`, so every surface that already reports store
+    failures (the CLI prints ``str(exc)``; the eval mapping does not turn it
+    into a ``KeyError``) reports this one too, and none treats it as a miss.
+    """
+
+
 #: Store-error classes that survive a broker round trip, by class name.
 #:
 #: **Why a name-keyed allowlist and not ``getattr`` on this module.** The class
