@@ -398,17 +398,25 @@ def _is_bound_site_question(question: Any) -> bool:
 
 
 def signed_card_target(origin: Any, *, operator_device_id: str = "") -> str:
-    """Where an AGENT CHILD's operator-signed cards go: the verified operator, or nowhere.
+    """Where an AGENT CHILD's open asks go: the verified operator, or nowhere.
 
-    THE ONE EXCEPTION TO "AN AGENT'S CHILD NEVER NOTIFIES THE OPERATOR"
-    (2026-11-13), and only for :func:`is_operator_signed_card` asks (manager
-    rule, 2026-11-15: "human-only signed cards ... forward to the bound operator
-    device even from agent-origin and stampless sessions. Ordinary agent-child
-    asks keep their current routing"). The parent agent cannot answer a site
-    card — only the operator's signature can — so dropping it strands the agent
-    until the request lapses (sessions 1c31cfff075b's a-652b/a-d271 on
-    lop-remote-node-2, spawned by an agent on the operator's Mac, lapsed with
-    nothing on the Mac).
+    THE EXCEPTION TO "AN AGENT'S CHILD NEVER NOTIFIES THE OPERATOR"
+    (2026-11-13), which keeps governing its ``notify`` items: its open ASKS
+    travel. First for :func:`is_operator_signed_card` asks (manager rule,
+    2026-11-15: "human-only signed cards ... forward to the bound operator
+    device even from agent-origin and stampless sessions") — the parent agent
+    cannot answer a site card, only the operator's signature can, so dropping
+    it strands the agent until the request lapses (sessions 1c31cfff075b's
+    a-652b/a-d271 on lop-remote-node-2, spawned by an agent on the operator's
+    Mac, lapsed with nothing on the Mac). That rule's "ordinary agent-child
+    asks keep their current routing" was its PR's scope boundary, not a
+    prohibition; since 2026-11-21 (remote-parity lane) ordinary asks follow the
+    same target, because a LOCAL agent-started session's asks already reach the
+    operator's inbox (``session.py`` ``_notify_tool_callable``) and the operator
+    mandate is remote notifications delivered to the head node like local ones
+    (session d83f5525a563's a-e9c5 on a node never reached the Mac). No new
+    answer authority: the answer travels back over the existing remote-ask
+    door (``ask_respond`` / signed ``bridge_decide``) with its own checks.
 
     Only for a row :func:`notice_origin` calls an agent child (the set the
     catalogue leg drops; every other row's asks already travel by
@@ -419,7 +427,7 @@ def signed_card_target(origin: Any, *, operator_device_id: str = "") -> str:
     when the row is no agent child or no operator is verified.
 
     DELIBERATE ASYMMETRY (decision 79bddc262663, security review S1-2): an
-    agent child a co-member placed here sends its site cards to the OPERATOR,
+    agent child a co-member placed here sends its asks to the OPERATOR,
     while that co-member's own non-agent session's cards (every ask of it) go
     to the co-member, as :func:`notice_target` has always routed them. The
     co-member's agent cannot sign a site card and its human may not be the
@@ -494,8 +502,8 @@ def notice_origin(origin: Any) -> tuple[str, bool]:
     ``mode="local"`` with its old owner as ``source_device``, so its notices
     ARE forwarded to that owner. ``is_agent_child`` is the agent-origin drop
     (:data:`AGENT_ORIGIN_KIND`): such a row may still match a viewer for its
-    completion badge, but its notices are never put on the wire — save its
-    operator-signed site cards, which go to the verified operator link only
+    completion badge, but its notify items are never put on the wire — its
+    open asks (site cards included) go to the verified operator link only
     (:func:`signed_card_target`). A non-mapping
     (no stamp, no origin) is ``("", False)``.
     """
@@ -559,9 +567,10 @@ def stamp_rows_for_viewer(
     request was "asks and notices", and a long-lived node session finishing a
     turn is not something the operator asked to be paged for.
 
-    An AGENT'S CHILD (wherever it was placed from) puts only its site cards on
-    the operator link's wire, and nothing on any other link's beyond what it
-    did before (:func:`signed_card_target`).
+    An AGENT'S CHILD (wherever it was placed from) puts only its open asks
+    (ordinary questions and site cards) on the operator link's wire — never a
+    ``notify`` item — and nothing on any other link's beyond what it did
+    before (:func:`signed_card_target`).
 
     Never raises: a listing is not an error path, and a store that cannot be
     read leaves the rows exactly as the build before this one wrote them.
@@ -583,7 +592,7 @@ def stamp_rows_for_viewer(
             continue
         if target != viewer_device_id:
             # An agent child placed by ANOTHER device (or started here) still
-            # owes the operator its site cards (:func:`signed_card_target`);
+            # owes the operator its open asks (:func:`signed_card_target`);
             # nothing else of it — no completion badge — reaches this viewer.
             if signed_card_target(row.get("origin"), operator_device_id=operator) != (
                 viewer_device_id
@@ -637,18 +646,25 @@ def stamp_rows_for_viewer(
             # session another agent created here (a reviewer, QA or probe run
             # spawned with ``peer=``) reports to that agent, so its ``notify``
             # items stay in this device's inbox and are never put on the wire.
-            # NARROW EXCEPTION (:func:`signed_card_target`): its site cards go
-            # to the VERIFIED operator link, because only the operator can sign
-            # one and the parent agent waiting on it cannot. Its ordinary asks
-            # and notify items stay here, exactly as before.
+            # ITS OPEN ASKS — ordinary questions and site cards alike — go to
+            # the VERIFIED operator link (:func:`signed_card_target`), exactly
+            # as a local agent-started session's asks reach the local inbox
+            # (``session.py`` ``_notify_tool_callable``: "asks must still reach
+            # the inbox"): an ask is a question someone is blocked on, and the
+            # operator mandate is remote notifications delivered to the head
+            # node like local ones. Never to any other viewer (a co-member, or
+            # the device the origin names when its link is not the operator's).
+            # One ``open_ask_notices`` read, the same one the non-agent path
+            # makes: oldest first, a site card listed once among the asks, the
+            # same ``NOTICES_ON_WIRE`` cap and ``asks_unknown`` on a failed read.
             if signed_card_target(row.get("origin"), operator_device_id=operator) == (
                 viewer_device_id
             ):
-                cards = open_ask_notices(Path(root), session_id, signed_only=True)
-                if cards is None:
+                asks = open_ask_notices(Path(root), session_id)
+                if asks is None:
                     row["asks_unknown"] = True
-                elif cards:
-                    row["notices"] = cards[:NOTICES_ON_WIRE]
+                elif asks:
+                    row["notices"] = asks[:NOTICES_ON_WIRE]
             continue
         # Open asks FIRST: a question the agent is waiting on outranks an
         # informational notice for the bounded slots (``NOTICES_ON_WIRE``).
@@ -708,9 +724,7 @@ def _newest_notices(store: Any, session_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def open_ask_notices(
-    root: Path, session_id: str, *, signed_only: bool = False
-) -> list[dict[str, Any]] | None:
+def open_ask_notices(root: Path, session_id: str) -> list[dict[str, Any]] | None:
     """``session_id``'s OPEN queued asks as ``notices`` wire blocks, oldest first.
 
     ``None`` — not ``[]`` — when the ask log could not be read: the caller
@@ -759,10 +773,6 @@ def open_ask_notices(
         records = ask_store.fold(events, ask_store.now_ms(), session_id=session_id)
         out: list[dict[str, Any]] = []
         for record in ask_store.outstanding_asks(records):
-            # ``signed_only``: an agent child's leg (:func:`signed_card_target`)
-            # carries its operator-signed cards and nothing else.
-            if signed_only and not is_operator_signed_card(record):
-                continue
             ask_id = str(record.get("ask_id") or "")
             title = excerpt(first_question(record), 120)
             if not ask_id or not title:
@@ -1478,8 +1488,8 @@ def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, s
         if agent_child:
             # Mirrors the drop in stamp_rows_for_viewer: an agent's child
             # reports to that agent, so no notify item is put on the wire (its
-            # site cards are the one exception, and are asks, not notify items:
-            # signed_card_target).
+            # open asks travel to the verified operator, but are asks, not
+            # notify items: signed_card_target).
             return LOCAL_ONLY, source, False
         if target and not _is_active_peer(Path(root), target):
             # PR #4029 review R2-1: an origin (or bound device) that is no longer

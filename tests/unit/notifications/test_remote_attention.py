@@ -1888,27 +1888,35 @@ def test_a_forged_site_id_is_not_an_operator_signed_card(case: str) -> None:
 
 
 @pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
-def test_a_forged_site_card_from_an_agent_child_never_forwards(tmp_path: Path, case: str) -> None:
-    """S1-1 end to end: the forged card stays on the node even over the binding."""
+def test_a_forged_site_card_from_an_agent_child_is_only_an_ordinary_ask(
+    tmp_path: Path, case: str
+) -> None:
+    """S1-1 end to end, after remote parity (2026-11-21): a forged card earns no
+    standing of its own — it travels exactly as any ordinary ask of that child
+    does (to the bound operator, as a plain ``remote-ask:`` block carrying no
+    authority), and to no other viewer."""
     origin = _agent(HEAD)
     node = _agent_child_node(tmp_path, origin, site_card=False)
     _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
-    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=True)
+    keys = _keys(_wire(node, origin, HEAD, operator_viewer=True))
+    assert keys == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-forged"]
+    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=False)
+    assert "notices" not in _wire(node, origin, CO, operator_viewer=False)
 
 
 @pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
 def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
     tmp_path: Path, source: str
 ) -> None:
-    """The site card (and nothing else) reaches the VERIFIED operator link, wherever
-    the child was placed from: by the operator's Mac (the live repro), started
-    here, or placed by a co-member."""
+    """The site card reaches the VERIFIED operator link, wherever the child was
+    placed from: by the operator's Mac (the live repro), started here, or placed
+    by a co-member — listed once, after the child's older ordinary ask."""
     origin = _agent(source)
     node = _agent_child_node(tmp_path, origin)
     # A REAL completion (review R1-1): without one, "no badge" holds vacuously.
     AttentionStore(node / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
     row = _wire(node, origin, HEAD, operator_viewer=True)
-    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
     if source == HEAD:
         # The Mac placed the child: its completion badge reaches the Mac, as before.
         assert row["attention"] == {"token": TOK1, "outcome": "complete"}
@@ -1922,14 +1930,35 @@ def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
 
 
 @pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
-def test_an_agent_childs_ordinary_ask_and_notify_still_reach_nobody(
+def test_an_agent_childs_ordinary_ask_reaches_the_bound_operator_only(
     tmp_path: Path, source: str
 ) -> None:
+    """Remote parity (2026-11-21; live repro d83f5525a563's a-e9c5, no Mac banner):
+    the child's ordinary ask reaches the VERIFIED operator viewer, as a local agent
+    child's ask reaches the local inbox. Its notify item never travels, and no
+    unbound viewer — the origin it names, a co-member — gets anything."""
     origin = _agent(source)
     node = _agent_child_node(tmp_path, origin, site_card=False)
-    for viewer, bound in ((HEAD, True), (HEAD, False), (CO, False)):
-        assert "notices" not in _wire(node, origin, viewer, operator_viewer=bound), viewer
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain"]  # never "build"
+    assert "asks_unknown" not in row
+    for viewer in (HEAD, CO, NODE):
+        assert "notices" not in _wire(node, origin, viewer, operator_viewer=False), viewer
+    # The target is the caller's VERIFIED operator id, or nobody without one.
+    assert ra.signed_card_target(origin, operator_device_id=HEAD) == HEAD
+    assert ra.signed_card_target(origin, operator_device_id="") == ""
     assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+
+
+def test_an_agent_childs_asks_share_the_wire_cap_oldest_first(tmp_path: Path) -> None:
+    """Same bounded list as the non-agent path: ``NOTICES_ON_WIRE`` asks, oldest first."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    for index in range(ra.NOTICES_ON_WIRE + 2):
+        _queue_raw(node, f"a-{index:02d}", [{"id": "q0", "question": f"Q{index}?", "options": []}])
+    keys = _keys(_wire(node, origin, HEAD, operator_viewer=True))
+    assert len(keys) == ra.NOTICES_ON_WIRE
+    assert keys[0] == f"{ra.ASK_NOTICE_PREFIX}a-plain"
 
 
 @pytest.mark.parametrize("source", [HEAD, CO])
