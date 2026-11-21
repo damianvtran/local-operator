@@ -4361,37 +4361,73 @@ class AttachedSession:
         never by a caller-supplied name.
         """
         self._ask_proof_at_send = False
+        async with self._ask_control_client() as client:
+            # No await before frame construction: report the proof carried by
+            # THIS connection, never a stale display client's authority.
+            self._ask_proof_at_send = self._client_proof_held(client)
+            method = getattr(client, name)
+            if tail:
+                return await method(ask_id, *tail)
+            # THIS facade is a person's local surface (the desktop app's backend, the
+            # attached pane, the CLI), so it opts its client into presenting the
+            # operator-capability proof; the runtime then stamps a trusted surface
+            # only if that proof holds (``asks/surfaces``).
+            operator = operator_ask_kwargs(method)
+            if name in ("ask_respond", "ask_revise"):
+                body = {
+                    str(key): [str(item) for item in (values or ())]
+                    for key, values in (answers or {}).items()
+                }
+                if images:
+                    return await method(
+                        ask_id, body, by=by, images=[dict(i) for i in images], **operator
+                    )
+                return await method(ask_id, body, by=by, **operator)
+            if name == "ask_dismiss" and reason:
+                return await method(ask_id, by=by, reason=reason, **operator)
+            return await method(ask_id, by=by, **operator)
+
+    @asynccontextmanager
+    async def _ask_control_client(self) -> AsyncIterator[AttachClient]:
+        """Yield a control connection without making durable asks depend on paint.
+
+        A live older owner can exceed the canonical snapshot's socket limit.
+        Durable ask IDs still resolve atomically there, and the existing attach
+        protocol supports a projection-only handshake. Keep this connection
+        separate from the facade's display client: installing a partial client
+        there would falsely claim that its epoch and history were synchronized.
+        Authentication, identity checks and operator proofs remain AttachClient's.
+        Cold sessions and remote owners retain their normal engage/bind path.
+        """
+        if self._surface == "desktop" and self._owner.placement.is_local:
+            record, _ = await asyncio.to_thread(self._owner.locate)
+            if record is not None:
+                client = self._owner.make_client(
+                    lambda _projection: None,
+                    lambda _reason: None,
+                    surface=self._surface,
+                    frontend_state=False,
+                )
+                try:
+                    try:
+                        await self._connect_client(
+                            client,
+                            record,
+                            deadline=time.monotonic() + DESKTOP_CONTROL_ATTACH_S,
+                        )
+                    except TimeoutError:
+                        raise await self._refusal_while_reconnecting(
+                            self._unavailable_reason()
+                        ) from None
+                    yield client
+                finally:
+                    client.close()
+                return
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
-            # ``_ensure_bound`` returns quietly while a recovery owns the dial,
-            # so this is the ask answer that lands mid-reconnect. Nothing was
-            # sent; the owner's liveness decides busy vs gone.
             raise await self._refusal_while_reconnecting(self._unavailable_reason())
-        # No await between this read and the client method building its frame,
-        # so the proof reported is the one this connection presents (R1-m2).
-        self._ask_proof_at_send = self._client_proof_held(client)
-        method = getattr(client, name)
-        if tail:
-            return await method(ask_id, *tail)
-        # THIS facade is a person's local surface (the desktop app's backend, the
-        # attached pane, the CLI), so it opts its client into presenting the
-        # operator-capability proof; the runtime then stamps a trusted surface
-        # only if that proof holds (``asks/surfaces``).
-        operator = operator_ask_kwargs(method)
-        if name in ("ask_respond", "ask_revise"):
-            body = {
-                str(key): [str(item) for item in (values or ())]
-                for key, values in (answers or {}).items()
-            }
-            if images:
-                return await method(
-                    ask_id, body, by=by, images=[dict(i) for i in images], **operator
-                )
-            return await method(ask_id, body, by=by, **operator)
-        if name == "ask_dismiss" and reason:
-            return await method(ask_id, by=by, reason=reason, **operator)
-        return await method(ask_id, by=by, **operator)
+        yield client
 
     def move_will_wait(self) -> bool:
         """Whether :meth:`set_working_directory` is about to make the user wait.
