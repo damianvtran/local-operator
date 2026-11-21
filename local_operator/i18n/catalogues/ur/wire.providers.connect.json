@@ -1,0 +1,7 @@
+{
+  "wire.providers.connect.key_invalid_characters": "اس کلید میں ایسے حروف ہیں جو کسی API کلید میں نہیں ہو سکتے۔ اسے دوبارہ کاپی کریں اور پھر کوشش کریں۔",
+  "wire.providers.connect.key_rejected": "{label} نے اس API کلید کو مسترد کر دیا۔ اسے جانچیں اور دوبارہ کوشش کریں۔",
+  "wire.providers.connect.key_unreachable": "اس کلید کی جانچ کے لیے {label} تک رسائی نہیں ہو سکی۔ اسے تصدیق کے بغیر محفوظ کر لیا گیا ہے۔",
+  "wire.providers.connect.key_unverified": "{label} ابھی اس کلید کی جانچ نہیں کر سکا (HTTP {status})۔ اسے تصدیق کے بغیر محفوظ کر لیا گیا ہے۔",
+  "wire.providers.connect.suggested_automatic": "خودکار"
+}

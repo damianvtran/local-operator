@@ -1,0 +1,27 @@
+{
+  "wire.providers.connect.key_invalid_characters": {
+    "role": "error sentence",
+    "tone": "plain, actionable",
+    "note": "Shown under the API-key field when the pasted key holds spaces, line breaks or non-ASCII characters (usually a copy-paste accident). The key was NOT saved."
+  },
+  "wire.providers.connect.key_rejected": {
+    "role": "error sentence",
+    "tone": "plain, actionable",
+    "note": "Shown when the provider refused the pasted API key on a test request; the key was NOT saved. {label} is the provider's company or product name (e.g. 'Google', 'OpenAI'), never translated."
+  },
+  "wire.providers.connect.key_unreachable": {
+    "role": "warning sentence",
+    "tone": "plain, reassuring",
+    "note": "Shown when the test request could not reach the provider (offline, proxy, timeout). The key WAS saved, just not verified. {label} is the provider's name, never translated."
+  },
+  "wire.providers.connect.key_unverified": {
+    "role": "warning sentence",
+    "tone": "plain, reassuring",
+    "note": "Shown when the provider answered the test request with a status that says nothing definite about the key (rate limit, outage, region block). The key WAS saved, just not verified. {label} is the provider's name; {status} is the numeric HTTP status code (e.g. 429): keep 'HTTP {status}' as a technical token."
+  },
+  "wire.providers.connect.suggested_automatic": {
+    "role": "model name",
+    "tone": "terse",
+    "note": "Display name of Radient's router model, which picks a model per request. Shown where a provider's suggested default model is named, e.g. 'Suggests Automatic' in the connect-provider list and 'Default model set to Automatic'. An adjective/noun meaning 'chosen automatically'."
+  }
+}
