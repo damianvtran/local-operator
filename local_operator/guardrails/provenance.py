@@ -2469,20 +2469,52 @@ def _cleanup_status_path(row: str) -> str | None:
     return entry if entry and not os.path.isabs(entry) and ".." not in entry.split("/") else None
 
 
-def plain_cleanup_ignored_preserved(real: str) -> bool | None:
-    """Plain Git refuses ordinary changes but deletes ignored payload too."""
+@dataclass(frozen=True)
+class IgnoredInventory:
+    """What one strict status read says about a plain cleanup's ignored payload.
+
+    Why counts and not just a verdict (operator follow-up 2026-11-21, PR #4359
+    field case): the hold refusal used to give commit/stash/push guidance even
+    for a clean tree whose only blocker was 66 ignored entries, which read like
+    the earlier open-PR/unpushed-work refusal. The counts let the refusal name
+    the condition that actually failed. Both come from the SAME status read
+    the verdict already needed — no extra filesystem walk, no file names.
+    """
+
+    #: Ignored entries Git would delete that are not the one supported
+    #: regenerable witness (the shared ``node_modules`` link).
+    unverified_ignored: int
+    #: Tracked or untracked status rows (the work plain Git itself refuses).
+    changes: int
+
+
+def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
+    """Count unverified ignored entries and other changes; ``None`` = unreadable."""
     status = _strict_cleanup_status(real)
     if status is None:
         return None
+    unverified = changes = 0
     # A tracked edit cannot mask an independent ignored-data hold.
     for row in status.split("\0"):
-        if row.startswith("!! "):
-            entry = _cleanup_status_path(row)
-            if entry is None:
-                return None
-            if not _shared_dependencies_link(real, entry):
-                return False
-    return True
+        if not row:
+            continue
+        if not row.startswith("!! "):
+            changes += 1
+            continue
+        entry = _cleanup_status_path(row)
+        if entry is None:
+            return None
+        if not _shared_dependencies_link(real, entry):
+            unverified += 1
+    return IgnoredInventory(unverified, changes)
+
+
+def plain_cleanup_ignored_preserved(real: str) -> bool | None:
+    """Plain Git refuses ordinary changes but deletes ignored payload too."""
+    inventory = plain_cleanup_ignored_inventory(real)
+    if inventory is None:
+        return None
+    return inventory.unverified_ignored == 0
 
 
 def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
