@@ -67,16 +67,20 @@ def _assert_display_and_ids(locale, manager):
             settings_io.write_setting(manager, setting, choice.value, notify=False)
             assert settings_io.read_setting(manager, setting) == choice.value
             # Re-open the persisted config, not merely an in-memory snapshot.
-            assert settings_io.read_setting(ConfigManager(manager.config_dir), setting) == choice.value
+            assert (
+                settings_io.read_setting(ConfigManager(manager.config_dir), setting) == choice.value
+            )
             if choice.label not in values:
                 assert settings_io.validate(setting, str(choice.label)) is not None
         for field in ("label", "description"):
-            keys = [f"wire.settings.speech_voice_{group}.choice.{value}.{field}" for value in values]
+            keys = [
+                f"wire.settings.speech_voice_{group}.choice.{value}.{field}" for value in values
+            ]
             # A cognate may legitimately equal English. Reject wholesale English
             # fallback, not native wording: independent audits own each key.
-            assert any(target[key] != english[key] for key in keys), (
-                f"{locale}: English display copy remains for {group} {field}: {keys}"
-            )
+            assert any(
+                target[key] != english[key] for key in keys
+            ), f"{locale}: English display copy remains for {group} {field}: {keys}"
 
 
 @pytest.mark.parametrize("locale", LOCALES)
