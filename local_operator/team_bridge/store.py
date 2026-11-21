@@ -248,6 +248,13 @@ def state_db_path(config_dir: Path) -> Path:
     return Path(config_dir) / "team_bridge" / "state.sqlite3"
 
 
+#: The ``owner_releases.outcome`` of a signed Discard settled on THIS machine
+#: only (:meth:`Store.record_owner_release_local_terminal`): the hub could not
+#: confirm the message, so nothing was posted, delivered or sent to anyone. A
+#: sibling of the connector's ``admitted``/``rejected``, deliberately named so
+#: it can never be read as a hub or sender outcome.
+OWNER_RELEASE_LOCAL_TERMINAL = "discarded_local_unconfirmed"
+
 #: The same-account credential heal's audit receipt (``team_bridge.heal``): one
 #: row per re-point, old row -> new row, which enrollment, which trigger, when.
 #: Ids, the account id and a trigger word only — no token, no name.
@@ -9958,6 +9965,20 @@ class Store:
         "key_id TEXT NOT NULL, signature TEXT NOT NULL, surface TEXT NOT NULL, "
         "creator_generation INTEGER NOT NULL, outcome TEXT NOT NULL, outcome_at REAL, "
         "PRIMARY KEY (owner_key, message_id))",
+        # The audit receipt of a LOCAL-ONLY terminal Discard
+        # (:meth:`record_owner_release_local_terminal`), the ``credential_heals``
+        # shape: one row per settled message saying which signed record was
+        # settled, why it could only settle locally, the Deliver deadline that
+        # made it eligible, and when. Ids, closed words and times only. Kept
+        # beside ``owner_releases`` rather than as columns on it so the signed
+        # row, its payload and ``release_matches_decision`` stay byte-identical.
+        "CREATE TABLE IF NOT EXISTS owner_release_local_terminals ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+        "conversation_id TEXT NOT NULL, creator_generation INTEGER NOT NULL, "
+        "outcome TEXT NOT NULL, reason TEXT NOT NULL, key_id TEXT NOT NULL, "
+        "account_id TEXT NOT NULL, decided_at REAL NOT NULL, "
+        "deliver_until REAL NOT NULL, at REAL NOT NULL, "
+        "PRIMARY KEY (owner_key, message_id))",
     )
 
     #: Amendment 2 columns (S-1, m3), added by ``ALTER`` so a table an earlier
@@ -10253,40 +10274,130 @@ class Store:
         """WRITE-ONCE per (owner, message). Same word again → the existing row;
         the other word → ``already_decided``. The caller verified the signature."""
 
-        key = _owner_key(owner)
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
             self._ensure_work_scope_tables(conn)
-            existing = conn.execute(
+            existing = self._existing_owner_release(conn, owner, row)
+            if existing is not None:
+                return existing
+            return self._insert_owner_release(conn, owner, row, outcome="pending", outcome_at=None)
+
+    def record_owner_release_local_terminal(
+        self,
+        owner: OwnerSnapshot,
+        row: Mapping[str, Any],
+        *,
+        outcome: str,
+        reason: str,
+        deliver_until: float,
+        now: float,
+    ) -> dict[str, Any]:
+        """Write a signed Discard ALREADY SETTLED locally, plus its audit row, atomically.
+
+        WHY (follow-on to PR #4358). A Discard the person signs for a hold whose
+        body can no longer be loaded, past its Deliver window, is consumed by
+        the connector only when the hub serves the envelope again; a message
+        the hub no longer serves therefore sat ``pending`` forever. This
+        records the person's decision as the terminal ``outcome`` (a LOCAL
+        word — ``discarded_local_unconfirmed``) in the same transaction as the
+        ``owner_release_local_terminals`` audit row, so there is never a
+        settled row without its receipt or the reverse. Nothing here talks to
+        the hub, delivers, or notifies a sender, and the outcome says only
+        what THIS machine did.
+
+        Write-once like :meth:`record_owner_release`: the same word again
+        returns the existing row unchanged, the other word is
+        ``already_decided``. The caller verified eligibility and signed.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_work_scope_tables(conn)
+            existing = self._existing_owner_release(conn, owner, row)
+            if existing is not None:
+                return existing
+            written = self._insert_owner_release(
+                conn, owner, row, outcome=outcome, outcome_at=float(now)
+            )
+            conn.execute(
+                "INSERT INTO owner_release_local_terminals (owner_key, message_id, "
+                "conversation_id, creator_generation, outcome, reason, key_id, account_id, "
+                "decided_at, deliver_until, at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    _owner_key(owner),
+                    row["message_id"],
+                    row["conversation_id"],
+                    owner.enrollment_generation,
+                    outcome[:64],
+                    reason[:64],
+                    row["key_id"],
+                    row["account_id"],
+                    float(row["decided_at"]),
+                    float(deliver_until),
+                    float(now),
+                ),
+            )
+            return written
+
+    def owner_release_local_terminal(
+        self, owner: OwnerSnapshot, message_id: str
+    ) -> dict[str, Any] | None:
+        """The local-terminal audit row for this message, or ``None``."""
+
+        rows = self._work_scope_rows(
+            "SELECT * FROM owner_release_local_terminals WHERE owner_key = ? " "AND message_id = ?",
+            (_owner_key(owner), message_id),
+        )
+        return rows[0] if rows else None
+
+    def _existing_owner_release(
+        self, conn: sqlite3.Connection, owner: OwnerSnapshot, row: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        existing = conn.execute(
+            "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+            (_owner_key(owner), row["message_id"]),
+        ).fetchone()
+        if existing is None:
+            return None
+        if existing["word"] != row["word"]:
+            raise StoreRefused("already_decided", "this hold was already decided")
+        return dict(existing)
+
+    def _insert_owner_release(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        row: Mapping[str, Any],
+        *,
+        outcome: str,
+        outcome_at: float | None,
+    ) -> dict[str, Any]:
+        key = _owner_key(owner)
+        columns = (
+            "message_id", "conversation_id", "body_sha256", "envelope_digest",
+            "hold_code", "screener_provider", "screener_model", "template_sha256",
+            "categories", "word", "decided_at", "account_id", "key_id", "signature",
+            "surface", "screener_verdict", "screener_hop", "screener_preferred",
+        )  # fmt: skip
+        conn.execute(
+            "INSERT INTO owner_releases (owner_key, creator_generation, outcome, "
+            "outcome_at, "
+            + ", ".join(columns)
+            + ") VALUES (?,?,?,?,"
+            + ",".join("?" for _ in columns)
+            + ")",
+            (key, owner.enrollment_generation, outcome, outcome_at, *(row[c] for c in columns)),
+        )
+        return dict(
+            conn.execute(
                 "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
                 (key, row["message_id"]),
             ).fetchone()
-            if existing is not None:
-                if existing["word"] != row["word"]:
-                    raise StoreRefused("already_decided", "this hold was already decided")
-                return dict(existing)
-            columns = (
-                "message_id", "conversation_id", "body_sha256", "envelope_digest",
-                "hold_code", "screener_provider", "screener_model", "template_sha256",
-                "categories", "word", "decided_at", "account_id", "key_id", "signature",
-                "surface", "screener_verdict", "screener_hop", "screener_preferred",
-            )  # fmt: skip
-            conn.execute(
-                "INSERT INTO owner_releases (owner_key, creator_generation, outcome, "
-                + ", ".join(columns)
-                + ") VALUES (?,?,?,"
-                + ",".join("?" for _ in columns)
-                + ")",
-                (key, owner.enrollment_generation, "pending", *(row[c] for c in columns)),
-            )
-            return dict(
-                conn.execute(
-                    "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
-                    (key, row["message_id"]),
-                ).fetchone()
-            )
+        )
 
     def set_owner_release_outcome(
         self, owner: OwnerSnapshot, message_id: str, outcome: str, *, now: float
@@ -10300,10 +10411,23 @@ class Store:
             self._ensure_work_scope_tables(conn)
             conn.execute(
                 # Only a non-final outcome moves: ``admitted``/``rejected`` are
-                # terminal and a late replay must not rewrite them.
+                # terminal and a late replay must not rewrite them. The LOCAL
+                # terminal (``record_owner_release_local_terminal``) is final
+                # against every connector refusal too, and yields to exactly one
+                # word: ``rejected``, the hub's own confirmation of that same
+                # signed Discard if the hub ever serves the message again, so
+                # the row never keeps claiming "unconfirmed" after it was.
                 "UPDATE owner_releases SET outcome = ?, outcome_at = ? WHERE owner_key = ? "
-                "AND message_id = ? AND (outcome = 'pending' OR outcome LIKE 'refused:%')",
-                (outcome[:64], float(now), _owner_key(owner), message_id),
+                "AND message_id = ? AND (outcome = 'pending' OR outcome LIKE 'refused:%' "
+                "OR (outcome = ? AND ? = 'rejected'))",
+                (
+                    outcome[:64],
+                    float(now),
+                    _owner_key(owner),
+                    message_id,
+                    OWNER_RELEASE_LOCAL_TERMINAL,
+                    outcome[:64],
+                ),
             )
 
     def commit_owner_release(
