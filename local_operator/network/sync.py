@@ -3915,35 +3915,23 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
 def _quarantine_refused_recovery(
     root: Path, target: Path, new_id: str, created: tuple[int, int] | None
 ) -> bool:
-    """Move a refused recovery's partial copy out of ``sessions/`` (S-1).
+    """Move a refused recovery's staged copy to ``network/quarantine/<new_id>`` (S-1).
 
-    Before the origin-stamp work a refused copy was simply left un-promoted under
-    ``sessions/<new_id>`` (deliberately: this layer never deletes). That copy is
-    now a hazard, not just clutter: if the copy or the downgrade stopped partway,
-    it can hold stamps that still read ``verified: true``, and anything that lists
-    sessions would offer it as a conversation. A rename keeps the no-delete rule
-    and takes it out of every session reader's view in one step.
+    The copy is built in ``network/staging/<new_id>`` and never reaches
+    ``sessions/`` unless it was published whole (security review #4403 r2, S2), so a
+    refused one is no hazard to listings even where it stands. It is moved anyway,
+    as before S2: it is the evidence of what a peer sent, this layer never deletes,
+    and the staging sweep would age it out. Best effort: a rename that fails is
+    logged, the copy stays off-store, and the original refusal still propagates.
 
-    ``target`` was created by this call (``promote_replica`` refuses an existing
-    one before claiming), so only this call's own bytes move. Best-effort: a
-    rename that fails is logged and the original refusal still propagates.
-
-    CALLED WHILE THE COPY IS STILL CLAIMED (review R2-2), and it carries its
-    ``.session.pid`` out with it. Returns True once nothing is left at ``target``
-    (moved, or never there), having dropped that claim at the landing; False when
-    the rename failed, with the claim KEPT, so the copy left under ``sessions/``
-    still reads as owned to listings and sweeps for as long as this process lives.
+    Routed through the session-cleanup module (tests/unit/session/
+    test_no_session_deletion.py): ``cleanup.quarantine_staged_recovery`` proves the
+    tree is the one this call created (``created`` is its st_dev/st_ino) and renames
+    it without replacing anything. Returns True once nothing is left at ``target``.
     """
-    # Routed through the session-cleanup module (tests/unit/session/
-    # test_no_session_deletion.py): this is a rename OUT of ``sessions/``, and
-    # every such call lives behind cleanup.py's guards. The guard proves the tree
-    # is the one this call created (``created`` is its st_dev/st_ino, recorded
-    # right after the claim) and that the claim still names this pid. It renames
-    # it to network/quarantine/<new_id> without replacing anything, deletes
-    # nothing, and drops the claim only at the landing.
-    from local_operator.session.cleanup import quarantine_claimed_session_dir
+    from local_operator.session.cleanup import quarantine_staged_recovery
 
-    landing = quarantine_claimed_session_dir(
+    landing = quarantine_staged_recovery(
         target,
         config_dir=Path(root),
         created=created,
@@ -3951,7 +3939,7 @@ def _quarantine_refused_recovery(
         actor="sync.promote_replica",
     )
     if landing is None:
-        logger.error("sync: a refused recovery of %s could not be moved out of sessions/", new_id)
+        logger.error("sync: a refused recovery of %s stays in staging, off the store", new_id)
         return False
     if landing != target:
         logger.warning("sync: the refused recovery of %s was moved to %s", new_id, landing)
@@ -3981,7 +3969,7 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
     from local_operator.session.placement import (
         MeshStamp,
         SessionPlacement,
-        write_stamp,
+        write_stamp_into,
     )
 
     source = replica_dir(root, session_id)
@@ -4002,24 +3990,34 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
             f"a copy of {session_id} cannot be recovered under the same id; the device "
             "that holds the original would become a second writer",
         )
-    target = session_dir(root, _session_component(new_id))
+    final = session_dir(root, _session_component(new_id))
+    if final.exists():
+        raise SyncRefused("in_progress", f"{new_id} already exists on this device")
+    # BUILT OFF THE STORE, PUBLISHED WHOLE (security review #4403 r2, S2). The copy
+    # used to land in ``sessions/<new_id>`` first and be made safe there: for that
+    # window a reader saw a local-looking session with the owner's raw ``cwd.json``
+    # and checkpoint rows no stamp marked as imported, and the retention claim that
+    # covered it is best effort and consulted by nothing on the move's preflight.
+    # Now everything below — copy, stamp downgrade, cwd containment, the import
+    # stamp and origin marker — happens in ``network/staging/<new_id>`` (where a
+    # move stages too, outside every session reader), and one no-replace rename
+    # (``cleanup.publish_staged_recovery``) makes it visible already complete. A
+    # crash leaves only staging, which ``mobility.sweep_staging`` ages out; the
+    # replica it came from is untouched, so that copy is never the last one. No
+    # claim is taken: claims only act under ``sessions/``, and nothing is there
+    # until the publish.
+    target = network_dir(root) / STAGING_DIRNAME / _session_component(new_id)
     target_scope = _write_scope(Path(root), target)
     store_scope = _write_scope(Path(root), Path(root) / ATTACHMENTS_DIRNAME)
-    if target.exists():
-        raise SyncRefused("in_progress", f"{new_id} already exists on this device")
-    # CLAIM BEFORE the first byte, exactly as ``fork_session`` does, so a
-    # concurrent retention sweep can never see an empty unclaimed directory. The
-    # claim is released below: it names THIS process, and leaving it would make the
-    # promoted session read as open in the prompter's own process.
-    from local_operator.session.retention import claim_session, release_session
-
-    claim_session(target)
+    if os.path.lexists(target):
+        raise SyncRefused("in_progress", f"{new_id} is already being recovered on this device")
     copied: list[str] = []
-    # The created directory's identity, so a refused copy can be quarantined by
-    # proof of "this call made it" (inode), not by its name alone.
+    # The created directory's identity, so a refused copy can be quarantined (and a
+    # good one published) by proof of "this call made it" (inode), not by name alone.
     created: tuple[int, int] | None = None
     try:
-        target.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.mkdir()
         made = os.lstat(target)
         created = (made.st_dev, made.st_ino)
         # The replica is peer-authored too. Validate its links as one graph against
@@ -4143,6 +4141,37 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         from local_operator.network import carry
 
         carry.remap_cwd_record(target, new_id, home=str(Path.home()), config_root=Path(root))
+        # THE IMPORT STAMP IS MANDATORY AND IN PLACE BEFORE THE PUBLISH (S2 r2): it is
+        # what makes every reader treat the copy's checkpoint rows as imported
+        # (``mobility._arrived_from_another_device``), so a failure to write it
+        # refuses the recovery rather than publish a copy that reads as local.
+        cursor = read_replica_cursor(root, session_id)
+        owner = str(cursor.get("owner_device") or "")
+        from local_operator.network.projection import self_device_id
+
+        write_stamp_into(
+            target,
+            MeshStamp(
+                session_id=new_id,
+                network_id="",
+                home_device=self_device_id(Path(root)),
+                placement=SessionPlacement(mode="local", home_device=self_device_id(Path(root))),
+                origin={
+                    "kind": REPLICA_ORIGIN_KIND,
+                    "source_device": owner,
+                    "source_session_id": session_id,
+                    "recovered_at": time.time(),
+                },
+            ),
+        )
+        # The origin marker rides the publish too, naming the owner like a move's
+        # (``mobility``'s staging marker). Best effort by its own contract; the
+        # stamp above is the mandatory signal. Re-marked after the publish, below,
+        # because the lineage registry is recorded only under ``sessions/``.
+        mark_session_origin(target, ORIGIN_FORK, parent=session_id, source_device=owner)
+        from local_operator.session.cleanup import publish_staged_recovery
+
+        publish_staged_recovery(target, config_dir=Path(root), created=created, session_id=new_id)
     except Exception as exc:  # noqa: BLE001 — every failure here is a refusal, not a crash
         # ``Exception``, not ``(OSError, SyncRefused)`` (security review S-1): the
         # replica is peer-authored, so the downgrade can fail in ways no file API
@@ -4150,39 +4179,17 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         # to break the parser). The old handler let those escape, skipping the
         # claim release and leaving the copy in place with its stamps verified.
         #
-        # MOVE FIRST, THEN RELEASE (review R2-2): releasing first left an
-        # UNCLAIMED copy under ``sessions/`` (whose stamps may still read
-        # verified) for listings and sweeps to pick up, briefly, or for good if
-        # the move then failed. The quarantine drops the claim at the landing; a
-        # failed move keeps it, and the refusal below still propagates.
+        # The refused copy is still in staging, never having reached ``sessions/``
+        # (S2 r2); it is moved to the quarantine as evidence of what the peer sent,
+        # and stays in staging (off-store) if even that rename is refused.
         _quarantine_refused_recovery(Path(root), target, new_id, created)
         if isinstance(exc, SyncRefused):
             raise
         raise SyncRefused(
             "no_replica", f"the synced copy could not be recovered on this device ({exc})"
         ) from exc
-    release_session(target)
-    cursor = read_replica_cursor(root, session_id)
-    owner = str(cursor.get("owner_device") or "")
-    from local_operator.network.projection import self_device_id
-
-    write_stamp(
-        root,
-        MeshStamp(
-            session_id=new_id,
-            network_id="",
-            home_device=self_device_id(Path(root)),
-            placement=SessionPlacement(mode="local", home_device=self_device_id(Path(root))),
-            origin={
-                "kind": REPLICA_ORIGIN_KIND,
-                "source_device": owner,
-                "source_session_id": session_id,
-                "recovered_at": time.time(),
-            },
-        ),
-    )
     try:
-        mark_session_origin(target, ORIGIN_FORK, parent=session_id)
+        mark_session_origin(final, ORIGIN_FORK, parent=session_id, source_device=owner)
     except Exception:  # noqa: BLE001 — provenance decoration, never a gate
         logger.debug("sync: could not stamp the origin of %s", new_id, exc_info=True)
     return {

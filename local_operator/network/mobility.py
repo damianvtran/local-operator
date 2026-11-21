@@ -5460,41 +5460,52 @@ def _session_cwd_at(
             return ""
         return expanded
 
+    from local_operator.network import carry as carry_mod
+
+    # THE THREE LEGACY SOURCES, in order. Each is read independently (one that cannot
+    # be read is skipped, never fatal) so discovery below can try the next when the
+    # first is unusable.
+    legacy: list[str] = []
     try:
         from local_operator.wakes import store as wake_store
 
         entry = wake_store.read_entry(root, session_id) or {}
-        found = usable(entry.get("cwd"))
-        if found:
-            return found
+        legacy.append(usable(entry.get("cwd")))
     except Exception:  # noqa: BLE001 — a cwd is never worth a failed move
         logger.debug("mobility: could not read %s's wake index cwd", session_id, exc_info=True)
     try:
-        from local_operator.network import carry as carry_mod
-
-        found = usable(carry_mod.resolve_cwd(session_dir))
-        if found:
-            return found
+        legacy.append(usable(carry_mod.resolve_cwd(session_dir)))
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's desktop marker", session_id, exc_info=True)
     try:
         from local_operator.mobile.attach_client import find_runtime_record
 
         record, _pid = find_runtime_record(root, session_id)
-        found = usable(record.cwd) if record is not None else ""
-        if found:
-            return found
+        legacy.append(usable(record.cwd) if record is not None else "")
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's runtime record", session_id, exc_info=True)
+    legacy = [value for value in legacy if value]
+    if not durable_hints:
+        # THE WIRE RESOLVER IS UNCHANGED (security review #4403 r2, S4): the first
+        # absolute legacy value, exactly what a destination's marker rule has always
+        # received. Only discovery below validates and falls through.
+        return legacy[0] if legacy else ""
+    # DISCOVERY VALIDATES EACH LEGACY CANDIDATE (security review #4403 r2, S4). A
+    # stale marker (a folder since removed, a path adopted from another device) used
+    # to win just by being absolute, and so HID a valid ``cwd.json`` behind it: the
+    # manifest then saw an unusable seed, kept the gap, and the session's real
+    # worktree stayed mention-only. Each legacy value must now pass the same
+    # ``carry.contained_cwd`` rule the durable hints do. The value returned keeps its
+    # recorded spelling (not the realpath): the prepare sends it home-relative, which
+    # a symlinked home spelling must not change.
+    for value in legacy:
+        if carry_mod.contained_cwd(value, home=home_text, config_root=root):
+            return value
     # THE TWO DURABLE FALLBACKS (coordinator retest on v0.111.4): an idle session
     # created by ``lop exec`` or the TUI has no wake entry, no marker and — its runtime
     # gone — no runtime record, so every step above answered nothing and its worktree
     # (unpushed commit, dirty files) was listed only as "mentioned": nothing planned,
     # no confirmation, and a real move would have left the work behind silently.
-    if not durable_hints:
-        return ""
-    from local_operator.network import carry as carry_mod
-
     # CONTAINED BEFORE THEY SEED ANYTHING (security review #4403, S1/S4). Either
     # value can name a path this device never chose, and the next thing a seed does
     # is ``git status`` and file-fact reads in it. ``carry.contained_cwd`` admits only
@@ -5546,10 +5557,19 @@ def _session_cwd_at(
             return found
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's checkpoint cwd", session_id, exc_info=True)
-    return ""
+    # Nothing usable anywhere: the first legacy value is still the honest answer —
+    # the manifest's ``cwd_known`` re-checks it (``workset._usable_local_dir``), so a
+    # stale one keeps the gap exactly as it did before S4's fall-through existed.
+    return legacy[0] if legacy else ""
 
 
-def _arrived_from_another_device(root: Path, session_id: str) -> bool:
+#: How many fork generations :func:`_arrived_from_another_device` follows before it
+#: gives up and answers "arrived" (fail closed). Real chains are a handful deep; the
+#: bound exists only so a crafted ``origin.json`` loop or chain cannot spin.
+_FORK_LINEAGE_MAX_DEPTH = 32
+
+
+def _arrived_from_another_device(root: Path, session_id: str, *, _depth: int = 0) -> bool:
     """Whether ``session_id``'s directory carries ANY sign it arrived from elsewhere.
 
     The signals, each written by an import door (``_promote`` / ``sync.promote_replica``):
@@ -5557,8 +5577,21 @@ def _arrived_from_another_device(root: Path, session_id: str) -> bool:
     with a ``source_device``, or a marker flagged ``moved_in``. FAIL CLOSED: a
     ``mesh.json`` that exists but cannot be parsed counts as arrived, since a stamp
     nobody can read proves nothing about where the rows were written. Never raises.
+
+    A FORK INHERITS ITS PARENT'S ROWS, SO IT INHERITS ITS PARENT'S ANSWER (security
+    review #4403 r2, S1). ``fork.fork_session`` copies the journal but not
+    ``mesh.json``, so a fork of an imported session used to look local and turned the
+    parent's passive checkpoint into a discovery seed. Two signals close that:
+    ``inherited_arrival`` in the fork's ``origin.json`` (written at fork time from this
+    same answer, so it survives the parent's later deletion), and — for forks made
+    before that flag — the ``parent`` the fork origin names, followed here. A fork
+    whose parent is gone or whose lineage is too deep to follow proves nothing local
+    and counts as arrived; a fork of a genuinely local session stays local, because
+    its inherited rows were this device's own evidence for the same work.
     """
     from local_operator.network import carry as carry_mod
+    from local_operator.network.types import MeshRefusal
+    from local_operator.resume import ORIGIN_FORK
 
     session_dir = Path(root) / "sessions" / session_id
     try:
@@ -5576,9 +5609,30 @@ def _arrived_from_another_device(root: Path, session_id: str) -> bool:
         marked: Any = json.loads((session_dir / "origin.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         marked = {}
-    if isinstance(marked, dict) and marked.get("source_device"):
+    if isinstance(marked, dict) and (
+        marked.get("source_device") or marked.get("inherited_arrival")
+    ):
         return True
-    return carry_mod.moved_in(session_dir)
+    if carry_mod.moved_in(session_dir):
+        return True
+    if isinstance(marked, dict) and marked.get("origin") == ORIGIN_FORK:
+        parent = marked.get("parent")
+        if (
+            not isinstance(parent, str)
+            or not parent
+            or parent == session_id
+            or _depth >= _FORK_LINEAGE_MAX_DEPTH
+        ):
+            return True
+        try:
+            # The id names a directory to read: never a path component that escapes.
+            _validated_session_id(parent)
+        except MeshRefusal:
+            return True
+        if not (Path(root) / "sessions" / parent).is_dir():
+            return True
+        return _arrived_from_another_device(root, parent, _depth=_depth + 1)
+    return False
 
 
 def _handoff_in_progress_refusal(server: "RelayServer", session_id: str) -> dict[str, Any] | None:

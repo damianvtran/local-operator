@@ -438,8 +438,37 @@ def fork_session(
     # Truncating to whole seconds would make a title the parent wrote earlier in
     # the same second look like it was written after the fork, and the branch
     # would silently wear its parent's name.
-    mark_session_origin(fork_dir, ORIGIN_FORK, parent=parent_id, forked_at=time.time())
+    #
+    # ``inherited_arrival`` (security review #4403 r2, S1): the journal just copied may
+    # hold rows another device wrote, and ``mesh.json`` — the stamp that says so — is
+    # deliberately not in ``COPIED_SIDECARS``. Without this flag the fork read as a
+    # local session and the parent's imported checkpoint became the fork's working
+    # folder seed for a move's discovery. Recorded here, from the parent's own
+    # answer, so it outlives the parent; the reader also follows ``parent`` for forks
+    # made before the flag existed (``mobility._arrived_from_another_device``).
+    mark_session_origin(
+        fork_dir,
+        ORIGIN_FORK,
+        parent=parent_id,
+        forked_at=time.time(),
+        **({"inherited_arrival": True} if _parent_arrived(config_dir, parent_id) else {}),
+    )
     return new_id
+
+
+def _parent_arrived(config_dir: Path, parent_id: str) -> bool:
+    """Whether the parent's rows may have been written on another device. Fails closed.
+
+    Imported lazily: ``network.mobility`` is the move's large module, and a fork that
+    never touches the mesh should not pay for importing it at module load.
+    """
+    try:
+        from local_operator.network.mobility import _arrived_from_another_device
+
+        return bool(_arrived_from_another_device(Path(config_dir), parent_id))
+    except Exception:  # noqa: BLE001 — provenance unknown is provenance "elsewhere"
+        logger.debug("fork: could not read %s's arrival provenance", parent_id, exc_info=True)
+        return True
 
 
 def _discard_failed_fork(fork_dir: Path) -> None:

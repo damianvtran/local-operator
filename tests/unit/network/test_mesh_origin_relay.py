@@ -550,8 +550,10 @@ def test_r2_1_replica_door_refuses_a_line_too_deep_at_its_depth(
 
 
 # ---------------------------------------------------------------------------
-# R2-2: the refused copy leaves ``sessions/`` WHILE STILL CLAIMED, so nothing ever
-# sees an unclaimed copy there; if it cannot leave, the claim stays.
+# R2-2, superseded by #4403 r2 S2: the copy is built OFF the store
+# (``network/staging/<new_id>``), so a refused one never appears under
+# ``sessions/`` at all — claimed or not. It is then quarantined as evidence; if
+# even that rename fails it stays off-store in staging.
 # ---------------------------------------------------------------------------
 
 
@@ -565,33 +567,34 @@ def _refusing_replica(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[
     return root, session_id
 
 
-def test_r2_2_quarantine_moves_the_copy_before_releasing_its_claim(
+def test_r2_2_a_refused_copy_never_reaches_sessions_and_is_quarantined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from local_operator.session import cleanup
 
     root, session_id = _refusing_replica(tmp_path, monkeypatch)
-    # The move's ONE primitive (cleanup._rename_noreplace: renameat2/renamex_np,
-    # else an exists-check plus os.rename), observed at the call.
+    # The move's ONE primitive (cleanup._rename_noreplace), observed at the call.
     real_rename = cleanup._rename_noreplace
-    claimed_at_move: list[bool] = []
+    sources: list[Path] = []
 
     def watching_rename(src: Any, dst: Any) -> None:
         if sync.QUARANTINE_DIRNAME in Path(dst).parts:
-            claimed_at_move.append((Path(src) / ".session.pid").exists())
+            sources.append(Path(src))
+            assert not (root / "sessions" / "recovered0001").exists()
         real_rename(src, dst)
 
     monkeypatch.setattr(cleanup, "_rename_noreplace", watching_rename)
     with pytest.raises(sync.SyncRefused):
         sync.promote_replica(root, session_id, new_id="recovered0001")
-    assert claimed_at_move == [True]
+    assert sources == [sync.network_dir(root) / sync.STAGING_DIRNAME / "recovered0001"]
     quarantined = sync.network_dir(root) / sync.QUARANTINE_DIRNAME / "recovered0001"
     assert quarantined.is_dir()
-    assert not (quarantined / ".session.pid").exists()  # released once it was out
+    assert not (quarantined / ".session.pid").exists()
+    assert not (root / "sessions" / "recovered0001").exists()
     _assert_no_verified_copy(root)
 
 
-def test_r2_2_a_failed_quarantine_keeps_the_claim_and_still_refuses(
+def test_r2_2_a_failed_quarantine_leaves_the_copy_off_store_and_still_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from local_operator.session import cleanup
@@ -607,12 +610,14 @@ def test_r2_2_a_failed_quarantine_keeps_the_claim_and_still_refuses(
     monkeypatch.setattr(cleanup, "_rename_noreplace", failing_rename)
     with pytest.raises(sync.SyncRefused):
         sync.promote_replica(root, session_id, new_id="recovered0001")
-    # Still under sessions/, so it stays claimed: listings and sweeps skip it.
-    assert (root / "sessions" / "recovered0001" / ".session.pid").exists()
+    assert not (root / "sessions" / "recovered0001").exists()
+    assert (sync.network_dir(root) / sync.STAGING_DIRNAME / "recovered0001").is_dir()
 
 
-# The guarded quarantine (cleanup.quarantine_claimed_session_dir) that the
-# refused-recovery path routes through. Security bar (PR #4169): rename only;
+# The guarded quarantine (cleanup.quarantine_claimed_session_dir) for a CLAIMED
+# tree under ``sessions/``; the refused recovery used it until #4403 r2 S2 moved the
+# copy off the store (it now uses cleanup.quarantine_staged_recovery).
+# Security bar (PR #4169): rename only;
 # source proven by inode AND live claim; destination network/quarantine/<id>,
 # never overwritten; ANY mismatch refuses, leaving the tree in place, claimed.
 

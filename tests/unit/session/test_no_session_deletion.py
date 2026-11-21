@@ -4049,16 +4049,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # (``network/replicas/<id>/`` or ``network/staging/<id>/`` — both deliberately
     # outside ``sessions/``; the only route into the session store is
     # ``mobility._promote`` above, allow-listed by name), the shared attachment store
-    # ``<config>/attachments/``, and — in ``promote_replica`` — the
-    # ``<config>/sessions/<new_id>/`` directory that call has just refused to reuse
-    # (an existing id raises) and then created and claimed itself. In every case the
+    # ``<config>/attachments/``, and — in ``promote_replica`` — its own off-store
+    # ``<config>/network/staging/<new_id>/`` (since #4403 r2 S2; it reaches
+    # ``sessions/`` only through ``cleanup.publish_staged_recovery``). In every case the
     # operation names ONE member component inside an already-open directory.
     (
         "local_operator/network/sync.py::_replace_at",
         "os.replace",
         "Publishes THIS attempt's own staged file/link onto one member name as a "
         "same-directory dirfd rename (replica or staging tree, attachment store, or "
-        "recovery's just-created sessions/<new_id>); both operands are direct "
+        "recovery's own network/staging/<new_id>); both operands are direct "
         "children of that opened directory, so no directory is ever renamed",
     ),
     (

@@ -127,6 +127,13 @@ def _open_session_dir(directory: Path) -> int | None:
     confirms it is a directory this user owns (a directory another user controls
     could swap entries under us). Never creates anything.
     """
+    # POSIX ONLY (review #4403 r2, R2-m1): ownership needs ``os.getuid`` and the
+    # dir-relative calls need a directory descriptor, neither of which Windows has.
+    # ``None`` there means every read is "no record" and every write is ``False``;
+    # the arrival remap then skips rather than refuses (``carry.remap_cwd_record``).
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return None
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(str(directory), flags)
@@ -134,7 +141,7 @@ def _open_session_dir(directory: Path) -> int | None:
         return None
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != getuid():
             os.close(descriptor)
             return None
     except OSError:
@@ -245,8 +252,10 @@ def write_session_cwd(
     temporary = f"{CWD_RECORD_NAME}.{secrets.token_hex(8)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     published = False
+    created = False
     try:
         descriptor = os.open(temporary, flags, 0o600, dir_fd=dir_fd)
+        created = True
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(document, sort_keys=True))
             handle.flush()
@@ -263,13 +272,16 @@ def write_session_cwd(
     except OSError:
         published = False
     finally:
-        # The staging name is this call's own (random, O_EXCL): after a link it is a
-        # second name for the record, after a replace it is already gone, and after
-        # a failure it is a partial file. Dropping it is never another writer's data.
-        try:
-            os.unlink(temporary, dir_fd=dir_fd)
-        except OSError:
-            pass
+        # The staging name is this call's own ONLY once its O_EXCL open succeeded
+        # (review #4403 r2, S3): after a link it is a second name for the record,
+        # after a replace it is already gone, and after a later failure it is a
+        # partial file. An open that failed (the random name already taken) created
+        # nothing, so the file there is another writer's and is left alone.
+        if created:
+            try:
+                os.unlink(temporary, dir_fd=dir_fd)
+            except OSError:
+                pass
         os.close(dir_fd)
     return published
 

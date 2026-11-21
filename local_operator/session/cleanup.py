@@ -1629,7 +1629,7 @@ def sweep_handed_away(config_dir: Path, *, max_age_s: float = HANDED_AWAY_MAX_AG
 
 
 #: Where a REFUSED mesh recovery's partial copy is parked
-#: (``<config>/network/quarantine/``) by :func:`quarantine_claimed_session_dir`.
+#: (``<config>/network/quarantine/``) by :func:`quarantine_staged_recovery`.
 #: Kept, never swept: the tree is evidence of what a peer sent. Spelled here AND
 #: as ``network.sync.QUARANTINE_DIRNAME`` (sync's readers predate this helper);
 #: ``test_mesh_origin_relay`` asserts the two agree.
@@ -1695,7 +1695,11 @@ def quarantine_claimed_session_dir(
 ) -> Path | None:
     """Rename a session directory THIS CALL created, and still claims, out of the store.
 
-    WHY THIS EXISTS. ``sync.promote_replica`` creates and claims
+    HISTORY: since security review #4403 r2 (S2) ``sync.promote_replica`` builds
+    its copy off the store and refuses through :func:`quarantine_staged_recovery`
+    instead; this guard stays for any claimed in-store tree and keeps its tests.
+
+    WHY THIS EXISTS. ``sync.promote_replica`` created and claimed
     ``sessions/<new_id>``, then copies a peer's replica into it. When the import
     door refuses that copy (origin-stamp downgrade failure, a mismatched content
     digest), the partial tree must leave ``sessions/``: it may still hold stamps
@@ -1819,6 +1823,133 @@ def quarantine_claimed_session_dir(
         (landing / LIVE_MARKER_NAME).unlink()
     except OSError:
         pass
+    return landing
+
+
+#: Where ``sync.promote_replica`` builds a recovered copy before publishing it:
+#: ``<config>/network/staging/<new_id>``, the same off-store root a move stages into.
+_RECOVERY_STAGING_PARTS: tuple[str, ...] = ("network", "staging")
+
+
+def _verified_recovery_staging(staging: Path, config_root: Path, created: Any) -> None:
+    """Raise ``OSError`` unless ``staging`` is the recovery's own staged directory.
+
+    The same identity proof :func:`quarantine_claimed_session_dir` uses — a name alone
+    proves nothing — applied to the off-store staging root: a real directory (not a
+    link), whose ``(st_dev, st_ino)`` is the one the caller recorded when it created
+    it, and a direct child of ``<config>/network/staging`` resolved without detours.
+    """
+    if created is None:
+        raise OSError("no creation identity was recorded")
+    st = os.lstat(staging)
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError("not a real directory")
+    if (st.st_dev, st.st_ino) != tuple(created):
+        raise OSError("not the directory this call created (inode mismatch)")
+    expected = config_root.resolve(strict=True).joinpath(*_RECOVERY_STAGING_PARTS)
+    if staging.resolve(strict=True).parent != expected:
+        raise OSError("not a direct child of the network staging root")
+
+
+def _rename_proven(src: Path, dst: Path, created: Any) -> None:
+    """No-replace rename, then prove the landing is the inode that was checked.
+
+    A swap between the checks and the rename is renamed back (no-replace, so
+    nothing is clobbered) and raised, exactly as the quarantine does.
+    """
+    _rename_noreplace(src, dst)
+    try:
+        moved = os.lstat(dst)
+        swapped = (moved.st_dev, moved.st_ino) != tuple(created)
+    except OSError:
+        swapped = True
+    if swapped:
+        try:
+            _rename_noreplace(dst, src)
+        except OSError:
+            logger.exception("session cleanup: could not restore %s after a swap", src)
+        raise OSError(f"{src} changed during the rename")
+
+
+def publish_staged_recovery(
+    staging: Path, *, config_dir: Path, created: Any, session_id: str
+) -> Path:
+    """Make a recovered replica visible as ``sessions/<session_id>`` in ONE rename.
+
+    WHY (security review #4403 r2, S2). ``sync.promote_replica`` used to copy a
+    replica straight into its final ``sessions/<new_id>`` and only then lower the
+    stamps, contain the peer-authored ``cwd.json`` and write the import stamp. For
+    that whole window a reader saw a local-looking session: an unremapped owner path
+    as its cwd, and checkpoint rows with no stamp saying they came from elsewhere.
+    The recovery now builds the copy in ``<config>/network/staging/<new_id>`` (off
+    the store, like a move's staging) with all of that already in place, and this
+    publishes it whole.
+
+    The bar is :func:`quarantine_claimed_session_dir`'s, adapted to the direction:
+    a rename only, never a replace (an id that now exists refuses); the source is
+    proved by inode to be the directory the caller created, a direct child of the
+    staging root; the landing is re-proved after the rename. Raises ``OSError`` on
+    any refusal, leaving the staged copy where it is for the caller to quarantine.
+    """
+    config_root = Path(config_dir)
+    staging = Path(staging)
+    _verified_recovery_staging(staging, config_root, created)
+    if not session_id or os.sep in session_id or session_id in (".", ".."):
+        raise OSError(f"unsafe session id {session_id!r}")
+    store = config_root / SESSIONS_DIRNAME
+    store.mkdir(parents=True, exist_ok=True)
+    if store.is_symlink() or store.resolve(strict=True) != (
+        config_root.resolve(strict=True) / SESSIONS_DIRNAME
+    ):
+        raise OSError("the session store is not where it should be")
+    landing = store / session_id
+    _rename_proven(staging, landing, created)
+    logger.info("session cleanup: published recovered session %s", session_id)
+    return landing
+
+
+def quarantine_staged_recovery(
+    staging: Path, *, config_dir: Path, created: Any, reason: str, actor: str
+) -> Path | None:
+    """Move a REFUSED recovery's staged copy to ``<config>/network/quarantine/<name>``.
+
+    The staged copy never reached ``sessions/`` (:func:`publish_staged_recovery`),
+    so it is no hazard to listings; it is moved anyway because it is evidence of
+    what a peer sent and the staging sweep (``mobility.sweep_staging``) would
+    eventually delete it — the mesh layer keeps a refused recovery, as before S2.
+    A rename only, the source proved by inode; never raises. Returns the landing,
+    ``staging`` itself when nothing is there, or ``None`` on refusal (logged; the
+    copy then stays off-store in staging).
+    """
+    staging = Path(staging)
+    if not os.path.lexists(staging):
+        return staging
+    config_root = Path(config_dir)
+    holding = config_root / "network" / QUARANTINE_DIRNAME
+    landing = holding / staging.name
+    try:
+        _verified_recovery_staging(staging, config_root, created)
+        holding.mkdir(parents=True, exist_ok=True)
+        expected_holding = config_root.resolve(strict=True) / "network" / QUARANTINE_DIRNAME
+        if holding.is_symlink() or holding.resolve(strict=True) != expected_holding:
+            raise OSError("the quarantine directory is not where it should be")
+        _rename_proven(staging, landing, created)
+    except OSError as exc:
+        logger.warning(
+            "session cleanup: REFUSED to quarantine staged %s (%s); reason=%s actor=%s",
+            staging,
+            exc,
+            reason,
+            actor,
+        )
+        return None
+    logger.warning(
+        "session cleanup: quarantined %s to %s; reason=%s actor=%s",
+        staging.name,
+        landing,
+        reason,
+        actor,
+    )
     return landing
 
 

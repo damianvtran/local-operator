@@ -695,3 +695,190 @@ def test_l1_the_cwd_containment_rules_match_the_restore_policy() -> None:
 
     assert carry._CWD_DENY_TOP == workset_transfer._RESTORE_DENY_TOP
     assert carry._CWD_DENY_ANY == workset_transfer._RESTORE_DENY_ANY
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 remediation (PR #4403 ledger M1–M3, m1, m2, n1)
+# ---------------------------------------------------------------------------
+
+
+def _imported_stamp(session: Path) -> None:
+    (session / "mesh.json").write_text(
+        json.dumps({"session_id": session.name, "origin": {"kind": "moved", "source_device": "x"}}),
+        encoding="utf-8",
+    )
+
+
+def test_m1_a_fork_of_an_imported_session_keeps_the_inherited_checkpoint_passive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1/S1 (r2): a fork copies the journal but not the parent's ``mesh.json``, so an
+    imported parent's checkpoint row must not become the fork's "local" cwd seed —
+    neither for a fork made now (it carries the parent's arrival) nor for one made
+    before this rule (its origin names the imported parent, which is followed). A fork
+    of a genuinely LOCAL session keeps the seed: the parent's rows were this device's
+    own evidence, and the fork continues the same work in the same folder."""
+    from local_operator.fork import fork_session
+    from local_operator.resume import ORIGIN_FORK, mark_session_origin
+
+    root, session, home = _bare_root(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    _checkpoint(session, str(home / "proj"))
+
+    local_fork = fork_session(root, SESSION)
+    assert os.path.realpath(mobility._session_cwd_at(root, local_fork)) == os.path.realpath(
+        home / "proj"
+    )
+
+    _imported_stamp(session)
+    imported_fork = fork_session(root, SESSION)
+    assert not (root / "sessions" / imported_fork / "mesh.json").exists()
+    assert mobility._session_cwd_at(root, imported_fork) == ""
+    # A fork of that fork inherits the same provenance.
+    assert mobility._session_cwd_at(root, fork_session(root, imported_fork)) == ""
+
+    # A fork written before this rule: origin.json names the parent, nothing else.
+    legacy = root / "sessions" / "legacyfork01"
+    legacy.mkdir()
+    (legacy / "transcript.jsonl").write_bytes((session / "transcript.jsonl").read_bytes())
+    mark_session_origin(legacy, ORIGIN_FORK, parent=SESSION, forked_at=1.0)
+    assert mobility._session_cwd_at(root, "legacyfork01") == ""
+    # Its parent gone, nothing proves the rows local: passive (fail closed).
+    mark_session_origin(legacy, ORIGIN_FORK, parent="vanished0001", forked_at=1.0)
+    assert mobility._session_cwd_at(root, "legacyfork01") == ""
+
+
+def test_m2_replica_recovery_publishes_only_a_stamped_contained_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2/S2 (r2): the recovered copy is built OFF the store and appears under
+    ``sessions/<new_id>`` in one rename, already carrying the normalised ``cwd.json``
+    and the import stamp. While the copy is being validated nothing exists at the
+    final path, so no reader can take the raw owner path or an unstamped checkpoint
+    as local; a refused recovery never appears there at all."""
+    from local_operator.network import carry, origin
+    from tests.unit.network.test_sync import _ask, seed
+
+    root = tmp_path / "holder"
+    root.mkdir()
+    seed(root, "9f3ac1e0b7d2")
+    _write_cwd_record(root / "sessions" / "9f3ac1e0b7d2", "/etc")
+    sync.sync_from(
+        root,
+        "9f3ac1e0b7d2",
+        ask=_ask(root),
+        owner_device="d_owner",
+        into=sync.replica_dir(root, "9f3ac1e0b7d2"),
+    )
+    (root / "sessions" / "9f3ac1e0b7d2").rename(tmp_path / "elsewhere")
+    final = root / "sessions" / "recovered0001"
+    seen: list[str] = []
+    real_remap, real_downgrade = carry.remap_cwd_record, origin.downgrade_stamps
+
+    def remap(target: Path, *args: Any, **kwargs: Any) -> Any:
+        seen.append(f"remap:{os.path.lexists(final)}")
+        return real_remap(target, *args, **kwargs)
+
+    def downgrade(target: Path, *args: Any, **kwargs: Any) -> Any:
+        seen.append(f"downgrade:{os.path.lexists(final)}")
+        return real_downgrade(target, *args, **kwargs)
+
+    monkeypatch.setattr(carry, "remap_cwd_record", remap)
+    monkeypatch.setattr(origin, "downgrade_stamps", downgrade)
+    promoted = sync.promote_replica(root, "9f3ac1e0b7d2", new_id="recovered0001")
+    assert seen == ["downgrade:False", "remap:False"], seen
+    assert promoted["session_id"] == "recovered0001"
+    assert json.loads((final / "cwd.json").read_text(encoding="utf-8"))["cwd"] == ""
+    stamp = json.loads((final / "mesh.json").read_text(encoding="utf-8"))
+    assert stamp["origin"]["source_device"] == "d_owner", stamp
+    assert mobility._arrived_from_another_device(root, "recovered0001")
+
+    # A refused recovery: nothing ever exists at the final path.
+    other = root / "sessions" / "recovered0002"
+    at_refusal: list[bool] = []
+
+    def refuse(*_a: Any, **_k: Any) -> Any:
+        at_refusal.append(os.path.lexists(other))
+        raise carry.CwdRecordUntrusted("injected")
+
+    monkeypatch.setattr(carry, "remap_cwd_record", refuse)
+    with pytest.raises(sync.SyncRefused):
+        sync.promote_replica(root, "9f3ac1e0b7d2", new_id="recovered0002")
+    assert at_refusal == [False]
+    assert not os.path.lexists(other)
+    assert (sync.network_dir(root) / sync.QUARANTINE_DIRNAME / "recovered0002").is_dir()
+
+
+def test_m3_a_stale_legacy_cwd_does_not_shadow_a_valid_cwd_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M3/S4 (r2): discovery validates each LEGACY candidate (wake, marker, runtime)
+    with the durable hints' containment rule and falls through when it is unusable, so
+    a stale marker no longer hides the real worktree ``cwd.json`` names. The WIRE
+    resolver (``durable_hints=False``) is unchanged: legacy sources only, as before."""
+    from local_operator.network import workset
+
+    root, session, home = _bare_root(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    (session / "desktop.json").write_text(json.dumps({"cwd": str(home / "gone")}), "utf-8")
+    _write_cwd_record(session, str(home / "proj"))
+
+    assert os.path.realpath(mobility._session_cwd_at(root, SESSION)) == os.path.realpath(
+        home / "proj"
+    )
+    assert mobility._session_cwd_at(root, SESSION, durable_hints=False) == str(home / "gone")
+    manifest = workset.compute_manifest(root, SESSION, to_device="d", home=home)
+    assert manifest.cwd_known is True
+    assert [w.path for w in manifest.worktrees] == ["~/proj"], manifest.worktrees
+
+
+def test_m1_minor_the_cwd_writer_never_unlinks_a_staging_name_it_did_not_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1/S3 (r2): when the exclusive open of the staging name fails because the name
+    already exists, that file is someone else's and stays."""
+    from local_operator.session import creation
+
+    monkeypatch.setattr(creation.secrets, "token_hex", lambda _n: "feedface")
+    planted = tmp_path / f"{creation.CWD_RECORD_NAME}.feedface.tmp"
+    planted.write_text("not mine", encoding="utf-8")
+    assert creation.write_session_cwd(tmp_path, str(tmp_path), source="runtime") is False
+    assert planted.read_text(encoding="utf-8") == "not mine"
+
+
+def test_m2_minor_no_posix_uid_skips_the_remap_instead_of_refusing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m2/R2-m1: where ``os.getuid`` (and the verified directory handle built on it)
+    does not exist, an arriving ``cwd.json`` is not a reason to refuse the session:
+    the remap is skipped and the record reads blank, because every reader goes
+    through the same unavailable handle."""
+    from local_operator.network import carry
+    from local_operator.session import creation
+
+    target = tmp_path / "arrived"
+    target.mkdir()
+    _write_cwd_record(target, "/etc")
+    monkeypatch.delattr(os, "getuid")
+    assert carry.remap_cwd_record(target, SESSION, home=str(tmp_path)) == {}
+    assert creation.read_session_cwd(target) == ""
+    assert carry.contained_cwd(str(tmp_path), home=str(tmp_path)) == ""
+
+
+def test_n1_a_carried_restore_records_the_restored_tree_in_cwd_json(tmp_path: Path) -> None:
+    """n1/R2-n1: after a restore with files carried, ``cwd.json`` names the restored
+    tree (contained), not the blank the promote's remap left before it existed."""
+    from types import SimpleNamespace
+
+    from local_operator.network import workset_move
+    from local_operator.session.creation import read_session_cwd
+
+    home = tmp_path / "home"
+    (home / "proj-moved" / "sub").mkdir(parents=True)
+    root = home / ".local-operator"
+    session = root / "sessions" / SESSION
+    session.mkdir(parents=True)
+    _write_cwd_record(session, "")
+    rows = [{"state": "restored", "path": "~/proj", "dest_path": "~/proj-moved"}]
+    workset_move._retarget_cwd(SimpleNamespace(root=root), SESSION, "~/proj/sub", rows, home)
+    assert read_session_cwd(session) == os.path.realpath(home / "proj-moved" / "sub")

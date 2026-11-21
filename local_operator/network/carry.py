@@ -508,7 +508,10 @@ def contained_cwd(value: str, *, home: str | Path, config_root: str | Path | Non
         info = os.stat(real)
     except (OSError, ValueError):
         return ""
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+    # POSIX ownership (review #4403 r2, R2-m1): with no ``os.getuid`` (Windows) the
+    # owner cannot be proved, so nothing is contained — fail closed, never a crash.
+    getuid = getattr(os, "getuid", None)
+    if getuid is None or not stat.S_ISDIR(info.st_mode) or info.st_uid != getuid():
         return ""
     return real
 
@@ -559,6 +562,15 @@ def remap_cwd_record(
         return {}
     except OSError as exc:
         raise CwdRecordUntrusted(f"cannot stat {CWD_RECORD_NAME}: {exc}") from exc
+    if getattr(os, "getuid", None) is None:
+        # NO VERIFIED DIRECTORY HANDLE ON THIS PLATFORM (review #4403 r2, R2-m1): the
+        # record can be neither read nor rewritten safely, and refusing would turn
+        # every arrival that carries one into a failed move. Skipped instead: the
+        # record reads blank here, because every reader goes through the same
+        # unavailable handle (``creation._open_session_dir``), so the sender's path
+        # is never this device's cwd.
+        logger.info("carry: %s's carried cwd record is unused on this platform", session_id)
+        return {}
     document = read_session_cwd_document(Path(target))
     recorded = document.get("cwd")
     recorded = recorded if isinstance(recorded, str) else ""
