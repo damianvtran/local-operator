@@ -120,12 +120,13 @@ def test_a_coalesced_card_counts_the_messages_it_does_not_show() -> None:
     assert "4 more messages in this card" in text
 
 
-def test_loading_then_an_empty_answer_falls_back_to_todays_copy() -> None:
+def test_loading_then_a_failed_full_answer_shows_unavailable_not_preview() -> None:
     block = TeamBridgeBlock("(no preview available)", {"name": "Ola"}, body_loader=_no_load)
     block._expanded = True
     assert "Loading message…" in block._build_content(80).plain
     block.apply_card_body(None)
-    assert "(no preview available)" in block._build_content(80).plain
+    assert "Message body unavailable" in block._build_content(80).plain
+    assert "(no preview available)" not in block._build_content(80).plain
 
 
 def test_a_hostile_body_cannot_drive_the_terminal() -> None:
@@ -691,3 +692,82 @@ def test_new_context_uses_readable_semantic_muted_ink() -> None:
         and span.style.color.triplet is not None
     }
     assert theme_mod.semantic_color("muted").lower() in colours
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("fresh standing failed"), None, {"items": "bad"}, {"items": [None]}]
+)
+@pytest.mark.parametrize("reopen", [False, True])
+async def test_failed_fresh_disclosure_never_revives_previous_body(
+    failure: Any, reopen: bool
+) -> None:
+    calls: list[bool] = []
+    old = _answer(_item("admitted", body="OLD DISCLOSURE BODY", source="local"))
+    current = _answer(_item("admitted", body="CURRENT DISCLOSURE BODY", source="hub"))
+    block = TeamBridgeBlock(
+        "(no preview available)",
+        {"name": "Ola"},
+        body_loader=_scripted_loader(
+            [old] + ([old] if reopen else []) + [failure, failure, current], calls
+        ),
+    )
+    timers: list[_FakeTimer] = []
+    app = await _mounted(block, timers)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        if reopen:
+            block.toggle_expanded()
+            await pilot.pause()
+            assert "OLD DISCLOSURE BODY" in block._build_content(110).plain
+            block.toggle_expanded()
+        block.toggle_expanded()
+        assert "OLD DISCLOSURE BODY" not in block._build_content(110).plain
+        await pilot.pause()
+        fresh_calls = [True] + ([False] if reopen else []) + [False]
+        assert calls == fresh_calls
+        assert "OLD DISCLOSURE BODY" not in block._build_content(110).plain
+        assert "OLD DISCLOSURE BODY" not in block._snippet
+        assert [timer.delay for timer in timers] == [5.0]
+        _fire(timers)
+        await pilot.pause()
+        assert calls == fresh_calls + [False]
+        assert "OLD DISCLOSURE BODY" not in block._build_content(110).plain
+        assert [timer.delay for timer in timers] == [5.0, 10.0]
+        _fire(timers)
+        await pilot.pause()
+        assert calls == fresh_calls + [False, False]
+        assert "CURRENT DISCLOSURE BODY" in block._build_content(110).plain
+        assert "OLD DISCLOSURE BODY" not in block._build_content(110).plain
+        assert all(timer.stopped for timer in timers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("poll failed"), None, {"items": "bad"}, {"items": [None]}]
+)
+async def test_failed_same_disclosure_poll_keeps_current_answer(failure: Any) -> None:
+    calls: list[bool] = []
+    current = _answer(_item("pending"))
+    block = TeamBridgeBlock(
+        "(no preview available)",
+        {"name": "Ola"},
+        body_loader=_scripted_loader([current, current, failure, _answer(_item("refused"))], calls),
+    )
+    timers: list[_FakeTimer] = []
+    app = await _mounted(block, timers)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        block.toggle_expanded()
+        await pilot.pause()
+        painted = block._build_content(110).plain
+        _fire(timers)
+        assert block._build_content(110).plain == painted
+        await pilot.pause()
+        assert block._build_content(110).plain == painted
+        assert [timer.delay for timer in timers] == [5.0, 10.0]
+        assert calls == [True, False, False]
+        _fire(timers)
+        await pilot.pause()
+        assert "Refused by moderation" in block._build_content(110).plain
+        assert calls == [True, False, False, False]

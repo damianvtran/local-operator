@@ -3835,9 +3835,7 @@ class TeamBridgeBlock(PeerMessageBlock):
             load.close()
             self._body_loading = False
 
-    async def _load_body(
-        self, *, local_only: bool = False, generation: int | None = None
-    ) -> None:
+    async def _load_body(self, *, local_only: bool = False, generation: int | None = None) -> None:
         loader = self._body_loader
         result: dict[str, Any] | None
         try:
@@ -3860,17 +3858,34 @@ class TeamBridgeBlock(PeerMessageBlock):
         from local_operator.tui.bridge_card_body import answer_is_final
 
         self._body_loading = False
-        if isinstance(result, dict) and isinstance(result.get("card"), dict):
+        valid_answer = (
+            isinstance(result, dict)
+            and isinstance(result.get("items"), list)
+            and all(isinstance(item, dict) for item in result["items"])
+        )
+        if not valid_answer and verified and not self._body_verified:
+            # A failed fresh standing check cannot authorize a previous open's
+            # body or header excerpt. Finish this attempt with existing unavailable
+            # copy, not a recursive full read; the original failure below still
+            # schedules the bounded backoff. Same-open poll failures retain their
+            # own verified answer instead, without a loading flash.
+            self._card_body = {
+                "v": 1,
+                "items": [{"state": "unavailable", "reason": "hub_unsupported"}],
+                "more": 0,
+            }
+            self._snippet = self._header_text(self._card_body)
+        if valid_answer and isinstance(result, dict) and isinstance(result.get("card"), dict):
             self._card_facts = result["card"]
-        if isinstance(result, dict) and isinstance(result.get("items"), list):
+        if valid_answer and isinstance(result, dict):
             self._card_body = result
             self._body_verified = self._body_verified or verified
             header = self._header_text(result)
             if header:
                 self._snippet = header
         else:
-            # No answer (old row without a receipt, unknown entry): keep the
-            # card as it was rather than inventing a state.
+            # Local-only failures and same-open poll failures keep their last
+            # answer. Fresh full failures already discarded older standing above.
             self._card_body = self._card_body or {"v": 1, "items": [], "more": 0}
             self._body_verified = self._body_verified or verified
         self._refresh_row()
@@ -3886,7 +3901,7 @@ class TeamBridgeBlock(PeerMessageBlock):
             # A full answer for an open card: keep asking until it is final.
             # A failed read (``result`` None) is not final either — the last
             # good answer stays painted and the next re-read tries again.
-            if answer_is_final(result):
+            if answer_is_final(result if valid_answer else None):
                 self._cancel_reread()
                 self._reread_attempt = 0
             else:
