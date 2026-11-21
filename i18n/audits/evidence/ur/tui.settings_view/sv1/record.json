@@ -1,0 +1,359 @@
+{
+  "locale": "ur",
+  "namespace": "tui.settings_view",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null,
+    "provenance": "Identity from delegation; translator date not independently established."
+  },
+  "auditor": {
+    "agent": "translation-auditor / settings-audit-ur / 67f8e8a36066",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "keys_read": 21,
+  "findings": [
+    {
+      "id": "UR1",
+      "severity": "minor",
+      "key": "tui.settings_view.editor.contract",
+      "current": "{save_key} محفوظ کریں · {cancel_key} منسوخ کریں",
+      "proposed": "{save_key} محفوظ · {cancel_key} منسوخ",
+      "reason": "With literal enter/esc keys, the fallback grows from English 25 to 33 cells (+32%), so the cancel instruction can crop sooner; this catalogue already uses the proposed terse vocabulary in contract_unset and suggest_medium. Proposed wording is 23 cells. Overflow risk, not a demonstrated visual defect.",
+      "code_path": "local_operator/tui/widgets/settings_view.py:4443,4466-4471 always appends contract when wider hints do not fit."
+    }
+  ],
+  "checks": {
+    "interpreter": "/Users/damian/local-operator/.venv/bin/python",
+    "PYTHONPATH": "/Users/damian/local-operator/.worktrees/i18n-settings-view",
+    "head": "56781d884f27",
+    "keys_and_argument_parity": true,
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "plural_selectors": [
+      [
+        "one",
+        "other"
+      ]
+    ],
+    "no_exact_numeric_selectors": true,
+    "plural_renders": {
+      "0": "… 0 مزید",
+      "1": "… 1 مزید",
+      "2": "… 2 مزید",
+      "5": "… 5 مزید",
+      "21": "… 21 مزید"
+    },
+    "suggest_ladder_cells": [
+      50,
+      34,
+      22
+    ],
+    "manual_bidi_controls": 0,
+    "unsanctioned_latin_words": 0,
+    "widths": [
+      {
+        "key": "tui.settings_view.editor.contract",
+        "arguments": [
+          [
+            "save_key",
+            "simple"
+          ],
+          [
+            "cancel_key",
+            "simple"
+          ]
+        ],
+        "rendered": "enter محفوظ کریں · esc منسوخ کریں",
+        "target_cells": 33,
+        "english_cells": 25,
+        "maxCells": null,
+        "fits": null
+      },
+      {
+        "key": "tui.settings_view.editor.contract_unset",
+        "arguments": [
+          [
+            "save_key",
+            "simple"
+          ],
+          [
+            "cancel_key",
+            "simple"
+          ]
+        ],
+        "rendered": "enter محفوظ · esc منسوخ · خالی کر کے ہٹائیں",
+        "target_cells": 43,
+        "english_cells": 42,
+        "maxCells": 23,
+        "fits": false
+      },
+      {
+        "key": "tui.settings_view.editor.suggest_long",
+        "arguments": [
+          [
+            "browse_keys",
+            "simple"
+          ],
+          [
+            "complete_key",
+            "simple"
+          ],
+          [
+            "save_key",
+            "simple"
+          ],
+          [
+            "cancel_key",
+            "simple"
+          ]
+        ],
+        "rendered": "↑↓ تجاویز · tab مکمل کریں · enter محفوظ کریں · esc",
+        "target_cells": 50,
+        "english_cells": 50,
+        "maxCells": null,
+        "fits": null
+      },
+      {
+        "key": "tui.settings_view.editor.suggest_medium",
+        "arguments": [
+          [
+            "browse_keys",
+            "simple"
+          ],
+          [
+            "complete_key",
+            "simple"
+          ],
+          [
+            "save_key",
+            "simple"
+          ]
+        ],
+        "rendered": "↑↓ دیکھیں · tab مکمل · enter محفوظ",
+        "target_cells": 34,
+        "english_cells": 38,
+        "maxCells": null,
+        "fits": null
+      },
+      {
+        "key": "tui.settings_view.editor.suggest_short",
+        "arguments": [
+          [
+            "browse_keys",
+            "simple"
+          ],
+          [
+            "complete_key",
+            "simple"
+          ],
+          [
+            "save_key",
+            "simple"
+          ]
+        ],
+        "rendered": "↑↓ · tab · enter محفوظ",
+        "target_cells": 22,
+        "english_cells": 22,
+        "maxCells": 23,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.agents_empty",
+        "arguments": [],
+        "rendered": "کوئی ایجنٹ کنفیگر نہیں",
+        "target_cells": 22,
+        "english_cells": 20,
+        "maxCells": 38,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.empty_hint",
+        "arguments": [
+          [
+            "command",
+            "simple"
+          ]
+        ],
+        "rendered": "/team سے دیکھیں اور منسلک کریں",
+        "target_cells": 30,
+        "english_cells": 29,
+        "maxCells": 38,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.more",
+        "arguments": [
+          [
+            "count",
+            "plural"
+          ],
+          [
+            "shown",
+            "simple"
+          ]
+        ],
+        "rendered": "… 1 مزید",
+        "target_cells": 8,
+        "english_cells": 8,
+        "maxCells": 16,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.providers_empty",
+        "arguments": [
+          [
+            "command",
+            "simple"
+          ]
+        ],
+        "rendered": "کوئی لاگ ان نہیں — /team",
+        "target_cells": 24,
+        "english_cells": 22,
+        "maxCells": 38,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.providers_header",
+        "arguments": [],
+        "rendered": "پرووائیڈرز",
+        "target_cells": 10,
+        "english_cells": 9,
+        "maxCells": 20,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.tab_agents",
+        "arguments": [],
+        "rendered": "ایجنٹس",
+        "target_cells": 6,
+        "english_cells": 6,
+        "maxCells": 10,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.tab_teams",
+        "arguments": [],
+        "rendered": "ٹیمیں",
+        "target_cells": 5,
+        "english_cells": 5,
+        "maxCells": 10,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.pane.teams_empty",
+        "arguments": [],
+        "rendered": "کوئی ٹیم کنفیگر نہیں",
+        "target_cells": 20,
+        "english_cells": 19,
+        "maxCells": 38,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.row.add_chain",
+        "arguments": [],
+        "rendered": "+ چین شامل کریں",
+        "target_cells": 15,
+        "english_cells": 13,
+        "maxCells": null,
+        "fits": null
+      },
+      {
+        "key": "tui.settings_view.row.add_hop",
+        "arguments": [],
+        "rendered": "+ ہاپ شامل کریں",
+        "target_cells": 15,
+        "english_cells": 11,
+        "maxCells": null,
+        "fits": null
+      },
+      {
+        "key": "tui.settings_view.scope.live",
+        "arguments": [],
+        "rendered": "فوراً",
+        "target_cells": 4,
+        "english_cells": 4,
+        "maxCells": 14,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.scope.never",
+        "arguments": [],
+        "rendered": "کبھی نہیں",
+        "target_cells": 9,
+        "english_cells": 5,
+        "maxCells": 14,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.scope.new_launch",
+        "arguments": [],
+        "rendered": "نئے لانچ پر",
+        "target_cells": 11,
+        "english_cells": 10,
+        "maxCells": 14,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.scope.new_sessions",
+        "arguments": [],
+        "rendered": "نئے سیشنز پر",
+        "target_cells": 12,
+        "english_cells": 12,
+        "maxCells": 14,
+        "fits": true
+      },
+      {
+        "key": "tui.settings_view.section.takes_effect",
+        "arguments": [
+          [
+            "scope",
+            "simple"
+          ]
+        ],
+        "rendered": "اطلاق: فوراً",
+        "target_cells": 11,
+        "english_cells": 18,
+        "maxCells": null,
+        "fits": null
+      },
+      {
+        "key": "tui.settings_view.too_short",
+        "arguments": [],
+        "rendered": "ترتیبات کے لیے ٹرمینل بہت چھوٹا ہے — اونچائی بڑھائیں",
+        "target_cells": 52,
+        "english_cells": 48,
+        "maxCells": null,
+        "fits": null
+      }
+    ],
+    "actual_provider_command": {
+      "rendered": "کوئی لاگ ان نہیں — /login <provider>",
+      "cells": 36
+    },
+    "scope_renders": {
+      "live": "اطلاق: فوراً",
+      "new_sessions": "اطلاق: نئے سیشنز پر",
+      "new_launch": "اطلاق: نئے لانچ پر",
+      "never": "اطلاق: کبھی نہیں"
+    }
+  },
+  "references": [
+    "i18n/style-guides/ur.md:9-17 polite respectful register; 21-28 sanctioned Latin and Urdu-script loanwords; 38 session; 48 one/other; 61-70 logical RTL storage, no bidi controls, degraded TUI stance.",
+    "i18n/glossary.md:15-17 permits inflection; 23-30 technical names; 56 session, 60 agent, 77 team.",
+    "wire.settings.agents.title = ایجنٹس; wire.settings.keymap.new_session.label = نیا سیشن; wire.settings.model.description and wire.settings.hosting.help use پرووائیڈر; wire.settings.retry_fallbackchains.help uses ہاپس; wire.settings.agents.description uses لانچ; wire.settings.auto_save_conversation.choice.false.description uses محفوظ کریں.",
+    "tui.small.subagents.title = ذیلی ایجنٹس; tui.small.org_chart_view.team_heading = ٹیم {charted}; tui.small.copy_picker.more_lines uses … {shown} مزید and one/other."
+  ],
+  "note": "All 21 source/target/context keys read independently. Accuracy, idiom, respectful register and glossary otherwise clean. contract_unset is 43 cells vs English 42; its nominal 23 cap is exempted by delegation because code falls back to contract at settings_view.py:4466-4470. All other capped samples fit. No rendered or native RTL-layout proof claimed. Initial ad-hoc Latin check incorrectly counted ICU grammar count/plural/one/other as prose; follow-up isolated those exact tokens and corrected the checker, not the catalogue. No repository changes.",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "830315a90b473c4667dc91c92a2028fd6f55c624824aff7655f3d9e748c0cca4",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7"
+}

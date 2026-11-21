@@ -874,7 +874,8 @@ async def test_settings_keeps_a_body_row_on_a_short_terminal() -> None:
     body widget reported height 1 while painting zero rows onto the
     frame, which is how a size assertion would have shipped the defect.
     """
-    from local_operator.tui.widgets.settings_view import _TOO_SHORT
+    # Spelled out (not read from the catalogue) so a wording change fails here.
+    _TOO_SHORT = "terminal too short for settings — make it taller"
 
     counts: dict[int, int] = {}
     for height in (14, 15, 16, 17, 18, 20, 24):
