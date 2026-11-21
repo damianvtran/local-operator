@@ -56,7 +56,8 @@
   "tui.settings_view.chrome.cascade.first_hop": {
     "role": "validation error",
     "tone": "plain, terse",
-    "note": "Detail-line error when a new chain's first hop (provider/model) is invalid. {problem} is the validator's own explanation, inserted as-is. A hop is one provider/model step in a failover chain."
+    "note": "Detail-line error when a new chain's first hop (provider/model) is invalid. {problem} is the validator's own explanation, inserted as-is. A hop is one provider/model step in a failover chain. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
   },
   "tui.settings_view.chrome.cascade.malformed": {
     "role": "empty state",
@@ -97,7 +98,8 @@
   "tui.settings_view.chrome.clause.would_remove": {
     "role": "state clause",
     "tone": "plain, terse",
-    "note": "Detail-line clause on the session-cleanup master switch: how many stored sessions the configured policy would delete at the next launch. {count} selects the plural; {shown} is the same number as raw digits. {command} is the literal CLI command 'lop sessions cleanup --dry-run' inserted verbatim."
+    "note": "Detail-line clause on the session-cleanup master switch: how many stored sessions the configured policy would delete at the next launch. {count} selects the plural; {shown} is the same number as raw digits. {command} is the literal CLI command 'lop sessions cleanup --dry-run' inserted verbatim. Painted on the one-row detail line (74 cells at 80x24); the shed ladder keeps it alone on the line when nothing else fits, but a rendering wider than the line is DROPPED whole and the row's help shows instead, so the count and the command vanish together. English is 72 cells at a two-digit count.",
+    "maxCells": 74
   },
   "tui.settings_view.chrome.confirm.ask": {
     "role": "confirmation question",
@@ -119,7 +121,8 @@
   "tui.settings_view.chrome.error.config_unreadable": {
     "role": "error",
     "tone": "plain, direct",
-    "note": "Detail-line error when the config file cannot be parsed, so a save was refused. {file} is the file name 'config.yml' inserted verbatim; {error} is the parser's own message."
+    "note": "Detail-line error when the config file cannot be parsed, so a save was refused. {file} is the file name 'config.yml' inserted verbatim; {error} is the parser's own message. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
   },
   "tui.settings_view.chrome.error.not_text": {
     "role": "validation error",
@@ -136,12 +139,14 @@
   "tui.settings_view.chrome.error.save_failed": {
     "role": "error",
     "tone": "plain, terse",
-    "note": "Detail-line error for any other failed write (read-only directory, full disk). {error} is the system's message."
+    "note": "Detail-line error for any other failed write (read-only directory, full disk). {error} is the system's message. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
   },
   "tui.settings_view.chrome.error.unexpected_structure": {
     "role": "error",
     "tone": "plain, direct",
-    "note": "Detail-line error when the config file parses but holds the wrong shape underneath. {path} is the config file's path; {error} is the original technical message, kept for bug reports."
+    "note": "Detail-line error when the config file parses but holds the wrong shape underneath. {path} is the config file's path; {error} is the original technical message, kept for bug reports. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
   },
   "tui.settings_view.chrome.footer.any_key": {
     "role": "key hint",
@@ -236,8 +241,8 @@
   "tui.settings_view.chrome.gate_kept.medium": {
     "role": "alert",
     "tone": "plain, direct",
-    "note": "Middle form of the gate-kept alert (see gate_kept.long). {command} is '/approvals auto' inserted verbatim.",
-    "maxCells": 40
+    "note": "Middle form of the gate-kept alert (see gate_kept.long). {command} is '/approvals auto' inserted verbatim. Shown when the long form does not fit — the 54-cell detail line at 60x24; at 44x20 (38 cells) the short form takes over.",
+    "maxCells": 54
   },
   "tui.settings_view.chrome.gate_kept.short": {
     "role": "alert",
