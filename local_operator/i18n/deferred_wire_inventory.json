@@ -535,6 +535,25 @@
         "server/utils/desktop_auth.py": 1,
         "tui/app.py": 1
       }
+    },
+    "wire.errors.sdk_spec": {
+      "reason": "SDK specification refusals rendered in-process by session/spec.py and sdk.py through spec_refusal_text (active locale) and raised as a one-string SessionSpecError; the exception carries finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/session/spec.py",
+          "symbol": "spec_refusal_text / SessionSpec.__post_init__",
+          "note": "every keyed refusal is wrapped in spec_refusal_text, which renders the active locale before SessionSpecError(str) is raised; the exception has no code/params attribute"
+        },
+        {
+          "path": "local_operator/sdk.py",
+          "symbol": "open_session / spawn_session / _refuse_attach_extras / _refuse_spawn_extras",
+          "note": "same spec_refusal_text wrapper; the SDK raises finished text in the embedding process and never serialises a catalogue key"
+        }
+      ],
+      "references": {
+        "sdk.py": 16,
+        "session/spec.py": 28
+      }
     }
   }
 }

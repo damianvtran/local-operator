@@ -847,6 +847,7 @@ export type MessageParams = {
   "wire.errors.sdk_spec.attach_fields_unsupported": { "fields": string };
   "wire.errors.sdk_spec.attach_output_unsupported": undefined;
   "wire.errors.sdk_spec.attach_resume_required": undefined;
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": undefined;
   "wire.errors.sdk_spec.mode_invalid": { "mode": string };
   "wire.errors.sdk_spec.output_format_invalid": { "formats": string };
   "wire.errors.sdk_spec.output_retries_range": undefined;

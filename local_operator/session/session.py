@@ -4881,6 +4881,18 @@ class Session:
         #: gate again, not a silent send without its declared tools (agent
         #: review round 1, R3).
         self._named_mcp_ready_checked = False
+        #: Which servers that first-turn gate waits for: ``"declared"`` (the
+        #: default every host gets: declared candidates, plus preload-only
+        #: servers when headless), ``"all"`` (also every other configured server
+        #: still connecting; raises ``McpServersNotReady`` at the bound) or
+        #: ``"off"`` (no wait at all). Only ``set_first_turn_mcp_wait`` moves
+        #: it, and only the SDK calls that: an in-process SDK owner's first
+        #: ``prompt()`` is the run, with no later turn for a late server to merge
+        #: into. Never copied to a delegated child, which skips the gate anyway.
+        self._first_turn_mcp_wait: Literal["declared", "all", "off"] = "declared"
+        #: That gate's bound in seconds; ``None`` keeps the module's measured
+        #: default (``DECLARED_MCP_READY_TIMEOUT_S``).
+        self._first_turn_mcp_timeout_s: float | None = None
         #: Whether this session's MCP reach is INHERITED: a delegated child whose
         #: MCP tools are fixed by its parent's ``_child_mcp_wiring`` surface (on
         #: the parent's BORROWED manager) and whose declaration is the parent's
@@ -16631,6 +16643,39 @@ class Session:
         else:
             self._merge_capability_tools(("no_reply", "notify"))
 
+    def set_first_turn_mcp_wait(self, timeout_s: float | None) -> None:
+        """Hold the first turn for EVERY configured MCP server, bounded; ``None`` opts out.
+
+        The SDK's in-process owner (``sdk.open_session(mode="own")``) calls this
+        from ``SessionSpec.mcp_ready_timeout_s``. Without it an undeclared SDK
+        session's first ``prompt()`` went out while a slow stdio server was
+        still ``connecting`` and the model's call to its tool read "Tool not
+        found" (see ``session/declared_mcp_ready.py``, "EVERY CONFIGURED
+        SERVER"). A number ``>= 0`` is the bound for the first turn's wait,
+        which then also covers the declared/preload rule; a server still
+        connecting at the bound raises ``McpServersNotReady`` before anything
+        is sent. ``None`` turns the first-turn wait off entirely, declared
+        tools included: the caller has chosen to race discovery (and may gate
+        by hand with :meth:`wait_for_tools`). A delegated child never runs the
+        gate (``_mcp_reach_inherited``), whatever this says.
+
+        Validated like :meth:`wait_for_tools`' ``timeout_s`` (same message), so
+        the SDK's two spellings of a readiness bound accept the same values.
+        """
+        if timeout_s is None:
+            self._first_turn_mcp_wait = "off"
+            self._first_turn_mcp_timeout_s = None
+            return
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s < 0
+        ):
+            raise ValueError("timeout_s must be a finite number >= 0")
+        self._first_turn_mcp_wait = "all"
+        self._first_turn_mcp_timeout_s = float(timeout_s)
+
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
 
@@ -16657,29 +16702,76 @@ class Session:
         have nothing to grant. Returns the names granted.
         """
         declared = self._declared_tools
+        if declared is None:
+            return ()
+        return self._grant_named_mcp_tools(declared)
+
+    def _unreached(self, names: Sequence[str]) -> list[str]:
+        """The ``names`` the live enforced inventory does not reach yet."""
+        inventory = set(self.tool_inventory)
+        return [name for name in names if name not in inventory]
+
+    def _grant_named_mcp_tools(self, names: Collection[str]) -> tuple[str, ...]:
+        """Grant the schemas of NAMED lazy MCP tools this session may reach.
+
+        The one grant step behind a declaration (:meth:`materialize_declared_tools`)
+        and a caller's explicit enumeration (:meth:`wait_for_tools`): both are
+        the caller naming the tool, which is the activation a model would
+        otherwise perform by reading its ``mcp://`` URL. Never a widening: a
+        declared session grants only names inside its declaration (and
+        ``refresh_tools`` re-applies that bound), and a delegated child grants
+        nothing (``_mcp_reach_inherited``).
+        """
         manager = getattr(self, "mcp_manager", None)
         # An inherited declaration is a bound, never a grant: see
         # ``_mcp_reach_inherited``. Before the first-turn gate called this on a
         # child, the only child call (``set_tool_inventory`` in ``subagent``)
         # ran before the borrowed manager was attached, which hid the leak.
-        if declared is None or manager is None or self._mcp_reach_inherited:
+        if manager is None or self._mcp_reach_inherited:
+            return ()
+        wanted = set(names)
+        if self._declared_tools is not None:
+            wanted &= self._declared_tools
+        if not wanted:
             return ()
         try:
             available = manager.get_tools()
         except Exception:  # noqa: BLE001 — a reduced manager must not break a run
-            logger.debug("mcp get_tools() unavailable for a declaration", exc_info=True)
+            logger.debug("mcp get_tools() unavailable for a named-tool grant", exc_info=True)
             return ()
         present = {tool.name for tool in self._tools}
         granted = [
             tool
             for tool in available
-            if getattr(tool, "name", None) in declared and tool.name not in present
+            if getattr(tool, "name", None) in wanted and tool.name not in present
         ]
-        if granted:
-            # Through ``refresh_tools``, so the grant is subject to the very
-            # declaration that asked for it rather than beside it.
-            self.refresh_tools([*self._tools, *granted])
-        return tuple(tool.name for tool in granted)
+        if not granted:
+            return ()
+        names_granted = tuple(tool.name for tool in granted)
+        # AN UNDECLARED SESSION'S GRANT IS AN ACTIVATION, so it goes through the
+        # factory's activation bookkeeping (``_mcp_activate_named``, installed by
+        # ``session_factory.wire_mcp_into_session`` beside
+        # ``_mcp_cold_boundary_prune``). Installed directly, the tool sat outside
+        # that bookkeeping: a later ``mcp://`` read of the same over-cap tool
+        # selected it again and the provider array carried the name twice — an
+        # Anthropic 400 on every later request (PR #4349 agent review round 1,
+        # R1). A DECLARATION keeps the direct path on purpose: its tools are the
+        # caller's fixed contract (a bounded runtime may hold no ``read`` to
+        # re-find a schema), so they must not enter the idle demotion a
+        # model's activation is subject to.
+        activate = getattr(self, "_mcp_activate_named", None)
+        if self._declared_tools is None and callable(activate):
+            try:
+                activate(names_granted)
+            except Exception:  # noqa: BLE001 — a grant must not break the wait
+                logger.debug("mcp activation unavailable for a named-tool grant", exc_info=True)
+            else:
+                reached = set(self.tool_inventory)
+                return tuple(name for name in names_granted if name in reached)
+        # Through ``refresh_tools``, so the grant is subject to the very
+        # declaration that asked for it rather than beside it.
+        self.refresh_tools([*self._tools, *granted])
+        return names_granted
 
     def unresolved_declared_tools(self) -> tuple[str, ...]:
         """Declared names this session reaches NOTHING for, for a host to report.
@@ -16749,6 +16841,15 @@ class Session:
             raise ValueError("timeout_s must be a finite number >= 0")
         required_names = tuple(names)
 
+        # LAZY MCP TOOLS: a connected server's tools stay out of the enforced
+        # inventory until something activates them (``mcp://`` read or a
+        # declaration), so on an undeclared session this read ``missing`` with
+        # discovery settled for a tool the server had already delivered
+        # (measured: SDK + slow stdio fixture, server ``connected``, manager
+        # listing ``mcp__slowfix_search``, readiness ``missing``). Naming the
+        # tool here is that activation, granted under the same bounds as a
+        # declaration's; a cold cache gets the same grant after the wait below.
+        self._grant_named_mcp_tools(self._unreached(required_names))
         inventory = self.tool_inventory
         present = tuple(name for name in required_names if name in inventory)
         if len(present) == len(required_names):
@@ -16769,6 +16870,7 @@ class Session:
                 # CancelledError (BaseException) still propagates to the caller.
                 settled = None
 
+        self._grant_named_mcp_tools(self._unreached(required_names))
         inventory = self.tool_inventory
         present = tuple(name for name in required_names if name in inventory)
         missing = tuple(name for name in required_names if name not in inventory)
@@ -22212,8 +22314,14 @@ class Session:
         # Never for a delegated child (``_mcp_reach_inherited``): its parent's
         # gate settled the borrowed manager, and the gate's grant step would
         # widen the child's surface past what its parent allowed.
-        if not self._named_mcp_ready_checked and not self._mcp_reach_inherited:
+        # ``"off"`` is an SDK caller's explicit opt-out (``set_first_turn_mcp_wait``).
+        if (
+            self._first_turn_mcp_wait != "off"
+            and not self._named_mcp_ready_checked
+            and not self._mcp_reach_inherited
+        ):
             from local_operator.session.declared_mcp_ready import (
+                DECLARED_MCP_READY_TIMEOUT_S,
                 await_named_mcp_servers,
             )
 
@@ -22232,8 +22340,14 @@ class Session:
                 reachable=lambda: self.tool_inventory,
                 materialize=self.materialize_declared_tools,
                 wait_for_preload=not front_end,
+                wait_for_all=self._first_turn_mcp_wait == "all",
                 # Esc lands here as the sticky flag (no turn signal exists yet).
                 cancelled=lambda: self._abort_requested,
+                timeout_s=(
+                    DECLARED_MCP_READY_TIMEOUT_S
+                    if self._first_turn_mcp_timeout_s is None
+                    else self._first_turn_mcp_timeout_s
+                ),
             )
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:

@@ -15,7 +15,7 @@ Stdio server:
 ```bash
 local-operator mcp add filesystem \
   --command npx \
-  --arg -y \
+  --arg=-y \
   --arg @modelcontextprotocol/server-filesystem \
   --arg /allowed/path
 ```
@@ -40,6 +40,27 @@ local-operator mcp login linear
 Inside the TUI, `/mcp` lists servers and `/mcp login <name>` runs the same grant. To forget a stored credential or force a fresh consent (account switch, scope change): `/mcp logout <name>` / `local-operator mcp logout <name>`, and `/mcp reauth <name>` / `local-operator mcp reauth <name>` to log out and re-authorize in one step.
 
 Add `--scope project` to write `<cwd>/.local-operator/mcp.json`; the default global scope writes `~/.local-operator/mcp.json`. Use repeated `--env KEY=VALUE` only when the server must receive that variable. Do not put long-lived secrets in committed project configuration.
+
+## Environment variables and API keys
+
+A stdio server does NOT inherit Local Operator's environment. Its child environment is an allowlist — on macOS and Linux `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER` (the MCP SDK's `get_default_environment()`; Windows inherits `APPDATA`, `HOMEDRIVE`, `HOMEPATH`, `LOCALAPPDATA`, `PATH`, `PATHEXT`, `PROCESSOR_ARCHITECTURE`, `SYSTEMDRIVE`, `SYSTEMROOT`, `TEMP`, `USERNAME`, `USERPROFILE` instead) — then Local Operator's quiet-output defaults `NO_COLOR=1`, `TERM=dumb`, `CLICOLOR=0`, `PY_COLORS=0` (`CHILD_QUIET_ENV` in `local_operator/mcp/manager.py`, so `TERM` arrives as `dumb`, not inherited), and finally the server's own config `env`, merged last and winning. This is intended: a project `.mcp.json` must not be able to copy arbitrary variables out of the running app. So `TAVILY_API_KEY` exported in your shell never reaches a Tavily server by itself.
+
+Pass a key by reference, resolved from the encrypted secret store at connect time:
+
+```bash
+lop secret set TAVILY_API_KEY          # reads the value from stdin; never put it in argv
+local-operator mcp add tavily \
+  --command npx --arg=-y --arg tavily-mcp@latest \
+  --env 'TAVILY_API_KEY=${TAVILY_API_KEY}'
+```
+
+The config then holds only the reference `"env": {"TAVILY_API_KEY": "${TAVILY_API_KEY}"}`, never the secret. Rules, from `local_operator/mcp/secret_refs.py`:
+
+- A reference is `${NAME}` with `NAME` matching `[A-Za-z_][A-Za-z0-9_]*`, in a stdio server's `env` or a remote server's `headers` (`Bearer ${NAME}` works too). Server `args` are never resolved: argv is visible to `ps`.
+- `NAME` is looked up in the encrypted store only (`<config dir>/secrets/store.db`, what `lop secret` writes) — never the process environment. A missing or empty name refuses the connect, naming the server and key.
+- `$${NAME}` passes the literal text `${NAME}` through for a child that expands its own variables.
+
+Restart the session (or reconnect the server) after storing a key. Full table and trust model: `docs/mcp.md`, "Secrets in `env` and `headers`".
 
 Check and remove entries:
 

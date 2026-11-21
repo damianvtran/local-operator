@@ -39,7 +39,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -6185,8 +6185,21 @@ async def wire_mcp_into_session(
         live = list(getattr(session, "_tools", None) or getattr(session, "tools", None) or ())
         base = [tool for tool in live if tool.name not in installed_mcp] or base_inventory
         selected = selected_tools(source)
+        # ONE COPY PER NAME, ``selected`` winning. ``base`` is "whatever is live
+        # that this function did not install", so a tool that entered the
+        # inventory by another route -- a declaration's grant
+        # (``Session.materialize_declared_tools``) -- is still in it when the
+        # model later activates the same tool through an over-cap ``mcp://``
+        # read. Concatenating both published the name twice, and Anthropic
+        # refuses a request whose tool names repeat (400 "Tool names must be
+        # unique"), so every later request in the session failed (PR #4349
+        # agent review round 1, R1). The selected copy wins because it is the
+        # one this wiring tracks: it gets fresh schemas on ``tools/list_changed``
+        # and is the copy cold-boundary demotion knows how to remove.
+        selected_names = {tool.name for tool in selected}
+        base = [tool for tool in base if tool.name not in selected_names]
         installed_mcp.clear()
-        installed_mcp.update(tool.name for tool in selected)
+        installed_mcp.update(selected_names)
         return session.refresh_tools(base + selected)
 
     # Per-origin USE clock, in session runs (``Session._generation``, bumped
@@ -6208,6 +6221,42 @@ async def wire_mcp_into_session(
         enabled_origins.add((server_name, raw_tool_name))
         stamp_use(server_name, raw_tool_name)
         return refresh_selected(manager.get_tools())
+
+    def activate_named(names: Collection[str]) -> tuple[str, ...]:
+        """Activate the manager's tools named in ``names``, as ``activate`` does.
+
+        WHY. ``Session.wait_for_tools`` grants a lazy MCP tool a caller named,
+        which is the activation a model would otherwise perform by reading its
+        ``mcp://`` URL. Installing it straight into the session's inventory left
+        it outside ``enabled_origins``/``installed_mcp``, so a later read of the
+        same over-cap tool selected it AGAIN beside the untracked copy (two tools
+        of one name, an Anthropic 400 on every later request), it was never
+        demoted at a cold boundary, and it outlived a ``tools/list_changed``
+        that removed it (PR #4349 agent review round 1, R1). Routing the grant
+        through this wiring keeps one bookkeeping for every activation.
+
+        Returns the names whose origin was enabled; one rebind for the batch.
+        Names the manager does not list, or lists without an origin, are
+        skipped, never guessed.
+        """
+        wanted = set(names)
+        enabled: list[str] = []
+        for tool in manager.get_tools():
+            if tool.name not in wanted:
+                continue
+            meta = manager.get_tool_meta(tool.name) or {}
+            server_name = str(meta.get("server_name", ""))
+            raw_name = str(meta.get("mcp_tool_name", ""))
+            if not server_name or not raw_name:
+                continue
+            enabled_origins.add((server_name, raw_name))
+            stamp_use(server_name, raw_name)
+            enabled.append(tool.name)
+        if enabled:
+            refresh_selected(manager.get_tools())
+        return tuple(enabled)
+
+    setattr(session, "_mcp_activate_named", activate_named)
 
     def cold_boundary_prune() -> bool:
         """Demote published-but-idle MCP schemas at a cache-cold boundary.
