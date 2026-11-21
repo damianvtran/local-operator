@@ -23,8 +23,10 @@ reads the holder records, the same source ``lop services status`` trusts.
 
 Exit codes: ``wait``/``run`` return :data:`EXIT_TIMED_OUT` (75, ``EX_TEMPFAIL``)
 when the queue bound runs out, so a script can tell "never ran" from a command
-that ran and failed; ``run`` otherwise returns the child's code (``128 + N`` for a
-child ended by signal N, the shell convention). Off (``bash.heavy_jobs.enabled=
+that ran and failed; ``run --start-by`` returns :data:`EXIT_LATE_START` (79)
+when the deadline passed before the child was spawned; ``run`` otherwise
+returns the child's code (``128 + N`` for a child ended by signal N, the shell
+convention). Off (``bash.heavy_jobs.enabled=
 false``) or an unsupported platform (no POSIX flock) is not an error: ``wait`` and
 ``status`` say so and return 0, ``run`` says so and runs the command unqueued.
 """
@@ -40,16 +42,28 @@ import sys
 import time
 from typing import Any, Callable, Sequence, TextIO
 
-from local_operator import heavy_lease
+from local_operator import bounded_contract, heavy_audit, heavy_lease
 
 #: ``EX_TEMPFAIL`` from sysexits.h: "try again later" is exactly what a full queue
 #: means, and it is distinct from the 1/2 a failing command usually returns.
 EXIT_TIMED_OUT = 75
 
+#: ``run --start-by`` passed before the child could be spawned: never started.
+#: The same number ``scripts/run_bounded.py`` returns for the same breach, so a
+#: scheduler reads one code whichever wrapper it used (see bounded_contract).
+EXIT_LATE_START = bounded_contract.EXIT_LATE_START
+
+#: The audit ``label`` of a ``lop services heavy wait`` that timed out.
+WAIT_LABEL = "heavy wait"
+
 #: How often a waiter prints its "queued behind …" line. The bash tool streams
 #: one a second into a live UI; a terminal or a log file only needs to show it is
 #: alive and who it waits for, and one line a second floods a build log.
 NOTE_EVERY_SECONDS = 5.0
+
+#: Audit events ``status`` shows: enough to see the last two jobs' take/release
+#: pairs, short enough to stay a glance. The whole trail is the jsonl file.
+STATUS_EVENTS = 5
 
 #: How often ``wait`` re-reads the holder records. Matches the lease's own poll
 #: so a freed slot is noticed as fast as a real acquirer would notice it.
@@ -121,6 +135,20 @@ def wait_command(
         return 0
     settings = heavy_lease.configured_settings()
     directory = heavy_lease.lease_dir()
+    # A `wait` inside a leased command (its own ancestor holds the slot) would
+    # otherwise wait for that ancestor to finish, i.e. for itself: return at
+    # once, but only on a VERIFIED inherited lock (heavy_lease.inherited_lease;
+    # a bare or forged LOCAL_OPERATOR_HEAVY_LEASE queues as before).
+    inherited = heavy_lease.inherited_lease(directory)
+    if inherited is not None:
+        heavy_lease.record_nested(
+            directory,
+            inherited,
+            session_id=os.environ.get("LOCAL_OPERATOR_SESSION_ID", ""),
+            label=WAIT_LABEL,
+        )
+        print(heavy_lease.nested_line(inherited), file=out, flush=True)
+        return 0
     bound = timeout if timeout is not None else settings.wait_seconds
     started = clock()
     last_note: float | None = None
@@ -130,6 +158,18 @@ def wait_command(
             return 0
         waited = clock() - started
         if waited >= bound:
+            # Same fields as acquire()'s timeout line, so a waiter that gave up
+            # is on the trail whichever command queued (PR #4264 Q1). The label
+            # is fixed: `wait` runs no command, and there is nothing to filter.
+            heavy_audit.record(
+                directory,
+                "timeout",
+                pid=os.getpid(),
+                session=os.environ.get("LOCAL_OPERATOR_SESSION_ID") or None,
+                label=WAIT_LABEL,
+                waited_s=round(waited, 3),
+                holders=[holder.pid for holder in holders],
+            )
             message = heavy_lease.refusal_message(holders, waited, "lop services heavy wait", bound)
             print(message, file=out)
             return EXIT_TIMED_OUT
@@ -149,8 +189,17 @@ def run_command(
     timeout: float | None,
     *,
     out: TextIO | None = None,
+    start_by: float | None = None,
+    clock: Callable[[], float] = time.time,
 ) -> int:
     """Run ``argv`` holding a heavy-job slot; release it when the child exits.
+
+    ``start_by`` (epoch seconds, ``--start-by``) is the latest the child may be
+    spawned. It is checked AFTER the queue wait and immediately before
+    ``Popen``: a run admitted in time that then queued past its window is
+    refused with :data:`EXIT_LATE_START`, the child is never spawned, and the
+    slot it just took is released by the ``finally`` below. ``None`` (the flag
+    absent) skips the check entirely, so behaviour is unchanged.
 
     The child leads its OWN session and process group (``start_new_session``,
     the same spawn shape the ``bash`` tool uses) and the lease record names
@@ -166,6 +215,15 @@ def run_command(
     replaced with ``/dev/null`` — heavy jobs are builds and tests, not
     interactive programs, and an inherited tty fd would be one it cannot own.
     A piped stdin is passed through untouched.
+
+    Nested inside another leased command (a verified
+    ``LOCAL_OPERATOR_HEAVY_LEASE``, see ``heavy_lease.inherited_lease``), the
+    run does not queue and takes NO slot of its own: it shares its ancestor's,
+    as any child of a leased command does. So a nested run that outlives the
+    ancestor (started in the background) keeps running with no slot once the
+    ancestor releases, and an unrelated heavy job may start beside it; that is
+    the residual a self-backgrounded child already has (``heavy_lease``'s
+    module docstring), not a second queue.
     """
     out = out if out is not None else sys.stderr
     if not argv:
@@ -193,7 +251,13 @@ def run_command(
             pass  # already gone; the wait below returns on its own
 
     previous = {sig: signal.signal(sig, _on_signal) for sig in _FORWARDED}
-    lease: heavy_lease.Lease | None = None
+    # An InheritedLease when this `run` sits inside another leased command (see
+    # heavy_lease.HEAVY_LEASE_INHERITED_ENV): acquire() returns it at once
+    # instead of queueing behind our own ancestor (the 2026-11-20 deadlock), and
+    # its release() is a no-op, so the `finally` below never frees the
+    # ancestor's slot.
+    lease: heavy_lease.Lease | heavy_lease.InheritedLease | None = None
+    exit_code: list[int] = []
     try:
         off = _queue_off_line()
         if off is not None:
@@ -231,18 +295,73 @@ def run_command(
             if isinstance(result, heavy_lease.Refusal):
                 print(result.message, file=out)
                 return EXIT_TIMED_OUT
+            if isinstance(result, heavy_lease.InheritedLease):
+                print(heavy_lease.nested_line(result), file=out, flush=True)
             lease = result
         if received:
             return 128 + received[0]
+        if start_by is not None:
+            # Wall clock, not monotonic: the deadline is a calendar time stated
+            # by another host.
+            now = clock()
+            if now > start_by:
+                from local_operator.i18n.keys import cli_services_heavy as copy
+                from local_operator.i18n.text import tr
+
+                # The breach goes on the lease trail as well as stderr, so
+                # "did my 08:05Z window run?" is answered from the trail file
+                # (`<config>/run/heavy-jobs/heavy-lease.jsonl`), not a lost
+                # terminal. `heavy status` shows the row only while the queue
+                # is enabled: with it off, status returns before reading the
+                # trail (pre-existing behaviour), but the row is still written.
+                # Same field names as take/timeout; `slot` only when one was
+                # taken (queue off has none). record() swallows every error:
+                # the trail is evidence, and a failed write must never turn
+                # the 79 below into anything else. Written BEFORE the finally
+                # releases the slot, so the trail reads take → late-start →
+                # release for a run that queued past its window.
+                # Queue off never took a slot, so the lease dir (which
+                # acquire() creates) may not exist yet and record() would drop
+                # the row; create it the way acquire() does, best effort.
+                directory = heavy_lease.lease_dir()
+                try:
+                    directory.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+                heavy_audit.record(
+                    directory,
+                    "late-start",
+                    slot=lease.slot if lease is not None else None,
+                    pid=os.getpid(),
+                    session=os.environ.get("LOCAL_OPERATOR_SESSION_ID") or None,
+                    label=heavy_audit.command_label(shlex.join(argv)),
+                    start_by=round(start_by, 3),
+                    late_s=round(now - start_by, 3),
+                )
+
+                line = copy.late_start(
+                    start_by=bounded_contract.utc_stamp(start_by),
+                    now=bounded_contract.utc_stamp(now),
+                    late=f"{now - start_by:.1f}",
+                )
+                print(tr("cli.services_heavy")(line), file=out, flush=True)
+                return EXIT_LATE_START
         fd = lease.fileno() if lease is not None else None
         stdin = subprocess.DEVNULL if _stdin_is_tty() else None
         inherited: tuple[int, ...] = (fd,) if fd is not None else ()
+        # The child gets the lock fd AND the marker naming it, so a `heavy run`
+        # or bash-tool lease anywhere below it runs under this slot instead of
+        # queueing behind it; with no fd passed, any marker this process
+        # inherited is cleared rather than handed to a child that lacks the fd.
+        child_env = dict(os.environ)
+        heavy_lease.export_marker(child_env, lease if fd is not None else None)
         try:
             proc = subprocess.Popen(
                 list(argv),
                 stdin=stdin,
                 pass_fds=inherited,
                 start_new_session=True,
+                env=child_env,
             )
         except OSError as exc:
             # The shell's own codes: 127 "not found", 126 "found, not runnable".
@@ -264,10 +383,13 @@ def run_command(
             lease.note_pgid(proc.pid)
         # PEP 475: the handler runs inside wait() and wait() resumes, so the
         # child's real exit status is what comes back after a forwarded signal.
-        return _exit_code(proc.wait())
+        exit_code.append(_exit_code(proc.wait()))
+        return exit_code[0]
     finally:
         if lease is not None:
-            lease.release()
+            # The child's code goes into the audit trail's release line; None
+            # when the child never ran (spawn failure, signal before Popen).
+            lease.release(exit_code=exit_code[0] if exit_code else None)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 
@@ -310,6 +432,26 @@ def status_command(*, out: TextIO | None = None, now: float | None = None) -> in
             holder=holder.who(),
             age=_age(now - holder.started_at),
             command=holder.command or "?",
+        )
+        print(text(line), file=out)
+    # The audit trail's tail (local_operator/heavy_audit.py), so "did those two
+    # jobs serialize?" is answerable here without opening the file. The holder
+    # line above already gives pid/session/age; the matching ``take`` line
+    # below adds its label and absolute start time.
+    #
+    # No waiter count, deliberately: waiters poll a non-blocking flock and
+    # leave no trace until they win or time out, so counting them would need a
+    # new per-waiter registry (writes on every queue entry, plus stale cleanup
+    # for killed waiters) — not cheap, and not needed to prove serialization.
+    path = heavy_audit.audit_path(directory)
+    events = heavy_audit.tail(directory, STATUS_EVENTS)
+    if not events:
+        print(text(copy.no_events(path=str(path))), file=out)
+        return 0
+    print(text(copy.events_header(path=str(path))), file=out)
+    for entry in events:
+        line = copy.event_line(
+            time=heavy_audit.iso_time(entry.get("ts")), record=heavy_audit.describe(entry)
         )
         print(text(line), file=out)
     return 0

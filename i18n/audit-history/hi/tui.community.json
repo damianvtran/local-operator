@@ -1,0 +1,175 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tui.community",
+  "history_sha256": "5b48564e37d1dde12886112442e24bf3a628b4e96d2a2049ea46545a84ba5eda",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tui.community",
+      "source_sha256": "cf2cc44838daed3feee13561e45dac11ddce031ac3fa702854a3215536671ac1",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer / i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "hi `tui.community` PR #4221 first independent audit (pass A), full namespace (148 keys). Evidence: i18n/audits/evidence/hi/community-primary/record.json. Auditor anthropic/claude-opus-5-5 session c739715f0519; 1 minor, 0 nit (locale-wide counts), 0 blocker/major; no wording changed.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/community-primary/record.json",
+          "sha256": "9af981c17128a916b83b8739cc58d79e0fa75a28674d7e88362c99b940c7bcb2"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-primary/report.md",
+          "sha256": "e0dd7b95cc08cf36314e8c2bca791d91d0bd4e988ab67349538c45a6c93ec422"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-primary/audit.log",
+          "sha256": "49476ad37a2e6c471de1490919b7fd64277c7bacc7e9a8b3aaf7b6281bdd4e88"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.community",
+      "source_sha256": "cf2cc44838daed3feee13561e45dac11ddce031ac3fa702854a3215536671ac1",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer / i18n-auditor (second pass, same session)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "hi `tui.community` PR #4221 second pass (pass B), approval-card keys only (3 keys). Evidence: i18n/audits/evidence/hi/community-secondary/record.json. Auditor anthropic/claude-opus-5-5 session c739715f0519; 0 minor, 0 nit (locale-wide counts), 0 blocker/major; no wording changed. Same auditor session as pass A: independent of the translator, NOT of the first audit.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/community-secondary/record.json",
+          "sha256": "917d360e12d242bfd6cfb78646508fb8e5245fd63fe48286e9a7e4912fb2a064"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-secondary/report.md",
+          "sha256": "60e1ed81f59a38519a8851a1144c060e76a9a6468303e75568afcd7a9efa1689"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-secondary/audit.log",
+          "sha256": "4d11dd8c5508a025acd6a73fdad9f2309c21303612b9af715bee3ed51955d386"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.community",
+      "source_sha256": "67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer / i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "hi `tui.community` PR #4221 delta audit round 2 (pass A), changed/new keys only (page_error, post_allow_unread, post_card_cut); other 147 keys byte-identical to the round-1 passed bytes with unchanged English. Evidence: i18n/audits/evidence/hi/community-delta-r2-primary/record.json. Auditor anthropic/claude-opus-5-5 session 837443aac8da; 1 minor, 0 blocker/major; no wording changed.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/community-delta-r2-primary/record.json",
+          "sha256": "1390e4c42526f7b7ecd80b7c2adb17c4b5a7b960cda4ea639a4efbeb8abfc585"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-delta-r2-primary/report.md",
+          "sha256": "c5fe1b30e81de7ed94a4ee2bd489265024cf7320f113f238b36adb964a95c59b"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-delta-r2-primary/audit.log",
+          "sha256": "e1f83d46af06f2f09f09c0095b6908957edc76c6ab85196687ac2df0efaf9443"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.community",
+      "source_sha256": "67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer / i18n-auditor (second pass, same session)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "hi `tui.community` PR #4221 delta audit round 2 (pass B), approval-card keys only (post_allow_unread, post_card_cut). Evidence: i18n/audits/evidence/hi/community-delta-r2-secondary/record.json. Auditor anthropic/claude-opus-5-5 session 837443aac8da; 1 minor (concurs), 0 blocker/major; no wording changed. Same auditor session as pass A: independent of the translator, NOT of the first audit, and not model-independent.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/community-delta-r2-secondary/record.json",
+          "sha256": "dd8cc29c32bc549e9c56daed891d70dd4ff605d9f6c5330d6287d7f143c5964f"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-delta-r2-secondary/report.md",
+          "sha256": "dd577a018d0197202ce555b5ecc306e89709906dd38d53d4e00ad98f8355f68d"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-delta-r2-secondary/audit.log",
+          "sha256": "6c2e012efa738f86ecde211be670db81b26f9743d66ba902c5c8a9a750332b80"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.community",
+      "source_sha256": "67cf18960cb91fb3a557d5a725fd11fc90fc68714f93122dfee58478e29e7616",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_first_audit": true
+      },
+      "status": "passed",
+      "note": "PR #4221 round 3: SECOND independent safety audit (08c6dfffd961); different session and model from translator and round-1/2 first auditors. 5 approval-card keys only; no changes to audited copy. Evidence: i18n/audits/evidence/hi/community-r3-safety-tui/record.json. Retains R3-M1 (MINOR, deferred).",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/community-r3-safety-tui/record.json",
+          "sha256": "2592e30a46cc88c27e4e26381f5e2712db14de8b2d1ab066b012305dfe3a2ac6"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/community-r3-safety-tui/report.md",
+          "sha256": "e5836a189df4ccf33d39f01e06e09005308643c9a72ce213a341bcc46c912288"
+        }
+      ]
+    }
+  ]
+}

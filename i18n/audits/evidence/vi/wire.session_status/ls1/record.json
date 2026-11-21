@@ -1,0 +1,97 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20T10:19:52.910401+00:00",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/vi/wire.session_status.json",
+  "target_sha256": "6ebcf183173d19edcc69e11475580f4e9785e58b2226f1ee4d1976fc662bbe59",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance_source": "Delegation brief; translator identity not independently inspected"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "task": "live-status-audit-vi",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "16713779bc7e",
+    "session": "16713779bc7e",
+    "actual_model_source": "Host Model declaration",
+    "fallback_used": false,
+    "independent_from_translator": true,
+    "result": "fail",
+    "unresolved_blocker_major": 1
+  },
+  "findings_count": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 1,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "VI-LIVE-01",
+      "severity": "major",
+      "key": "wire.session_status.wedged_heartbeat",
+      "current_text": "Không phản hồi · tiến trình vẫn chạy (heartbeat gần nhất {duration} trước)",
+      "problem": "Visible English common noun heartbeat remains in a high-visibility Vietnamese chip.",
+      "evidence": "Rendered actual output: Không phản hồi · tiến trình vẫn chạy (heartbeat gần nhất 4m trước). The sidecar describes a measured heartbeat age, not a literal command/token. vi style-guide kept-English terminology does not exempt heartbeat. A second corpus check found cli.browser.heartbeat_stale also retains heartbeat, but that diagnostic-label precedent does not make this new prose token Vietnamese or satisfy the explicit no-English interface goal. exec is separately and explicitly required to remain literal.",
+      "suggested_wording": "Không phản hồi · tiến trình vẫn chạy (tín hiệu sống gần nhất cách đây {duration})"
+    },
+    {
+      "id": "VI-LIVE-02",
+      "severity": "minor",
+      "key": "wire.session_status.delegating_queued",
+      "related_keys": [
+        "wire.session_status.delegating_queued_addend"
+      ],
+      "current_text": "{count, plural, other {# tác nhân con đang xếp hàng}} / {count, plural, other {# đang xếp hàng}}",
+      "problem": "Queue segments materially expand in narrow row chips; rendered fit remains unverified.",
+      "evidence": "rich.cells.cell_len on runtime-rendered count 2: queued en=18, vi=28 cells; addend en=8, vi=15 cells. The sidecar specifies no hard cell cap, so this is a fit risk rather than proven clipping. Queued means waiting for capacity, not actively executing; shorter chờ chạy preserves the distinction.",
+      "suggested_wording": {
+        "wire.session_status.delegating_queued": "{count, plural, other {# tác nhân con chờ chạy}}",
+        "wire.session_status.delegating_queued_addend": "{count, plural, other {# chờ chạy}}"
+      }
+    }
+  ],
+  "result": "fail",
+  "status": "changes_requested",
+  "keys_audited": 31,
+  "new_keys_audited": 14,
+  "preexisting_keys_byte_unchanged": 17,
+  "checks": {
+    "head": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+    "argument_name_and_kind_parity": "31/31 pass via runtime.message_arguments",
+    "plural_categories": [
+      "other"
+    ],
+    "plural_verification": "Every plural AST selector set exactly equals format.plural_categories(vi); no =N arms. runtime imports format as fmt; plural_categories actually lives in format.py, not as a runtime.py export.",
+    "render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000000
+    ],
+    "render_results": "84/84 new-key render calls succeeded; Vietnamese grouped 1000000 as 1.000.000.",
+    "exec_and_joiners": "Literal (exec) and all source U+0020 U+00B7 U+0020 joiner counts preserved",
+    "unicode": "All 31 strings NFC",
+    "old_bytes": "git diff inspected; 17 old values unchanged. Raw old key lines match byte-for-byte apart from the final old entry comma needed to append keys.",
+    "register_and_agreement": "Sentence case, terse pronoun-free labels; Vietnamese has no grammatical gender/number agreement. attached Đang mở accurately means window open.",
+    "glossary_citations": [
+      "wire.sessions.stop_refused_busy: đang làm việc / phê duyệt / tác nhân con / tác vụ",
+      "wire.sessions.park_self_refused_busy: tác nhân con / tác vụ nền",
+      "tui.review.relation_subagent: tác nhân con",
+      "tui.notices.model_switch_queued: Đã xếp hàng"
+    ],
+    "rendered_app_fit": "Not exercised; runtime-rendered strings and terminal-cell widths only. No UI visual sign-off claimed.",
+    "rtl": "Not applicable to vi"
+  },
+  "runtime_evidence_path": "/Users/damian/.local-operator/sessions/16713779bc7e/scratchpad/vi-live-status-runtime-evidence.json",
+  "runtime_evidence_sha256": "8da41b068836e8b44ec6e7cac45ebf79039cf3acb460ff29d372bc35acdc4df5",
+  "notes": "Read all 31 English and Vietnamese entries and context sidecar. Legacy rows are byte-preserved, not reopened as new-scope findings. No repo edits, commits or ledger/history appends."
+}

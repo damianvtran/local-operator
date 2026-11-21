@@ -24,5 +24,19 @@
   "relay.transcript.message.show_more": "مزید دکھائیں",
   "relay.transcript.message.show_less": "کم دکھائیں",
   "relay.transcript.message.show_more_label": "مزید دکھائیں — آپ کا پیغام",
-  "relay.transcript.message.show_less_label": "کم دکھائیں — آپ کا پیغام"
+  "relay.transcript.message.show_less_label": "کم دکھائیں — آپ کا پیغام",
+  "relay.transcript.bridge.provenance": "بیرونی پیغام · غیر قابلِ اعتماد مواد",
+  "relay.transcript.bridge.loading": "پیغام لوڈ ہو رہا ہے…",
+  "relay.transcript.bridge.pending": "آپ کے ایجنٹ تک پہنچائے جانے کا منتظر",
+  "relay.transcript.bridge.held": "ماڈریشن نے روک رکھا ہے",
+  "relay.transcript.bridge.held_transient": "اسکریننگ کا انتظار ہے — ابھی آپ کے ایجنٹ کو نہیں دکھایا گیا",
+  "relay.transcript.bridge.refused": "ماڈریشن نے مسترد کیا",
+  "relay.transcript.bridge.not_admitted": "آپ کے ایجنٹ تک نہیں پہنچایا گیا",
+  "relay.transcript.bridge.unavailable": "پیغام کا متن دستیاب نہیں",
+  "relay.transcript.bridge.signed_out": "یہ پیغام دیکھنے کے لیے Radient میں سائن اِن کریں",
+  "relay.transcript.bridge.other_account": "کسی دوسرے Radient اکاؤنٹ پر موصول ہوا",
+  "relay.transcript.bridge.not_member": "اب آپ اس گفتگو میں شامل نہیں ہیں",
+  "relay.transcript.bridge.offline": "Radient سے رابطہ نہیں ہوا — دوبارہ کوشش کے لیے گفتگو دوبارہ کھولیں",
+  "relay.transcript.bridge.deleted": "یہ پیغام حذف کر دیا گیا",
+  "relay.transcript.bridge.more_messages": "{count, plural, one {اس کارڈ میں # مزید پیغام} other {اس کارڈ میں # مزید پیغامات}}"
 }

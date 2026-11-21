@@ -16,5 +16,6 @@
   "tui.bridge_card.body.show_less": "收起",
   "tui.bridge_card.body.more_messages": "{count, plural, other {此卡片中还有#条消息}}",
   "tui.bridge_card.header.held_transient": "等待筛查",
-  "tui.bridge_card.header.open_to_load": "展开以加载消息"
+  "tui.bridge_card.header.open_to_load": "展开以加载消息",
+  "tui.bridge_card.header.offline": "无法连接Radient——展开以重试"
 }

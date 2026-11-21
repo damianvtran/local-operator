@@ -184,10 +184,27 @@ def test_pr_red_or_pending_gate_fails_closed(serve, tmp_path, conclusion):
     )
 
 
-def test_pr_run_still_running_fails(serve, tmp_path):
-    api = serve({WF: {"workflow_runs": [run_obj(1, status="in_progress")]}})
-    code, out, _ = cli(api, tmp_path, *PR_ARGS)
-    assert code == 1 and "not finished" in out
+@pytest.mark.parametrize("status", ["queued", "in_progress", "waiting", "pending"])
+def test_pr_run_still_pending_is_a_decided_not_green(serve, tmp_path, status):
+    """The GH #4194/#4215 race: a label armed while ci.yml is still queued.
+
+    It must stay fail-closed (exit 1, ``ok=false``) and must be EXIT_NOT_GREEN,
+    not EXIT_UNKNOWN: ``make merge-gate`` refuses to arm on 1 and arms anyway
+    on 3, so a pending head reported as 3 would re-open the race. The runner
+    never waits: no jobs endpoint is read for an unfinished run.
+    """
+    api = serve({WF: {"workflow_runs": [run_obj(1, status=status)]}})
+    code, out, o = cli(api, tmp_path, *PR_ARGS)
+    assert (code, o["ok"]) == (1, "false"), out
+    assert f"ci.yml run 1 is {status}, not finished" in out
+    assert "Next: after CI Gate is green: make merge-gate PR=7" in out
+    assert not any("/jobs" in p for p in api.seen)
+
+
+def test_pr_with_no_ci_run_at_all_is_a_decided_not_green(serve, tmp_path):
+    api = serve({WF: {"workflow_runs": []}})
+    code, out, o = cli(api, tmp_path, *PR_ARGS)
+    assert (code, o["ok"]) == (1, "false") and "no ci.yml pull_request run bound" in out
 
 
 def test_newer_red_run_beats_older_green_run(serve, tmp_path):
@@ -248,13 +265,27 @@ def test_same_gate_name_twice_is_ambiguous(serve, tmp_path):
 def test_api_errors_and_malformed_json_fail_closed(serve, tmp_path, routes):
     api = serve(routes)
     code, out, o = cli(api, tmp_path, *PR_ARGS)
-    assert code == 1 and o["ok"] == "false"
+    # EXIT_UNKNOWN (3): still a failed step on the runner (any non-zero), but
+    # the client may arm on it because the runner will decide for itself.
+    assert code == 3 and o["ok"] == "false" and "unknown is not green" in out
+
+
+def test_missing_token_is_unknown_not_green(tmp_path):
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--repo", REPO, "--api-url", "http://127.0.0.1:9", *PR_ARGS],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 3 and "no GitHub token" in proc.stderr
 
 
 def test_pagination_overflow_fails_closed(serve, tmp_path):
     api = serve({WF: {"workflow_runs": [run_obj(i) for i in range(100)]}})
     code, out, _ = cli(api, tmp_path, *PR_ARGS)
-    assert code == 1 and "refusing to guess" in out
+    assert code == 3 and "refusing to guess" in out
 
 
 def test_fake_api_log_message_accepts_the_base_class_keyword_form(serve):

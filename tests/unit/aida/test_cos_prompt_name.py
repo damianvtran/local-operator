@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.types import AgentTool
 from local_operator.prompts_api import (
     build_system_blocks,
     identity_delta,
@@ -406,8 +407,13 @@ def test_builder_is_byte_identical_without_a_name() -> None:
 
 
 def test_identity_section_round_trips_through_the_splitter() -> None:
+    async def _never(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("not called")
+
+    # `read` held, so the knowledge piece ships (CAPABILITY_CLASS_FLAGS).
+    read = AgentTool(name="read", description="read tool", execute=_never)
     blocks = build_system_blocks(
-        [],
+        [read],
         "<skills/>",
         "",
         "2026-11-07",

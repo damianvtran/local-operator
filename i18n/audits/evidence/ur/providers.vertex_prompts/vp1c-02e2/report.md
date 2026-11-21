@@ -1,0 +1,7 @@
+# Context-only compatibility acknowledgement: ur/providers.vertex_prompts
+
+Primary auditor: i18n-auditor / 02e2a562a33a / openai/gpt-6.1-sol (quota fallback). Original 4/4 semantic PASS retained; no string re-audit. Independent secondary semantic audit and context acknowledgment: i18n-auditor / 03178f8c9cba / openai/gpt-6.1-sol. Secondary ack stale Anthropic model attribution is explicitly corrected by the manager's served-model receipt, preserved in provenance-correction.json; original ack bytes retained.
+
+Exact change: only prompt.field.note narrows template usage from CLI+Desktop to CLI. CLI empty-to-cancel remains correct. Desktop uses the project-ID label rather than the CLI question, avoiding an empty-submit promise at its nonempty-only input endpoint. Code-path behavior supplied by manager/coder, not independently executed here. TUI cancellation hint context unchanged.
+
+Independently reconstructed prior context by reversing the sole note field and serializing with the original two-space indentation plus newline; reproduced original SHA-256. Current context hash: fa524f9163a535252a9f9eac8d391b46f86fcd2435c3723a8d0be12b6198faef. English plus all seven locale hashes unchanged. Prior semantic report and records remain byte-identical. No new BLOCKER/MAJOR or minor/nit finding. This is context compatibility, not another semantic pass, a runtime behavior test, rendered fit, or native RTL/shaping evidence. Notes are audit_notes_not_execution_log; actual commands/checks are in audit.log.

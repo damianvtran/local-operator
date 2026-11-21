@@ -400,6 +400,9 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
         # do not interpolate an unchecked authority/userinfo string into a URL.
         value = {**value, "gateway_port": config.port(value.get("gateway_port"))}
         fields["connector"] = await report.connector_state(value)
+        blocked = _client_update_plan(fields["connector"], fields)
+        if blocked is not None:
+            return blocked
     return _plan("quote_unread", _t(ms.quote_unread()), **fields)
 
 
@@ -517,6 +520,10 @@ async def observe(selected: int | None = None, *, resume_stopped: bool = False) 
     # alone is insufficient: the closed origin gate and actual connector matter.
     if value:
         connector = await report.connector_state(value)
+        if fields["cloud_active"]:
+            blocked = _client_update_plan(connector, fields)
+            if blocked is not None:
+                return blocked
         harness = next(
             (
                 h
@@ -622,6 +629,23 @@ def _disabled_copy(plan: dict[str, Any]) -> Msg:
     return ms.disabled_resume() if plan.get("resuming") else ms.disabled()
 
 
+def _client_update_plan(connector: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any] | None:
+    from local_operator.tunnels import gateway
+
+    # GET polling does not negotiate bootstrap. Preserve a known 426 while the
+    # explicit override still forbids the relay, rather than calling it a login
+    # failure or offering setup that cannot succeed. After it is cleared, this
+    # capability-advertising build may reobserve/reconnect on an explicit action.
+    if (
+        connector.get("reason") == gateway.CLIENT_UPGRADE_REQUIRED
+        and config.transport_override() == config.TRANSPORT_CLOUDFLARE
+    ):
+        return _plan(
+            "client_update", gateway.terminal_detail(gateway.CLIENT_UPGRADE_REQUIRED, ""), **fields
+        )
+    return None
+
+
 def _unreadable_step(failure: BaseException) -> tuple[str, str]:
     """The ``(step, remedy)`` for a fresh read that did not complete.
 
@@ -638,6 +662,8 @@ def _unreadable_step(failure: BaseException) -> tuple[str, str]:
     from local_operator.tunnels.service import authorization_failure_reason
 
     reason = authorization_failure_reason(failure)
+    if reason == gateway.CLIENT_UPGRADE_REQUIRED:
+        return "client_update", gateway.terminal_detail(reason, "")
     if reason in (gateway.UNREACHABLE, gateway.CONTROL_PLANE_TIMEOUT):
         return "network", _t(ms.network())
     if reason == gateway.SERVER_UNAVAILABLE:
@@ -817,7 +843,7 @@ async def _apply(
                 await asyncio.sleep(1)
         if not plan["verified"]:
             plan = {**plan, "step": "verification", "ready": False, "remedy": _t(ms.verification())}
-    except (ValueError, OSError, httpx.HTTPError, KeyError, TypeError):
+    except (ValueError, OSError, httpx.HTTPError, KeyError, TypeError) as failure:
         # Error bodies, saved records and connector tokens never enter a receipt.
         # Earlier successes remain visible so retry is not mistaken for rollback.
         # A lost activation response is NOT proof that billing rolled back.
@@ -860,6 +886,11 @@ async def _apply(
                 else _t(ms.failed())
             ),
         }
+        # A rejected create/connect is a permanent bootstrap prerequisite, not
+        # a failed sign-in or an automatic setup retry. Keep prior receipts.
+        step, remedy = _unreadable_step(failure)
+        if step == "client_update":
+            plan = {**plan, "step": step, "remedy": remedy}
     return {
         **plan,
         "receipts": receipts,
@@ -899,6 +930,7 @@ STEP_REMEDY_KIND = {
     "disabled": "open_console",
     "network": "wait_network",
     "radient_unavailable": "wait_radient",
+    "client_update": "update_client",
     "reconnecting": "wait_reconnect",
 }
 
@@ -991,6 +1023,10 @@ _SHELL_COMMAND = re.compile(r"(?<![\w/.-])lop\s+[a-z]|`")
 
 def plain_remedy(plan: dict[str, Any]) -> str:
     """The command-free remedy sentence for ``plan`` (see `_PLAIN_REMEDY`)."""
+    if plan.get("step") == "client_update":
+        from local_operator.tunnels.upgrade import plain
+
+        return plain()
     build = _PLAIN_REMEDY.get(str(plan.get("step")), _PLAIN_REMEDY["failed"])
     return _t(build(plan))
 
@@ -1022,7 +1058,12 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         "failed": ms.title_failed,
         "stopped": ms.title_stopped,
     }
-    lines = [_t(titles.get(plan["step"], ms.title_failed)())]
+    if plan["step"] == "client_update":
+        from local_operator.tunnels.upgrade import label
+
+        lines = [label()]
+    else:
+        lines = [_t(titles.get(plan["step"], ms.title_failed)())]
     if plan.get("credential_id") is not None:
         lines.append(
             _t(
@@ -1066,6 +1107,10 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
     if plan.get("reservation_outcome") in reservation:
         lines.append(_t(reservation[plan["reservation_outcome"]]()))
     remedy = plan["remedy"]
+    if plan["step"] == "client_update":
+        from local_operator.tunnels.upgrade import detail
+
+        remedy = detail(surface)
     if plan["step"] == "quote_changed":
         remedy = _t(
             ms.quote_changed(

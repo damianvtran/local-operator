@@ -35,6 +35,7 @@ import hashlib
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -66,7 +67,9 @@ from ..client import (
     SCREENING_TEMPLATE_V3_SHA256,
     SCREENING_TEMPLATE_V4_SHA256,
     SCREENING_TEMPLATE_V5_PIN,
+    SCREENING_TEMPLATE_V6_PIN,
     SCREENING_VERSION_V5,
+    SCREENING_VERSION_V6,
     BridgeRefusal,
     agent_file_reads_capability,
     screening_template_v4_usable,
@@ -80,8 +83,10 @@ from .batch_screen import (
     take_result,
 )
 from .coalesce import CARD_COALESCED, card_is_buffered
+from .routing import ROUTED_BUDGET, ROUTED_WAKE_MIN_INTERVAL_S, plan_route
 from .wake import (
     CLAIM_TTL_S,
+    RoutedSessionGone,
     _producer_fence,
     deliver_wake,
     engagement_hold,
@@ -95,6 +100,10 @@ logger = logging.getLogger(__name__)
 #: course-correct / ask, no new work, scope) live in that served text; the card
 #: deliberately does not duplicate them. Bump WITH the served version (§11.3).
 GUIDANCE_VERSION = "bridge-guidance-v2"
+#: The per-wake reply style line (operator, 2026-11-17, Team Bridge #general
+#: seq 94 and the earlier no-sign-off ask). Billed on every wake, so it is one
+#: short line; the served guidance text (``GUIDANCE_VERSION``) is unchanged.
+REPLY_STYLE_LINE = "style: in channels/groups reply in the thread; no sign-off line"
 
 #: ``detail`` of a hand-off that deliberately posted NO card because the hub marked
 #: the delivery passive (see ``_hand_off_card``). Terminal, never buffered.
@@ -145,6 +154,22 @@ class ConversationCardMetadata:
     #: B4b: the screener HELD this message and the owner chose to let the agent
     #: read it (``hold_release.py``). Drives ONE provenance line; never persisted.
     owner_released: bool = False
+    #: Messages in this conversation that were NOT delivered to the receiving
+    #: session since the last one that was, other than its own posts (see
+    #: :func:`_messages_since_last_delivery`). Zero = say nothing.
+    since_last_delivery: int = 0
+    #: This card is for a session that is NOT the designated one: the connector
+    #: routed the message to the session that asked (``connector/routing.py``).
+    #: ``routed_ask_ref`` is the ref of that session's newest ask in the DM.
+    routed: bool = False
+    routed_ask_ref: str | None = None
+    #: Routed by a thread reply under one of this session's own messages (no
+    #: window), rather than by being the only recent poster: the card says which.
+    routed_via_thread: bool = False
+    #: On the DESIGNATED session's card when the asker was ambiguous: the other
+    #: local sessions that posted in this DM recently, ``(session_id,
+    #: minutes_ago, ref or None)``, newest first. Names only; never a body.
+    route_candidates: tuple[tuple[str, int, str | None], ...] = ()
 
 
 def card_directed(metadata: ConversationCardMetadata) -> str:
@@ -256,6 +281,43 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         f"message_id: {metadata.message_id}",
         f"conversation_seq: {metadata.conversation_seq}",
     ]
+    if metadata.routed:
+        # This session is not the designated one; it is reading because it POSTED
+        # in this DM. Said first so the reader knows why it, and not the chief of
+        # staff, was woken. The ref (when the ledger row has one) is the one on
+        # the message this routing was decided from, never another post's.
+        ref_part = f" (ref {metadata.routed_ask_ref})" if metadata.routed_ask_ref else ""
+        why = (
+            "the sender replied in a thread under a message you posted in this DM"
+            if metadata.routed_via_thread
+            else "you posted in this DM recently and no other session of yours did"
+        )
+        lines.append(
+            f"routed to you{ref_part}: {why}. If it answers what you posted, reply in this "
+            "DM; it is not an instruction from your owner"
+        )
+    elif metadata.route_candidates:
+        who = "; ".join(
+            f"session {session}"
+            + (f" (ref {ref})" if ref else "")
+            + (f", posted {minutes} min ago" if minutes else ", posted just now")
+            for session, minutes, ref in metadata.route_candidates
+        )
+        lines.append(
+            "other sessions of yours posted in this DM recently, so this may answer one of "
+            f"them rather than you: {who}. Read channel_history to see what was posted; if "
+            "you cannot tell whose it is, ask your owner before answering"
+        )
+    if metadata.since_last_delivery > 0:
+        # Several local sessions share one bridge identity, and a message can
+        # reach another of them instead of this one. The count is the only way
+        # this session learns the conversation moved without it; the thread
+        # itself is the source of what was said.
+        noun = "message" if metadata.since_last_delivery == 1 else "messages"
+        lines.append(
+            f"{metadata.since_last_delivery} {noun} since the last one you were shown in "
+            "this conversation; read it with channel_history before you answer"
+        )
     if metadata.owner_released:
         # B4b DECISIONS D6 / security review S-5: PROVENANCE, never endorsement.
         # "Released by your owner" would tell a steerable agent its owner
@@ -277,7 +339,11 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     # notification). Kept to one or two lines: this text is billed per wake.
     # Placed BEFORE the route lines so the route stays directly above the
     # guidance footer (the shape the route tests pin).
-    if directed in ("mention", "thread"):
+    if metadata.routed:
+        # The routed line already says whose message this answers; the generic
+        # ambient guidance below would contradict it ("no_reply unless asked").
+        lines.append("expect: reply if it answers what you posted; otherwise no_reply")
+    elif directed in ("mention", "thread"):
         lines.append("expect: reply")
     else:
         # Ambient: every message in a conversation the agent belongs to now
@@ -321,6 +387,12 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
             lines.append("view: bridge channel_thread with this thread_root_id returns the files")
         else:
             lines.append("view: bridge channel_history returns the admitted files")
+    # ONE style line, on the card rather than the tool description for the
+    # same budget reason as the route lines below (operator, 2026-11-17,
+    # #general seq 94: channel replies in threads; no sign-off lines in agent
+    # messages). Placed ABOVE the route lines so the route stays directly over
+    # the guidance footer, the shape the route tests pin.
+    lines.append(REPLY_STYLE_LINE)
     if metadata.thread_root_id:
         # Thread context: where the reply lives and how to answer IN it, so an
         # agent coordinating in a thread does not answer at channel level.
@@ -329,8 +401,9 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
             # carries the contract's second name for the same value
             # (``reply_to_message_id``) without a second line saying it twice.
             f"thread_root_id: {metadata.thread_root_id} (reply to)",
-            "reply in thread: bridge channel_post with this thread_root_id; "
-            "read the thread with channel_thread",
+            "reply in thread: bridge channel_post with this thread_root_id"
+            + (" and in_reply_to_message_id = this message_id" if metadata.routed else "")
+            + "; read the thread with channel_thread",
         ]
     else:
         # Root message (DM, group or channel): name the route that keeps the
@@ -346,10 +419,30 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # (scripts/bench_context_budget.py --kind child) had ~2 tokens of
         # headroom, while this card costs only when a conversation message
         # arrives — exactly when the choice between the two routes is made.
-        lines.append(
-            "if you reply: bridge channel_post with channel_id = this conversation_id; "
-            "legacy send/reply never appears in a conversation"
-        )
+        #
+        # Channel/group roots (operator, 2026-11-17, #general seq 94): the
+        # answer goes in THIS message's thread, which the bridge tool does by
+        # default once ``in_reply_to_message_id`` names it, so the route names
+        # that field and the opt-out. A DM, and a card whose kind the hub did
+        # not state, keep the inline route: a DM has no channel timeline to
+        # flood, and an unknown kind must not promise a thread.
+        if metadata.conversation_kind in ("channel", "group"):
+            # A group/channel card is never routed (``plan_route`` refuses any
+            # kind but ``dm``), so the route is the same for every reader there.
+            lines.append(
+                "if you reply: bridge channel_post with channel_id = this conversation_id "
+                "and in_reply_to_message_id = this message_id (threads it; new_post for "
+                "a new topic); legacy send/reply never appears in a conversation"
+            )
+        else:
+            # A DM card CAN be routed (this session is not the designated one and
+            # was woken because it posted here), and then the reply must name the
+            # message it answers: the router decides the next hop from it.
+            lines.append(
+                "if you reply: bridge channel_post with channel_id = this conversation_id"
+                + (" and in_reply_to_message_id = this message_id" if metadata.routed else "")
+                + "; legacy send/reply never appears in a conversation"
+            )
     lines.append(f"guidance: {GUIDANCE_VERSION}")
     return "\n".join(lines)
 
@@ -796,6 +889,7 @@ def _record_body_reservation(
     *,
     body_hash: str,
     designation: str,
+    routed_session: str | None = None,
 ) -> str:
     """Record the CONTENTLESS reservation for one admitted message.
 
@@ -833,6 +927,7 @@ def _record_body_reservation(
             consent_version=consent.get("consent_version"),
             designated_session=designation,
             now=time.time(),
+            routed_session=routed_session,
         )
     except Exception:  # noqa: BLE001 — closed structural code, never content
         logger.warning("bridge: body reservation refused code=store_refused")
@@ -849,6 +944,78 @@ def _record_body_reservation(
 #: then NOT mark the reservation's card posted: the flush does that once the one
 #: grouped card is out, and ``card_is_buffered`` is the ONE test both this spine
 #: and the loop's hold re-drive use (review round 2, M1′).
+
+
+def _stored_route(store: Any, owner: Any, ref: ConversationFeedRef, config_dir: Path) -> Any:
+    """The route of a message whose reservation already exists: the STORED one.
+
+    A replay never recomputes the decision. The facts it was made from (who
+    posted in the last 30 minutes, who is live) have moved on, and a second
+    decision could name a different session than the one the row is reserved
+    for, whose card would then wake a session that cannot read the message.
+    """
+
+    from ..store import StoreRefused
+    from .routing import RoutePlan, route_display
+
+    try:
+        row = store.body_reservation(owner, ref.conversation_id, ref.message_id)
+    except StoreRefused:
+        row = None
+    target = str((row or {}).get("routed_session") or "") or None
+    if target is None:
+        return RoutePlan(None, "replay")
+    ref_text, via_thread = route_display(
+        config_dir,
+        endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
+        conversation_id=ref.conversation_id,
+        target=target,
+        thread_root_id=ref.thread_root_id,
+        posted_at=None,
+    )
+    return RoutePlan(target, "replay", ask_ref=ref_text, via_thread=via_thread)
+
+
+def _messages_since_last_delivery(
+    owner: Any, ref: ConversationFeedRef, *, session_id: str, config_dir: Path
+) -> int:
+    """Messages between this session's previous delivery here and this one.
+
+    The hub's seq is dense per conversation, so ``seq - previous - 1`` counts
+    everything the session was not handed: other people's messages it did not
+    get, and posts by this account. This session's OWN posts are subtracted
+    (ledger rows with a confirmed seq), because "you posted a reply" is not news
+    and would make the line fire after every answer. Advisory: any failure is 0,
+    which prints nothing.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    from .. import reply_guard
+
+    try:
+        previous = Store(config_dir).previous_delivery_seq(
+            owner,
+            conversation_id=ref.conversation_id,
+            before_seq=ref.conversation_seq,
+            session_id=session_id,
+        )
+        if previous is None:
+            return 0
+        gap = ref.conversation_seq - previous - 1
+        if gap <= 0:
+            return 0
+        own = reply_guard.own_posts_between(
+            config_dir,
+            endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
+            conversation_id=ref.conversation_id,
+            session_id=session_id,
+            after_seq=previous,
+            before_seq=ref.conversation_seq,
+        )
+    except Exception:  # noqa: BLE001 — advisory line; never a reason to lose a card
+        return 0
+    return max(0, gap - own)
 
 
 async def _hand_off_card(
@@ -911,11 +1078,22 @@ async def _hand_off_card(
         # to lift an OLDER build's cool-down while builds are mixed mid-upgrade.
         directed=wake_is_addressed(metadata),
     )
+    gap = _messages_since_last_delivery(owner, ref, session_id=session_id, config_dir=config_dir)
+    if gap:
+        metadata = replace(metadata, since_last_delivery=gap)
     coalescer = active_coalescer()
     if coalescer is None:
         return await _deliver_card(owner, metadata, session_id=session_id, config_dir=config_dir)
     coalescer.enqueue(
-        owner, metadata, ref_key=ref.encode(), session_id=session_id, config_dir=config_dir
+        owner,
+        metadata,
+        ref_key=ref.encode(),
+        session_id=session_id,
+        config_dir=config_dir,
+        # A routed destination is woken at most once per ROUTED_WAKE_MIN_INTERVAL_S
+        # (the ordinary window is shorter): a stranger's burst of replies must not
+        # become a burst of turns for a task session.
+        min_interval_s=ROUTED_WAKE_MIN_INTERVAL_S if metadata.routed else None,
     )
     return CARD_COALESCED
 
@@ -929,12 +1107,84 @@ async def _deliver_card(
 ) -> str:
     """Hand the metadata card to the designated session (shipped mailbox wake)."""
 
+    if metadata.routed:
+        try:
+            return await _deliver_routed(owner, metadata, session_id, config_dir)
+        except RoutedSessionGone:
+            # The target died or went wedged between the decision and the wake.
+            # Nothing was delivered: give the row(s) back to the designated
+            # session and send it the ordinary card instead.
+            return await _fall_back_to_designated(owner, metadata, session_id, config_dir)
+    return await _deliver_card_to(owner, metadata, session_id, config_dir, live_only=False)
+
+
+async def _deliver_routed(
+    owner: Any, metadata: ConversationCardMetadata, session_id: str, config_dir: Path
+) -> str:
+    detail = await _deliver_card_to(owner, metadata, session_id, config_dir, live_only=True)
+    # Charged on a wake that actually went out, not on a decision.
+    ROUTED_BUDGET.charge(session_id)
+    return detail
+
+
+async def _fall_back_to_designated(
+    owner: Any, metadata: ConversationCardMetadata, session_id: str, config_dir: Path
+) -> str:
+    from local_operator.team_bridge.store import Store
+
+    store = Store(config_dir)
+    handed_back = 0
+    ids = metadata.coalesced_message_ids or (metadata.message_id,)
+    for message_id in ids:
+        # A StoreRefused propagates: the row is not provably the designated
+        # session's yet, so the flush keeps the card owed and retries.
+        if store.unroute_reservation(
+            owner,
+            conversation_id=metadata.conversation_id,
+            message_id=message_id,
+            routed_session=session_id,
+        ):
+            handed_back += 1
+            continue
+        # False is two different facts: the row is no longer routed to the target
+        # (the sweep already handed it back: the designated session owns it, so
+        # it still needs the card) or it still is but is no longer pending (claimed).
+        row = store.body_reservation(owner, metadata.conversation_id, message_id)
+        if row is None or row.get("routed_session") != session_id:
+            handed_back += 1
+    if handed_back == 0:
+        # The compare-and-set lost: a live turn of the routed session claimed the
+        # row (or finished it) between the recheck and now. The designated session
+        # cannot read that body, so waking it would cost a turn for nothing; the
+        # routed session is already serving it.
+        logger.info("bridge: routed row already claimed, no fallback code=route_claimed")
+        return "route_claimed"
+    designated = store.designated_session_for(owner)
+    if not designated:
+        raise RoutedSessionGone(session_id)
+    logger.info("bridge: routed target gone, delivering to designated code=route_fallback")
+    plain = replace(metadata, routed=False, routed_ask_ref=None, route_candidates=())
+    return await _deliver_card_to(owner, plain, designated, config_dir, live_only=False)
+
+
+async def _deliver_card_to(
+    owner: Any,
+    metadata: ConversationCardMetadata,
+    session_id: str,
+    config_dir: Path,
+    *,
+    live_only: bool,
+) -> str:
     card = build_conversation_card(metadata)
+    extra: dict[str, Any] = {"live_only": True} if live_only else {}
     return await deliver_wake(
         owner,
         card,
         session_id=session_id,
         config_dir=config_dir,
+        # Only a routed delivery passes it: the designated path keeps the exact
+        # call it always made (and the seams tests patch in for it).
+        **extra,
         sender_display={
             "sender_name": metadata.sender_label,
             # Display-only facts come from this card's typed producer, never
@@ -1054,13 +1304,15 @@ async def _screen_images(
     owner: Any,
     access: Any,
     descriptors: tuple[AttachmentDescriptor, ...],
+    *,
+    purpose: str = "screen",
 ) -> list[Any]:
-    """Fetch each image with ``purpose=screen``, verify and bound it.
+    """Fetch each image for screening or recovery proof, verify and bound it.
 
-    These bytes exist ONLY to be classified: they ride the private carrier into
-    the isolated screening dispatch and are dropped with it. They are never
-    the bytes an agent sees — that is a separate ``purpose=context`` fetch
-    after allow (manager decision D1) — and never written anywhere.
+    Screening bytes ride the private carrier into the isolated dispatch. On
+    recovery, context bytes are verified only to rebuild the canonical local
+    envelope commitment; they are never dispatched to a screener or agent.
+    Neither path writes image bytes anywhere.
     Raises :class:`AttachmentRejected` (verification) or ``BridgeRefusal``
     (transport); the caller maps both to closed codes.
     """
@@ -1075,7 +1327,7 @@ async def _screen_images(
             descriptor.id,
             tenant_id=owner.tenant_id,
             endpoint_id=owner.endpoint_id,
-            purpose="screen",
+            purpose=purpose,
             access=access,
         )
         verified = await verify_and_bound(data, descriptor)
@@ -1422,11 +1674,19 @@ def _text_admit_template(result: Any) -> str | None:
     renders nothing) keeps the omitted shape.
     """
 
+    rendered = getattr(result, "rendered_template_sha256", None)
     if (
         getattr(result, "rendered_version", None) == SCREENING_VERSION_V5
-        and getattr(result, "rendered_template_sha256", None) == SCREENING_TEMPLATE_V5_PIN
+        and rendered == SCREENING_TEMPLATE_V5_PIN
     ):
         return SCREENING_TEMPLATE_V5_PIN
+    # v6 is v5's successor in the hub's ``screening_addressed`` slot (holds triage
+    # 2026-11-18); the hub accepts its pinned hash on a text-only admit the same way.
+    if (
+        getattr(result, "rendered_version", None) == SCREENING_VERSION_V6
+        and rendered == SCREENING_TEMPLATE_V6_PIN
+    ):
+        return SCREENING_TEMPLATE_V6_PIN
     return None
 
 
@@ -1512,6 +1772,248 @@ def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:
 
     record_woke_nobody(config_dir, code=CODE_NO_DESIGNATION)
     return {"action": "badge_only", "message_id": message_id, "code": CODE_NO_DESIGNATION}
+
+
+@dataclass(frozen=True)
+class _RecoveredDelivery:
+    """The recovery branch's outcome, plus the terminal flag the caller reads.
+
+    The branch always returns, so ``result`` IS the caller's return value; the
+    flag rides alongside because the caller's ``finally`` retires the durable
+    retry row from ``terminal`` (``_clear_terminal_hold``), and a buffered card
+    is not a delivered one.
+    """
+
+    result: dict[str, Any]
+    terminal: bool
+
+
+async def _deliver_recovered(
+    owner: Any,
+    ref: ConversationFeedRef,
+    *,
+    config_dir: Path,
+    access: Any,
+    settings: Any,
+    store: Any,
+    client: Any,
+    held: Callable[[str], Awaitable[dict[str, Any]]],
+    designation: str,
+    recovery: str,
+    terminal: bool,
+    metadata: ConversationCardMetadata,
+    display: Mapping[str, Any],
+    body_text: str,
+    body_hash: str,
+    served_digest: str,
+    sender: Mapping[str, Any],
+    descriptors: Any,
+    fetched: _Fetched,
+    files_descriptors: Any,
+    screened_files: Any,
+) -> _RecoveredDelivery:
+    """Deliver the card a verdict this machine already concluded owns (R1-01).
+
+    ``recovery`` names what the hub and the local receipt already decided; NONE
+    of those paths re-screens. Everything the branch used to close over is
+    passed in explicitly -- including ``held``, whose publication semantics stay
+    the caller's -- so it is a plain subroutine: inside
+    ``handle_conversation_available`` this much conditional weight is more than
+    pyright will analyse (reportGeneralTypeIssues, "code is too complex to
+    analyze").
+    """
+
+    from ..store import CARD_POSTED, CARD_SETTLED, StoreRefused
+
+    message_id = ref.message_id
+    if recovery in ("images_admitted", "text_admitted"):
+        fence_code = _producer_fence(store, owner, access, settings)
+        if fence_code:
+            return _RecoveredDelivery(await held(fence_code), terminal)
+        # A lost admit response can leave a real local screen receipt but
+        # no reservation. Recovery must commit the SAME body obligation
+        # before waking, just like the ordinary admission path. A hub
+        # context grant alone is not a local receipt and cannot mint one.
+        proof = store.receipt_for_message(owner, message_id)
+        if (
+            proof is None
+            or proof.get("verdict") != "allow"
+            or proof.get("body_sha256") != served_digest
+            or proof.get("creator_generation") != owner.enrollment_generation
+        ):
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        if recovery == "text_admitted":
+            # A closed image screen is also returned for a reject or a
+            # missing blob. Only the admitted history read proves text;
+            # the classification body read above intentionally cannot.
+            page = await client.conversation_messages(
+                ref.conversation_id,
+                tenant_id=owner.tenant_id,
+                endpoint_id=owner.endpoint_id,
+                after_seq=ref.conversation_seq - 1,
+                limit=1,
+                access=access,
+            )
+            rows = page.get("messages") if isinstance(page, Mapping) else None
+            if not isinstance(rows, list) or len(rows) != 1:
+                return _RecoveredDelivery(await held("admission_unverified"), terminal)
+            row = rows[0]
+            if (
+                not isinstance(row, Mapping)
+                or row.get("id") != message_id
+                or row.get("seq") != ref.conversation_seq
+                or row.get("body") != body_text
+            ):
+                return _RecoveredDelivery(await held("admission_unverified"), terminal)
+        # Recompute the canonical LOCAL envelope, not a fingerprint made
+        # from the old row. A context grant proves remote admission only:
+        # it cannot upgrade a text-only or different-image local verdict.
+        # Fetch/verify the context bytes without dispatching a screener.
+        from ..screening import ScreeningAttachments, validate_envelope
+
+        recovery_item = _screening_item(
+            owner=owner,
+            conversation_id=ref.conversation_id,
+            message_id=message_id,
+            body=body_text,
+            body_hash=body_hash,
+            sender=sender,
+            **screening_routing(ref, display),
+        )
+        if recovery == "images_admitted":
+            if not descriptors or fetched.attachments_hash is None:
+                return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+            try:
+                recovery_images = await _screen_images(
+                    client, ref, owner, access, descriptors, purpose="context"
+                )
+            except AttachmentRejected:
+                return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+            recovery_item["attachments"] = ScreeningAttachments(
+                attachments_hash=str(fetched.attachments_hash),
+                images=tuple(recovery_images),
+            )
+        # A file grant is independent of the image grant. If the exact
+        # file carrier cannot be verified, historical file authority must
+        # not be reconstructed from a remote image/text grant either.
+        if files_descriptors:
+            if screened_files is None:
+                return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+            recovery_item["files"] = screened_files
+        elif files_descriptors is None:
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        envelope, _error = validate_envelope(owner, recovery_item)
+        if envelope is None or proof.get("envelope_digest") != envelope.envelope_digest:
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        # These awaits can outlive a disk disable, credential rotation,
+        # revocation or shutdown. The readonly reservation guard below
+        # does not replace the fresh producer authority check.
+        fence_code = _producer_fence(store, owner, access, settings)
+        if fence_code:
+            return _RecoveredDelivery(await held(fence_code), terminal)
+        if store.designated_session_for(owner) != designation:
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        recorded = _record_body_reservation(
+            store, owner, ref, body_hash=body_hash, designation=designation
+        )
+        if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
+            return _RecoveredDelivery(await held(recorded), terminal)
+        # WHO MAY READ IT. The reservation names the session this body
+        # belongs to, and the block above may be the one that just
+        # committed it: a lost admit response leaves a real receipt with
+        # no reservation row, and that block fills the gap with a fresh
+        # row carrying no stored route -- designated session, correct for
+        # a message no routing decision ever ran on. Read the route AFTER
+        # that commit and never before, so an already-routed recovery
+        # whose row survived still finds its routed session: recomputing
+        # the decision here would replay a choice made against facts (who
+        # was live, who posted) that have moved on.
+        recovered = _stored_route(store, owner, ref, config_dir)
+        # Reuse the reply guard's exact live owner/session/consent fence;
+        # a replay can neither revive a retired row nor change its owner.
+        # It is asked about the session the ROW belongs to, not the
+        # designated one: the guard refuses a routed row to the
+        # designated session by design (it is blind to that body), so
+        # passing ``designation`` unconditionally would hold every routed
+        # recovery as ``receipt_unavailable`` forever. For an unrouted row
+        # this is ``designation`` exactly as before.
+        if (
+            store.admitted_inbound_reservation_readonly(
+                owner,
+                in_reply_to_message_id=message_id,
+                designated_session=recovered.target or designation,
+            )
+            is None
+        ):
+            return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        if store.body_card_status(owner, ref.conversation_id, message_id) in (
+            CARD_POSTED,
+            CARD_SETTLED,
+        ):
+            return _RecoveredDelivery(
+                {
+                    "action": "duplicate",
+                    "message_id": message_id,
+                    "conversation_id": ref.conversation_id,
+                    "reservation": "already_recorded",
+                },
+                True,
+            )
+    else:
+        # A bounce card is not an admitted body, so no reservation had to
+        # exist and the fence above never ran; read the route here instead
+        # (a row can only be there from an earlier admission). ``else``, not a
+        # second membership test: the two are complements, and pyright cannot
+        # prove that, leaving ``recovered`` possibly unbound below.
+        recovered = _stored_route(store, owner, ref, config_dir)
+    if recovered.target is not None:
+        metadata = replace(
+            metadata,
+            routed=True,
+            routed_ask_ref=recovered.ask_ref,
+            routed_via_thread=recovered.via_thread,
+        )
+    detail = await _hand_off_card(
+        owner,
+        metadata,
+        ref,
+        session_id=recovered.target or designation,
+        config_dir=config_dir,
+    )
+    # A BUFFERED card is not a delivered one (review M1): the durable
+    # ``wake_coalescing`` hold is the only trace between this ref's
+    # delete and the flush, so the coalescer's ``_settle`` retires it,
+    # never this cleanup.
+    terminal = not card_is_buffered(detail)
+    if recovery in ("images_admitted", "text_admitted") and terminal:
+        try:
+            store.mark_body_card_posted(owner, ref.conversation_id, message_id, now=time.time())
+        except StoreRefused:
+            logger.warning("bridge: card posted mark refused code=store_refused")
+    if recovery in ("rejected", "unadmitted"):
+        return _RecoveredDelivery(
+            {
+                "action": "delivered_unadmitted",
+                "message_id": message_id,
+                "code": ("screening_bounce" if recovery == "rejected" else "admission_unverified"),
+                "session": recovered.target or designation,
+                "detail": detail,
+            },
+            terminal,
+        )
+    return _RecoveredDelivery(
+        {
+            "action": "delivered",
+            "message_id": message_id,
+            "conversation_id": ref.conversation_id,
+            "conversation_seq": ref.conversation_seq,
+            "mention": ref.mention,
+            "session": recovered.target or designation,
+            "detail": detail,
+            "recovered": recovery,
+        },
+        terminal,
+    )
 
 
 async def handle_conversation_available(
@@ -1775,34 +2277,33 @@ async def handle_conversation_available(
                     )
 
         if recovery is not None:
-            detail = await _hand_off_card(
-                owner, metadata, ref, session_id=designation, config_dir=config_dir
+            # The branch always returns; its terminal bookkeeping has to be back
+            # in this frame before the ``finally`` retires the durable retry row.
+            recovered_delivery = await _deliver_recovered(
+                owner,
+                ref,
+                config_dir=config_dir,
+                access=access,
+                settings=settings,
+                store=store,
+                client=client,
+                held=held,
+                designation=designation,
+                recovery=recovery,
+                terminal=terminal,
+                metadata=metadata,
+                display=display,
+                body_text=body_text,
+                body_hash=body_hash,
+                served_digest=served_digest,
+                sender=sender,
+                descriptors=descriptors,
+                fetched=fetched,
+                files_descriptors=files_descriptors,
+                screened_files=screened_files,
             )
-            # A BUFFERED card is not a delivered one (review M1): the durable
-            # ``wake_coalescing`` hold is the only trace between this ref's
-            # delete and the flush, so the coalescer's ``_settle`` retires it,
-            # never this cleanup.
-            terminal = not card_is_buffered(detail)
-            if recovery in ("rejected", "unadmitted"):
-                return {
-                    "action": "delivered_unadmitted",
-                    "message_id": message_id,
-                    "code": (
-                        "screening_bounce" if recovery == "rejected" else "admission_unverified"
-                    ),
-                    "session": designation,
-                    "detail": detail,
-                }
-            return {
-                "action": "delivered",
-                "message_id": message_id,
-                "conversation_id": ref.conversation_id,
-                "conversation_seq": ref.conversation_seq,
-                "mention": ref.mention,
-                "session": designation,
-                "detail": detail,
-                "recovered": recovery,
-            }
+            terminal = recovered_delivery.terminal
+            return recovered_delivery.result
 
         item = _screening_item(
             owner=owner,
@@ -1985,13 +2486,40 @@ async def handle_conversation_available(
         # designated session now owes it a body. Recorded BEFORE the card —
         # a card with no reservation wakes an agent for a body that will never
         # arrive — and a failure here is a RETRYABLE hold, never a delivery.
+        # WHO READS IT. Decided once, here, before the reservation is written, and
+        # stored ON the reservation: a replay (a hub re-delivery, a re-driven
+        # hold) takes the target from the stored row and never recomputes it, so
+        # a message cannot be routed twice or to two sessions.
+        plan = plan_route(
+            config_dir=config_dir,
+            endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
+            own_account_id=str(getattr(owner, "account_id", "") or ""),
+            designated_session=designation,
+            conversation_id=ref.conversation_id,
+            kind=metadata.conversation_kind,
+            sender_class=metadata.sender_kind,
+            sender_account_id=str(sender.get("account_id") or ""),
+            thread_root_id=ref.thread_root_id,
+        )
         recorded = _record_body_reservation(
             store,
             owner,
             ref,
             body_hash=body_hash,
             designation=designation,
+            routed_session=plan.target,
         )
+        if recorded == RESERVATION_ALREADY_RECORDED:
+            plan = _stored_route(store, owner, ref, config_dir)
+        delivery_session = plan.target or designation
+        if plan.target or plan.candidates:
+            metadata = replace(
+                metadata,
+                routed=plan.target is not None,
+                routed_ask_ref=plan.ask_ref,
+                routed_via_thread=plan.via_thread,
+                route_candidates=plan.candidates,
+            )
         card = (
             store.body_card_status(owner, ref.conversation_id, message_id)
             if recorded == RESERVATION_ALREADY_RECORDED
@@ -2037,7 +2565,7 @@ async def handle_conversation_available(
             owner,
             metadata,
             ref,
-            session_id=designation,
+            session_id=delivery_session,
             config_dir=config_dir,
         )
         # A BUFFERED card is not a delivered one: the wake_coalescing hold
@@ -2057,7 +2585,7 @@ async def handle_conversation_available(
                 "conversation_id": ref.conversation_id,
                 "conversation_seq": ref.conversation_seq,
                 "mention": ref.mention,
-                "session": designation,
+                "session": delivery_session,
                 "detail": detail,
                 "screened_template": getattr(result, "rendered_version", None),
                 "screened_template_sha256": getattr(result, "rendered_template_sha256", None),
@@ -2078,7 +2606,7 @@ async def handle_conversation_available(
             "conversation_id": ref.conversation_id,
             "conversation_seq": ref.conversation_seq,
             "mention": ref.mention,
-            "session": designation,
+            "session": delivery_session,
             "detail": detail,
             # Which template screened (R1-07): a version string and a public
             # template hash — never content.
@@ -2109,6 +2637,7 @@ __all__ = [
     "CARD_COALESCED",
     "CARD_PASSIVE",
     "GUIDANCE_VERSION",
+    "REPLY_STYLE_LINE",
     "ConversationCardMetadata",
     "build_conversation_card",
     "card_directed",

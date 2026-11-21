@@ -254,9 +254,25 @@ class ApprovalUnavailableError(RuntimeError):
 ACCOUNT_PROFILE_GATE = "account profile save"
 
 
+#: The gate "tool name" a chief of staff's community post is asked under
+#: (``community/agent_ops.py``, RFC v2.4 §5.9). Contains a space for the same
+#: reason as the profile gate: no registered tool can carry it.
+#:
+#: WHY IT IS NEVER AUTO-APPROVED. A community post is public speech under the
+#: owner's name, read by strangers. The RFC makes the owner's approval of the
+#: exact text the control ("the bridge tool cannot publish without the approval
+#: step"), and the community server has no standing agent-post grants yet, so
+#: ``--yolo``, ``/approvals auto`` and approve-all must not answer it: the card
+#: always reaches a person (Allow/Deny only), or the post is refused.
+COMMUNITY_POST_GATE = "community post"
+
+#: Gates no auto mode may answer. A frozenset so a new member is one line.
+_PERSON_ONLY_GATES: frozenset[str] = frozenset({ACCOUNT_PROFILE_GATE, COMMUNITY_POST_GATE})
+
+
 def never_auto_approved(tool_name: str) -> bool:
     """Whether an auto-approve shortcut must still ask a person for this gate."""
-    return tool_name == ACCOUNT_PROFILE_GATE
+    return tool_name in _PERSON_ONLY_GATES
 
 
 def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:

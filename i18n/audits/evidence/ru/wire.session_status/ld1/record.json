@@ -1,0 +1,145 @@
+{
+  "locale": "ru",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "agent": "translation-auditor (lopdev dur-audit-ru)",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "449f59257307",
+  "fallback_used": false,
+  "independent_from_translator": true,
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "delegation brief; not independently observed"
+  },
+  "source_path": "local_operator/i18n/catalogues/en/wire.session_status.json",
+  "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d",
+  "target_path": "local_operator/i18n/catalogues/ru/wire.session_status.json",
+  "target_sha256": "d42b1d039e714336656a8c3f122d9de38c8eb94dcb4e20b0dbeec35d50663a56",
+  "context_path": "local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "4f9cf2dabc89f7e711c3cf2d74b2a6e75c274954152daa14a1dad31ac9cf12f2",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-status-duration",
+  "head": "74b05c6a2aee6b6ed6a03e0332fa25611773041d",
+  "keys_read": 35,
+  "keys_audited": 5,
+  "scope": "4 new duration keys and existing wedged_heartbeat; other 30 read for context and mechanically verified unchanged, not re-cleared semantically",
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "clean",
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "449f59257307",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "checks": {
+    "existing_31_entry_bytes": "unchanged except syntactically required added comma on former final member",
+    "all_35_argument_sets": "exact parity",
+    "days_kind": "simple; raw string 1000 retained without grouping",
+    "cldr_categories": [
+      "few",
+      "many",
+      "one",
+      "other"
+    ],
+    "existing_plural_arguments_checked": 8,
+    "new_plural_arguments": 0,
+    "plural_losslessness": "every existing plural has all four categories and a count-rendering branch; all observed branches use #",
+    "latin_unit_letters": "none in new durations",
+    "rtl": "not applicable",
+    "runtime_cases": [
+      {
+        "case": "0s",
+        "duration": "0 с",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 0 с назад)",
+        "cells": 3,
+        "english_cells": 2
+      },
+      {
+        "case": "42s",
+        "duration": "42 с",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 42 с назад)",
+        "cells": 4,
+        "english_cells": 3
+      },
+      {
+        "case": "1m",
+        "duration": "1 мин",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 1 мин назад)",
+        "cells": 5,
+        "english_cells": 2
+      },
+      {
+        "case": "4m",
+        "duration": "4 мин",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 4 мин назад)",
+        "cells": 5,
+        "english_cells": 2
+      },
+      {
+        "case": "1h 0m",
+        "duration": "1 ч 0 мин",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 1 ч 0 мин назад)",
+        "cells": 9,
+        "english_cells": 5
+      },
+      {
+        "case": "3h 12m",
+        "duration": "3 ч 12 мин",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 3 ч 12 мин назад)",
+        "cells": 10,
+        "english_cells": 6
+      },
+      {
+        "case": "21h 0m",
+        "duration": "21 ч 0 мин",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 21 ч 0 мин назад)",
+        "cells": 10,
+        "english_cells": 6
+      },
+      {
+        "case": "1d 1h",
+        "duration": "1 д 1 ч",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 1 д 1 ч назад)",
+        "cells": 7,
+        "english_cells": 5
+      },
+      {
+        "case": "2d 4h",
+        "duration": "2 д 4 ч",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 2 д 4 ч назад)",
+        "cells": 7,
+        "english_cells": 5
+      },
+      {
+        "case": "1000d 0h",
+        "duration": "1000 д 0 ч",
+        "wrapped": "Не отвечает · процесс жив (последний пульс 1000 д 0 ч назад)",
+        "cells": 10,
+        "english_cells": 8
+      }
+    ]
+  },
+  "glossary_references": [
+    "relay.asks.duration.minutes",
+    "relay.asks.duration.hours",
+    "relay.asks.duration.days",
+    "relay.shell.usage.countdown_days",
+    "relay.shell.usage.countdown_hours",
+    "relay.shell.usage.countdown_minutes"
+  ],
+  "notes": [
+    "Russian invariant abbreviations с, мин, ч, д are idiomatic; no ICU plural needed for these units.",
+    "wedged_heartbeat naturally takes all 10 compact durations without an address-form or case mismatch.",
+    "Width expansion versus English: seconds +1 cell, minutes +3, hours/minutes +4, days/hours +2; conventional spacing and мин match shipped glossary. Recommend rendered sidebar/picker width check for 21 ч 0 мин; no fixed maxCells exists in context. No rendered frame or native-speaker certification claimed.",
+    "Read-only repository audit: only this scratch receipt written."
+  ]
+}

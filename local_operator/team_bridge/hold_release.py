@@ -32,6 +32,15 @@ WHAT IS RELEASABLE, AND WHY IT IS SO NARROW (DECISIONS Amendment 1, D2/D4):
   the hub's anti-probing clamp never counts it, and without a budget a sender
   could probe the releasable class for free while training the person to click.
 
+FALLBACK WORK REVIEW (operator directive 2026-11-19). A valid fallback BOUNCE
+naming solely ``new_work_request`` may enter the existing generic ``model_hold``
+review class when both work-scope conversion and generic review are enabled and
+the strict reason check passes. It does NOT enter ``work_scope_hold``: the row
+keeps the actual model/provider, non-preferred provenance and bounce verdict.
+Only the person's signed Deliver/Discard supplies authority, exactly as for an
+ordinary generic review hold. No preferred-screening receipt or automatic
+allow is created; disclosure categories remain terminal bounces.
+
 THE RELEASE RECORD (D7, S-7/S-8/S-11). Deliver and Discard are both signed by
 the operator key (TB-02: a bridge deny is the operator's statement to a third
 party). The signature is under a DEDICATED domain
@@ -276,7 +285,11 @@ def converts(categories: Sequence[str]) -> bool:
 
 
 def enabled(config_dir: Path | str) -> bool:
-    """``team_bridge.hold_release``: ON unless the file says a real ``false``.
+    """``team_bridge.hold_release``: ON unless the file says ``false``.
+
+    "Says false" is ``settings_io.strict_bool``'s reading (``false``, a quoted
+    ``"false"``, ``off``, ``no``, ``0``), the same one the ``/settings`` row
+    paints, so the page and this gate cannot disagree (S-1, PR #4317).
 
     Default ON since slice S3a (see ``DEFAULT_HOLD_RELEASE``): a torn or absent
     read takes the default, like ``review_enabled``, because what it opens is a
@@ -301,13 +314,16 @@ _non_boolean_logged = False
 
 
 def _warn_non_boolean_once(values: Any) -> None:
-    """Log ONCE when ``team_bridge.hold_release`` holds a non-boolean (security S-3).
+    """Log ONCE when ``team_bridge.hold_release`` holds a value nobody can parse (S-3).
 
-    Only a real ``false`` is the off switch, so a quoted ``"false"``, ``off`` or
-    ``0`` reads ON. That direction is safe (a hold, never an admit), but an
-    operator who believes they turned it off would keep getting holds with no
-    clue why. One ``info`` line per process names the fix without echoing the
-    value (config text is the operator's, and the log is not).
+    A quoted ``"false"``, ``off``, ``no`` or ``0`` is a parseable off switch
+    (``settings_io.strict_bool``, shared with the ``/settings`` row since S-1
+    on PR #4317) and is NOT logged. Only a value ``strict_bool`` falls back on
+    (``"maybe"``, a list, ``null``) reads the default, ON. That direction is
+    safe (a hold, never an admit), but an operator who believes they turned it
+    off would keep getting holds with no clue why. One ``info`` line per
+    process names the fix without echoing the value (config text is the
+    operator's, and the log is not).
     """
 
     global _non_boolean_logged
@@ -316,12 +332,17 @@ def _warn_non_boolean_once(values: Any) -> None:
     section = values.get("team_bridge")
     if not isinstance(section, Mapping) or "hold_release" not in section:
         return
-    if isinstance(section["hold_release"], bool):
+    from local_operator.settings_io import strict_bool
+
+    raw = section["hold_release"]
+    # Parseable iff both defaults give the same answer: then the value, not
+    # the fallback, decided it.
+    if strict_bool(raw, True) == strict_bool(raw, False):
         return
     _non_boolean_logged = True
     logger.info(
-        "bridge: team_bridge.hold_release is not a boolean and reads ON; "
-        "write an unquoted false to turn it off"
+        "bridge: team_bridge.hold_release is not on or off and reads ON; "
+        "write false to turn it off"
     )
 
 

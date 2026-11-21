@@ -1,0 +1,93 @@
+HASH /Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json 52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326
+HASH /Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json 5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525
+HASH /Users/damian/.local-operator/sessions/56c3029571f6/scratchpad/wire.session_status.vi.json 963b8bf337981a328bb80b265cb49d033db10c7afb2838c4ec8d5f05df20c1d1
+PASS JSON duplicate-free; exact 17 keys; NFC; single-line; no bidi controls; existing retired_label unchanged
+PASS actual repo check_catalogues() normal admission on isolated en/context/vi namespace: []
+NEGATIVE REJECTED missing-key ["vi/wire.session_status: missing key 'wire.session_status.recent'"]
+NEGATIVE REJECTED extra-key ["vi/wire.session_status: unknown key 'wire.session_status.bogus'"]
+NEGATIVE REJECTED renamed-placeholder ["vi/wire.session_status: wire.session_status.retired_label: arguments (('status', 'simple'),) != en's (('base', 'simple'),): argument 1 is 'status', en's is 'base' (renamed or reordered)"]
+NEGATIVE REJECTED wrong-argument-type ["vi/wire.session_status: wire.session_status.dormant: arguments (('count', 'simple'),) != en's (('count', 'plural'),): argument 'count' changed kind 'plural' -> 'simple'"]
+NEGATIVE REJECTED invalid-vi-plural-category ["vi/wire.session_status: wire.session_status.dormant: plural category 'one' not in ['other']"]
+NEGATIVE REJECTED malformed-ICU ["vi/wire.session_status: wire.session_status.signal_stop: expected a word (at offset 38 of '{command, select, none {} other {hỏng}')"]
+PASS restored normal admission
+PASS AST wire.session_status.retired_label args (('base', 'simple'),)
+PASS AST wire.session_status.interrupted args ()
+PASS AST wire.session_status.unseen_interruption args ()
+PASS AST wire.session_status.retired args ()
+PASS AST wire.session_status.unseen_retirement args ()
+PASS AST wire.session_status.signal_stop args (('command', 'select'),)
+PASS AST wire.session_status.unseen_signal_stop args (('command', 'select'),)
+PASS AST wire.session_status.forced_kill args (('command', 'select'),)
+PASS AST wire.session_status.unseen_forced_kill args (('command', 'select'),)
+PASS AST wire.session_status.complete args ()
+PASS AST wire.session_status.unseen_completion args ()
+PASS AST wire.session_status.recent args ()
+PASS AST wire.session_status.dormant args (('count', 'plural'),)
+PASS AST wire.session_status.error args ()
+PASS AST wire.session_status.unseen_error args ()
+PASS AST wire.session_status.error_cause args (('cause', 'select'),)
+PASS AST wire.session_status.unseen_error_cause args (('cause', 'select'),)
+PASS independently verified Vietnamese CLDR other-only; complete stable select arms and argument names/types
+ICU_CASE {"key": "wire.session_status.retired_label", "params": {"base": "Gián đoạn"}, "text": "Gián đoạn — đã ngừng để cập nhật", "cells": 32, "chars": 32}
+ICU_CASE {"key": "wire.session_status.interrupted", "params": {}, "text": "Gián đoạn", "cells": 9, "chars": 9}
+ICU_CASE {"key": "wire.session_status.unseen_interruption", "params": {}, "text": "Gián đoạn — chưa đọc", "cells": 20, "chars": 20}
+ICU_CASE {"key": "wire.session_status.retired", "params": {}, "text": "Gián đoạn — đã ngừng để cập nhật", "cells": 32, "chars": 32}
+ICU_CASE {"key": "wire.session_status.unseen_retirement", "params": {}, "text": "Gián đoạn — chưa đọc — đã ngừng để cập nhật", "cells": 43, "chars": 43}
+ICU_CASE {"key": "wire.session_status.signal_stop", "params": {"command": "none"}, "text": "Gián đoạn — đã dừng bằng tín hiệu", "cells": 33, "chars": 33}
+ICU_CASE {"key": "wire.session_status.signal_stop", "params": {"command": "/stop --all"}, "text": "Gián đoạn — đã dừng bằng tín hiệu qua /stop --all", "cells": 49, "chars": 49}
+ICU_CASE {"key": "wire.session_status.signal_stop", "params": {"command": "lop sessions stop synthetic-123"}, "text": "Gián đoạn — đã dừng bằng tín hiệu qua lop sessions stop synthetic-123", "cells": 69, "chars": 69}
+ICU_CASE {"key": "wire.session_status.unseen_signal_stop", "params": {"command": "none"}, "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu", "cells": 44, "chars": 44}
+ICU_CASE {"key": "wire.session_status.unseen_signal_stop", "params": {"command": "/stop --all"}, "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua /stop --all", "cells": 60, "chars": 60}
+ICU_CASE {"key": "wire.session_status.unseen_signal_stop", "params": {"command": "lop sessions stop synthetic-123"}, "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua lop sessions stop synthetic-123", "cells": 80, "chars": 80}
+ICU_CASE {"key": "wire.session_status.forced_kill", "params": {"command": "none"}, "text": "Gián đoạn — bị buộc kết thúc", "cells": 28, "chars": 28}
+ICU_CASE {"key": "wire.session_status.forced_kill", "params": {"command": "/stop --all"}, "text": "Gián đoạn — bị buộc kết thúc qua /stop --all", "cells": 44, "chars": 44}
+ICU_CASE {"key": "wire.session_status.forced_kill", "params": {"command": "lop sessions stop synthetic-123"}, "text": "Gián đoạn — bị buộc kết thúc qua lop sessions stop synthetic-123", "cells": 64, "chars": 64}
+ICU_CASE {"key": "wire.session_status.unseen_forced_kill", "params": {"command": "none"}, "text": "Gián đoạn — chưa đọc — bị buộc kết thúc", "cells": 39, "chars": 39}
+ICU_CASE {"key": "wire.session_status.unseen_forced_kill", "params": {"command": "/stop --all"}, "text": "Gián đoạn — chưa đọc — bị buộc kết thúc qua /stop --all", "cells": 55, "chars": 55}
+ICU_CASE {"key": "wire.session_status.unseen_forced_kill", "params": {"command": "lop sessions stop synthetic-123"}, "text": "Gián đoạn — chưa đọc — bị buộc kết thúc qua lop sessions stop synthetic-123", "cells": 75, "chars": 75}
+ICU_CASE {"key": "wire.session_status.complete", "params": {}, "text": "Hoàn tất", "cells": 8, "chars": 8}
+ICU_CASE {"key": "wire.session_status.unseen_completion", "params": {}, "text": "Hoàn tất — chưa đọc", "cells": 19, "chars": 19}
+ICU_CASE {"key": "wire.session_status.recent", "params": {}, "text": "Gần đây", "cells": 7, "chars": 7}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 0}, "text": "Đã dừng (0 lượt thức dậy tạm ngưng)", "cells": 35, "chars": 35}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 1}, "text": "Đã dừng (1 lượt thức dậy tạm ngưng)", "cells": 35, "chars": 35}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 2}, "text": "Đã dừng (2 lượt thức dậy tạm ngưng)", "cells": 35, "chars": 35}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 5}, "text": "Đã dừng (5 lượt thức dậy tạm ngưng)", "cells": 35, "chars": 35}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 21}, "text": "Đã dừng (21 lượt thức dậy tạm ngưng)", "cells": 36, "chars": 36}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 55}, "text": "Đã dừng (55 lượt thức dậy tạm ngưng)", "cells": 36, "chars": 36}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 1000000}, "text": "Đã dừng (1.000.000 lượt thức dậy tạm ngưng)", "cells": 43, "chars": 43}
+ICU_CASE {"key": "wire.session_status.dormant", "params": {"count": 1.5}, "text": "Đã dừng (1,5 lượt thức dậy tạm ngưng)", "cells": 37, "chars": 37}
+ICU_CASE {"key": "wire.session_status.error", "params": {}, "text": "Lỗi", "cells": 3, "chars": 3}
+ICU_CASE {"key": "wire.session_status.unseen_error", "params": {}, "text": "Lỗi — chưa đọc", "cells": 14, "chars": 14}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "user_stop"}, "text": "Lỗi — người dùng đã dừng", "cells": 24, "chars": 24}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "runtime_stall_bound"}, "text": "Lỗi — runtime tự kết thúc khi chạm ngưỡng đình trệ", "cells": 50, "chars": 50}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "continuation_limit"}, "text": "Lỗi — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ", "cells": 61, "chars": 61}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "output_limit"}, "text": "Lỗi — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục", "cells": 61, "chars": 61}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "runtime_retired"}, "text": "Lỗi — đã ngừng để cập nhật", "cells": 26, "chars": 26}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "runtime_shutdown"}, "text": "Lỗi — runtime bị kết thúc trong lượt", "cells": 36, "chars": 36}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "runtime_overdue"}, "text": "Lỗi — runtime rời đi để cập nhật sau ngưỡng tiến triển", "cells": 54, "chars": 54}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "runtime_update_failed"}, "text": "Lỗi — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp", "cells": 59, "chars": 59}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "runtime_killed"}, "text": "Lỗi — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng", "cells": 70, "chars": 70}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "install_mid_update"}, "text": "Lỗi — bản cài đặt bị thay thế trong lượt", "cells": 40, "chars": 40}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "owner_lost"}, "text": "Lỗi — runtime ngừng phản hồi trong lượt", "cells": 39, "chars": 39}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "disposed"}, "text": "Lỗi — phiên bị giải phóng trong lượt", "cells": 36, "chars": 36}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "other"}, "text": "Lỗi", "cells": 3, "chars": 3}
+ICU_CASE {"key": "wire.session_status.error_cause", "params": {"cause": "unknown_external_synthetic"}, "text": "Lỗi", "cells": 3, "chars": 3}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "user_stop"}, "text": "Lỗi — chưa đọc — người dùng đã dừng", "cells": 35, "chars": 35}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "runtime_stall_bound"}, "text": "Lỗi — chưa đọc — runtime tự kết thúc khi chạm ngưỡng đình trệ", "cells": 61, "chars": 61}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "continuation_limit"}, "text": "Lỗi — chưa đọc — đã chạm giới hạn tiếp tục; tin nhắn đang chờ bị loại bỏ", "cells": 72, "chars": 72}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "output_limit"}, "text": "Lỗi — chưa đọc — đã chạm giới hạn đầu ra của mô hình; không thể tiếp tục", "cells": 72, "chars": 72}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "runtime_retired"}, "text": "Lỗi — chưa đọc — đã ngừng để cập nhật", "cells": 37, "chars": 37}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "runtime_shutdown"}, "text": "Lỗi — chưa đọc — runtime bị kết thúc trong lượt", "cells": 47, "chars": 47}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "runtime_overdue"}, "text": "Lỗi — chưa đọc — runtime rời đi để cập nhật sau ngưỡng tiến triển", "cells": 65, "chars": 65}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "runtime_update_failed"}, "text": "Lỗi — chưa đọc — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp", "cells": 70, "chars": 70}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "runtime_killed"}, "text": "Lỗi — chưa đọc — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng", "cells": 81, "chars": 81}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "install_mid_update"}, "text": "Lỗi — chưa đọc — bản cài đặt bị thay thế trong lượt", "cells": 51, "chars": 51}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "owner_lost"}, "text": "Lỗi — chưa đọc — runtime ngừng phản hồi trong lượt", "cells": 50, "chars": 50}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "disposed"}, "text": "Lỗi — chưa đọc — phiên bị giải phóng trong lượt", "cells": 47, "chars": 47}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "other"}, "text": "Lỗi — chưa đọc", "cells": 14, "chars": 14}
+ICU_CASE {"key": "wire.session_status.unseen_error_cause", "params": {"cause": "unknown_external_synthetic"}, "text": "Lỗi — chưa đọc", "cells": 14, "chars": 14}
+PASS 58 ICU-only text cases; source has no maxCells/maxChars hints; not UI/runtime/visual proof
+VALIDATOR_GAP_PROBE missing-select-arm [] independent arm comparison rejects: True
+PASS independent stable-arm negative control rejects missing user_stop
+CLDR_VALIDATOR_GAP actual helper allows other-only Russian fixture missing ['few', 'many', 'one'] ; not a vi blocker: vi required set is exactly ['other']
+PASS final normal admission; repository and translator inputs never written

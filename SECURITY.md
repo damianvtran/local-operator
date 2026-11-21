@@ -65,11 +65,30 @@ macOS agents 4.6+ `Interoperability` is not supported.)
 
 ## Known limitations
 
-- A standalone `lop serve` daemon on loopback does not authenticate other
-  local OS accounts. Run it only on single-user hosts, or use the
-  desktop-managed posture. Browser pages are already limited to the daemon's
-  own origin or origins listed in `LOCAL_OPERATOR_DESKTOP_ORIGINS` for writes
-  and for reading responses with credentials.
+- **Other local OS accounts.** `lop serve` binds loopback only, and on native
+  macOS and Linux it refuses every loopback connection whose client process
+  belongs to a different OS user, before any request is read (403; a lookup
+  fault refuses that one connection with 503). This applies to standalone and
+  desktop-managed daemons alike, and covers `/v1/static/*` file previews. On
+  Linux, connections from root (uid 0) are admitted, since root can already
+  read the operator's files; macOS cannot attribute root's sockets, so there
+  they are refused (for example `sudo curl`); a Linux socket no live process
+  holds (a client that already closed) is never attributed to root. It needs
+  no setup. The daemon decides once, and logs one line saying whether it is
+  enforcing, at start-up (at the first connection under `--reload`).
+- **Where that check does not run.** It is skipped, with one start-up warning,
+  inside containers and WSL (relayed connections make the owning user
+  meaningless there), on Windows and other unsupported platforms, and when
+  its start-up self-test fails. In those cases another local account can
+  still reach the daemon, so run it only on single-user hosts.
+  `LOCAL_OPERATOR_PEER_UID_CHECK=on` enforces inside a container or WSL; `off`
+  disables the check (for a trusted relay or proxy that runs as another user,
+  such as a system VPN or traffic filter on macOS). The default `auto` is
+  right for everyone else. `GET /health` reports the result as
+  `peer_uid_check`.
+- Browser pages are limited separately: writes, and reading responses with
+  credentials, are allowed only from the daemon's own origin or origins listed
+  in `LOCAL_OPERATOR_DESKTOP_ORIGINS`.
 
 ## Reporting a Vulnerability
 
@@ -143,12 +162,19 @@ commands and the follow-up schedule, is in
 | --- | --- | --- | --- | --- |
 | [GHSA-22mg-8gw7-636x](https://github.com/damianvtran/local-operator/security/advisories/GHSA-22mg-8gw7-636x) | Critical | 2026-09-05 | 0.47.5 | [@mhdgning131](https://github.com/mhdgning131) |
 | [GHSA-3xjw-9qpc-53mh](https://github.com/damianvtran/local-operator/security/advisories/GHSA-3xjw-9qpc-53mh) | High | 2026-09-05 | 0.47.5 | [@mhdgning131](https://github.com/mhdgning131) |
+| [GHSA-5rx7-59wg-j944](https://github.com/damianvtran/local-operator/security/advisories/GHSA-5rx7-59wg-j944) | High | 2026-10-26 | 0.90.7 | [@Artur12555](https://github.com/Artur12555) |
+| [GHSA-cjv2-5fqm-h4gm](https://github.com/damianvtran/local-operator/security/advisories/GHSA-cjv2-5fqm-h4gm) | High | 2026-11-20 | 0.108.0 | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool), [@immingyu0](https://github.com/immingyu0) (independent rediscovery) |
+| [GHSA-q32x-jc47-67mm](https://github.com/damianvtran/local-operator/security/advisories/GHSA-q32x-jc47-67mm) | High | 2026-11-20 | 0.108.0 (desktop app 0.58.3) | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool) |
+| [GHSA-p7wx-ww96-267m](https://github.com/damianvtran/local-operator/security/advisories/GHSA-p7wx-ww96-267m) | Medium | 2026-11-20 | browser extension 0.1.28 | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool) |
+| [GHSA-qpfw-qw4q-544v](https://github.com/damianvtran/local-operator/security/advisories/GHSA-qpfw-qw4q-544v) | Low | 2026-11-20 | 0.108.0 | [@mappygrid](https://github.com/mappygrid), [@cooliscool](https://github.com/cooliscool) |
 
-If you are on a version earlier than 0.47.5, upgrade:
+If you are on a version earlier than 0.108.0, upgrade:
 
 ```sh
-pip install --upgrade 'local-operator>=0.47.5'
+pip install --upgrade 'local-operator>=0.108.0'
 ```
+
+Browser-extension fixes arrive through the Chrome Web Store automatically.
 
 ## Contact
 

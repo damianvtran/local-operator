@@ -200,17 +200,24 @@ def test_auth_type_is_the_only_oauth_field_carried(root: Path) -> None:
 
 
 def test_run_shaping_flags_travel_and_snake_case_is_canonicalised(root: Path) -> None:
-    _write_servers(
+    # ``enabledServers`` rescues the entry's own ``enabled: false`` (the connect
+    # path's rule), so the row still RUNS on the owner and travels with the flag
+    # intact; an unrescued ``enabled: false`` is withdrawn instead (see the
+    # disabled-server cells below).
+    _write_doc(
         root,
         {
-            "s": {
-                "type": "stdio",
-                "command": "x",
-                "enabled": False,
-                "timeout": 30000,
-                "enabled_tools": ["a"],
-                "own_turn_only": True,
-            }
+            "mcpServers": {
+                "s": {
+                    "type": "stdio",
+                    "command": "x",
+                    "enabled": False,
+                    "timeout": 30000,
+                    "enabled_tools": ["a"],
+                    "own_turn_only": True,
+                }
+            },
+            "enabledServers": ["s"],
         },
     )
     row = mcpdefs.local_bundle(root)["servers"][0]
@@ -945,3 +952,347 @@ def test_the_sync_receipt_pluralises_by_device_count(
     detail = handler({"peer": ""})
     assert detail["ok"] is False
     assert detail["message"] == "0 of 1 device holds this device's MCP servers"
+
+
+# ---------------------------------------------------------------------------
+# Disabled servers: never mirrored, and withdrawn explicitly (never inferred)
+# ---------------------------------------------------------------------------
+
+
+def _write_doc(root: Path, doc: dict[str, Any]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "mcp.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+
+def _sync(owner: Path, peer: Path) -> dict[str, Any]:
+    """One owner->peer apply through the real bundle builder, authenticated as OWNER."""
+    return mcpdefs.apply_bundle(peer, mcpdefs.local_bundle(owner), origin_device=OWNER)
+
+
+def _index_names(root: Path) -> set[str]:
+    return set((definitions.read_index(root).get(mcpdefs.INDEX_SECTION) or {}).keys())
+
+
+CRM = {"type": "http", "url": "https://crm.example/mcp"}
+
+
+def test_a_disabled_server_is_never_sent_and_never_reaches_the_peer(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(
+        owner,
+        {
+            "mcpServers": {
+                "crm": CRM,
+                "off": {"type": "http", "url": "https://off.example/mcp"},
+                "self_off": {"type": "http", "url": "https://so.example/mcp", "enabled": False},
+                "rescued": {"type": "http", "url": "https://r.example/mcp", "enabled": False},
+            },
+            "disabledServers": ["off"],
+            "enabledServers": ["rescued"],
+        },
+    )
+    bundle = mcpdefs.local_bundle(owner)
+    # The connect path's own rule: disabledServers and an unrescued
+    # ``enabled: false`` are off; enabledServers rescues ``enabled: false``.
+    assert [row["name"] for row in bundle["servers"]] == ["crm", "rescued"]
+    assert bundle["withdrawn"] == ["off", "self_off"]
+    assert "https://off.example" not in json.dumps(bundle["withdrawn"])
+    summary = mcpdefs.apply_bundle(peer, bundle, origin_device=OWNER)
+    assert summary["withdrawn"] == [] and summary["conflicts"] == []
+    assert set(_read_servers(peer)) == {"crm", "rescued"}
+
+
+def test_a_mirror_the_owner_later_disables_is_withdrawn_with_its_index_entry(
+    root: Path,
+) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM, "keep": CRM}})
+    _sync(owner, peer)
+    assert _index_names(peer) == {"crm", "keep"}
+    _write_doc(owner, {"mcpServers": {"crm": CRM, "keep": CRM}, "disabledServers": ["crm"]})
+    summary = _sync(owner, peer)
+    assert [row["name"] for row in summary["withdrawn"]] == ["crm"]
+    assert set(_read_servers(peer)) == {"keep"}
+    assert _index_names(peer) == {"keep"}
+    # A second sync finds nothing to withdraw and reports nothing.
+    again = _sync(owner, peer)
+    assert again["withdrawn"] == [] and again["conflicts"] == []
+
+
+def test_an_edited_mirror_is_kept_and_named_as_a_conflict(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM}})
+    _sync(owner, peer)
+    servers = _read_servers(peer)
+    servers["crm"]["url"] = "https://hand-edited.example/mcp"
+    _write_servers(peer, servers)
+    _write_doc(owner, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    summary = _sync(owner, peer)
+    assert summary["withdrawn"] == []
+    assert [row["name"] for row in summary["conflicts"]] == ["crm"]
+    assert "local edits" in summary["conflicts"][0]["reason"]
+    assert _read_servers(peer)["crm"]["url"] == "https://hand-edited.example/mcp"
+    assert _index_names(peer) == {"crm"}
+
+
+def test_an_authored_server_of_the_same_name_is_never_withdrawn(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_servers(peer, {"crm": {"type": "http", "url": "https://mine.example/mcp"}})
+    _write_doc(owner, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    summary = _sync(owner, peer)
+    assert [row["name"] for row in summary["conflicts"]] == ["crm"]
+    assert "authored" in summary["conflicts"][0]["reason"]
+    # The authored marker, not the asker: the sender is not where it came from (Q2).
+    assert summary["conflicts"][0]["origin"] == ""
+    assert _read_servers(peer)["crm"]["url"] == "https://mine.example/mcp"
+
+
+def test_a_mirror_edited_outside_the_canonical_row_is_kept_and_named(root: Path) -> None:
+    """Security S1: an ``oauth`` block and an unknown key are invisible to the
+    canonical ``landed`` digest, so the withdrawal must compare the exact entry."""
+    owner, peer = root / "owner", root / "peer"
+    oauth_crm = {**CRM, "auth": {"type": "oauth"}}
+    _write_doc(owner, {"mcpServers": {"crm": oauth_crm}})
+    _sync(owner, peer)
+    servers = _read_servers(peer)
+    servers["crm"]["oauth"] = {"client_id": "cid", "client_secret": "s3cr3t"}
+    servers["crm"]["note"] = "hand-added"
+    _write_servers(peer, servers)
+    _write_doc(owner, {"mcpServers": {"crm": oauth_crm}, "disabledServers": ["crm"]})
+    summary = _sync(owner, peer)
+    assert summary["withdrawn"] == []
+    assert [row["name"] for row in summary["conflicts"]] == ["crm"]
+    assert summary["conflicts"][0]["reason"] == (
+        "the copy of that name here has local edits, so it was not withdrawn"
+    )
+    kept = _read_servers(peer)["crm"]
+    assert kept["oauth"]["client_secret"] == "s3cr3t" and kept["note"] == "hand-added"
+    assert _index_names(peer) == {"crm"}
+
+
+def test_an_untouched_oauth_mirror_is_withdrawn_by_its_exact_digest(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    oauth_crm = {**CRM, "auth": {"type": "oauth"}}
+    _write_doc(owner, {"mcpServers": {"crm": oauth_crm}})
+    _sync(owner, peer)
+    assert definitions.read_index(peer)[mcpdefs.INDEX_SECTION]["crm"]["landed_entry"]
+    _write_doc(owner, {"mcpServers": {"crm": oauth_crm}, "disabledServers": ["crm"]})
+    summary = _sync(owner, peer)
+    assert [row["name"] for row in summary["withdrawn"]] == ["crm"]
+    assert "crm" not in _read_servers(peer) and _index_names(peer) == set()
+
+
+def _forget_exact_tracking(peer: Path) -> None:
+    """Rewrite the index as a build before exact tracking left it."""
+    index = definitions.read_index(peer)
+    for record in index[mcpdefs.INDEX_SECTION].values():
+        record.pop("landed_entry", None)
+    definitions.write_index(peer, index)
+
+
+def test_a_legacy_mirror_is_withdrawn_only_when_it_is_exactly_the_materialized_entry(
+    root: Path,
+) -> None:
+    owner, peer = root / "owner", root / "peer"
+    oauth_crm = {**CRM, "auth": {"type": "oauth"}}
+    _write_doc(owner, {"mcpServers": {"crm": oauth_crm, "gl": CRM}})
+    _sync(owner, peer)
+    _forget_exact_tracking(peer)
+    servers = _read_servers(peer)
+    servers["crm"]["oauth"] = {"client_id": "cid", "client_secret": "s3cr3t"}
+    _write_servers(peer, servers)
+    _write_doc(
+        owner,
+        {"mcpServers": {"crm": oauth_crm, "gl": CRM}, "disabledServers": ["crm", "gl"]},
+    )
+    summary = _sync(owner, peer)
+    # Untouched legacy ``gl`` equals what the materializer writes: withdrawn.
+    assert [row["name"] for row in summary["withdrawn"]] == ["gl"]
+    # Edited legacy ``crm`` cannot be proved untouched: kept, and the reason says why.
+    assert [row["name"] for row in summary["conflicts"]] == ["crm"]
+    assert "predates exact tracking" in summary["conflicts"][0]["reason"]
+    assert _read_servers(peer)["crm"]["oauth"]["client_secret"] == "s3cr3t"
+    assert _index_names(peer) == {"crm"}
+
+
+def test_no_link_identity_withdraws_nothing_whatever_the_bundle_claims(root: Path) -> None:
+    """Security S2 / review N1: the bundle's ``origin_device`` never authorizes a delete."""
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM}})
+    _sync(owner, peer)
+    _write_doc(owner, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    bundle = mcpdefs.local_bundle(owner)
+    bundle["origin_device"] = OWNER
+    summary = mcpdefs.apply_bundle(peer, bundle, origin_device="")
+    assert summary["withdrawn"] == []
+    assert [row["name"] for row in summary["refused"]] == ["crm"]
+    assert "not authenticated" in summary["refused"][0]["reason"]
+    assert "crm" in _read_servers(peer) and _index_names(peer) == {"crm"}
+
+
+def test_an_over_cap_withdrawn_list_says_the_rest_were_ignored(root: Path) -> None:
+    """QA Q1: truncation is reported once, not silent."""
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM, "late": CRM}})
+    _sync(owner, peer)
+    bundle = _bundle([])
+    filler = [f"zz{i}" for i in range(mcpdefs.MAX_MCP_ROWS + 50)]
+    bundle["withdrawn"] = ["crm", *filler, "late"]
+    summary = mcpdefs.apply_bundle(peer, bundle, origin_device=OWNER)
+    assert [row["name"] for row in summary["withdrawn"]] == ["crm"]
+    assert [row["reason"] for row in summary["refused"]] == [
+        f"its withdrawn list is over {mcpdefs.MAX_MCP_ROWS} names; the rest were ignored"
+    ]
+    assert "late" in _read_servers(peer)
+
+
+def test_a_mirror_from_another_origin_is_never_withdrawn(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    # ``crm`` on the peer was mirrored from PEER-the-third-device, not OWNER.
+    mcpdefs.apply_bundle(peer, _bundle([_row("crm")]), origin_device=PEER)
+    _write_doc(owner, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    summary = _sync(owner, peer)
+    assert [row["name"] for row in summary["conflicts"]] == ["crm"]
+    assert summary["conflicts"][0]["origin"] == PEER
+    assert "crm" in _read_servers(peer) and _index_names(peer) == {"crm"}
+
+
+def test_a_re_enabled_server_is_re_installed_as_a_normal_mirror(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM}})
+    _sync(owner, peer)
+    _write_doc(owner, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    _sync(owner, peer)
+    assert "crm" not in _read_servers(peer)
+    _write_doc(owner, {"mcpServers": {"crm": CRM}})
+    summary = _sync(owner, peer)
+    assert [row["name"] for row in summary["installed"]] == ["crm"]
+    assert _index_names(peer) == {"crm"}
+    assert str(definitions.read_index(peer)[mcpdefs.INDEX_SECTION]["crm"]["origin"]) == OWNER
+
+
+def test_an_old_format_bundle_without_the_list_withdraws_nothing(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM}})
+    _sync(owner, peer)
+    # An older sender: the server simply stopped appearing. Absence means nothing.
+    old = mcpdefs.local_bundle(owner)
+    old.pop("withdrawn")
+    old["servers"] = []
+    summary = mcpdefs.apply_bundle(peer, old, origin_device=OWNER)
+    assert summary["withdrawn"] == []
+    assert "crm" in _read_servers(peer) and _index_names(peer) == {"crm"}
+
+
+def test_withdrawn_names_are_validated_like_row_names(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM}})
+    _sync(owner, peer)
+    bundle = _bundle([])
+    # ``crm\n``: the pattern's ``$`` admits it under ``match`` (security S5).
+    bundle["withdrawn"] = ["bad name/../x", 7, "x" * 500, "crm\n"]
+    summary = mcpdefs.apply_bundle(peer, bundle, origin_device=OWNER)
+    assert len(summary["refused"]) == 4 and summary["withdrawn"] == []
+    assert all(len(row["name"]) <= 100 for row in summary["refused"])
+    malformed = _bundle([])
+    malformed["withdrawn"] = "crm"
+    refused = mcpdefs.apply_bundle(peer, malformed, origin_device=OWNER)["refused"]
+    assert refused and "not a list" in refused[0]["reason"]
+    # A name both sent and withdrawn is refused, never decided by inference.
+    both = _bundle([_row("crm", url=CRM["url"])])
+    both["withdrawn"] = ["crm"]
+    out = mcpdefs.apply_bundle(peer, both, origin_device=OWNER)
+    assert [row["name"] for row in out["refused"]] == ["crm"]
+    assert "crm" in _read_servers(peer)
+
+
+def _state(servers: dict[str, str], mine: dict[str, bool] | None = None) -> dict[str, Any]:
+    detail: dict[str, Any] = {"phase": "state", "servers": servers}
+    if mine is not None:
+        detail["mirrored_from_you"] = mine
+    return {"op": "ack", "req": 1, "detail": detail}
+
+
+def test_push_withdraws_only_names_the_peer_holds_and_reports_the_peers_answer(
+    root: Path,
+) -> None:
+    _write_doc(
+        root,
+        {
+            "mcpServers": {"crm": CRM},
+            "disabledServers": ["crm", "never_mirrored", "theirs"],
+        },
+    )
+    link = _FakeLink(
+        capabilities=wire.LINK_CAPABILITIES,
+        replies=[
+            # ``theirs`` is held but not mirrored from us: never listed (review M1).
+            _state({"crm": "x", "theirs": "y"}, {"crm": True, "theirs": False}),
+            _apply_reply(withdrawn=[{"kind": "server", "name": "crm"}]),
+        ],
+    )
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
+    apply = [frame for frame in link.requests if frame["phase"] == "apply"][0]
+    assert apply["bundle"]["withdrawn"] == ["crm"] and apply["bundle"]["servers"] == []
+    assert result["ok"] is True and result["message"] == "withdrew 1 of 1 disabled server"
+    assert [row["name"] for row in result["withdrawn"]] == ["crm"]
+    # The peer's mirror was edited: it still answers with its own conflict, and
+    # the receipt reports the peer's answer, never what was asked.
+    edited = _FakeLink(
+        capabilities=wire.LINK_CAPABILITIES,
+        replies=[
+            _state({"crm": "x"}, {"crm": True}),
+            _apply_reply(conflicts=[{"kind": "server", "name": "crm", "reason": "edits"}]),
+        ],
+    )
+    assert mcpdefs.push_to_peer(_fake_server(root, edited), PEER)["ok"] is False
+
+
+def test_push_sends_no_withdrawal_to_an_older_or_non_origin_peer(root: Path) -> None:
+    """Review M1 / security S3: no per-tick apply + audit row for a request the
+    peer can never honour — its own server, or an older build that ignores it."""
+    _write_doc(root, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    for state in (_state({"crm": "x"}), _state({"crm": "x"}, {"crm": False})):
+        link = _FakeLink(capabilities=wire.LINK_CAPABILITIES, replies=[state])
+        result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
+        assert result["code"] == "in_sync" and len(link.requests) == 1
+
+
+def test_state_tells_the_asker_which_held_names_are_its_mirrors(root: Path) -> None:
+    owner, peer = root / "owner", root / "peer"
+    _write_doc(owner, {"mcpServers": {"crm": CRM}})
+    _sync(owner, peer)
+    mcpdefs.apply_bundle(peer, _bundle([_row("other")]), origin_device=PEER)
+    servers = _read_servers(peer)
+    servers["mine"] = CRM
+    _write_servers(peer, servers)
+    state = mcpdefs.server_state(peer, requester=OWNER)
+    assert state["mirrored_from_you"] == {"crm": True, "mine": False, "other": False}
+    # Booleans about the asker only — no other device's id crosses.
+    assert PEER not in json.dumps(state)
+    assert "mirrored_from_you" not in mcpdefs.server_state(peer)
+
+
+def test_push_is_in_sync_when_the_peer_holds_no_disabled_name(root: Path) -> None:
+    _write_doc(root, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    link = _FakeLink(
+        capabilities=wire.LINK_CAPABILITIES,
+        replies=[{"op": "ack", "req": 1, "detail": {"phase": "state", "servers": {}}}],
+    )
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
+    assert result["code"] == "in_sync" and len(link.requests) == 1
+
+
+def test_the_step_dials_when_only_withdrawals_are_pending(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_doc(root, {"mcpServers": {"crm": CRM}, "disabledServers": ["crm"]})
+    monkeypatch.setattr(definitions, "unholdable_capability", lambda *_a: "")
+    monkeypatch.setattr(mcpdefs, "push_to_peer", lambda _s, _d: {"code": "applied"})
+    assert mcpdefs.mesh_tick_step(_fake_server(root, None), PEER) == "applied"
+
+
+def test_state_rows_mark_a_disabled_server(root: Path) -> None:
+    _write_doc(root, {"mcpServers": {"crm": CRM, "on": CRM}, "disabledServers": ["crm"]})
+    rows = {row["name"]: row for row in mcpdefs.state_rows(root)}
+    assert rows["crm"]["disabled"] is True and rows["on"]["disabled"] is False

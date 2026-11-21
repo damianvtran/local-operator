@@ -723,11 +723,15 @@ _CLONE_GUARD_FIELDS = frozenset(
         # never changes the prompt bytes the model reads.
         "cache_diagnostics",
         "cache_diagnostics_previous_id",
+        "cache_diagnostics_chain",
         # Request role for the Anthropic cache-TTL policy, stamped by
         # ``SessionStreamFn`` on every request (``anthropic_cache_ttl``). It
         # selects a marker TTL, never message bytes, so an armed one-turn secret
         # stays in the one body it was approved for.
         "cache_role",
+        # Marker placement for one-shot auxiliary calls (``cache_markers``):
+        # where cache_control goes, never which bytes the model reads.
+        "cache_markers",
         # Same policy input, same stamper: "this conversation already had a
         # long-streaming turn" picks the marker TTL and nothing else.
         "cache_after_long_call",
@@ -1790,12 +1794,16 @@ class BrowserSurface:
         "handed",
         "handed_to",
         "late_handoff_to_parent",
+        "terminal_cleanup_generation",
     )
 
     def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
+        # The child runner alone consumes this exact failed-close marker after
+        # disposal, while it still owns the live job's resume fence.
+        self.terminal_cleanup_generation: str = ""
         # Whether the tool has already spent its ONE line telling the agent that
         # a newer browser extension exists. It lives HERE, on the host-owned
         # holder, because the ToolContext is rebuilt at the start of every turn
@@ -2579,6 +2587,13 @@ class ToolContext(BaseModel):
     #: (team-bridge-egress.md: "Propagation between sessions").
     #: Tighten-only: a child inherits its parent's taint for life.
     inherited_bridge_taint: bool = False
+    #: The session's community read flag (``community/taint.py``
+    #: ``CommunityTaint``, RFC v2.4 §5.9), owned by the session and injected
+    #: per turn. The bridge tool's ``community_post`` reads it to tell the owner
+    #: why a standing permission does not apply; ``None`` on a host that does
+    #: not track it, which then reads as tainted (fail closed). Host state,
+    #: never serialized.
+    community_taint: Any = Field(default=None, exclude=True, repr=False)
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
@@ -2651,6 +2666,16 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    #: The session's BASE approval gate, present even under ``--yolo`` (where
+    #: ``request_approval`` is ``None`` because yolo skips the tool gate). Only
+    #: for a person-only card a tool raises itself
+    #: (``harness.approval.never_auto_approved``: the community post): every
+    #: base gate routes those to a person or refuses (the TUI card, desktop
+    #: serving, the yolo/tty gate, SDK ``auto()``), so handing it over lets the
+    #: owner at the keyboard answer instead of the run refusing outright.
+    #: ``None`` on hosts that do not set it; callers fall back to
+    #: ``request_approval``. Host state, never serialized.
+    person_approval: ApprovalGate | None = Field(default=None, exclude=True, repr=False)
     # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
     # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
     # store is a user decision, and a model must not be able to stamp its own
@@ -2766,6 +2791,16 @@ class ToolContext(BaseModel):
     # ``self._tools`` (``harness.subagent``), and a declared inventory narrows
     # the same list (``Session._filter_declared``).
     may_delegate: bool = False
+    # Whether THIS session can expand a ``spill://`` handle, i.e. holds ``read``
+    # (deferred counts: a deferred tool is callable). DERIVED from the live
+    # inventory in ``Session._build_tool_context``, exactly like
+    # ``may_delegate``. ``spill_truncate`` reads it so a capped result's footer
+    # never teaches a call the run cannot make: a bounded ``--tools`` run
+    # without ``read`` answered "SAVED at spill://… read(path=…)" by calling
+    # its MCP ``fetch`` on the handle or re-searching (head-to-head benchmark,
+    # 2026-11-20: 11 such fetches across three arms). ``True`` by default so
+    # every host that does not derive it keeps today's footer.
+    spill_readable: bool = True
     # The user's persistent agent registry (``local_operator.agents``), behind
     # the ``agent`` tool and behind role resolution for ``task(agent=...)``.
     # Typed ``Any`` because that module is heavy (dill, yaml, the whole agent
@@ -2894,6 +2929,26 @@ class ToolContext(BaseModel):
     #: (review R4-1). Bound beside
     #: :attr:`withdraw_site_asks`, ``None`` where it is.
     site_ask_lapses: Callable[[str], int] | None = None
+    #: THE SITE-CARD DOOR (security review 60334). A ``task`` subagent is
+    #: built without an ask handler, so it has no queue and :attr:`enqueue_ask`
+    #: is ``None``. ``enqueue_site_card(facts, timeout, tool_call_id="",
+    #: cancel=None)`` takes ONLY a typed ``site_approval.SiteAccessFacts``
+    #: (never a question) and hands it to the nearest live ancestor with a
+    #: queue, which rebuilds the canonical signed card itself and binds it to
+    #: this requester and request. ``cancel`` is the tool's ``cancel_access``
+    #: closure for the entry, kept for this requester's teardown. Returns the
+    #: ask receipt shape (``{"ok", "details"/"error"}``); ``"busy": True``
+    #: means another open card already asks about the origin (its ids in
+    #: ``details``); ``"no_ancestor": True`` means no session up the tree can
+    #: queue it. Bound ONLY on a subagent with no queue; a session with its
+    #: own queue keeps :attr:`enqueue_ask`.
+    enqueue_site_card: Callable[..., Mapping[str, Any]] | None = None
+    #: THE TEARDOWN FENCE, before dispatch (60334 design correction (2)):
+    #: ``begin_site_request(cancel)`` returns a ``finish()`` to call once the
+    #: ``request_access`` reply has been handled, or ``None`` once the
+    #: session's teardown has begun — then nothing may be dispatched. Bound
+    #: beside :attr:`enqueue_site_card`.
+    begin_site_request: Callable[..., Any] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
     #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
@@ -4444,6 +4499,9 @@ EFFORT_CHOICE_UNSET = object()
 class ModelSpec(BaseModel):
     """A provider/model pair plus the knobs wire clients need."""
 
+    # Persisted connection-scoped listing facts; dispatch performs no IAM lookup.
+    bedrock_metadata: dict[str, Any] | None = None
+
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
     context_window: int = 128_000
@@ -5028,6 +5086,9 @@ class ChatRequest(BaseModel):
     #: metadata: it is request policy for one wire, not conversation state.
     cache_diagnostics: bool = Field(default=False, exclude=True, repr=False)
     cache_diagnostics_previous_id: str | None = Field(default=None, exclude=True, repr=False)
+    #: Per-stream local Google comparison identity; forks never share this even
+    #: when they inherit prompt_cache_key. Never sent to any provider or saved.
+    cache_diagnostics_chain: str | None = Field(default=None, exclude=True, repr=False)
     # Native reasoning is opaque: use provider-reported token counts rather
     # than treating encrypted bytes as text. Populated only after replay checks.
     native_context_tokens: int = Field(default=0, exclude=True, repr=False)
@@ -5038,6 +5099,21 @@ class ChatRequest(BaseModel):
     #: outside a session stream) derives the role from ``purpose`` alone, as a
     #: top-level conversation. Transport policy, never wire content.
     cache_role: str | None = Field(default=None, exclude=True, repr=False)
+    #: Where the Anthropic wire may place ``cache_control`` markers.
+    #: ``"auto"`` (default) is the conversation policy, byte-identical to the
+    #: tree before this field: system breakpoints plus message breakpoints.
+    #: ``"system"`` puts ONE marker on the last system block and none on
+    #: messages; ``"none"`` sends no marker at all.
+    #:
+    #: WHY: one-shot auxiliary calls (screeners, judges) are isolated, single
+    #: user-turn requests whose only marker landed on ``messages[-1]`` — AFTER
+    #: content unique to that call — so every call paid the cache-WRITE premium
+    #: for a prefix nothing would ever read. Measured on the 7-day usage ledger:
+    #: ``team_bridge_screen`` 37,014 distinct prompt hashes over 37,457 calls
+    #: (1.4% cache hit), ``guardrail`` 0% hit. Transport policy, never content.
+    cache_markers: Literal["auto", "system", "none"] = Field(
+        default="auto", exclude=True, repr=False
+    )
     #: This conversation has already had a turn that ran at least
     #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
     #: start to stream end. Stamped by ``SessionStreamFn`` from its own
@@ -5522,6 +5598,10 @@ class StreamUsageEvent(BaseModel):
 
 class StreamEndEvent(BaseModel):
     type: Literal["end"] = "end"
+    #: Local Google prefix diagnosis, available only after usageMetadata.
+    #: Debug metadata for analytics/logging, never user-facing usage content.
+    cache_miss_type: str | None = Field(default=None, exclude=True, repr=False)
+    cache_missed_tokens: int = Field(default=0, exclude=True, repr=False)
     stop_reason: str  # stop | length | toolUse | refusal | error | aborted
     usage: Usage | None = None
     provider_payload: dict[str, Any] | None = None

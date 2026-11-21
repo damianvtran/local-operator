@@ -1,0 +1,257 @@
+{
+  "status": "mechanical_checks_passed",
+  "scope": "Hindi scratch candidate only; repository parser and scoped checker helpers, not whole-corpus check.py CLI",
+  "key_count": 17,
+  "new_translations": 16,
+  "preserved_existing": 1,
+  "results": [
+    {
+      "key": "wire.session_status.retired_label",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.interrupted",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.unseen_interruption",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.retired",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.unseen_retirement",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.signal_stop",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.unseen_signal_stop",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.forced_kill",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.unseen_forced_kill",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.complete",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.unseen_completion",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.recent",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.dormant",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.error",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.unseen_error",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.error_cause",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    },
+    {
+      "key": "wire.session_status.unseen_error_cause",
+      "icu_parse": "PASS",
+      "argument_parity": "PASS",
+      "select_arm_names_order": "PASS",
+      "plural_categories": "PASS",
+      "literal_tokens": "PASS",
+      "single_line_no_bidi_controls": "PASS"
+    }
+  ],
+  "command_formatter_samples": [
+    {
+      "key": "signal_stop",
+      "command": "none",
+      "output": "बाधित — सिग्नल से रोका गया"
+    },
+    {
+      "key": "signal_stop",
+      "command": "/stop --all",
+      "output": "बाधित — /stop --all द्वारा सिग्नल से रोका गया"
+    },
+    {
+      "key": "unseen_signal_stop",
+      "command": "none",
+      "output": "बाधित (अपठित) — सिग्नल से रोका गया"
+    },
+    {
+      "key": "unseen_signal_stop",
+      "command": "/stop --all",
+      "output": "बाधित (अपठित) — /stop --all द्वारा सिग्नल से रोका गया"
+    },
+    {
+      "key": "forced_kill",
+      "command": "none",
+      "output": "बाधित — ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "key": "forced_kill",
+      "command": "/stop --all",
+      "output": "बाधित — /stop --all द्वारा ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "key": "unseen_forced_kill",
+      "command": "none",
+      "output": "बाधित (अपठित) — ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "key": "unseen_forced_kill",
+      "command": "/stop --all",
+      "output": "बाधित (अपठित) — /stop --all द्वारा ज़बरदस्ती बंद किया गया"
+    }
+  ],
+  "plural_formatter_samples": [
+    {
+      "count": 0,
+      "output": "रुका हुआ (0 जागृति निष्क्रिय)"
+    },
+    {
+      "count": 1,
+      "output": "रुका हुआ (1 जागृति निष्क्रिय)"
+    },
+    {
+      "count": 2,
+      "output": "रुका हुआ (2 जागृतियाँ निष्क्रिय)"
+    },
+    {
+      "count": 5,
+      "output": "रुका हुआ (5 जागृतियाँ निष्क्रिय)"
+    },
+    {
+      "count": 21,
+      "output": "रुका हुआ (21 जागृतियाँ निष्क्रिय)"
+    }
+  ],
+  "negative_controls": {
+    "malformed_icu_rejected": "PASS",
+    "renamed_machine_arm_detected": "PASS",
+    "renamed_argument_detected": "PASS"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "existing_target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/hi/wire.session_status.json",
+      "sha256": "f245dd2ff0a26f46594dc4eec914808664702215279f71964feea4994e8e252d"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/wire.session_status.json",
+      "sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81"
+    }
+  }
+}

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import random
 import sqlite3
 import time
@@ -1639,7 +1640,12 @@ class ProviderController:
             from local_operator.aida.profile import record_radient_login
 
             record_radient_login(result, config_dir=self.config_dir)
-        identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
+        # The one label derivation (email -> account_id -> org_name, and an
+        # Amazon Bedrock connection's own label first), so the receipt names a
+        # Bedrock connection "dev · us-east-1", never its storage identity.
+        from local_operator.providers.auth_store import credential_identity
+
+        identity = credential_identity(result) or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
         if storage == "radient":
@@ -3909,6 +3915,22 @@ class ProviderController:
             else await self.auth_store.get_oauth_access(credential_id, **kwargs)
         )
         if access is not None and access.kind == "oauth" and access.access_token:
+            if credential_id == "google-vertex":
+                # Vertex AI's publisher listing requires a GCP quota project in
+                # ``x-goog-user-project``; ``access.account_id`` holds the user's
+                # email, not the project id, so resolve ``project_id`` into the
+                # 3rd slot (not used for OpenAI/Muse account scoping on Vertex).
+                raw_project = (
+                    access.raw.get("project_id") if isinstance(access.raw, Mapping) else None
+                )
+                project_id = (
+                    (str(raw_project).strip() if raw_project else "")
+                    or (access.org_id or "").strip()
+                    or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+                    or (os.environ.get("VERTEX_PROJECT") or "").strip()
+                    or None
+                )
+                return access.access_token, True, project_id
             return (
                 access.access_token,
                 True,
@@ -4101,14 +4123,40 @@ def _enrich_prices(
             enriched.append(
                 dataclasses.replace(
                     row,
+                    # Fill display name when the provider's listing returned only
+                    # the bare model id (e.g. Vertex AI's ``publisherModels``).
+                    name=row.name or found.name,
                     input_price=found.input_price,
                     output_price=found.output_price,
                     cache_read_price=row.cache_read_price or found.cache_read_price,
                     cache_write_price=row.cache_write_price or found.cache_write_price,
+                    long_context_threshold=(
+                        row.long_context_threshold or found.long_context_threshold
+                    ),
+                    long_context_input_price=(
+                        row.long_context_input_price or found.long_context_input_price
+                    ),
+                    long_context_output_price=(
+                        row.long_context_output_price or found.long_context_output_price
+                    ),
+                    long_context_cache_read_price=(
+                        row.long_context_cache_read_price or found.long_context_cache_read_price
+                    ),
+                    long_context_cache_write_price=(
+                        row.long_context_cache_write_price or found.long_context_cache_write_price
+                    ),
                     # Limits only where the listing gave none: the provider's
                     # own window is the right number for its endpoint.
                     context_window=row.context_window or found.context_window,
                     max_tokens=row.max_tokens or found.max_tokens,
+                    supports_audio_input=(
+                        row.supports_audio_input
+                        if row.supports_audio_input is not None
+                        else found.supports_audio_input
+                    ),
+                    supports_prompt_cache=(
+                        row.supports_prompt_cache or found.supports_prompt_cache
+                    ),
                 )
             )
         result[definition.id] = enriched
