@@ -26,12 +26,12 @@ document, and §7's copy would otherwise disagree with the paint about order.
 
 from __future__ import annotations
 
-import textwrap
 import time
 from dataclasses import dataclass, field
 from typing import Sequence
 
 from rich.cells import cell_len
+from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -42,9 +42,21 @@ from textual.widgets import Static
 # i18n: this screen's session-row clauses are user-facing copy, extracted so
 # a locale can carry them; `_t` is bound BELOW the whole import block so no
 # later import reads as not-at-top (E402, the earlier slice's CI failure).
+from local_operator.i18n.keys import tui_info as _ik
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh
 from local_operator.info.collect import LiveState
+from local_operator.info.copy import (
+    InfoRow,
+    copy_slice,
+    info_leaving,
+    info_plural,
+    info_state,
+    info_text as _i,
+    info_update,
+    join_info,
+    paint_info_row,
+)
 from local_operator.info.model import (
     UNKNOWN,
     InfoSnapshot,
@@ -53,7 +65,7 @@ from local_operator.info.model import (
     format_duration,
     is_shadowed_install,
 )
-from local_operator.info.render import build_export, not_answering_clause, plural
+from local_operator.info.render import build_export, not_answering_clause
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_PROGRESS_S,
     LEAVING_FOR_BUILD,
@@ -65,7 +77,6 @@ from local_operator.session.runtime.types import (
     UPDATING_DONE,
     bound_text,
     update_phase,
-    update_short,
 )
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
@@ -82,7 +93,7 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 from local_operator.tui.widgets.welcome import _fit_tail, _shorten_home
 
-_t = tr("tui.small")
+_t = _i
 
 #: The copy chord. Deliberately the SAME constant the aside already binds rather
 #: than a second ``"ctrl+r"`` literal: "copy this surface out" should be one
@@ -222,49 +233,68 @@ def _model(value: str, width: int) -> str:
 #: this build does not know (written by a newer runtime) falls back to
 #: :data:`_LEAVING_SHORT_OTHER`, which says the irreducible fact rather than
 #: another trigger's words.
-_LEAVING_SHORT: dict[str, str] = {
-    LEAVING_ON_SIGNAL: f"leaving (silent {bound_text(SIGNAL_DRAIN_S)})",
-    LEAVING_FOR_BUILD: "leaving for build",
-    # The bounded handover, and the SHELF IS `no movement {bound}` rather than a
-    # cut of the long phrase: ``no movement`` is the runtime's own observation
-    # (see ``types.LEAVING_FOR_BUILD_OVERDUE`` for why it does not say "stalled",
-    # and for why this phrase is HISTORICAL rather than deleted) and the bound is
-    # what a narrow reader most needs of a departure that has already spent it.
-    # Rendered from the constant, like the signal rung's, so the compact form
-    # cannot disagree with the long one.
-    LEAVING_FOR_BUILD_OVERDUE: f"no movement {bound_text(BUILD_DRAIN_PROGRESS_S)}",
-}
+def _reload_state_copy() -> None:
+    global _LEAVING_SHORT, _LEAVING_SHORT_OTHER, HELD_STATE_WORD
+    global _UPDATING_SHORT, _UPDATING_SHORT_OTHER
+    _LEAVING_SHORT = {
+        LEAVING_ON_SIGNAL: _i(
+                               _ik.status_leaving_silent(
+                                   SIGNAL_DRAIN_S=str(bound_text(SIGNAL_DRAIN_S)),
+                               ),
+                           ),
+        LEAVING_FOR_BUILD: _i(_ik.status_leaving_for_build()),
+        # The bounded handover, and the SHELF IS `no movement {bound}` rather than a
+        # cut of the long phrase: ``no movement`` is the runtime's own observation
+        # (see ``types.LEAVING_FOR_BUILD_OVERDUE`` for why it does not say "stalled",
+        # and for why this phrase is HISTORICAL rather than deleted) and the bound is
+        # what a narrow reader most needs of a departure that has already spent it.
+        # Rendered from the constant, like the signal rung's, so the compact form
+        # cannot disagree with the long one.
+        LEAVING_FOR_BUILD_OVERDUE: _i(
+                                       _ik.status_no_movement(
+                                           BUILD_DRAIN_PROGRESS_S=str(
+                                               bound_text(
+                                                   BUILD_DRAIN_PROGRESS_S,
+                                               ),
+                                           ),
+                                       ),
+                                   ),
+    }
 
-#: The fallback above: no trigger named, no bound claimed, nothing false.
-_LEAVING_SHORT_OTHER = "leaving"
+    #: The fallback above: no trigger named, no bound claimed, nothing false.
+    _LEAVING_SHORT_OTHER = _i(_ik.status_leaving())
 
-#: What a row says when its own stall bound fired, dumped every thread and LEFT IT
-#: ALIVE: stalled with the work still inside it, and only ``lop stop`` ends it
-#: (``stall_watchdog.HELD_MARKER``; design review round 1, D1). Short because the
-#: meta ladder sheds from the right and this clause must survive to the narrowest
-#: frame — the state word is what a reader scans first, and "not answering" without
-#: this reads as a runtime that is merely slow to report.
-HELD_STATE_WORD = "bound held"
+    #: What a row says when its own stall bound fired, dumped every thread and LEFT IT
+    #: ALIVE: stalled with the work still inside it, and only ``lop stop`` ends it
+    #: (``stall_watchdog.HELD_MARKER``; design review round 1, D1). Short because the
+    #: meta ladder sheds from the right and this clause must survive to the narrowest
+    #: frame — the state word is what a reader scans first, and "not answering" without
+    #: this reads as a runtime that is merely slow to report.
+    HELD_STATE_WORD = _i(_ik.status_bound_held())
 
-#: The shelf form of an UPDATE WINDOW, keyed by the PHASE TOKEN rather than by the
-#: sentence — the one structural difference from ``_LEAVING_SHORT`` above, and it is
-#: forced: every updating sentence carries a build pair, so a table keyed by the
-#: sentence could not be written at all (``types.UPDATING``).
-#:
-#: THE THREE ARE NOT DEGREES OF ONE THING, which is why the shelf keeps them apart
-#: even at ~15 cells: ``updating`` means the message is already held and arrives in a
-#: second, while ``update failed`` means it is NOT coming and the session is still on
-#: the build it loaded. A narrow reader who cannot tell those apart either re-sends a
-#: queued message or waits on a handover that was abandoned.
-_UPDATING_SHORT: dict[str, str] = {
-    UPDATING: "updating",
-    UPDATING_DONE: "updated",
-    UPDATE_FAILED: "update failed",
-}
+    #: The shelf form of an UPDATE WINDOW, keyed by the PHASE TOKEN rather than by the
+    #: sentence — the one structural difference from ``_LEAVING_SHORT`` above, and it is
+    #: forced: every updating sentence carries a build pair, so a table keyed by the
+    #: sentence could not be written at all (``types.UPDATING``).
+    #:
+    #: THE THREE ARE NOT DEGREES OF ONE THING, which is why the shelf keeps them apart
+    #: even at ~15 cells: ``updating`` means the message is already held and arrives in a
+    #: second, while ``update failed`` means it is NOT coming and the session is still on
+    #: the build it loaded. A narrow reader who cannot tell those apart either re-sends a
+    #: queued message or waits on a handover that was abandoned.
+    _UPDATING_SHORT = {
+        UPDATING: _i(_ik.status_updating()),
+        UPDATING_DONE: _i(_ik.status_updated()),
+        UPDATE_FAILED: _i(_ik.status_update_failed()),
+    }
 
-#: The fallback above: a phase this build cannot place says only that a move is
-#: happening, and claims neither the queue nor the outcome.
-_UPDATING_SHORT_OTHER = "moving to a new build"
+    #: The fallback above: a phase this build cannot place says only that a move is
+    #: happening, and claims neither the queue nor the outcome.
+    _UPDATING_SHORT_OTHER = _i(_ik.status_moving_to_a_new_build())
+
+
+_reload_state_copy()
+register_refresh(_reload_state_copy)
 
 
 @dataclass
@@ -283,6 +313,51 @@ class _Body:
 
     width: int
     lines: list[Text] = field(default_factory=list)
+    label_cells: int = field(init=False, default=_LABEL_CELL)
+
+    def __post_init__(self) -> None:
+        # English uses the historical floor; locales own their measured label
+        # widths. Charge paths/models for this SAME column before tail fitting,
+        # rather than cropping their identifying suffix after a long label.
+        labels = (
+            _ik.heading_this_session,
+            _ik.label_agent_home,
+            _ik.label_agent_profiles,
+            _ik.label_answering,
+            _ik.label_approvals,
+            _ik.label_browser,
+            _ik.label_built,
+            _ik.label_cache_dir,
+            _ik.label_config_dir,
+            _ik.label_control_port,
+            _ik.label_credentials,
+            _ik.label_guides,
+            _ik.label_install_kind,
+            _ik.label_install_path,
+            _ik.label_interpreter,
+            _ik.label_kind,
+            _ik.label_log_dir,
+            _ik.label_mcp_servers,
+            _ik.label_mobile_relay,
+            _ik.label_model,
+            _ik.label_multiplexer,
+            _ik.label_platform,
+            _ik.label_python,
+            _ik.label_running_code,
+            _ik.label_runtimes,
+            _ik.label_session_id,
+            _ik.label_skills,
+            _ik.label_source,
+            _ik.label_started,
+            _ik.label_subagent_capacity,
+            _ik.label_teams,
+            _ik.label_terminal,
+            _ik.label_theme,
+            _ik.label_trajectories,
+            _ik.label_version,
+            _ik.label_working_dir,
+        )
+        self.label_cells = max(_LABEL_CELL, *(cell_len(_i(label())) + 2 for label in labels))
 
     def blank(self) -> None:
         self.lines.append(Text())
@@ -294,7 +369,7 @@ class _Body:
         A CEILING for the path and model helpers, not the pad width — see
         :data:`_VALUE_MIN` for why conflating the two erases every note.
         """
-        return max(8, self.width - _ROW_OVERHEAD)
+        return max(8, self.width - _ROW_OVERHEAD - (self.label_cells - _LABEL_CELL))
 
     def kv(
         self,
@@ -333,8 +408,13 @@ class _Body:
         the reader cannot then tell whether the field does not apply or the
         screen is broken.
         """
-        row = Text()
-        row.append(f"  {name:<{_LABEL_CELL}}", style=semantic_style("dim"))
+        row = InfoRow()
+        # Twenty cells is the English compatibility floor, not a locale cap.
+        # Measure the translated label in terminal cells; long/CJK labels grow
+        # their own row and reduce the actual value/note budget below.
+        row.append("  ")
+        row.append(name, style=semantic_style("dim"))
+        row.append(" " * max(2, self.label_cells - cell_len(name)))
         if values:
             # A ladder for the VALUE, mirroring ``notes`` below, and needed for
             # the same reason: without one the value is hard-cropped by the
@@ -344,19 +424,22 @@ class _Body:
             # Widest-first, first-that-fits, and the last rung must always fit
             # by construction — it is the caller's irreducible fact.
             budget = self.width - row.cell_len - 2
-            value = next((rung for rung in values if len(rung) <= budget), values[-1])
-        row.append(f"{value:<{_VALUE_MIN}}", style=semantic_style(value_style))
+            value = next((rung for rung in values if cell_len(rung) <= budget), values[-1])
+        row.append(value, style=semantic_style(value_style))
+        row.append(" " * max(0, _VALUE_MIN - cell_len(value)), style=semantic_style(value_style))
         if notes:
             # Budget measured from the row as actually BUILT, not from a
             # restated literal, so a change to the label column cannot silently
             # reintroduce the crop this ladder removes.
             budget = self.width - row.cell_len - 2
             for candidate in notes:
-                if len(candidate) <= budget:
-                    row.append(f"  {candidate}", style=semantic_style("dim"))
+                if cell_len(candidate) <= budget:
+                    row.append("  ")
+                    row.append(candidate, style=semantic_style("dim"))
                     break
         elif note and self.width >= _NOTE_MIN:
-            row.append(f"  {note}", style=semantic_style("dim"))
+            row.append("  ")
+            row.append(note, style=semantic_style("dim"))
         row.truncate(self.width, overflow="crop")
         self.lines.append(row)
 
@@ -395,7 +478,7 @@ class _Body:
         which for a session that has stopped answering is the words "not
         answering".
         """
-        row = Text()
+        row = InfoRow()
         row.append("  " + " " * indent, style=semantic_style("dim"))
         row.append(f"{glyph} ", style=semantic_style(ink))
         candidates = list(metas) or ([meta] if meta else [])
@@ -447,7 +530,8 @@ class _Body:
             pad = max(1, _MARK_LABEL_CELL - cell_len(shown))
             if lead + cell_len(shown) + pad + cell_len(meta_shown) > self.width:
                 pad = 1  # the column would push it off; sit it right beside.
-            row.append(" " * pad + meta_shown, style=semantic_style("dim"))
+            row.append(" " * pad)
+            row.append(meta_shown, style=semantic_style("dim"))
         row.truncate(self.width, overflow="crop")
         self.lines.append(row)
 
@@ -459,10 +543,30 @@ class _Body:
         reads as a new record in the middle of a block.
         """
         body_width = max(1, self.width - 2)
-        for line in textwrap.wrap(text, body_width) or [""]:
-            row = Text(no_wrap=True, overflow="crop")
-            row.append(f"  {line}", style=semantic_style("dim"))
+        # Wrap by terminal cells, not Python codepoints. Retain semantic source
+        # slices until the final paint so English fallback is never marked RTL.
+        offset = 0
+        while offset < len(text):
+            end = offset
+            used = 0
+            while end < len(text) and used + cell_len(text[end]) <= body_width:
+                used += cell_len(text[end])
+                end += 1
+            if end == offset:
+                end += 1
+            if end < len(text):
+                space = text.rfind(" ", offset, end + 1)
+                if space > offset:
+                    end = space
+            row = InfoRow(no_wrap=True, overflow="crop")
+            row.append("  ")
+            row.append(copy_slice(text, offset, end), style=semantic_style("dim"))
             self.lines.append(row)
+            offset = end
+            while offset < len(text) and text[offset].isspace():
+                offset += 1
+        if not text:
+            self.lines.append(Text("  "))
 
     def header(
         self, title: str, meta: str = "", short: str = "", *, shorts: Sequence[str] = ()
@@ -500,7 +604,15 @@ class _Body:
         if meta and (self.width < _NOTE_MIN or not _fits(meta)):
             rungs = tuple(shorts) or ((short,) if short else ())
             meta = next((rung for rung in rungs if _fits(rung)), rungs[-1] if rungs else "")
-        row = section_header(title, meta)
+        # Keep the shared header glyph/ink, but append semantic values without
+        # f-string coercion so their actual fallback provenance survives fit.
+        base = section_header("", "")
+        row = InfoRow()
+        row.append_text(base)
+        row.append(title, style=semantic_style("fg") + Style(bold=True))
+        if meta:
+            row.append("   ")
+            row.append(meta, style=semantic_style("dim"))
         row.truncate(self.width, overflow="crop")
         self.lines.append(row)
 
@@ -509,7 +621,7 @@ class _Body:
         for index, line in enumerate(self.lines):
             if index:
                 out.append("\n")
-            out.append_text(line)
+            out.append_text(paint_info_row(line))
         return out
 
 
@@ -521,40 +633,52 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
     of "I fixed it and nothing changed" in this codebase. A user filing an issue
     is asked for a version before anything else.
     """
-    body.header("Install", "how this lop was installed", "install")
+    body.header(
+        _i(_ik.heading_install()),
+        _i(_ik.install_description()),
+        _i(_ik.install_full_short()),
+    )
     if snapshot is None:
         # ``Install`` is worker-filled, so it says what it is doing rather than
         # showing a blank block. It is never left out: a missing section reads
         # as a rendering bug.
-        body.kv("Version", "checking…" if loading else "unavailable", value_style="dim")
+        body.kv(
+            _i(_ik.label_version()),
+            (_i(_ik.install_loading()) if loading else _i(_ik.install_unavailable())),
+            value_style='dim',
+        )
         return
     install = snapshot.install
-    body.kv("Version", install.version or "unavailable", notes=_latest_notes(install))
+    body.kv(
+        _i(_ik.label_version()),
+        install.version or _i(_ik.install_unavailable()),
+        notes=_latest_notes(install),
+    )
     if install.behind and install.latest_known:
         # Composed like ``welcome.py``'s update row so the two cannot diverge,
         # and the ``— /update`` remedy is dropped WHOLE when it does not fit:
         # ``/upd…`` is an instruction nobody can follow.
         remedy = f"{NOTICE_GLYPHS['warning']} latest is v{install.latest_known} — /update"
         short = f"{NOTICE_GLYPHS['warning']} v{install.latest_known} available"
-        row = Text()
+        row = InfoRow()
         row.append("  " + (remedy if len(remedy) + 2 <= body.width else short))
         row.stylize(semantic_style("warning"))
         row.truncate(body.width, overflow="crop")
         body.lines.append(row)
     body.kv(
-        "Install kind",
-        install.kind or "unavailable",
+        _i(_ik.label_install_kind()),
+        install.kind or _i(_ik.install_unavailable()),
         notes=_kind_notes(install.kind),
         value_style="fg" if install.kind else "dim",
     )
-    body.kv("Install path", _path(install.prefix, body.value_cells))
-    body.kv("Interpreter", _path(install.executable, body.value_cells))
+    body.kv(_i(_ik.label_install_path()), _path(install.prefix, body.value_cells))
+    body.kv(_i(_ik.label_interpreter()), _path(install.executable, body.value_cells))
     if install.import_path:
         # Directly under the install path, because the two are only meaningful
         # side by side: this row answers "which code is actually executing",
         # and the row above answers "which install claims to be executing it".
         body.kv(
-            "Running code",
+            _i(_ik.label_running_code()),
             _path(install.import_path, body.value_cells),
             notes=_import_path_notes(install),
             # A WARNING, not an unavailable: nothing failed to read. The same
@@ -571,35 +695,53 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
                 # ``! not und…`` at 45 cells, so the one row built to survive
                 # narrow frames was the only one that did not (UX round 1, U5).
                 # The shortest rung still names the fault.
-                "not under the install path above",
+                _i(_ik.install_shadow_label_full()),
                 labels=(
-                    "not under the install path above",
-                    "not under the install path",
-                    "not the installed tree",
+                    _i(_ik.install_shadow_label_full()),
+                    _i(_ik.install_shadow_label_short()),
+                    _i(_ik.install_shadow_label_terse()),
                 ),
                 metas=(
-                    "this runtime is executing a different tree",
-                    "executing a different tree",
-                    "different tree",
+                    _i(_ik.install_shadow_meta_full()),
+                    _i(_ik.install_shadow_meta_short()),
+                    _i(_ik.install_shadow_meta_terse()),
                 ),
             )
     if install.is_git_snapshot:
         # A SHA is never truncated: a half-printed one is a wrong one.
         body.kv(
-            "Source",
-            f"git snapshot @ {install.source_ref[:12]}" if install.source_ref else "git snapshot",
-            notes=("built by lop-update, not a PyPI wheel", "lop-update build", "lop-update"),
+            _i(_ik.label_source()),
+            (
+                _i(_ik.install_source_snapshot(source_ref=str(install.source_ref[:12])))
+                if install.source_ref
+                else _i(_ik.install_source_snapshot_unknown())
+            ),
+            notes=(
+                      _i(_ik.install_snapshot_note_full()),
+                      _i(_ik.install_snapshot_note_short()),
+                      'lop-update',
+                  ),
         )
     else:
-        body.kv("Source", "PyPI wheel" if install.version else "unavailable")
+        body.kv(
+            _i(_ik.label_source()),
+            (_i(_ik.install_source_wheel()) if install.version else _i(_ik.install_unavailable())),
+        )
     if install.build_age_s is not None:
-        body.kv("Built", f"{format_duration(install.build_age_s)} ago")
+        body.kv(
+            _i(_ik.label_built()),
+            _i(_ik.install_build_age(build_age_s=str(format_duration(install.build_age_s)))),
+        )
     body.kv(
-        "Python",
-        install.python_version or "unavailable",
+        _i(_ik.label_python()),
+        install.python_version or _i(_ik.install_unavailable()),
         notes=_python_notes(install),
     )
-    body.kv("Platform", install.platform or "unavailable", note=install.machine)
+    body.kv(
+        _i(_ik.label_platform()),
+        install.platform or _i(_ik.install_unavailable()),
+        note=install.machine,
+    )
     if is_shadowed_install(install):
         # AFTER the table, not between two of its rows. A four-line wrapped
         # paragraph spliced into the middle of a kv block breaks the column
@@ -617,10 +759,7 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
         # it, because the cwd is inherited at spawn (`runtime/launch.py`).
         body.blank()
         body.note(
-            "Nothing will error: the version and paths above still describe the install, "
-            "while the running code is the tree named here. A change made to one will "
-            "appear to have no effect in the other. Relaunch from outside that checkout "
-            "to clear it — /reload does not."
+            _i(_ik.install_shadow_explanation())
         )
 
 
@@ -638,20 +777,32 @@ def _latest_notes(install: object) -> tuple[str, ...]:
         # beside a cached NEWER release asserted currency. Both halves fail
         # together on a broken install, which is the state /info is opened in
         # (review round 1, M3).
-        return ("latest unknown (installed version unreadable)", "latest unknown", "unknown")
+        return (
+                   _i(_ik.latest_installed_unreadable()),
+                   _i(_ik.latest_full_unknown()),
+                   _i(_ik.latest_unknown()),
+               )
     latest = getattr(install, "latest_known", None)
     if latest is None:
-        return ("latest unknown (never checked)", "latest unknown", "unknown")
+        return (
+                   _i(_ik.latest_never_checked()),
+                   _i(_ik.latest_full_unknown()),
+                   _i(_ik.latest_unknown()),
+               )
     age = getattr(install, "latest_age_s", None)
     if getattr(install, "behind", False):
-        return (f"behind {latest}", f"< {latest}", "behind")
+        return (
+                   _i(_ik.latest_behind_full(latest=str(latest))),
+                   f'< {latest}',
+                   _i(_ik.latest_behind_short()),
+               )
     if age is None:
-        return ("latest", "latest")
-    stale = " (stale)" if age > TTL_S else ""
+        return (_i(_ik.latest_current()), _i(_ik.latest_current()))
+    stale = _i(_ik.latest_stale()) if age > TTL_S else ""
     return (
-        f"latest · checked {format_duration(age)} ago{stale}",
-        f"checked {format_duration(age)} ago",
-        "latest",
+        _i(_ik.latest_checked_full(age=str(format_duration(age)), stale=str(stale))),
+        _i(_ik.latest_checked_short(age=str(format_duration(age)))),
+        _i(_ik.latest_current()),
     )
 
 
@@ -665,11 +816,23 @@ def _kind_of_runtime_notes(kind: str) -> tuple[str, ...]:
     would tell a user their session dies with the window when it does not.
     """
     if kind == "daemon":
-        return ("a spawned runtime; survives this terminal", "spawned runtime", "spawned")
+        return (
+                   _i(_ik.kind_of_runtime_daemon_full()),
+                   _i(_ik.kind_of_runtime_daemon_short()),
+                   _i(_ik.kind_of_runtime_daemon_terse()),
+               )
     if kind == "tui":
-        return ("in-process, attached to this terminal", "attached", "attached")
+        return (
+                   _i(_ik.kind_of_runtime_attached_full()),
+                   _i(_ik.kind_of_runtime_attached_short()),
+                   _i(_ik.kind_of_runtime_attached_short()),
+               )
     if kind == "exec":
-        return ("one-shot non-interactive run", "one-shot run", "one-shot")
+        return (
+                   _i(_ik.kind_of_runtime_exec_full()),
+                   _i(_ik.kind_of_runtime_exec_short()),
+                   _i(_ik.kind_of_runtime_exec_terse()),
+               )
     return ()
 
 
@@ -687,26 +850,38 @@ def _import_path_notes(install: object) -> tuple[str, ...]:
     if not getattr(install, "import_path_foreign", False):
         return ()
     if getattr(install, "kind", "") == "editable":
-        return ("expected for an editable checkout", "editable checkout", "editable")
+        return (
+                   _i(_ik.import_path_editable_full()),
+                   _i(_ik.import_path_editable_short()),
+                   _i(_ik.import_path_editable_terse()),
+               )
     return (
-        "a checkout on sys.path is shadowing the install",
-        "a checkout is shadowing the install",
-        "shadowed by a checkout",
+        _i(_ik.import_path_shadowed_full()),
+        _i(_ik.import_path_shadowed_short()),
+        _i(_ik.import_path_shadowed_terse()),
     )
 
 
 def _kind_notes(kind: str) -> tuple[str, ...]:
     """Say what the install kind MEANS for changing the code, at three widths."""
     if kind == "editable":
-        return ("editable checkout; source edits are live", "editable · live source", "editable")
+        return (
+                   _i(_ik.kind_editable_full()),
+                   _i(_ik.kind_editable_short()),
+                   _i(_ik.import_path_editable_terse()),
+               )
     if kind == "uv-tool":
         return (
-            "non-editable; `lop-update` rebuilds it",
-            "non-editable · lop-update",
-            "non-editable",
+            _i(_ik.kind_uv_full()),
+            _i(_ik.kind_uv_short()),
+            _i(_ik.kind_non_editable()),
         )
     if kind in ("pip", "pipx"):
-        return (f"non-editable {kind} install", f"non-editable {kind}", "non-editable")
+        return (
+                   _i(_ik.kind_pip_full(kind=str(kind))),
+                   _i(_ik.kind_pip_short(kind=str(kind))),
+                   _i(_ik.kind_non_editable()),
+               )
     return ()
 
 
@@ -726,12 +901,16 @@ def _session_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState
     it is complete on the first frame while the ~900 ms fleet scan is still
     resolving. That is what stops the screen ever appearing blank.
     """
-    body.header("This session", "the runtime you are typing into", "this runtime")
+    body.header(
+        _i(_ik.heading_this_session()),
+        _i(_ik.session_description()),
+        _i(_ik.session_description_short()),
+    )
     process = snapshot.process if snapshot else None
-    body.kv("Session id", (process.session_id if process else live.session_id) or "—")
+    body.kv(_i(_ik.label_session_id()), (process.session_id if process else live.session_id) or "—")
     kind = (process.kind if process else live.kind) or ""
     body.kv(
-        "Kind",
+        _i(_ik.label_kind()),
         kind or "—",
         # Per KIND, not one hardcoded phrase. Checked against the real records
         # on this machine rather than read off the Literal in ``types.py``:
@@ -743,22 +922,29 @@ def _session_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState
         value_style="fg" if kind else "dim",
     )
     if process is None:
-        body.kv("Model", _model(live.model_label, body.value_cells))
-        body.kv("Working dir", "checking…", value_style="dim")
+        body.kv(_i(_ik.label_model()), _model(live.model_label, body.value_cells))
+        body.kv(_i(_ik.label_working_dir()), _i(_ik.install_loading()), value_style="dim")
         return
-    body.kv("Model", _model(process.model_label, body.value_cells))
+    body.kv(_i(_ik.label_model()), _model(process.model_label, body.value_cells))
     if process.effective_model and process.effective_model != process.model_label:
         # Only when they DIFFER: under failover the model answering is not the
         # model selected, and that gap is the whole reason to show the row.
         body.kv(
-            "Answering",
+            _i(_ik.label_answering()),
             _model(process.effective_model, body.value_cells),
-            notes=("failover is in force", "failover"),
+            notes=(_i(_ik.session_failover_full()), _i(_ik.session_failover_short())),
         )
-    body.kv("Started", f"{format_duration(process.uptime_s)} ago" if process.uptime_s else "—")
-    body.kv("Working dir", _path(process.cwd, body.value_cells))
     body.kv(
-        "Config dir",
+        _i(_ik.label_started()),
+        (
+            _i(_ik.session_started(uptime_s=str(format_duration(process.uptime_s))))
+            if process.uptime_s
+            else '—'
+        ),
+    )
+    body.kv(_i(_ik.label_working_dir()), _path(process.cwd, body.value_cells))
+    body.kv(
+        _i(_ik.label_config_dir()),
         _path(process.config_dir, body.value_cells),
         notes=_redirect_notes(process.config_dir_redirected, "LOCAL_OPERATOR_CONFIG_DIR"),
     )
@@ -767,52 +953,64 @@ def _session_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState
     # records as silently producing a *plausible wrong answer* in a run that
     # believes it is isolated. Two adjacent rows are how a reader sees the
     # divergence instead of assuming it away.
-    body.kv("Cache dir", _path(process.cache_dir, body.value_cells))
+    body.kv(_i(_ik.label_cache_dir()), _path(process.cache_dir, body.value_cells))
     body.kv(
-        "Agent home",
+        _i(_ik.label_agent_home()),
         _path(process.agent_home, body.value_cells),
         notes=_redirect_notes(process.agent_home_redirected, "LOCAL_OPERATOR_HOME"),
     )
-    body.kv("Log dir", _path(process.log_dir, body.value_cells))
+    body.kv(_i(_ik.label_log_dir()), _path(process.log_dir, body.value_cells))
     port = f"{process.control_port}" if process.control_port else "—"
-    body.kv("Control port", port, note=f"protocol v{process.protocol}" if process.protocol else "")
+    body.kv(
+        _i(_ik.label_control_port()),
+        port,
+        note=(_i(_ik.session_protocol(protocol=str(process.protocol))) if process.protocol else ''),
+    )
 
 
 def _approval_notes(mode: str) -> tuple[str, ...]:
     if mode == "ask":
-        return ("every tool call is confirmed", "confirmed")
+        return (_i(_ik.approval_ask_full()), _i(_ik.approval_ask_short()))
     if mode == "auto":
-        return ("tool calls run without a prompt", "auto")
+        return (_i(_ik.approval_auto_full()), _i(_ik.approval_auto_short()))
     return ()
 
 
 def _redirect_notes(redirected: bool, variable: str) -> tuple[str, ...]:
     if not redirected:
         return ()
-    return (f"redirected by {variable}", "redirected by env", "redirected")
+    return (
+               _i(_ik.redirect_full(variable=str(variable))),
+               _i(_ik.redirect_short()),
+               _i(_ik.redirect_terse()),
+           )
 
 
 def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
     """Every session on this machine, outer before inner."""
     if snapshot is None:
-        body.header("Sessions on this machine", "scanning…", "scanning…")
-        body.note("Reading the session registry.")
+        body.header(
+            _i(_ik.heading_sessions_on_this_machine()),
+            _i(_ik.sessions_loading()),
+            _i(_ik.sessions_loading()),
+        )
+        body.note(_i(_ik.sessions_registry_loading()))
         return
     sessions = snapshot.sessions
     if not sessions.available:
         # A whole section that could not be gathered REPLACES its header rather
         # than annotating it — ``/session``'s proven ``Ledger unavailable``
         # shape. The prose says what failed and what to do, in one sentence.
-        body.header("Sessions unavailable")
+        body.header(_i(_ik.heading_sessions_unavailable()))
         body.note(
             # ``r`` re-runs exactly these probes and the footer advertises it two
             # rows below this sentence; "close and reopen" sent the reader the
             # long way round and quietly implied ``r`` would not help, which is
             # the opposite of true (UX round 1, U7).
-            "Could not scan the session registry. Press r to try again."
+            _i(_ik.sessions_registry_unavailable())
         )
         return
-    meta = f"{sessions.live} live · {sessions.total} total"
+    meta = _i(_ik.sessions_summary_full(live=sessions.live, total=sessions.total))
     # The condition, on the header where the fleet is enumerated: a runtime that
     # has stopped reporting is one of the ``total`` beside it and NOT one of the
     # ``live``, and naming it here is what stops a reader reading "1 live · 2
@@ -820,10 +1018,14 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
     # narrow frame, which is why the row below carries the same fact again —
     # before the uptime and memory that a reader can do without.
     if sessions.wedged:
-        meta += f" · {sessions.wedged} not answering"
-    body.header("Sessions on this machine", meta, f"{sessions.live} live")
+        meta += _i(_ik.sessions_not_answering_clause(wedged=str(sessions.wedged)))
+    body.header(
+        _i(_ik.heading_sessions_on_this_machine()),
+        meta,
+        _i(_ik.sessions_summary_short(live=sessions.live)),
+    )
     if not sessions.lines:
-        body.note("No other lop sessions are running on this machine.")
+        body.note(_i(_ik.sessions_empty()))
         return
     for line in sessions.lines:
         # THE PHASE IS READ FIRST, because the MARKER's ink is part of the answer (design
@@ -880,7 +1082,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # rightmost facts are the least identifying: which session it is and
         # whether it is not answering must survive to the narrowest frame,
         # while the memory figure is the one a reader can do without.
-        bits = ["this session"] if line.is_self else []
+        bits = [_i(_ik.sessions_self())] if line.is_self else []
         # THE HELD STATE, AHEAD OF THE STATE WORD AND OUTSIDE ITS BRANCH (design review
         # round 1, D1 for the placement; round 2, D6 for the gate). "not answering" alone
         # reads as "still settling", and before this change the bound RESOLVED such a
@@ -900,7 +1102,13 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # answering" is what a stale heartbeat establishes, and "wedged"
             # both invites a diagnosis the evidence does not support and hides
             # the fact that the process is still there.
-            bits.append(_t(_x.info_panel_not_answering()) if line.state == "wedged" else line.state)
+            bits.append(
+                (
+                    _t(_x.info_panel_not_answering())
+                    if line.state == 'wedged'
+                    else info_state(line.state)
+                ),
+            )
         # The measurement, ahead of uptime and memory for the same reason: on
         # this row the age is the reason the reader is looking at it at all.
         if line.state == "wedged":
@@ -935,9 +1143,9 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # the APP (``RuntimeServer.announce_retiring``), so the two cannot
         # disagree about whether this row is draining at all.
         if phase:
-            bits.append(update_short(phase, pair))
+            bits.append(info_update(phase, pair))
         if line.leaving:
-            bits.append(line.leaving)
+            bits.append(info_leaving(line.leaving))
         bits.append(format_duration(line.uptime_s))
         # BOTH of these are shed on a row that is not answering, not merely
         # ordered after the facts (design round 2, D4): usage is sampled for
@@ -963,8 +1171,8 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # both reads as two facts where there is one. The wedged guard makes
             # the same argument for the other state whose words already cover it.
             bits.append(_t(_x.info_panel_busy_word()))
-        metas = tuple(" · ".join(bits[:count]) for count in range(len(bits), 0, -1))
-        name = line.conversation_name or line.session_id or f"pid {line.pid}"
+        metas = tuple(join_info(" · ", bits[:count]) for count in range(len(bits), 0, -1))
+        name = line.conversation_name or line.session_id or _i(_ik.sessions_pid(pid=str(line.pid)))
         # ``short_meta`` below the note floor: the WORDS survive to the
         # narrowest frame, where the meta ladder is otherwise shed wholesale.
         # This row's whole point is that a reader can tell it apart from the
@@ -988,7 +1196,11 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # answering" (a bound that fired and was held means nothing is reporting) and
             # it is the fact that tells the reader a person is needed. The wide frame
             # keeps both, so nothing is lost that fits.
-            short_meta = HELD_STATE_WORD if line.stall_held else "not answering"
+            short_meta = (
+                             HELD_STATE_WORD
+                             if line.stall_held
+                             else _i(_x.info_panel_not_answering())
+                         )
         elif phase:
             # The SHELF form, keyed by the PHASE the row is in — the failed phase
             # included, so a fleet whose only news is an abandoned update says so at
@@ -1001,11 +1213,10 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         body.marked(glyph, ink, name, metas=metas, short_meta=short_meta)
     if sessions.build_skew:
         body.note(
-            "Live sessions are running more than one build — a change may look "
-            "absent in the window that has not been restarted."
+            _i(_ik.sessions_build_skew())
         )
     if not sessions.usage_available:
-        body.note("Memory could not be measured on this host.")
+        body.note(_i(_ik.sessions_memory_unavailable()))
 
 
 def _counted(value: int, probe: str, snapshot: "InfoSnapshot | None") -> str:
@@ -1035,7 +1246,7 @@ def _counted(value: int, probe: str, snapshot: "InfoSnapshot | None") -> str:
 #: ``/info`` pluralises everywhere else (``3 keys``, ``1 session is not answering``),
 #: so an unpluralised count reads as unfinished rather than as house style, and
 #: a single-window host is the state every fresh install starts in.
-_plural = plural
+_plural = info_plural
 
 
 def _runtimes(sessions: SessionsInfo) -> int:
@@ -1071,11 +1282,8 @@ def _fleet_caveats(body: _Body, sessions: SessionsInfo | None) -> None:
         # "1 session runs an older build and do not report" — reachable as soon
         # as the fleet is one restart from updated, i.e. the tail of the very
         # rollout this caveat exists for.
-        one = count == 1
         body.note(
-            f"{_plural(count, 'session')} {'runs' if one else 'run'} an older build and "
-            f"{'does' if one else 'do'} not report subagents — "
-            "the fleet total is a lower bound."
+            _i(_ik.fleet_caveats_lower_bound(count=count))
         )
     if sessions.wedged:
         # The shared sentence, NOT a second copy: it names the measured age, the
@@ -1116,7 +1324,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
     # is the only short form whose width grows with its digits.
     shorts: tuple[str, ...] = ()
     if sessions is None or not sessions.available:
-        meta = f"this session: {own} running · fleet checking…"
+        meta = _i(_ik.agents_loading_full(own=own))
         # The hedge sheds LAST, not first. The bare ``{own} running`` short
         # form dropped ``fleet checking…`` entirely, so for the ~900 ms before
         # the worker returns a narrow frame showed a number that is about to be
@@ -1124,8 +1332,12 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # rendered as measured" fault the rest of this section exists to
         # prevent. ``fleet …`` keeps the fact that a second half is still
         # coming; only its wording is compressed.
-        short = f"{own} running"
-        shorts = (short + " · fleet checking…", f"{own}r · fleet …", short)
+        short = _i(_ik.agents_loading_short(own=own))
+        shorts = (
+                     _i(_ik.agents_loading_mid(short=str(short))),
+                     _i(_ik.agents_loading_terse(own=str(own))),
+                     short,
+                 )
     else:
         runtimes = _runtimes(sessions)
         # ``≥`` — and the reason it is not simply the total — is the whole of
@@ -1145,20 +1357,31 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         bound = "≥" if sessions.subagents_unreported else ""
         total = sessions.fleet_trajectories
         if total:
-            meta = f"{_plural(runtimes, 'runtime')} · {bound}{_plural(total, 'trajectory')}"
+            meta = _i(_ik.agents_summary_full(runtimes=runtimes, bound=bound, total=total))
             # BOTH halves survive the shed. The operator's question is
             # explicitly two-part ("how many runtimes and how many
             # trajectories"), so dropping the denominator leaves the count
             # unanchored — N trajectories across how many processes? The
             # abbreviation is what makes keeping both affordable.
-            short = f"{runtimes}rt · {bound}{total}tj"
+            short = _i(
+                        _ik.agents_summary_terse(
+                            runtimes=str(runtimes),
+                            bound=str(bound),
+                            total=str(total),
+                        ),
+                    )
         elif bound:
             # Nothing measured AND nothing known: ``0`` here would be pure
             # fabrication, so the count is refused outright rather than hedged.
             # ``—`` is the screen's existing "we looked and could not tell",
             # not a fourth vocabulary.
-            meta = f"{_plural(runtimes, 'runtime')} · trajectories {UNKNOWN}"
-            short = f"{runtimes}rt · tj {UNKNOWN}"
+            meta = _i(
+                       _ik.agents_unknown_full(
+                           plural=str(_plural(runtimes, 'runtime')),
+                           UNKNOWN=str(UNKNOWN),
+                       ),
+                   )
+            short = _i(_ik.agents_unknown_terse(runtimes=str(runtimes), UNKNOWN=str(UNKNOWN)))
         elif sessions is not None and sessions.fleet_subagents_queued:
             # Measured, and measured as zero RUNNING — but not as nothing.
             # ``fleet_trajectories`` deliberately excludes queued children
@@ -1170,7 +1393,12 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # exist to prevent, reached through arithmetic rather than
             # through an unmeasured term.
             queued = sessions.fleet_subagents_queued
-            meta = f"{_plural(runtimes, 'runtime')} · none running · {queued} queued"
+            meta = _i(
+                       _ik.agents_queued_full(
+                           plural=str(_plural(runtimes, 'runtime')),
+                           queued=queued,
+                       ),
+                   )
             # Two rungs, because this short form is the first whose width grows
             # with its DIGITS: a fleet-wide queued sum is not bounded by
             # ``max_running``, so two digits are ordinary on a busy host and
@@ -1179,18 +1407,21 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # can already infer from a queued-only header, whereas dropping a
             # count would lose a measured fact. The ``truncate`` in ``header``
             # is the backstop beneath both.
-            short = f"{runtimes}rt · 0r · {queued}q"
-            shorts = (short, f"{runtimes}rt · {queued}q")
+            short = _i(_ik.agents_queued_short(runtimes=str(runtimes), queued=str(queued)))
+            shorts = (
+                         short,
+                         _i(_ik.agents_queued_terse(runtimes=str(runtimes), queued=str(queued))),
+                     )
         else:
             # Every runtime reported, every one reported zero, and nothing is
             # waiting either. This is the one state in which the bare word is
             # earned: it is a measurement, and ``none running`` reads better
             # than ``0``.
-            meta = f"{_plural(runtimes, 'runtime')} · none running"
+            meta = _i(_ik.agents_quiet_full(plural=str(_plural(runtimes, 'runtime'))))
             # ``none`` and not ``0tj``: the bare-zero rule does not relax on a
             # narrow frame, and the word costs one cell more than the digit.
-            short = f"{runtimes}rt · none"
-    body.header("Agents and subagents", meta, short, shorts=shorts)
+            short = _i(_ik.agents_quiet_short(runtimes=str(runtimes)))
+    body.header(_i(_ik.heading_agents_and_subagents()), meta, short, shorts=shorts)
     if sessions is not None and sessions.available:
         # The header's runtime count broken down. Both numbers name a live
         # pid — that is why the header adds them — and the split is what tells
@@ -1199,9 +1430,14 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # this line and the caveat below it: the split is a reading of the
         # records, and which of them stopped reporting is what the numbers say.
         body.kv(
-            "Runtimes",
-            f"{sessions.live} live"
-            + (f" · {sessions.wedged} not answering" if sessions.wedged else ""),
+            _i(_ik.label_runtimes()),
+            _i(
+                _ik.agents_runtimes(
+                    live=sessions.live,
+                    has_wedged=str('yes' if sessions.wedged else 'no'),
+                    wedged=str(sessions.wedged),
+                ),
+            ),
         )
         # Same rule as the header, one row down. Three zeros in a row
         # (``0 total — 0 sessions + 0 subagents``) under a visible running tree
@@ -1212,20 +1448,32 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # only fact the row actually has.
         if sessions.subagents_unreported and not sessions.fleet_trajectories:
             body.kv(
-                "Trajectories",
+                _i(_ik.label_trajectories()),
                 UNKNOWN,
                 notes=(
-                    f"{sessions.subagents_unreported} of "
-                    f"{_runtimes(sessions)} runtimes did not report",
-                    f"{sessions.subagents_unreported} did not report",
-                    "not reported",
+                    _i(
+                        _ik.agents_unreported_full(
+                            subagents_unreported=str(sessions.subagents_unreported),
+                            runtimes=_runtimes(sessions),
+                        ),
+                    ),
+                    _i(
+                        _ik.agents_unreported_short(
+                            subagents_unreported=str(sessions.subagents_unreported),
+                        ),
+                    ),
+                    _i(_ik.agents_unreported_terse()),
                 ),
             )
         else:
             bound = "≥" if sessions.subagents_unreported else ""
             addends = (
-                f"{_plural(sessions.fleet_session_trajectories, 'session')} + "
-                f"{_plural(sessions.fleet_subagents_running, 'subagent')}"
+                _i(
+                    _ik.agents_addends(
+                        sessions=sessions.fleet_session_trajectories,
+                        subagents=sessions.fleet_subagents_running,
+                    ),
+                )
             )
             # Queued rides the ADDENDS, not the total: it is not a trajectory
             # (nothing is being spent yet), so adding it to the sum would
@@ -1235,7 +1483,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # waiting work is named beside the total rather than folded into
             # it.
             waiting = (
-                f" · {sessions.fleet_subagents_queued} queued"
+                _i(_ik.agents_queued_suffix(fleet_subagents_queued=sessions.fleet_subagents_queued))
                 if sessions.fleet_subagents_queued
                 else ""
             )
@@ -1253,18 +1501,39 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # ``queued`` rows directly beneath it, the same bargain ``5rt·9tj``
             # makes in the header.
             terse: tuple[str, ...] = (
-                (f"{sessions.fleet_subagents_queued} queued", f"{sessions.fleet_subagents_queued}q")
+                (
+                    _i(
+                        _ik.agents_queued_count(
+                            fleet_subagents_queued=sessions.fleet_subagents_queued,
+                        ),
+                    ),
+                    _i(
+                        _ik.agents_queued_count_terse(
+                            fleet_subagents_queued=str(sessions.fleet_subagents_queued),
+                        ),
+                    ),
+                )
                 if sessions.fleet_subagents_queued
+                # Pure arithmetic, not a shortened English noun phrase.
                 else (f"{sessions.fleet_session_trajectories}+{sessions.fleet_subagents_running}",)
             )
             body.kv(
-                "Trajectories",
-                f"{bound}{sessions.fleet_trajectories} total",
+                _i(_ik.label_trajectories()),
+                _i(
+                    _ik.agents_trajectories_total(
+                        bound=str(bound),
+                        fleet_trajectories=sessions.fleet_trajectories,
+                    ),
+                ),
                 notes=(
                     addends
                     + waiting
                     + (
-                        f" · {sessions.subagents_unreported} did not report"
+                        _i(
+                            _ik.agents_unreported_suffix(
+                                subagents_unreported=str(sessions.subagents_unreported),
+                            ),
+                        )
                         if sessions.subagents_unreported
                         else ""
                     ),
@@ -1273,8 +1542,11 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
                 ),
             )
     if agents is not None:
-        body.kv("Agent profiles", _counted(agents.profiles, "agents.profiles", snapshot))
-        body.kv("Teams", _counted(agents.teams, "agents.teams", snapshot))
+        body.kv(
+            _i(_ik.label_agent_profiles()),
+            _counted(agents.profiles, 'agents.profiles', snapshot),
+        )
+        body.kv(_i(_ik.label_teams()), _counted(agents.teams, "agents.teams", snapshot))
     queued = agents.queued if agents else live.queued
     settled = agents.settled if agents else live.settled
     if unread:
@@ -1282,7 +1554,11 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # rather than zero. ``UNKNOWN`` and a named reason, the same treatment
         # ``_counted`` gives a failed probe — the alternative is the screen
         # asserting "no subagents" about a session it could not ask.
-        body.kv("This session", UNKNOWN, notes=("could not read the roster",))
+        body.kv(
+            _i(_ik.heading_this_session()),
+            UNKNOWN,
+            notes=(_i(_ik.agents_roster_unreadable()),),
+        )
     elif running or queued or settled:
         # Only when there is something to count. On a fresh session a
         # ``0 running · 0 queued`` row directly above "No subagents have been
@@ -1293,31 +1569,53 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # ``This session`` and not ``Subagents``: with a fleet total two
             # rows above it, an unqualified label is ambiguous about which of
             # the two numbers it belongs to.
-            "This session",
-            f"{running} running · {queued} queued" + (f" · depth {depth}" if depth else ""),
+            _i(_ik.heading_this_session()),
+            _i(
+                _ik.agents_session_full(
+                    running=running,
+                    queued=queued,
+                    has_depth=str('yes' if depth else 'no'),
+                    depth=str(depth),
+                ),
+            ),
             # ``depth`` sheds FIRST, before ``queued``: it is context about the
             # tree's shape, while the two counts are the answer. Without a rung
             # of its own the suffix was cropped mid-word at 60-64 columns,
             # ending the row on the bare label "depth" — a regression against
             # the pre-fleet row, which was shorter but always complete.
             values=(
-                f"{running} running · {queued} queued" + (f" · depth {depth}" if depth else ""),
-                f"{running} running · {queued} queued",
-                f"{running}r · {queued}q",
+                _i(
+                    _ik.agents_session_full(
+                        running=running,
+                        queued=queued,
+                        has_depth=str('yes' if depth else 'no'),
+                        depth=str(depth),
+                    ),
+                ),
+                _i(_ik.agents_session_short(running=running, queued=queued)),
+                _i(_ik.agents_session_terse(running=str(running), queued=str(queued))),
             ),
             # "settled (retained)" and not "settled": ``_evict_overflow`` drops
             # settled records past a cap, so this under-reports by design, and a
             # count that silently under-reports inside a bug report is worse
             # than one that says what it counts.
-            notes=(f"{settled} settled (retained)", f"{settled} settled", f"{settled} done"),
+            notes=(
+                      _i(_ik.agents_retained_full(settled=settled)),
+                      _i(_ik.agents_retained_short(settled=settled)),
+                      _i(_ik.agents_retained_terse(settled=settled)),
+                  ),
         )
     max_running = agents.max_running if agents else live.max_running
     at_capacity = agents.at_capacity if agents else live.at_capacity
     if max_running is not None:
         body.kv(
-            "Subagent capacity",
-            f"{max_running} concurrent",
-            notes=("at capacity — new launches queue", "at capacity") if at_capacity else (),
+            _i(_ik.label_subagent_capacity()),
+            _i(_ik.agents_capacity(max_running=max_running)),
+            notes=(
+                      (_i(_ik.agents_capacity_full()), _i(_ik.agents_capacity_short()))
+                      if at_capacity
+                      else ()
+                  ),
             value_style="warning" if at_capacity else "fg",
         )
     if not tree:
@@ -1326,29 +1624,29 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # a roster nobody managed to read. The empty tree here is the
             # absence of an answer, and saying otherwise is the exact lie the
             # UNKNOWN row above exists to prevent.
-            body.note("This session's subagent roster could not be read.")
+            body.note(_i(_ik.agents_roster_failure()))
         else:
             # The empty state pairs a statement of FACT with a statement of why
             # it is fine, matching ``/analytics``' own empty shape. The section
             # header above is the evidence that the screen looked.
-            body.note("No subagents have been launched in this session.")
-            body.note("Subagents appear here while a task is running.")
+            body.note(_i(_ik.agents_empty()))
+            body.note(_i(_ik.agents_waiting()))
         _fleet_caveats(body, sessions)
         return
     body.blank()
     for node in tree:
         glyph, ink = _SUBAGENT_MARKS.get(node.status, (NOTICE_GLYPHS["info"], "dim"))
-        bits = [node.status or "unknown"]
+        bits = [info_state(node.status)]
         if node.agent_role and node.agent_role != node.label:
             bits.insert(0, node.agent_role)
         prefix = _row_prefix(node.depth)
-        row = Text()
+        row = InfoRow()
         row.append("  " + prefix, style=semantic_style("dim"))
         row.append(f"{glyph} ", style=semantic_style(ink))
         # Shed whole items, longest first: the STATUS is the fact this section
         # exists to report, so the role qualifier goes before it does.
-        metas = tuple(" · ".join(bits[index:]) for index in range(len(bits)))
-        budget = max(8, body.width - row.cell_len - len(metas[0]) - 2)
+        metas = tuple(join_info(" · ", bits[index:]) for index in range(len(bits)))
+        budget = max(8, body.width - row.cell_len - cell_len(metas[0]) - 2)
         shown = truncate_cells(node.label or node.job_id, budget)
         row.append(shown, style=semantic_style("fg"))
         if body.width >= _NOTE_MIN:
@@ -1359,8 +1657,9 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             pad = max(1, _MARK_LABEL_CELL + 2 - cell_len(shown) - cell_len(prefix))
             available = body.width - row.cell_len - pad
             for candidate in metas:
-                if len(candidate) <= available:
-                    row.append(" " * pad + candidate, style=semantic_style("dim"))
+                if cell_len(candidate) <= available:
+                    row.append(" " * pad)
+                    row.append(candidate, style=semantic_style("dim"))
                     break
         row.truncate(body.width, overflow="crop")
         body.lines.append(row)
@@ -1373,7 +1672,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # cap ANYWHERE in the tree, so it is a section summary, not a child of
         # any row. A `└` that connects to nothing is worse than no glyph, and
         # the depth it summarises is named instead of mimed.
-        row = Text()
+        row = InfoRow()
         row.append(
             # Raw digit strings for both counts: the pre-extraction
             # f-string printed them via str(), so 1200 must stay 1200.
@@ -1387,16 +1686,14 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
     # TREE is not, and which is which has to be said in words.
     if agents is not None and agents.cross_session_known:
         body.note(
-            "Subagent trees are in-process state, so only this session's is drawn. "
-            "Other sessions report counts."
+            _i(_ik.agents_tree_counts())
         )
     else:
         # Nobody else reported, so the older text is still exactly right: this
         # screen genuinely knows nothing about other windows' children, and
         # promising counts it does not have would be the worse error.
         body.note(
-            "Subagent trees are in-process state, so only this session's is visible. "
-            "Other sessions report busy, pending and memory."
+            _i(_ik.agents_tree_legacy())
         )
     _fleet_caveats(body, sessions)
 
@@ -1407,25 +1704,29 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
     Putting these nine rows above the tree would push the parallelism question
     — the operator's stated motivation — below two folds.
     """
-    body.header("Environment", "for bug reports", "environment")
+    body.header(
+        _i(_ik.heading_environment()),
+        _i(_ik.env_description()),
+        _i(_ik.env_description_short()),
+    )
     env = snapshot.env if snapshot else None
     size = (env.terminal_size if env else live.terminal_size) or None
     body.kv(
-        "Terminal",
+        _i(_ik.label_terminal()),
         # ``checking…`` while the worker is out, NOT ``—``: an em-dash means "we
         # looked and could not tell" everywhere else on this screen, so a first
         # frame using it for a value still arriving told the reader their TERM
         # could not be determined — mildly alarming on the one screen about what
         # is actually running, and three loading vocabularies on one frame is
         # one too many (UX round 1, U6).
-        ((env.term or "—") if env else "checking…"),
+        ((env.term or "—") if env else _i(_ik.install_loading())),
         note=f"{size[0]}x{size[1]}" if size else "",
         value_style="fg" if env else "dim",
     )
-    body.kv("Theme", (env.theme if env else live.theme) or "—")
+    body.kv(_i(_ik.label_theme()), (env.theme if env else live.theme) or "—")
     approvals = (env.approval_mode if env else live.approval_mode) or ""
     body.kv(
-        "Approvals",
+        _i(_ik.label_approvals()),
         approvals or "—",
         # An UNKNOWN mode gets no note at all. Falling through to the "auto"
         # wording would tell a reader that tool calls run unconfirmed on the
@@ -1440,16 +1741,28 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
     mcp_failed = env.mcp_failed if env else live.mcp_failed
     if mcp_configured:
         body.kv(
-            "MCP servers",
-            f"{mcp_connected} of {mcp_configured} connected",
+            _i(_ik.label_mcp_servers()),
+            _i(
+                _ik.env_mcp_connected(
+                    mcp_connected=str(mcp_connected),
+                    mcp_configured=str(mcp_configured),
+                ),
+            ),
             # SETTLING suppresses the failure tally rather than reporting it:
             # OAuth servers routinely miss the 250 ms startup gate, and naming
             # one as failed mid-handshake produces a bug report about a server
             # that came up a second later.
             notes=(
-                ("still connecting", "connecting")
+                (_i(_ik.env_mcp_connecting_full()), _i(_ik.env_mcp_connecting_short()))
                 if mcp_settling
-                else ((f"{mcp_failed} failed", "failed") if mcp_failed else ())
+                else ((
+                          (
+                              _i(_ik.env_mcp_failed_full(mcp_failed=mcp_failed)),
+                              _i(_ik.env_mcp_failed_short()),
+                          )
+                          if mcp_failed
+                          else ()
+                      ))
             ),
             value_style="warning" if mcp_failed and not mcp_settling else "fg",
         )
@@ -1457,24 +1770,24 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
             for name, message in env.mcp_failures:
                 body.marked(NOTICE_GLYPHS["error"], "danger", f"{name}: {message}", indent=2)
     else:
-        body.kv("MCP servers", "none configured", value_style="dim")
+        body.kv(_i(_ik.label_mcp_servers()), _i(_ik.env_mcp_empty()), value_style="dim")
     if env is None:
-        body.kv("Browser", "checking…", value_style="dim")
+        body.kv(_i(_ik.label_browser()), _i(_ik.install_loading()), value_style="dim")
         return
     body.kv(
-        "Browser",
-        env.browser_backend or "none",
+        _i(_ik.label_browser()),
+        env.browser_backend or _i(_ik.env_none()),
         notes=(env.browser_name,) if env.browser_name else (),
     )
     body.kv(
-        "Mobile relay",
-        "installed" if env.mobile_installed else "not installed",
-        notes=("healthy", "up") if env.mobile_healthy else (),
+        _i(_ik.label_mobile_relay()),
+        _i(_ik.env_mobile_installed()) if env.mobile_installed else _i(_ik.env_mobile_absent()),
+        notes=(_i(_ik.env_mobile_healthy()), _i(_ik.env_mobile_up())) if env.mobile_healthy else (),
     )
-    body.kv("Multiplexer", env.multiplexer or "none")
-    body.kv("Guides", str(env.guides))
+    body.kv(_i(_ik.label_multiplexer()), env.multiplexer or _i(_ik.env_none()))
+    body.kv(_i(_ik.label_guides()), str(env.guides))
     if env.skills:
-        body.kv("Skills", str(env.skills))
+        body.kv(_i(_ik.label_skills()), str(env.skills))
     # NAMES, never values, lengths, prefixes or hashes. The diagnostic question
     # is "is the key even set?", which a name answers completely.
     names = list(env.credential_keys)
@@ -1487,11 +1800,11 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
         # support when the probe raised — the reader is told something false and
         # must cross-reference the degraded block to discover it (QA round 2,
         # Q8).
-        body.kv("Credentials", UNKNOWN, notes=("could not read",))
+        body.kv(_i(_ik.label_credentials()), UNKNOWN, notes=(_i(_ik.env_credentials_unreadable()),))
     else:
         body.kv(
-            "Credentials",
-            f"{len(names)} keys",
+            _i(_ik.label_credentials()),
+            _i(_ik.env_credential_count(count=len(names))),
             # COUNT the overflow, never crop it. The middle rung used to be
             # `truncate_cells(keys, 30)`, which produced `OPENAI_API…` — a crop
             # wearing a ladder's clothing, and precisely the `8.8k thin`
@@ -1499,9 +1812,18 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
             # A half-printed key cannot be told from `OPENAI_API_KEY_2` or a
             # typo, which is the exact ambiguity this row exists to resolve.
             notes=(
-                (keys, f"{names[0]} +{len(names) - 1} more", f"{len(names)} set")
+                (
+                    keys,
+                    _i(
+                        _ik.env_credentials_more(
+                            names=str(names[0]),
+                            remaining=str(len(names) - 1),
+                        ),
+                    ),
+                    _i(_ik.env_credentials_set(count=len(names))),
+                )
                 if len(names) > 1
-                else (keys,) if names else ("none stored",)
+                else (keys,) if names else (_i(_ik.env_credentials_empty()),)
             ),
         )
 
@@ -1532,13 +1854,28 @@ def build_info_report(
         body.blank()
         # Named, not swallowed. "cache dir: —" without a reason costs the
         # reporter a second round trip, which is the cost this screen removes.
-        body.header("Could not read", f"{len(snapshot.degraded)} probes", "degraded")
+        body.header(
+            _i(_ik.heading_could_not_read()),
+            _i(_ik.report_degraded_count(count=len(snapshot.degraded))),
+            _i(_ik.report_degraded()),
+        )
         for name, reason in snapshot.degraded:
             body.note(f"{name}: {reason}")
     if snapshot is not None and snapshot.captured_at:
         body.blank()
         # A wall-clock stamp so a pasted report is unambiguous about WHEN.
-        body.note("captured " + time.strftime("%H:%M:%S", time.localtime(snapshot.captured_at)))
+        body.note(
+            _i(
+                _ik.report_captured(
+                    time_strftime=str(
+                                      time.strftime(
+                                          '%H:%M:%S',
+                                          time.localtime(snapshot.captured_at),
+                                      ),
+                                  ),
+                ),
+            ),
+        )
     return body.to_text()
 
 
@@ -1637,11 +1974,13 @@ class InfoScreen(ModalScreen[None]):
             return _DEFAULT_CARD_WIDTH
 
     def _title_text(self) -> Text:
-        return Text(
+        row = InfoRow(
             _t(_x.info_panel_install_info_heading()) + "─" * max(1, self._card_width()),
             no_wrap=True,
             overflow="crop",
         )
+        row.truncate(self._card_width(), overflow="crop")
+        return paint_info_row(row)
 
     def _report_text(self) -> Text:
         return build_info_report(self.snapshot, self.live, self._card_width())
@@ -1680,8 +2019,8 @@ class InfoScreen(ModalScreen[None]):
         discoverable feature here, scroll is guessable.
         """
         if self._card_width() < _NOTE_MIN:
-            return f"esc back · {INFO_COPY_KEY} copy"
-        return f"esc / q back · {INFO_COPY_KEY} copy · r refresh"
+            return _i(_ik.info_hint_short(INFO_COPY_KEY=str(INFO_COPY_KEY)))
+        return _i(_ik.info_hint_full(INFO_COPY_KEY=str(INFO_COPY_KEY)))
 
     def on_resize(self) -> None:
         # Column arithmetic is a function of the card width, so a resize is a
@@ -1693,9 +2032,14 @@ class InfoScreen(ModalScreen[None]):
         scroll = getattr(self, "_scroll", None)
         hint = getattr(self, "_hint", None)
         if scroll is not None and hint is not None and hint.is_mounted:
-            hint.update(
-                self._info_hint() + (_t(_x.panels_scroll_hint()) if scroll.max_scroll_y > 0 else "")
-            )
+            row = InfoRow(
+                      (
+                          self._info_hint()
+                          + (_t(_x.panels_scroll_hint()) if scroll.max_scroll_y > 0 else '')
+                      ),
+                  )
+            row.truncate(self._card_width(), overflow="crop")
+            hint.update(paint_info_row(row))
 
     def render_lines_for_test(self) -> list[str]:
         """The report as plain strings — what a user actually reads."""
@@ -1728,7 +2072,7 @@ class InfoScreen(ModalScreen[None]):
             self.app.bell()
             notice = getattr(self.app, "_system_notice", None)
             if notice is not None:
-                notice("still reading this install — try ctrl+r again in a moment", "warning")
+                notice(_i(_ik.action_copy_report_loading()), "warning")
             return
         payload = build_export(self.snapshot)
         put = getattr(self.app, "_put_on_clipboard", None)
@@ -1746,7 +2090,7 @@ class InfoScreen(ModalScreen[None]):
         # every other copy gesture and must not claim redaction for them.
         notice = getattr(self.app, "_system_notice", None)
         if notice is not None:
-            notice("/info report copied — paths relativised, no secrets included", "info")
+            notice(_i(_ik.action_copy_report_redacted()), "info")
 
     def action_refresh_report(self) -> None:
         """Re-run the probes on demand. NOT on a timer.
