@@ -3930,6 +3930,27 @@ class CompactionEndEvent(AgentEvent[Literal["compaction_end"]]):
     #: Optional and defaulting to ``None`` so a host that predates it (and
     #: every ordinary size-triggered pass) is unchanged.
     detail: str | None = None
+    #: Which SIZE term the gate was over when this pass ran, so a reader of a
+    #: recorded session need not reconstruct it: ``"tokens"``,
+    #: ``"wire_bytes"`` (the serialized-request trigger, which fires on image
+    #: weight far below any token line), ``"tokens+wire_bytes"``, or
+    #: ``"none"`` for a pass neither size term forced (manual, advised, idle;
+    #: ``reason`` and ``detail`` say which). Without it a byte-fired pass at
+    #: 35k tokens of a 400k threshold is indistinguishable from a misfire, and
+    #: the three episodes that motivated the field had to be diagnosed from
+    #: estimated artifact sizes. ``""`` when the pass failed or the session
+    #: could not measure. Diagnostic only: no host branches on it.
+    trigger: str = ""
+    #: Serialized request size (``compaction.tokens.estimate_wire_bytes``, a
+    #: BYTE ruler, never comparable with the token figures above) of the
+    #: history the pass planned against, and of the committed context the next
+    #: request sends. ``wire_bytes_trigger`` is the resolved soft byte trigger
+    #: the pair is read against (0 = disabled), so ``trigger - after`` is the
+    #: room the pass left before the next byte-fired one. All three default to
+    #: 0 so a host that predates them, and every failed pass, is unchanged.
+    wire_bytes_before: int = 0
+    wire_bytes_after: int = 0
+    wire_bytes_trigger: int = 0
 
 
 class RetryStartEvent(AgentEvent[Literal["retry_start"]]):

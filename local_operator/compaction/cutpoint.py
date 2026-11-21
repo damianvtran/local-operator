@@ -817,10 +817,10 @@ def advance_cut_to_wire_band(
     with ~0.4 frame of headroom and fired again one or two tool groups later
     (measured bursts of consecutive passes, each rewriting the prompt prefix,
     so the request after a pass read 27.5% cache-read against ~80% in steady
-    state). The auto-continue gate already defines "real headroom" as
-    ``WIRE_RECOVERY_BAND`` x trigger; this applies that same definition to the
-    cut itself, so a byte-fired pass lands inside the band, not beside the
-    trigger.
+    state). The caller passes its landing target as ``band_bytes``
+    (``thresholds.wire_landing_bytes``: ``WIRE_LANDING_BAND`` x trigger, never
+    above the ``WIRE_RECOVERY_BAND`` line the auto-continue gate accepts), so
+    a byte-fired pass lands with real room under the trigger, not beside it.
 
     ``kept_bytes(i)`` is the CALLER's ruler for what the request would weigh
     if the cut were ``i``. It is a callable, not a ruler imported here,
