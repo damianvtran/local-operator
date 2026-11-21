@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 import yaml
+from rich.cells import cell_len
 
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
@@ -190,7 +191,9 @@ async def _surfaces(
     with monkeypatch.context() as patch:
         patch.setattr(view, "_detail_width", lambda: 200)
         out["confirm_long"] = list(view._confirm_parts())
-        patch.setattr(view, "_detail_width", lambda: 30)
+        # 64 cells: the long contract overruns, the short one fits whole with
+        # the full name. Narrower widths shed further (see the 60-column test).
+        patch.setattr(view, "_detail_width", lambda: 64)
         out["confirm_short"] = list(view._confirm_parts())
     view._confirm_delete = None
 
@@ -580,3 +583,235 @@ async def test_shipped_catalogue_paints_every_surface(
         if k in ("foot_rest", "notice_discarded", *_PLAIN_SURFACES) and v == ENGLISH[k]
     }
     assert not left, left
+
+
+# -- PR #4405 round-1 remediation ------------------------------------------
+
+
+def _boom(exc: BaseException):
+    def action() -> None:
+        raise exc
+
+    return action
+
+
+@pytest.mark.asyncio
+async def test_stored_error_and_notice_follow_a_live_language_switch(
+    pseudo_fr, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: a message already ON SCREEN re-resolves when the language moves.
+
+    Negative control: storing the rendered string (the round-1 head) keeps
+    `could not save: E123` in English after the switch and fails here.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        view._save(_boom(OSError("E123")))
+        assert view.error_text == "could not save: E123"
+        text.set_active_locale("fr")
+        view._paint_detail()
+        assert view.error_text == "FR could not save: E123", view.error_text
+        assert "FR could not save: E123" in view._detail_text.plain
+        text.set_active_locale("en")
+        view._error = ""
+        settings_io.write_chains(view._manager, {"default": ["openai/gpt-4o"]}, base={})
+        view._repaint()
+        _select(view, _first_of(Kind.CASCADE).key)
+        view.action_reset()
+        refused = "r resets one setting; delete a chain with d on its row"
+        assert view.notice_text == refused
+        text.set_active_locale("fr")
+        view._paint_detail()
+        assert view.notice_text == "FR " + refused, view.notice_text
+        assert ("FR " + refused) in view._detail_text.plain
+
+
+def test_detail_param_keeps_zwnj_and_zwj_and_blanks_only_forbidden_controls() -> None:
+    """R2: only what the display boundary refuses is blanked.
+
+    Negative control: the round-1 head blanked every `Cf`, turning the Urdu
+    ZWNJ and the emoji ZWJ below into spaces.
+    """
+    urdu = "نی‌لا"  # ZWNJ inside one word
+    emoji = "👩‍💻"  # woman + ZWJ + laptop
+    hostile = "\t\u202e\u2066\u2028x"
+    got = sv_mod._detail_param(f"{urdu} {emoji} {hostile}")
+    assert got == f"{urdu} {emoji}     x", repr(got)
+
+
+@pytest.mark.asyncio
+async def test_urdu_save_error_keeps_zwnj_and_zwj_on_the_painted_row(
+    shipped_tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 end to end: the real `ur` projection admits ZWNJ/ZWJ, so they survive."""
+    urdu = "نی‌لا"
+    emoji = "👩‍💻"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        text.set_active_locale("ur")
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        view._save(_boom(OSError(f"{urdu} {emoji}")))
+        view._paint_detail()
+    assert urdu in view.error_text and emoji in view.error_text, repr(view.error_text)
+
+
+@pytest.mark.asyncio
+async def test_urdu_save_against_an_unreadable_config_reports_instead_of_crashing(
+    shipped_tree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1: the REAL `ConfigUnreadableError` names `…/config/config.yml`.
+
+    With `{file}` declared technical, its span matched `config.yml` inside that
+    path too, after a `/`, and the boundary raised `technical status span must
+    include its whole prefix` from the handler reporting the failure.
+    Negative control: re-adding `file` to `technical_params` raises here.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        text.set_active_locale("ur")
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        config = tmp_path / "config" / "config.yml"
+        config.write_text("values: [unclosed\n", encoding="utf-8")
+        setting = _first_of(Kind.BOOL)
+        assert view._save(lambda: settings_io.reset_setting(view._manager, setting)) is False
+        view._paint_detail()
+    shipped = json.loads((EN_ROOT / "ur" / f"{NS}.json").read_text(encoding="utf-8"))
+    template = shipped[f"{NS}.error.config_unreadable"]
+    lead = template.split("{error}")[0].replace("{file}", "config.yml")
+    assert lead in view.error_text, view.error_text
+    assert str(config) in view.error_text, view.error_text
+
+
+_SHIPPED_PLUS_EN = ["en", "fr", "es", "zh-CN", "ru", "vi", "hi", "ur"]
+_STRIP_TAIL = "\u2066\u2067\u2068\u2069 "
+
+
+def _assert_balanced(plain: str, what: str) -> None:
+    # A cut or shed `ur` line must close every isolate it opens, or the
+    # direction leaks into whatever the terminal paints next.
+    assert sv_mod._open_isolates(plain) == 0, (what, plain)
+    assert plain.count("\u2069") == sum(plain.count(c) for c in "\u2066\u2067\u2068"), (
+        what,
+        plain,
+    )
+
+
+def _assert_one_row(view: SettingsView, plain: str, whole: str, what: str) -> None:
+    width = view._detail_width()
+    # The budget IS the painted row: no hidden second line can exist.
+    assert cell_len(plain) <= width, (what, cell_len(plain), width, plain)
+    _assert_balanced(plain, what)
+    tail = plain.rstrip(_STRIP_TAIL)
+    assert not tail.rstrip("…").rstrip(_STRIP_TAIL).endswith("·"), (what, plain)
+    if cell_len(whole) > width:
+        assert "…" in plain, (what, plain)
+    else:
+        assert plain == whole, (what, plain, whole)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", _SHIPPED_PLUS_EN)
+async def test_detail_band_never_hides_a_wrapped_line_at_60_columns(
+    shipped_tree, locale: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1/Q2: at 60x20 the one-row band cuts with `…`, never wraps out of sight.
+
+    Negative control: on the round-1 head the fr/ru discarded notice and the
+    ru delete ask exceed the 58-cell row with no `…`, and the ask keeps a
+    trailing `·` once the frame clips it.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await pilot.pause()
+        text.set_active_locale(locale)
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        # The budget never exceeds the widget's real content width (geometry,
+        # not belief): a line within it cannot wrap to a hidden second row.
+        assert view._detail_width() <= view._detail.content_region.width, (
+            view._detail_width(),
+            view._detail.content_region.width,
+        )
+        # Discarded notice, through the real settle path.
+        view._editing, view._buffer, view._edit_seed, view._discard_announced = (
+            "retry.baseDelayMs",
+            "9",
+            "1",
+            False,
+        )
+        view._settle_row()
+        view._paint_detail()
+        _assert_one_row(view, view._detail_text.plain, view._notice, "discarded")
+        # Reset refused on a healthy cascade, through the real `r` action.
+        view._notice = view._error = ""
+        settings_io.write_chains(view._manager, {"default": ["openai/gpt-4o"]}, base={})
+        view._repaint()
+        _select(view, _first_of(Kind.CASCADE).key)
+        view.action_reset()
+        view._paint_detail()
+        _assert_one_row(view, view._detail_text.plain, view._notice, "reset_refused")
+        # The delete ask, short name and a long one.
+        view._notice = ""
+        for chain in ("default", "openrouter-budget-fallback-chain"):
+            settings_io.write_chains(view._manager, {chain: ["openai/gpt-4o"]}, base={})
+            view._confirm_delete = chain
+            view._paint_detail()
+            plain = view._detail_text.plain
+            assert cell_len(plain) <= view._detail_width(), (chain, plain)
+            _assert_balanced(plain, chain)
+            assert not plain.rstrip(_STRIP_TAIL).endswith("·"), (chain, plain)
+            # The confirming key is never shed.
+            contract = view._confirm_parts()[1]
+            assert plain.endswith(contract) and "d" in contract, (plain, contract)
+            view._confirm_delete = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("size", "contract"),
+    [
+        ((120, 40), "press d again to confirm · esc cancels"),
+        ((80, 24), "d confirms · esc cancels"),
+    ],
+)
+async def test_english_detail_band_is_unchanged_at_120_and_80(
+    shipped_tree, size: tuple[int, int], contract: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """English frames at 120/80 are byte-identical to the pre-remediation paint."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        view._editing, view._buffer, view._edit_seed, view._discard_announced = (
+            "retry.baseDelayMs",
+            "9",
+            "1",
+            False,
+        )
+        view._settle_row()
+        view._paint_detail()
+        assert view._detail_text.plain == "discarded — enter saves, esc or moving away cancels"
+        view._notice = ""
+        settings_io.write_chains(view._manager, {"default": ["openai/gpt-4o"]}, base={})
+        view._repaint()
+        _select(view, _first_of(Kind.CASCADE).key)
+        view.action_reset()
+        view._paint_detail()
+        assert view._detail_text.plain == "r resets one setting; delete a chain with d on its row"
+        view._notice = ""
+        view._confirm_delete = "default"
+        view._paint_detail()
+        assert view._detail_text.plain == (f"▸ delete chain default and its 1 hop?  {contract}")

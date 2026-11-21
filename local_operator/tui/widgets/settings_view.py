@@ -60,6 +60,7 @@ from local_operator.i18n.keys import tui_settings_view as _sv
 from local_operator.i18n.keys import tui_settings_view_chrome as _svc
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_sound as _sound_keys
+from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Scope, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
@@ -125,25 +126,51 @@ _raw_sv = tr("tui.settings_view")
 #: span is every raw substring occurrence, so `r` would also match inside any
 #: Latin word a translation keeps and the display boundary refuses an island
 #: that starts mid-word; a literal is only isolated where it stands alone.
+#: `file` is deliberately NOT technical. A technical param's span is every raw
+#: occurrence of its value in the rendered text, and `config.yml` also occurs
+#: inside the `{error}` param — `ConfigUnreadableError` names the full
+#: `…/config/config.yml` path — where the occurrence follows `/`, so the
+#: boundary refused it ("technical status span must include its whole
+#: prefix") and a save against an unreadable config crashed the page in `ur`
+#: (PR #4405 QA round 1, Q1). The file name is a strong-LTR ASCII run, so it
+#: lays out correctly in RTL prose without an isolate.
 _t_chrome = display_tr(
     "tui.settings_view.chrome",
-    technical_params=("save_key", "cancel_key", "command", "syntax", "file"),
+    technical_params=("save_key", "cancel_key", "command", "syntax"),
     technical_literals=("r", "d"),
+)
+
+#: Exactly the characters `i18n.display.isolated_status_text` refuses besides
+#: `Cc`: the bidi embedding/override/isolate/mark controls and the two
+#: Unicode line/paragraph separators. Kept in step with that boundary's own
+#: set rather than a broad category so text it ADMITS survives intact.
+_FORBIDDEN_DETAIL_CHARS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u2028\u2029"
 )
 
 
 def _detail_param(value: object) -> str:
     """Free text (an exception, a path, a chain name) made safe to substitute.
 
-    The RTL display boundary refuses a string carrying control or format
-    characters rather than sanitising it (`i18n.display.isolated_status_text`),
-    so an exception text with a tab or a stray bidi mark would raise inside
-    the very handler reporting the failure. Those characters carry nothing a
-    one-line detail can show, so they become spaces here, at the caller that
-    owns the value; newlines are admitted by the boundary and kept.
+    The RTL display boundary refuses a string carrying control characters or
+    bidi controls rather than sanitising it
+    (`i18n.display.isolated_status_text`), so an exception text with a tab or
+    a stray bidi override would raise inside the very handler reporting the
+    failure. Those characters carry nothing a one-line detail can show, so
+    they become spaces here, at the caller that owns the value; newlines are
+    admitted by the boundary and kept.
+
+    Only what the boundary forbids is replaced. Other format characters are
+    meaningful text: ZWNJ (U+200C) shapes Urdu/Persian words and ZWJ
+    (U+200D) joins emoji sequences, and blanking every `Cf` broke both
+    (PR #4405 review round 1, R2).
     """
     return "".join(
-        " " if c != "\n" and unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c
+        (
+            " "
+            if c in _FORBIDDEN_DETAIL_CHARS or (c != "\n" and unicodedata.category(c) == "Cc")
+            else c
+        )
         for c in str(value)
     )
 
@@ -151,6 +178,72 @@ def _detail_param(value: object) -> str:
 #: Plain resolution of the same namespace, for a word substituted into ANOTHER
 #: catalogued sentence (project once, on the outermost string — PR #4361 R1).
 _raw_chrome = tr("tui.settings_view.chrome")
+
+
+_ISOLATE_OPENERS = frozenset("\u2066\u2067\u2068")
+_ISOLATE_CLOSE = "\u2069"
+
+
+def _open_isolates(text: str) -> int:
+    """How many bidi isolates ``text`` opens without closing."""
+    depth = 0
+    for char in text:
+        if char in _ISOLATE_OPENERS:
+            depth += 1
+        elif char == _ISOLATE_CLOSE and depth:
+            depth -= 1
+    return depth
+
+
+def _fit_detail_line(text: str, width: int) -> str:
+    """``text`` cut to ``width`` cells with a visible ``…``, safe for RTL paint.
+
+    The detail band is ONE painted row (`_apply_detail_padding` opens a second
+    only for the help ladder's planned wrap), so a longer line wrapped and its
+    second half was simply not on screen — no mark that anything was lost.
+    Translations made it common: at 60 columns the fr/ru discard notice lost
+    its verb and the reset refusal ended on a dangling article (PR #4405 design
+    round 1, D1 / QA Q2). Cutting here makes the loss visible instead.
+
+    Two things a plain `truncate_cells` gets wrong on this row:
+
+    * a cut landing just after a list separator would paint `… ·…`; the
+      separator and its spaces go with the cut, so the line never ends on `·`;
+    * `ur` display text carries bidi isolates (`i18n.display`), and a cut can
+      drop a closing PDI, leaving an isolate open into whatever paints next.
+      Inner isolates are closed before the `…` (so the mark sits in the
+      sentence's own direction run, at its logical end) and the outermost
+      after it.
+    """
+    if cell_len(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width]
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        w = cell_len(char)
+        if used + w > width - 1:
+            break
+        kept.append(char)
+        used += w
+    while kept and (kept[-1].isspace() or kept[-1] == "·" or kept[-1] in _ISOLATE_OPENERS):
+        kept.pop()
+    depth = _open_isolates("".join(kept))
+    inner = _ISOLATE_CLOSE * max(depth - 1, 0)
+    outer = _ISOLATE_CLOSE * min(depth, 1)
+    return "".join(kept) + inner + "…" + outer
+
+
+def _live_text(source: str | Msg) -> str:
+    """A stored detail message in the language active NOW (see `SettingsView._error`).
+
+    Looks `_t_chrome` up at call time so a resolver patched by a test (or
+    re-bound) applies to stored messages too.
+    """
+    return _t_chrome(source) if isinstance(source, Msg) else source
+
+
 #: Key names the editor hints mention. Literal key labels, not prose: the
 #: same words the footer legend and every keymap print.
 _KEY_SAVE = "enter"  # i18n: ignore key name
@@ -1066,6 +1159,32 @@ class SettingsView(Vertical):
     """
 
     can_focus = True
+
+    # -- live detail messages ----------------------------------------------
+    # The page's own errors and notices are stored as the catalogue MESSAGE
+    # (key + params), not the string it rendered to, and resolved on every
+    # read — i.e. at paint. A rendered string froze the language in force when
+    # the event fired: switch en→fr with a refusal on screen and the row kept
+    # saying `could not save: E123` (PR #4405 review round 1, R1). Text that
+    # arrives already rendered from ANOTHER owner (`settings_io` validation
+    # copy, the gate owner's receipt) is stored as-is: this page does not own
+    # its key. Every existing `self._error = "..."` / truthiness check keeps
+    # working because the read side is always a `str`.
+    @property
+    def _error(self) -> str:
+        return _live_text(self._error_src)
+
+    @_error.setter
+    def _error(self, value: str | Msg) -> None:
+        self._error_src = value
+
+    @property
+    def _notice(self) -> str:
+        return _live_text(self._notice_src)
+
+    @_notice.setter
+    def _notice(self, value: str | Msg) -> None:
+        self._notice_src = value
 
     # Movement WRAPS on the arrows (a discrete, deliberate press) and CLAMPS on
     # page and wheel — the convention `session_picker` and `model_picker` both
@@ -2155,7 +2274,7 @@ class SettingsView(Vertical):
                     # paint a listening frame whose every completion the
                     # validator refuses. Refuse the gesture up front, with the
                     # reason, on the surface a refused write uses.
-                    self._error = _hold_hotkey_refusal()
+                    self._error = _svc.hotkey_hold_refusal()
                     self._repaint()
                     return
                 self._begin_capture(setting)
@@ -2174,7 +2293,7 @@ class SettingsView(Vertical):
             self._repaint()
             return
         if setting.kind is Kind.READONLY:
-            self._error = _t_chrome(_svc.error_retired())
+            self._error = _svc.error_retired()
             self._repaint()
             return
         if setting.kind is Kind.CASCADE:
@@ -2392,7 +2511,7 @@ class SettingsView(Vertical):
             if disarmed:
                 self._repaint()
             return
-        cleared_notice = ""
+        cleared_notice: str | Msg = ""
         if row.setting.kind is Kind.CASCADE:
             stored = settings_io.read_setting(self._manager, row.setting)
             if isinstance(stored, Mapping):
@@ -2403,7 +2522,7 @@ class SettingsView(Vertical):
                 # `r default` on this row and a lit hint whose key does nothing
                 # is the "nothing happens when I click" bug one step earlier
                 # (UX round 1, U5).
-                self._notice = _t_chrome(_svc.cascade_reset_refused(reset_key="r", delete_key="d"))
+                self._notice = _svc.cascade_reset_refused(reset_key="r", delete_key="d")
                 self._repaint()
                 return
             # A cascade that is NOT a mapping is the wreckage of #440: every
@@ -2419,7 +2538,7 @@ class SettingsView(Vertical):
             # is advice they cannot act on from the one key they would reach
             # for (UX round 1, U1). Their original hops are gone either way —
             # destroyed by the shipped bug — but the page stops lying about it.
-            cleared_notice = _t_chrome(_svc.cascade_cleared())
+            cleared_notice = _svc.cascade_cleared()
         if row.setting.kind is Kind.READONLY:
             # Same rule as the exit above: `_leave_row` makes an armed ask on a
             # read-only row unreachable today, but the guard is on the EXIT
@@ -2478,8 +2597,8 @@ class SettingsView(Vertical):
         try:
             action()
         except settings_io.ConfigUnreadableError as error:
-            self._error = _t_chrome(
-                _svc.error_config_unreadable(file="config.yml", error=_detail_param(error))
+            self._error = _svc.error_config_unreadable(
+                file="config.yml", error=_detail_param(error)
             )
             self._repaint()
             return False
@@ -2498,15 +2617,13 @@ class SettingsView(Vertical):
             # preserved either way; only the wording was unhelpful, so this
             # names the file and the remedy while keeping the original text for
             # anyone reporting it.
-            self._error = _t_chrome(
-                _svc.error_unexpected_structure(
-                    path=_detail_param(self._config_path()), error=_detail_param(error)
-                )
+            self._error = _svc.error_unexpected_structure(
+                path=_detail_param(self._config_path()), error=_detail_param(error)
             )
             self._repaint()
             return False
         except Exception as error:  # noqa: BLE001 — a read-only config dir, a full disk
-            self._error = _t_chrome(_svc.error_save_failed(error=_detail_param(error)))
+            self._error = _svc.error_save_failed(error=_detail_param(error))
             self._repaint()
             return False
         self._error = ""
@@ -2694,7 +2811,7 @@ class SettingsView(Vertical):
         display = keymap_mod.display_key(
             capture.key, scope=keymap_mod.scope_of(capture.setting_key)
         )
-        self._notice = _t_chrome(_svc.capture_saved(shortcut=display))
+        self._notice = _svc.capture_saved(shortcut=display)
 
     def _capture_conflict(self) -> str:
         """What the pending key would cost, or ``""``.
@@ -2876,7 +2993,7 @@ class SettingsView(Vertical):
                 # as comma-separated text; "is this a scalar" would have to
                 # carve that out and would still miss a scalar-valued kind that
                 # needs its own widget.
-                self._error = _t_chrome(_svc.error_not_text())
+                self._error = _svc.error_not_text()
                 self._repaint()
                 return
             self._editing = row.setting.key
@@ -2984,9 +3101,7 @@ class SettingsView(Vertical):
         # user did nothing wrong.
         if self._buffer != self._edit_seed and not self._discard_announced:
             self._discard_announced = True
-            self._notice = _t_chrome(
-                _svc.notice_discarded(save_key=_KEY_SAVE, cancel_key=_KEY_CANCEL)
-            )
+            self._notice = _svc.notice_discarded(save_key=_KEY_SAVE, cancel_key=_KEY_CANCEL)
         self._cancel_edit()
         return True
 
@@ -3309,12 +3424,12 @@ class SettingsView(Vertical):
         text = self._buffer.strip()
         key, _, first_hop = text.partition(" ")
         if not key:
-            self._error = _t_chrome(_svc.cascade_expected(syntax="<chain-key> <provider>/<model>"))
+            self._error = _svc.cascade_expected(syntax="<chain-key> <provider>/<model>")
             self._repaint()
             return
         problem = settings_io.validate_hop(first_hop)
         if problem is not None:
-            self._error = _t_chrome(_svc.cascade_first_hop(problem=_detail_param(problem)))
+            self._error = _svc.cascade_first_hop(problem=_detail_param(problem))
             self._repaint()
             return
         chains, base = self._chain_edit()
@@ -4830,23 +4945,43 @@ class SettingsView(Vertical):
         #: carries the whole answer. Both rungs name the confirming key AND the
         #: cancelling key: that pair is what must never be lost, since losing
         #: it is the defect (design round 2, D8).
-        ladder = (
-            _t_chrome(_svc.confirm_contract_long(key="d", cancel_key=_KEY_CANCEL)),
-            _t_chrome(_svc.confirm_contract_short(key="d", cancel_key=_KEY_CANCEL)),
-        )
-        #: Cells the name may take before the line overruns the row. The
-        #: two-space gap is the one `_paint_detail` paints between the question
-        #: and the contract, so the budget matches the frame.
-        for contract in ladder:
+        long = _t_chrome(_svc.confirm_contract_long(key="d", cancel_key=_KEY_CANCEL))
+        short = _t_chrome(_svc.confirm_contract_short(key="d", cancel_key=_KEY_CANCEL))
+        #: Below the short contract, its hints drop from the RIGHT at the ` · `
+        #: separator \u2014 the cancel hint goes, the confirming key stays \u2014 so a
+        #: shed rung never ends on a dangling `\u00b7`. Translated questions are
+        #: much longer than the English one (ru adds ~25 cells), and at 60
+        #: columns even the short contract plus an 8-cell name overran the row:
+        #: it wrapped, the band showed only its first line, and the ask lost
+        #: `esc` and kept a stray `\u00b7` (PR #4405 design round 1, D1).
+        segments = short.split(" \u00b7 ")
+        # A `ur` contract is one RTL isolate around both hints, so a prefix
+        # cut at the separator would leave it open; close what it opened.
+        shed = [
+            prefix + _ISOLATE_CLOSE * _open_isolates(prefix)
+            for prefix in (" \u00b7 ".join(segments[:n]) for n in range(len(segments) - 1, 0, -1))
+        ]
+        #: The shortest a clipped name may get before a hint is dropped
+        #: instead: below this it names nothing. Same 8 the English ladder has
+        #: always clipped to, so every frame that fitted before is unchanged.
+        name_floor = 8
+        # The two-space gap is the one `_paint_detail` paints between the
+        # question and the contract, so the budget matches the frame.
+        for contract in (long, short, *shed):
             # The question with an EMPTY name measures everything but the name.
             fixed = cell_len(f"{self._CONFIRM_MARKER}{ask('')}  {contract}")
             room = width - fixed
-            if room >= cell_len(chain) or contract is ladder[-1]:
-                return (
-                    ask(truncate_cells(chain, max(room, 8))),
-                    contract,
-                )
-        raise AssertionError("the ladder's last rung always returns")
+            if room >= cell_len(chain):
+                return (ask(chain), contract)
+            # The LONG contract never clips the name: shedding to the short
+            # contract costs nothing the user needs, a clipped name does.
+            if contract is not long and room >= name_floor:
+                return (ask(truncate_cells(chain, room)), contract)
+        # Nothing fits whole: the confirming key alone, the name at its floor,
+        # and the question cut with a visible `\u2026` (never a hidden wrap).
+        contract = shed[-1] if shed else short
+        room = width - cell_len(f"{self._CONFIRM_MARKER}  {contract}")
+        return (_fit_detail_line(ask(truncate_cells(chain, name_floor)), max(room, 1)), contract)
 
     def _confirm_text(self) -> str:
         """The pending ask as one plain string. Kept for the assertions."""
@@ -5055,7 +5190,9 @@ class SettingsView(Vertical):
             # through `self._error` and inherit the danger ink, so telling a
             # user what a key they pressed does here looked like a report that
             # they had done something wrong (UX round 2, U16).
-            text.append(self._notice, style=faint)
+            # Cut with a visible mark, never left to wrap out of the one-row
+            # band (see `_fit_detail_line`).
+            text.append(_fit_detail_line(self._notice, self._detail_width()), style=faint)
         elif self._error:
             # THE REJECTION LADDER (design round 1, D11). This was the ONE
             # branch of this line with no floor: `.settings-view-detail`
