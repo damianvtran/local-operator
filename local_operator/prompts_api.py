@@ -1141,17 +1141,6 @@ run has no way to put a question in front of the operator.
 </interactivity>"""
 
 
-#: The bodies that tell a session WITHOUT ``ask`` to proceed on its best
-#: reading and state what it would have asked — the same instruction as
-#: ``system.md``'s ``no_ask`` line, which ``build_system_blocks`` withholds when
-#: one of these renders. ``_INTERACTIVITY_ATTACHED_HUB`` is deliberately absent:
-#: it routes the question through ``hub`` instead of saying "proceed", so the
-#: head's decide-yourself line still carries that half for an attached child.
-_INTERACTIVITY_PROCEED_BODIES = frozenset(
-    {_INTERACTIVITY_ATTACHED_NONE, _INTERACTIVITY_DETACHED_HUB, _INTERACTIVITY_DETACHED_NONE}
-)
-
-
 def _interactivity_channel(tools: Sequence[AgentTool], channel: str | None) -> str:
     """How this session can put a question in front of a person.
 
@@ -1516,25 +1505,17 @@ def build_system_blocks(
     # 23s on `playwright install`) and is the only text that names the wrong
     # turn — which stays worth saying however the tool came to be absent.
     #
-    # The ``<interactivity>`` body is chosen HERE, before the head renders,
-    # because one head line depends on it: a session without ``ask`` used to
-    # read "No `ask` tool in this session: decide yourself and state
-    # assumptions" in block 0 AND a no-channel ``<interactivity>`` body telling
-    # it the same thing in the tail — ~230 chars said twice on every request of
-    # every headless exec run and delegated child. The body is the more
-    # specific statement (it knows the attachment), so where it renders one of
-    # the PROCEED arms the head's line is withheld; where no body renders
-    # (``interactive is None``) or the body describes ``ask``/``hub`` as the
-    # route, the head line stays the only statement and still ships.
-    interactivity_body = (
-        _interactivity_block(
-            interactive, _interactivity_channel(tools, channel), queued_ask=_ask_queue_queued()
-        )
-        if interactive is not None
-        else ""
-    )
-    holds_ask = any(tool.name == "ask" for tool in tools)
-    tail_says_proceed = interactivity_body in _INTERACTIVITY_PROCEED_BODIES
+    # BLOCK 0 READS ONLY THE TOOL SET (PR #4375 review R1-M1). Every flag below
+    # is fixed for a session's life; the live ``interactive``/``channel`` pair
+    # is NOT an input here. It moves between turns — a delegated child's holder
+    # re-latches the parent's attachment at every turn boundary, ``exec
+    # --resume`` flips ``can_ask`` — and ``Session._prepare_system_blocks``
+    # starts a new ``system_prefix`` epoch (a cold cache over tools, system and
+    # history) whenever block 0 changes. A head line keyed on the
+    # ``<interactivity>`` body measured 3 epochs where 1 is right over one
+    # child's detach/attach/detach. So the "No `ask` tool" line rides
+    # ``no_ask`` (derived from membership) even where the tail's proceed body
+    # says much the same; the overlap costs far less than one cold prefix.
     instructions = render_template(
         "system.md",
         # The setup playbook is gated on the HOST, never on this role's list.
@@ -1586,11 +1567,6 @@ def build_system_blocks(
             # and MCP tool, so in production this holds whenever any tool does,
             # and drops only for a session with no narratable tool at all.
             "has_intent": any(intent_is_injected(tool.parameters) for tool in tools),
-            # See ``interactivity_body`` above. Stated as ``False`` (not
-            # omitted) so ``_resolve_system_md_flags`` does not re-derive it
-            # from ``has_ask``; ``has_ask`` and ``no_ask`` both false is the
-            # legitimate "neither line" state.
-            **({"no_ask": False} if tail_says_proceed and not holds_ask else {}),
         },
     )
     # One blank line before the section whatever the template's last gated
@@ -1604,8 +1580,8 @@ def build_system_blocks(
         "\n\n## Session state updates\n\n"
         "[session-state] records are host context, not a task or permission to "
         "act. Each section replaces its earlier snapshot, even when empty; older "
-        "ones describe their own point in the conversation. User instructions "
-        "and approval requirements still apply."
+        "ones describe their own point in the conversation. Direct user "
+        "instructions and approval requirements still apply."
     )
     if repo_guidance.strip():
         # Same head-block, read-once discipline as user_instructions: the
@@ -1764,7 +1740,10 @@ def build_system_blocks(
         # refuses without a hook) and a channel that does not exist — the failure
         # this whole change removes, reintroduced for the population most
         # sessions' turns are made of.
-        tail = f"{tail}\n\n{interactivity_body}"
+        body = _interactivity_block(
+            interactive, _interactivity_channel(tools, channel), queued_ask=_ask_queue_queued()
+        )
+        tail = f"{tail}\n\n{body}"
     if open_asks.strip():
         # AFTER `<interactivity>`, because that section states HOW a question can
         # reach a person and this one names what is already waiting — the channel

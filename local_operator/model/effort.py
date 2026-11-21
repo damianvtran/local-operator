@@ -448,9 +448,9 @@ def default_effort(model_id: str, provider: str | None = None) -> str | None:
     Seeded onto the spec so the band can state a real level from boot rather
     than the word "reasoning". Only safe because the provider says so: for
     Anthropic, sending the model's documented default (``high``, or ``medium``
-    on Opus 5.5) and sending nothing are the same request, so the seed changes
-    no behaviour and only stops the band from understating what is already
-    happening.
+    on Opus 5.5 and Haiku 5.5) and sending nothing are the same request, so the
+    seed changes no behaviour and only stops the band from understating what is
+    already happening.
     """
     support = effort_support(model_id, provider)
     return support.default if support is not None else None

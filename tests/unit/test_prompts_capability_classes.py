@@ -24,6 +24,7 @@ from local_operator.prompts_api import (
     CAPABILITY_CLASS_FLAGS,
     CHANNEL_ASK,
     CHANNEL_HUB,
+    CHANNEL_NONE,
     TOOL_GATED_PROSE_FLAGS,
     build_system_blocks,
     render_template,
@@ -82,6 +83,8 @@ _ALWAYS_ON_MARKERS = (
     "You are Local Operator, a personal assistant",
     "**Use tools before answering.**",
     "**Verify results.**",
+    # PR #4375 B1: truncation is universal, so this rides every session.
+    "A capped or truncated result is",
     "**Be concise.**",
     "**Do real work fully.**",
     "**Recover, don't stop.**",
@@ -136,9 +139,18 @@ def test_a_session_holding_every_class_renders_the_ungated_bytes() -> None:
         "system.md", {**_HOST, **{flag: True for flag in CAPABILITY_CLASS_FLAGS}}
     )
     assert plain == stated
-    # Wave 5 (g) is the ONLY full-tool-set delta: the template render is
-    # unchanged and the session-state section follows it after one blank line.
+    # The session-state section follows the template render after one blank
+    # line (wave 5 (g)), and keeps "Direct" (R1-n3).
     assert head.startswith(plain.rstrip("\n") + "\n\n## Session state updates\n\n")
+    flat = " ".join(head.split())
+    assert "Direct user instructions and approval requirements still apply." in flat
+    # PR #4375 B1 deliberately changes the full-tool template render: a capped
+    # page stopped 3/8 benchmark runs at its first 9 of 26 names.
+    assert (
+        '"can\'t test": try two safe routes first. A capped or truncated result is '
+        "partial: page through it or cross-check other sources before treating a "
+        "list or count as complete. Claim success only when observable;"
+    ) in flat
     for marker in _CLASS_GATED_MARKERS:
         assert marker in head, marker
     assert "your web search tools" not in head
@@ -167,9 +179,10 @@ def test_mcp_only_session_drops_class_prose_and_keeps_the_always_on_rules() -> N
     assert "Claim success only when observable" in head
     assert "- `BLOCKED by guardrail` is final for that effect: report it; never reroute.\n" in head
     assert "resolve the question yourself via\ntools or documents, then act." in head
-    # The detached no-channel ``<interactivity>`` body says "proceed and state
-    # what you would have asked"; the head's no-ask line is not repeated.
-    assert "No `ask` tool in this session" not in head
+    # The no-ask line follows membership, never the ``<interactivity>`` body
+    # (R1-M1): it ships beside the tail's proceed body rather than move block 0.
+    assert "No `ask` tool in this session: decide yourself and state assumptions" in head
+    assert "`ask` is the exception" not in head
     assert "Prefer to PROCEED with what you have" in tail
     # MCP tools carry the injected ``i`` property, so its rule stays.
     assert "Most tools take `i`" in head
@@ -316,28 +329,94 @@ def test_the_tools_heading_never_renders_empty() -> None:
     assert "## Tools\n\n### Deciding and asking\n\n" in bare
 
 
-@pytest.mark.parametrize(
-    ("interactive", "channel", "no_ask_line"),
-    [
-        # No ``<interactivity>`` block (no runtime probe): the head line is the
-        # only statement, so it stays.
-        (None, None, True),
-        # The PROCEED bodies say it already; said once, in the tail.
-        (False, None, False),
-        (True, None, False),
-        (False, CHANNEL_HUB, False),
-        # An attached child is routed through ``hub``, not told to proceed, so
-        # the head keeps its decide-yourself line.
-        (True, CHANNEL_HUB, True),
-    ],
+#: Every (interactive, channel) pair a host can pass: unprobed, attached and
+#: detached, against each channel and the unstated one.
+_INTERACTIVITY_STATES = [
+    (interactive, channel)
+    for interactive in (None, True, False)
+    for channel in (None, CHANNEL_ASK, CHANNEL_HUB, CHANNEL_NONE)
+]
+
+#: The tool-set shapes a session is built with, each fixed for its life.
+_TOOL_SET_SHAPES = {
+    "full with ask": _EVERY_GATED_TOOL,
+    "full without ask (headless exec)": [n for n in _EVERY_GATED_TOOL if n != "ask"],
+    "mcp-only": _MCP_ONLY,
+    "restricted child": ["bash", "read", "grep", "send", "hub"],
+}
+
+#: The v0.110.0 no-``ask`` sentence, whitespace-flattened.
+_NO_ASK_SENTENCE = (
+    "No `ask` tool in this session: decide yourself and state assumptions; a "
+    "destructive or irreversible step without explicit approval is not taken — "
+    "report it instead."
 )
-def test_the_no_ask_line_is_said_once_between_head_and_interactivity(
-    interactive: bool | None, channel: str | None, no_ask_line: bool
+
+#: The clauses that only make sense to a session that can call ``ask``.
+_ASK_ONLY_CLAUSES = (
+    "`ask` is the exception",
+    "Asking spends their attention on work they delegated.",
+    "ask first when it is not",
+)
+
+
+@pytest.mark.parametrize("names", list(_TOOL_SET_SHAPES.values()), ids=list(_TOOL_SET_SHAPES))
+def test_block_0_reads_the_tool_set_never_the_live_interactivity_state(names: list[str]) -> None:
+    """PR #4375 review R1-M1: block 0 is byte-identical across attached,
+    detached and unprobed renders for every channel.
+
+    ``Session._prepare_system_blocks`` opens a new ``system_prefix`` epoch (a
+    cold cache over tools, system and history) whenever block 0 changes, and a
+    delegated child re-latches its parent's attachment at every turn boundary.
+    A head line keyed on the ``<interactivity>`` body made each attach/detach
+    blink cost one cold prefix; attachment belongs to the tail alone."""
+    heads = {
+        state: _blocks(names, interactive=state[0], channel=state[1])[0]
+        for state in _INTERACTIVITY_STATES
+    }
+    reference = heads[(None, None)]
+    moved = [state for state, head in heads.items() if head != reference]
+    assert moved == [], f"block 0 moved with interactivity state: {moved}"
+
+
+@pytest.mark.parametrize(("interactive", "channel"), _INTERACTIVITY_STATES)
+def test_the_no_ask_line_rides_block_0_whatever_the_interactivity_state(
+    interactive: bool | None, channel: str | None
 ) -> None:
+    """Flipped by R1-M1: the head's no-``ask`` line follows membership alone, so
+    it ships even where the tail's proceed body says much the same. The tail is
+    untouched: the detached/no-channel bodies still tell the session to proceed."""
     head, _inv, _env, tail = _blocks(_MCP_ONLY, interactive=interactive, channel=channel)
-    assert ("No `ask` tool in this session" in head) is no_ask_line
-    proceeds = "PROCEED" in tail or "proceed on the best reading" in tail
-    assert proceeds is not no_ask_line or (interactive, channel) == (True, CHANNEL_HUB)
+    assert _NO_ASK_SENTENCE in " ".join(head.split())
+    if interactive is not None and (interactive is False or channel == CHANNEL_NONE):
+        assert "PROCEED" in tail or "proceed on the best reading" in tail
+
+
+@pytest.mark.parametrize(
+    "names",
+    [names for label, names in _TOOL_SET_SHAPES.items() if label != "full with ask"],
+    ids=[label for label in _TOOL_SET_SHAPES if label != "full with ask"],
+)
+def test_a_session_without_ask_is_never_pointed_at_ask(names: list[str]) -> None:
+    """The wave-5 benchmark's no-``ask`` render still said "`ask` is the
+    exception" and "ask first when it is not" to a session that cannot call it.
+    Without ``ask`` the paragraph states the decision rule and the v0.110.0
+    no-``ask`` sentence instead, and an irreversible fix is reported unfixed."""
+    flat = " ".join(_blocks(names)[0].split())
+    for clause in _ASK_ONLY_CLAUSES:
+        assert clause not in flat, clause
+    assert "Deciding is your job: resolve the question yourself via tools" in flat
+    assert _NO_ASK_SENTENCE in flat
+    assert "when the fix is reversible; report it unfixed when it is not." in flat
+
+
+def test_a_session_holding_ask_keeps_every_ask_clause() -> None:
+    flat = " ".join(_blocks(_EVERY_GATED_TOOL)[0].split())
+    for clause in _ASK_ONLY_CLAUSES:
+        assert clause in flat, clause
+    assert "Deciding is your job; `ask` is the exception: resolve the question" in flat
+    assert "No `ask` tool in this session" not in flat
+    assert "report it unfixed" not in flat
 
 
 def test_a_session_holding_ask_keeps_its_ask_prose_whatever_the_tail_says() -> None:

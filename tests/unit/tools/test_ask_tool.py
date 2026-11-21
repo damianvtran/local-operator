@@ -147,7 +147,10 @@ def test_ask_advertises_itself_as_a_last_resort_not_a_checkpoint() -> None:
     head = _ask_holding_head()
     assert "Deciding is your job; `ask` is the exception" in head
     assert "resolve the question yourself" in head
-    assert "subagent, then act" in head
+    # ``create_tools`` here builds no ``task``, so the subagent route is gated
+    # out (PR #4375) and the alternatives are tools and documents; the full
+    # render's subagent clause is pinned in test_prompts_api.py.
+    assert "tools or documents, then act" in head
 
 
 def test_ask_names_the_cases_that_do_warrant_a_question() -> None:
