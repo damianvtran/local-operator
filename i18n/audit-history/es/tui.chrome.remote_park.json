@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "tui.chrome.remote_park",
-  "history_sha256": "7862554ad1c78f1333df0ee921996fa65317f8dae23698bd09ec74721157be5e",
+  "history_sha256": "1bac99c8d3595e192d428bb9b07c8c95922012a2a03aa5a431cd1e9d083aed46",
   "entries": [
     {
       "locale": "es",
@@ -39,6 +39,41 @@
       },
       "status": "passed",
       "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 0 minor, 4 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.chrome.remote_park",
+      "source_sha256": "8d3cce5ad16be492a7b0ced9591b2b8892daa8d636e2ac2e1cdd1ff844ea464d",
+      "context_sha256": "f34bf588287f7303769fee4e124a1d2994d0bf5c46f4646cfe11276906069e79",
+      "target_sha256": "de56b1501c7c06800a3730a3aa0717398f9857916739bc6acad83d1a158dab1e",
+      "translator": {
+        "agent": "coder (team lopdev), commit b1550a814 (PR #4372)",
+        "session": "not relayed",
+        "session_kind": "translator session id was not relayed to the auditor; identified by commit",
+        "model": "not relayed to the auditor",
+        "date": "2026-11-21",
+        "fallback": "unknown (not relayed)"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, task role, independent i18n auditor of PR #4372; did not author the English or these translations and read no translator scratchpad), session 88f5179a9146",
+        "session": "88f5179a9146",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-21",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "round": "pr4372-r1",
+      "note": "PR #4372 round 1: independent audit of the one new key tui.chrome.remote_park.ask_agent_started (commit b1550a814) against en 8d3cce5ad16b with context sidecar f34bf588287f (meaning: an agent running on {agent_device} started the session, which runs on {device}; agent = AI agent). Mechanical: key set equals en; placeholders {agent_device} and {device} preserved exactly; NFC; no format/bidi control characters; no final punctuation, matching en. Semantic: 'Pregunta de una sesión que un agente en {agent_device} inició en {device}': tú-neutral (no address needed), 'iniciar' matches catalogue usage ('sesión iniciada'); no final period. Carry-forward: the other 15 keys are byte-identical — removing the new key from current en, the en context sidecar and this locale and re-serialising reproduces the base 1a8dae591 bytes exactly, and those base file hashes equal the previous receipt's source/context/target hashes — so that audit carries onto the new en hash. Native-speaker review and rendered-frame certification not claimed."
     }
   ]
 }
