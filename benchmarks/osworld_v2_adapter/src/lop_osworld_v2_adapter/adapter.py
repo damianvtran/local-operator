@@ -50,7 +50,7 @@ from lop_osworld_v2_adapter import actions
 from lop_osworld_v2_adapter import cleanup as cleanup_mod
 from lop_osworld_v2_adapter import diagnostics, provisioning
 from lop_osworld_v2_adapter import requirements as requirements_mod
-from lop_osworld_v2_adapter import scoring, taskfile, vendor_bridge
+from lop_osworld_v2_adapter import scorer_preflight, scoring, taskfile, vendor_bridge
 from lop_osworld_v2_adapter.observation import ObservationBuilder
 from lop_osworld_v2_adapter.providers.base import (
     EnvironmentProvider,
@@ -332,6 +332,7 @@ class OSWorldV2Adapter:
         # the workspace's adapter-provider.json selects the backend (AWS by
         # default).
         self._provider_factory = provider_factory
+        self._scorer_runtime: scorer_preflight.FreeCADRuntime | None = None
         # The workspace root is where task modules live (``tasks/<id>.py``).
         # Defaulted to the worker's cwd, which the supervisor sets to the
         # workspace (supervisor.py:270).
@@ -650,12 +651,13 @@ class OSWorldV2Adapter:
             self._infra_values,
             forbidden_roots=(str(self._workspace_root), str(artifact_root)),
         )
+        self._scorer_runtime = None
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",
         ):
-            # Tasks are first named here. Check packaging and verified host
-            # dependencies without importing the task or building a provider.
+            # Tasks are first named here. Check packaging and host scorer
+            # readiness without importing the task or building a provider.
             from lop_osworld_v2_adapter.dependencies import validate_task_dependencies
             from lop_osworld_v2_adapter.evaluator_dependencies import (
                 validate_evaluator_dependencies,
@@ -672,6 +674,12 @@ class OSWorldV2Adapter:
                 workspace_root=self._workspace_root,
                 tool_directories=tool_directories,
                 forbidden_roots=(self._workspace_root, artifact_root, inputs_root),
+            )
+            self._scorer_runtime = await scorer_preflight.require_runtime(
+                self._workspace_root,
+                task_id=params.task_id,
+                source=source,
+                forbidden_roots=(self._workspace_root, artifact_root),
             )
         self._plan = provisioning.resolve(
             self._task,
@@ -1010,6 +1018,7 @@ class OSWorldV2Adapter:
             region=self._plan.region,
             lease_ref=self._refs.lease_ref,
             ttl_seconds=self._ttl_seconds(),
+            scorer_runtime=self._scorer_runtime,
         )
 
     # ------------------------------------------------------------------
