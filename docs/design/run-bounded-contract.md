@@ -52,7 +52,13 @@ unit-test shard selection includes these tests. The 3.12/3.13/3.14
 
 The completion receipt is a fresh `run-bounded-completion/v1` sibling of the
 legacy identity records. Its `cleanup_scope` is always `owned-process-group`;
-`descendant_cleanup` is always `unknown`. Only the exact terminal verdict accepted
+`descendant_cleanup` is `unknown` except on the Linux cleanup-required path, where
+the wrapper is a child subreaper and `local_operator.escaped_descendants` sweeps
+every descendant that left the owned group (setsid/setpgid): `proven-empty` after
+two clean `/proc` scans, otherwise `unproven` with `escaped_residuals` naming the
+live pids and `cleanup_status=unproven`. An empty owned group with a live escapee
+is never `proven-empty` (lopdev fd36, 2026-11-19: a setsid'd Chrome outlived an
+rc=124 reap under that status). Only the exact terminal verdict accepted
 by an authoritative owner before irreversible revocation can set
 `cleanup_status=proven-empty`. A wait, signal, ESRCH, empty residual list or zero
 child status cannot supply that proof. Direct-only mode forcibly retains unknown.

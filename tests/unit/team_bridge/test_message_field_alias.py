@@ -32,6 +32,7 @@ from local_operator.team_bridge.tool import (
     _normalize_message_field,
     execute_bridge,
 )
+from tests.unit.team_bridge.ref_text import without_ref
 from tests.unit.team_bridge.test_channel_tool import RecordingClient
 from tests.unit.team_bridge.test_channel_tool import _runtime as _room_runtime
 from tests.unit.team_bridge.test_client import _ok
@@ -65,7 +66,9 @@ def _post(**fields: Any) -> dict[str, Any]:
 
 
 def _sent_texts(client: RecordingClient | DmClient) -> list[str]:
-    return [call["text"] for call in client.calls if call["method"] == "conversation_send"]
+    return [
+        without_ref(call["text"]) for call in client.calls if call["method"] == "conversation_send"
+    ]
 
 
 # -- channel_post ---------------------------------------------------------------

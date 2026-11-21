@@ -1,0 +1,121 @@
+{
+  "tui.session_sidebar.footer.asks_note": {
+    "maxCells": 10,
+    "note": "Footer counter of queued questions from agents waiting for the user's answer, clickable to open them. {count} is raw digits, inserted verbatim. Lower-case terse label style matching the key hints beside it (e.g. 'ctrl+f asks: 4'); only painted when the count is above zero. Keep under ~10 cells; the footer composes several hints into 29–43 cells.",
+    "role": "counter note",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.footer.hub_note": {
+    "maxCells": 10,
+    "note": "Footer counter of Agent Hub links (shared agent/skill sources) on this device, clickable to open them. {count} is raw digits, inserted verbatim. Same terse lower-case style as the asks counter; only painted when the count is above zero. Keep under ~10 cells.",
+    "role": "counter note",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.footer.opening": {
+    "maxCells": 29,
+    "note": "Replaces the sidebar's key-hint footer while the selected conversation is being opened. Keep the ellipsis character. Single line, cropped at the footer width (29 cells by default).",
+    "role": "status footer",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.footer.refresh_failed": {
+    "maxCells": 29,
+    "note": "Replaces the sidebar's key-hint footer when the last refresh of the list failed. Single line, cropped at the footer width (29 cells by default).",
+    "role": "status footer",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.pinned_overflow": {
+    "maxCells": 29,
+    "note": "Muted note under the Pinned heading when some pinned sessions are below the visible page; tells the user to scroll to see them. {count} is the number for plural selection; {shown} is the same number pre-formatted as raw digits — insert {shown}, do not localise digits. 'scroll' is an instruction. English is 24 cells at N=99. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "affordance note",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.row.untitled": {
+    "maxCells": 20,
+    "note": "Row title for a conversation that has no name yet. Cropped to the row's title width (about 20 cells at the default sidebar width) with an ellipsis.",
+    "role": "fallback label",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.section.active": {
+    "maxCells": 29,
+    "note": "Heading over sessions that are currently running/open. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "section heading",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.section.pinned": {
+    "maxCells": 27,
+    "note": "Heading over the user's pinned sessions. The ★ glyph is painted before it by code and is not part of the message. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "section heading",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.section.previous": {
+    "maxCells": 29,
+    "note": "Heading over earlier, no-longer-running conversations the user can resume. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "section heading",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.section.subagent": {
+    "maxCells": 27,
+    "note": "Heading over sessions that were delegated to a subagent (a helper agent). The ⌥ glyph is painted before it by code and is not part of the message. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "section heading",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.state.empty": {
+    "maxCells": 29,
+    "note": "Shown in the sidebar body when the user has no conversations. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "empty state",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.state.error": {
+    "maxCells": 29,
+    "note": "Shown in the sidebar body when the conversation list failed to load. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "error state",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.state.loading": {
+    "maxCells": 27,
+    "note": "Shown in the sidebar body while the conversation list loads; a spinner glyph is painted before it by code. Keep the trailing ellipsis character. The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "loading state",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.title": {
+    "maxCells": 29,
+    "note": "Heading painted at the top of the left session sidebar only while the list has no section headings (loading, empty or error state). The sidebar's content width is 29 cells by default (30-cell panel minus its border) and grows to 43 on a wide terminal; anything longer is cropped with an ellipsis, so keep it short.",
+    "role": "panel title",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.tooltip.location": {
+    "note": "Hover tooltip line naming the device a remote session lives on. {device} is a device name (or the 'unnamed device' fallback). Terse noun phrase. Tooltips wrap; no cell budget.",
+    "role": "tooltip line",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.tooltip.location_network": {
+    "note": "As 'on {device}', plus the mesh network name the row came through. {device} and {network} are user-chosen names inserted verbatim.",
+    "role": "tooltip line",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.tooltip.location_network_stale": {
+    "note": "As 'on {device} · {network}', when the placement data is stale: the state shown is the last one known, not live.",
+    "role": "tooltip line",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.tooltip.location_stale": {
+    "note": "As 'on {device}', when the device's placement data is stale: the state shown is the last one known, not live.",
+    "role": "tooltip line",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.tooltip.status_wedged": {
+    "note": "Hover tooltip state line for a session whose heartbeat went stale. {status} is the backend's own state sentence (already rendered). {command} is the literal shell command `lop stop`, inserted verbatim and never translated. 'If it stays silent' is a condition, not a forecast: suggest the command only if the session remains quiet; do not promise recovery or diagnose it as dead. Tooltips wrap; no cell budget.",
+    "role": "tooltip line",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.tooltip.unnamed_device": {
+    "note": "Inserted as {device} in the 'on {device}' tooltip lines when the remote device has no name. Lower-case noun phrase.",
+    "role": "fallback label",
+    "tone": "plain, terse"
+  },
+  "tui.session_sidebar.tooltip.unreachable": {
+    "note": "Hover tooltip line when a remote session's device cannot be reached. {reason} is an already-rendered short reason phrase from another surface (e.g. 'device offline'). Terse, lower-case, same '·' separator.",
+    "role": "tooltip line",
+    "tone": "plain, terse"
+  }
+}

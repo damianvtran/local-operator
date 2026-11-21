@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.chip.you": "आप:",
+  "tui.tool_card.fetch.cache": "कैश {state}",
+  "tui.tool_card.fetch.fetched": "प्राप्त: {url}",
+  "tui.tool_card.fetch.final": "(अंतिम: {url})",
+  "tui.tool_card.hint.collapse": "समेटें",
+  "tui.tool_card.hint.expand": "फैलाएँ",
+  "tui.tool_card.hint.interrupt": "रोकने के लिए {chord}",
+  "tui.tool_card.imagegen.requests_ahead": "{count, plural, one {आगे {shown} अनुरोध कतार में} other {आगे {shown} अनुरोध कतार में}}",
+  "tui.tool_card.live.earlier_lines": "{count, plural, one {{shown} पिछली पंक्ति} other {{shown} पिछली पंक्तियाँ}}",
+  "tui.tool_card.live.earlier_output_hidden": "पिछला आउटपुट नहीं दिखाया गया",
+  "tui.tool_card.live.no_output_yet": "अभी कोई आउटपुट नहीं",
+  "tui.tool_card.live.running": "चल रहा है",
+  "tui.tool_card.more.diff_lines": "{count, plural, one {{shown} और बदलाव की पंक्ति} other {{shown} और बदलाव की पंक्तियाँ}}",
+  "tui.tool_card.more.lines": "{count, plural, one {{shown} और पंक्ति} other {{shown} और पंक्तियाँ}}",
+  "tui.tool_card.more.search_lines": "{count, plural, one {{shown} और मेल खाती पंक्ति} other {{shown} और मेल खाती पंक्तियाँ}}",
+  "tui.tool_card.status.stop_unconfirmed": "रोक की पुष्टि नहीं"
+}

@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_operator import procstate
 from local_operator.session import index_read_model as rm
 from local_operator.session import transcript_index as ti
 
@@ -1170,3 +1171,150 @@ def test_the_order_projection_rejects_a_row_a_later_append_added(tmp_path):
         tmp_path, SID, collected_ids=[new_id], order_ids=[], source=rm.source_of(index)
     )
     assert result.state != "ready", "a pre-append projection answered for an appended row"
+
+
+# ---------------------------------------------------------------------------
+# Dead-writer temp reclamation
+#
+# A KILLED builder never reaches its `finally`, so `<token>.<pid>.tmp` and the
+# SQLite `-journal` beside it leaked forever (~961 files on one operator store).
+# These pin the sweep's invariant: name-matched, not ours, older than the grace,
+# and the writer provably gone (dead pid, or a pid reused by a later process).
+# ---------------------------------------------------------------------------
+
+_OLD = 1_600_000_000  # 2020: far older than any grace and any live process
+
+
+def _read_models(root: Path) -> Path:
+    return ti.index_path(root, SID).parent / "read-models"
+
+
+def _dead_pid() -> int:
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    if procstate.pid_liveness(child.pid) is not False:
+        pytest.skip("the reaped child's pid was reused before the probe")
+    return child.pid
+
+
+def _leak(directory: Path, name: str, mtime: float) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(b"leaked")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def _sleeper():
+    import subprocess
+    import sys
+
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def test_a_killed_writers_temps_are_reclaimed_by_collect(publication):
+    root, index = publication
+    pid = _dead_pid()
+    own = _read_models(root) / SID
+    other = _read_models(root) / "another-session"
+    leaked = [
+        _leak(own, f"{'a' * 32}.{pid}.tmp", _OLD),
+        _leak(own, f"{'a' * 32}.{pid}.tmp-journal", _OLD),
+        _leak(own, f"{'b' * 32}.naming.{pid}.naming.tmp", _OLD),
+        # Another LIVE session's directory: _sweep_orphans skips it (its index
+        # exists), so only the temp sweep can reach these.
+        _leak(other, f"{'c' * 32}.{pid}.tmp", _OLD),
+        _leak(other, f"{'c' * 32}.{pid}.tmp-journal", _OLD),
+    ]
+    (ti.index_path(root, "another-session")).parent.mkdir(parents=True, exist_ok=True)
+    ti.index_path(root, "another-session").write_text("{}", encoding="utf-8")
+    companion = _leak(other, f"{'d' * 32}.sqlite", _OLD)
+    rm.collect(root, SID, rm.token_for(index))
+    assert [path.name for path in leaked if path.exists()] == []
+    # A companion is never a temp, however old.
+    assert companion.exists()
+
+
+def test_a_young_temp_is_kept_even_when_its_writer_is_dead(publication):
+    root, index = publication
+    young = _leak(_read_models(root) / SID, f"{'a' * 32}.{_dead_pid()}.tmp", time.time())
+    rm.collect(root, SID, rm.token_for(index))
+    assert young.exists()
+
+
+def test_this_processs_own_temps_are_never_swept(publication):
+    root, index = publication
+    mine = _leak(_read_models(root) / SID, f"{'a' * 32}.{os.getpid()}.tmp", _OLD)
+    rm.collect(root, SID, rm.token_for(index))
+    assert mine.exists()
+
+
+def test_a_live_foreign_writers_temp_is_kept(publication, monkeypatch):
+    root, index = publication
+    child = _sleeper()
+    try:
+        # Grace 0 so a file written AFTER the peer started already qualifies by
+        # age; it must still survive because its writer is alive and is the
+        # process that wrote it (started before the file).
+        time.sleep(1.1)
+        monkeypatch.setattr(rm, "_ORPHAN_GRACE_S", -5.0)
+        live = _leak(_read_models(root) / SID, f"{'a' * 32}.{child.pid}.tmp", time.time())
+        rm.collect(root, SID, rm.token_for(index))
+        assert live.exists()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_temp_whose_pid_was_reused_by_a_later_process_is_reclaimed(publication):
+    root, index = publication
+    child = _sleeper()
+    try:
+        if procstate.birth_token(child.pid) is None:
+            pytest.skip("this platform reports no process start time")
+        # The file predates the process now holding its pid: the writer is gone.
+        reused = _leak(_read_models(root) / SID, f"{'a' * 32}.{child.pid}.tmp", _OLD)
+        rm.collect(root, SID, rm.token_for(index))
+        assert not reused.exists()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_retention_of_companions_is_unchanged_by_the_temp_sweep(publication):
+    root, index = publication
+    directory = _read_models(root) / SID
+    stale = [_leak(directory, f"{n:032x}.sqlite", _OLD + n) for n in range(1, 6)]
+    rm.collect(root, SID, rm.token_for(index))
+    kept = sorted(path.stem for path in directory.glob("*.sqlite"))
+    assert rm.token_for(index) in kept
+    assert len(kept) == rm._RETAIN_PREVIOUS + 1
+    # The newest stale ones are the retained predecessors, exactly as before.
+    assert [p.exists() for p in stale] == [False, False, False, True, True]
+
+
+def test_a_finished_build_removes_its_journal_sibling(tmp_path, monkeypatch):
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    real = rm._head_token
+    seen: list[Path] = []
+
+    def head_token(root, sid):
+        # Stand in for SQLite having left its rollback journal beside the temp
+        # (it does when the process dies mid-transaction or the journal outlives
+        # a failed close); the `finally` must not leave it behind.
+        for temp in (_read_models(tmp_path) / SID).glob(f"*.{os.getpid()}.tmp"):
+            journal = Path(f"{temp}-journal")
+            journal.write_bytes(b"journal")
+            seen.append(journal)
+        return real(root, sid)
+
+    monkeypatch.setattr(rm, "_head_token", head_token)
+    rm.publish(tmp_path, SID, index)
+    assert seen, "the build never reached its compare-and-publish"
+    assert [path.name for path in seen if path.exists()] == []
+    ti._reset_for_tests()

@@ -1,0 +1,124 @@
+{
+  "locale": "ru",
+  "namespace": "tui.tool_card",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "target_sha256": "b55e5d78bad7e0056a20f29046b3413a4b3abbf26e6666bf2c4dccad96245de6",
+  "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Delegation brief; not independently established"
+  },
+  "auditor": {
+    "agent": "translation-auditor / toolcard-reaudit-ru",
+    "session": "e4c9dd1c9f95",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "fallback_used": false
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": {
+    "changed_keys": [
+      "tui.tool_card.fetch.final"
+    ],
+    "composition_neighbours": [
+      "tui.tool_card.fetch.fetched"
+    ],
+    "keys_read": 2,
+    "changed_keys_read": 1,
+    "head": "4e164d26c8ecc5a8f5fe8d510526277efc4fdd0e",
+    "catalogues_uncommitted": true
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [],
+  "evidence": {
+    "message_arguments": "url/simple exact parity for both keys",
+    "plural_selectors": [],
+    "template_cells": {
+      "tui.tool_card.fetch.final": {
+        "en": 14,
+        "ru": 13
+      },
+      "tui.tool_card.fetch.fetched": {
+        "en": 14,
+        "ru": 16
+      }
+    },
+    "samples": [
+      {
+        "count_probe": 0,
+        "en": {
+          "text": "Fetched: https://example.test/0  (final: https://example.test/final/0)",
+          "cell_len": 70
+        },
+        "ru": {
+          "text": "Загружено: https://example.test/0  (итог: https://example.test/final/0)",
+          "cell_len": 71
+        }
+      },
+      {
+        "count_probe": 1,
+        "en": {
+          "text": "Fetched: https://example.test/1  (final: https://example.test/final/1)",
+          "cell_len": 70
+        },
+        "ru": {
+          "text": "Загружено: https://example.test/1  (итог: https://example.test/final/1)",
+          "cell_len": 71
+        }
+      },
+      {
+        "count_probe": 2,
+        "en": {
+          "text": "Fetched: https://example.test/2  (final: https://example.test/final/2)",
+          "cell_len": 70
+        },
+        "ru": {
+          "text": "Загружено: https://example.test/2  (итог: https://example.test/final/2)",
+          "cell_len": 71
+        }
+      },
+      {
+        "count_probe": 5,
+        "en": {
+          "text": "Fetched: https://example.test/5  (final: https://example.test/final/5)",
+          "cell_len": 70
+        },
+        "ru": {
+          "text": "Загружено: https://example.test/5  (итог: https://example.test/final/5)",
+          "cell_len": 71
+        }
+      },
+      {
+        "count_probe": 21,
+        "en": {
+          "text": "Fetched: https://example.test/21  (final: https://example.test/final/21)",
+          "cell_len": 72
+        },
+        "ru": {
+          "text": "Загружено: https://example.test/21  (итог: https://example.test/final/21)",
+          "cell_len": 73
+        }
+      },
+      {
+        "count_probe": 1000000,
+        "en": {
+          "text": "Fetched: https://example.test/1000000  (final: https://example.test/final/1000000)",
+          "cell_len": 82
+        },
+        "ru": {
+          "text": "Загружено: https://example.test/1000000  (итог: https://example.test/final/1000000)",
+          "cell_len": 83
+        }
+      }
+    ],
+    "composition_source": "local_operator/tui/widgets/tool_card.py:1322-1324",
+    "context_source": "local_operator/i18n/catalogues/en/tui.tool_card.context.json:18-21"
+  },
+  "note": "Independent round-2 delta audit only; not a full namespace re-audit. Read English/Russian final suffix and fetched row plus sidecar and live composition source. (итог: {url}) is idiomatic terse final-destination shorthand in this row, retaining parentheses and exact URL placeholder; no register/glossary/Latin leakage issue. No sidecar width cap on suffix. Counts are URL probes only: neither scoped key has plurals; 1000000 included as extra probe, not CLDR coverage. Rich cell_len/runtime render evidence, not a terminal screenshot/layout certification. First probe incorrectly expected API kind string; actual documented parser returns simple, corrected assertion and reran. No repo edits."
+}

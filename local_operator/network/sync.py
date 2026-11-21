@@ -109,6 +109,11 @@ NETWORK_DIRNAME = "network"
 REPLICA_DIRNAME = "replicas"
 REPLICA_CURSOR_NAME = "sync.json"
 STAGING_DIRNAME = "staging"
+#: Where a REFUSED replica recovery is moved (mesh-origin-stamp, security review
+#: S-1). Outside ``sessions/`` for the reason ``staging_dir`` is: nothing that
+#: lists, resumes or sweeps sessions looks here, so a copy whose origin stamps
+#: could not be lowered never appears as a conversation, yet nothing is deleted.
+QUARANTINE_DIRNAME = "quarantine"
 
 #: ``attachments/<ref>.bin`` — the store-relative spelling blobs travel under, so
 #: the two sides cannot disagree about where a blob lives.
@@ -3881,6 +3886,52 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
             )
 
 
+def _quarantine_refused_recovery(
+    root: Path, target: Path, new_id: str, created: tuple[int, int] | None
+) -> bool:
+    """Move a refused recovery's partial copy out of ``sessions/`` (S-1).
+
+    Before the origin-stamp work a refused copy was simply left un-promoted under
+    ``sessions/<new_id>`` (deliberately: this layer never deletes). That copy is
+    now a hazard, not just clutter: if the copy or the downgrade stopped partway,
+    it can hold stamps that still read ``verified: true``, and anything that lists
+    sessions would offer it as a conversation. A rename keeps the no-delete rule
+    and takes it out of every session reader's view in one step.
+
+    ``target`` was created by this call (``promote_replica`` refuses an existing
+    one before claiming), so only this call's own bytes move. Best-effort: a
+    rename that fails is logged and the original refusal still propagates.
+
+    CALLED WHILE THE COPY IS STILL CLAIMED (review R2-2), and it carries its
+    ``.session.pid`` out with it. Returns True once nothing is left at ``target``
+    (moved, or never there), having dropped that claim at the landing; False when
+    the rename failed, with the claim KEPT, so the copy left under ``sessions/``
+    still reads as owned to listings and sweeps for as long as this process lives.
+    """
+    # Routed through the session-cleanup module (tests/unit/session/
+    # test_no_session_deletion.py): this is a rename OUT of ``sessions/``, and
+    # every such call lives behind cleanup.py's guards. The guard proves the tree
+    # is the one this call created (``created`` is its st_dev/st_ino, recorded
+    # right after the claim) and that the claim still names this pid. It renames
+    # it to network/quarantine/<new_id> without replacing anything, deletes
+    # nothing, and drops the claim only at the landing.
+    from local_operator.session.cleanup import quarantine_claimed_session_dir
+
+    landing = quarantine_claimed_session_dir(
+        target,
+        config_dir=Path(root),
+        created=created,
+        reason=f"refused recovery of {new_id}",
+        actor="sync.promote_replica",
+    )
+    if landing is None:
+        logger.error("sync: a refused recovery of %s could not be moved out of sessions/", new_id)
+        return False
+    if landing != target:
+        logger.warning("sync: the refused recovery of %s was moved to %s", new_id, landing)
+    return True
+
+
 def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[str, Any]:
     """Turn a replica into a LOCAL session under a freshly minted id.
 
@@ -3938,8 +3989,13 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
 
     claim_session(target)
     copied: list[str] = []
+    # The created directory's identity, so a refused copy can be quarantined by
+    # proof of "this call made it" (inode), not by its name alone.
+    created: tuple[int, int] | None = None
     try:
         target.mkdir(parents=True, exist_ok=True)
+        made = os.lstat(target)
+        created = (made.st_dev, made.st_ino)
         # The replica is peer-authored too. Validate its links as one graph against
         # the NEW session root before copying files or publishing shared attachments.
         carried_links = [{"name": name, "link": link} for name, link in tree_link_entries(source)]
@@ -4043,8 +4099,28 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         except BaseException:
             _unlink_at(target, staged_boundary.name, target_scope)
             raise
-    except (OSError, SyncRefused) as exc:
-        release_session(target)
+        # IMPORTED STAMPS ARE EVIDENCE ONLY (mesh-origin-stamp M-4, R2-1): every
+        # mesh origin stamp in the recovered copy is lowered to ``verified: false``
+        # whoever minted it, while the new id is still claimed and before anything
+        # can run it. ANY failure, here or in the copy above, refuses the recovery
+        # (the handler below), which moves the copy out of ``sessions/`` rather
+        # than leave one whose stamps may still read verified.
+        from local_operator.network.origin import downgrade_stamps
+
+        downgrade_stamps(target)
+    except Exception as exc:  # noqa: BLE001 — every failure here is a refusal, not a crash
+        # ``Exception``, not ``(OSError, SyncRefused)`` (security review S-1): the
+        # replica is peer-authored, so the downgrade can fail in ways no file API
+        # predicts (``ImportStampsRefused`` for a compressed journal, a row crafted
+        # to break the parser). The old handler let those escape, skipping the
+        # claim release and leaving the copy in place with its stamps verified.
+        #
+        # MOVE FIRST, THEN RELEASE (review R2-2): releasing first left an
+        # UNCLAIMED copy under ``sessions/`` (whose stamps may still read
+        # verified) for listings and sweeps to pick up, briefly, or for good if
+        # the move then failed. The quarantine drops the claim at the landing; a
+        # failed move keeps it, and the refusal below still propagates.
+        _quarantine_refused_recovery(Path(root), target, new_id, created)
         if isinstance(exc, SyncRefused):
             raise
         raise SyncRefused(

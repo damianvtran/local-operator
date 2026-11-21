@@ -1497,6 +1497,22 @@ async def _direct_message(
     conversation_id = str(view.get("id") or "")
     if _CONVERSATION_ID.fullmatch(conversation_id) is None:
         return _error("the hub opened no usable DM id", code="dm_failed")
+    # REPLY BINDING, DM HALF. ``channel_post`` binds before it writes; ``dm`` did
+    # not, so a run that had received bridge input could answer into ANY DM
+    # without naming what it answered (the 2026-11 incident: a session posted
+    # into a DM it was not woken for). The check needs the RESOLVED DM id — a DM
+    # is addressed by person or endpoint, so the conversation only exists here —
+    # and runs before any upload or reservation so a refusal leaves nothing.
+    refused = _validate_reply_destination(
+        runtime,
+        {
+            "in_reply_to_message_id": params.in_reply_to_message_id,
+            "new_post": params.new_post,
+            "channel_id": conversation_id,
+        },
+    )
+    if refused is not None:
+        return refused
     # Stage the images (the DM now exists, so there is a conversation to stage
     # into) BEFORE the reply guard is touched: a failed upload then never reserves a
     # slot. Every exit below that does not send must discard them.
@@ -1569,12 +1585,23 @@ async def _direct_message(
             guard_busy = failure.transient
         if isinstance(slot, reply_guard.Skipped):
             return slot.as_result(conversation_id)
+        client_ref = str(uuid.uuid4())
+        ledger, outgoing_text = _begin_outbound(
+            runtime,
+            endpoint_id,
+            conversation_id,
+            kind="dm",
+            client_ref=client_ref,
+            text=text,
+            thread_root_id=thread_root_id,
+            in_reply_to=params.in_reply_to_message_id,
+        )
         try:
             sender = file_batch.send if file_batch else runtime.client.conversation_send
             result = await sender(
                 conversation_id,
-                client_ref=str(uuid.uuid4()),
-                text=text,
+                client_ref=client_ref,
+                text=outgoing_text,
                 tenant_id=runtime.tenant_id,
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
@@ -1583,7 +1610,8 @@ async def _direct_message(
                 **agent_attachments.send_kwargs(staged_images),
             )
         except Exception as failure:
-            # The hub did not take it: the slot goes back (``reply_guard.release``).
+            # The hub did not take it: the slot goes back (``reply_guard.release``)
+            # and so does the ledger row, so a failed send is never a poster.
             if slot is not None and not (file_batch and file_batch.uncertain):
                 reply_guard.release(
                     runtime.config_dir,
@@ -1591,6 +1619,8 @@ async def _direct_message(
                     endpoint_id=endpoint_id,
                     conversation_id=conversation_id,
                 )
+            if not (file_batch and file_batch.uncertain):
+                reply_guard.discard_outbound(runtime.config_dir, ledger)
             return _error(
                 (
                     agent_files.UNCERTAIN_MESSAGE
@@ -1604,7 +1634,20 @@ async def _direct_message(
                     "delivery_uncertain" if file_batch and file_batch.uncertain else "post_failed"
                 ),
             )
+        except BaseException:
+            # Cancellation (CancelledError is not an ``Exception``): the send never
+            # confirmed, and a ledger row with no message id would still count this
+            # session as a recent poster and route a stranger's answer to it.
+            if not (file_batch and file_batch.uncertain):
+                reply_guard.discard_outbound(runtime.config_dir, ledger)
+            raise
         landed = True
+        reply_guard.confirm_outbound(
+            runtime.config_dir,
+            ledger,
+            message_id=_posted_message(result)[0],
+            seq=_posted_message(result)[1],
+        )
     finally:
         if not landed:
             if file_batch:
@@ -1614,12 +1657,17 @@ async def _direct_message(
                     runtime, conversation_id, endpoint_id, staged_images
                 )
     receipt = _post_receipt(
-        conversation_id, result, thread_root_id=thread_root_id, lead=f"direct message to {label} in"
+        conversation_id,
+        result,
+        thread_root_id=thread_root_id,
+        lead=f"direct message to {label} in",
+        ref=ledger.ref if ledger is not None and ledger.ref else "",
     )
     receipt["destination_type"] = "conversation_dm"
     if file_batch:
         receipt["file_ids"] = list(file_batch.staged)
     attachment_warning = _annotate_attachments(receipt, staged_images)
+    _note_reply_destination(runtime, receipt, dm=True)
     # The target's membership state is the server's admission answer: an
     # ``invited`` agent will not be woken until its owner accepts, and the
     # sender must know that rather than assume delivery.
@@ -1821,6 +1869,86 @@ def _posted_message(result: Any) -> tuple[str, int | None]:
     )
 
 
+def _note_reply_destination(
+    runtime: "BridgeRuntime", receipt: dict[str, Any], *, dm: bool = False
+) -> None:
+    """Tell a non-designated sender where the answer to this post will land.
+
+    Replies to a conversation post are delivered to the DESIGNATED session by
+    default, not to the session that posted (the sender may be a task session
+    the owner never sees again). In a DM the connector may route the answer back
+    to the asker, but only while it is the one local session that posted there
+    recently and is still running, so the line says both. Without it a task
+    session waits for an answer that was handed to someone else, and the
+    designated session answers a question it did not ask. Silent when the
+    sender IS the designated session, and when the designation cannot be read
+    (store-less runtime, unreadable store): a notice must never fail a send that
+    already landed.
+    """
+
+    from .connector.routing import POSTER_WINDOW_S
+    from .store import Store, StoreRefused
+
+    try:
+        designated = Store(Path(runtime.config_dir)).designated_session_for_readonly(runtime.owner)
+    except (StoreRefused, OSError, UnicodeDecodeError, AttributeError):
+        return
+    if not designated or designated == runtime.session_id:
+        return
+    if dm:
+        receipt["content"] += (
+            "; a reply reaches this session only while it is the one session of yours that "
+            f"posted in this DM in the last {int(POSTER_WINDOW_S // 60)} minutes and is still "
+            f"running, otherwise it goes to session {designated}: read channel_history to see "
+            "what comes back"
+        )
+        return
+    # ``channel_post`` does not know the conversation's kind (it addresses by id),
+    # and a post to a DM is routed like a ``dm`` one: so it says "may", and names
+    # the DM rule, instead of promising the designated session.
+    receipt["content"] += (
+        f"; replies may go to session {designated}, not to you (in a DM, only the one "
+        f"session that posted there in the last {int(POSTER_WINDOW_S // 60)} minutes and is "
+        "still running gets them): read channel_history to see what comes back"
+    )
+
+
+def _begin_outbound(
+    runtime: "BridgeRuntime",
+    endpoint_id: str,
+    conversation_id: str,
+    *,
+    kind: str,
+    client_ref: str,
+    text: str,
+    thread_root_id: str,
+    in_reply_to: str,
+) -> tuple[reply_guard.OutboundRecord | None, str]:
+    """Write the ledger row for a send and return the text to put on the wire.
+
+    An ASK is a ``dm`` or ``channel_post`` with text and no
+    ``in_reply_to_message_id`` — the tool has no "expects a reply" flag, and an
+    answer to a delivered message is not a new question. Only an ask is given a
+    ``ref`` line. Everything here is best effort (the ledger fails open): when
+    no row could be written the text goes out unchanged, because a reference is
+    never worth a lost message. The line is appended HERE, after the secret scan
+    and the duplicate hash, which both saw the caller's own text.
+    """
+
+    ask = bool(text.strip()) and not in_reply_to.strip()
+    record = reply_guard.record_outbound(
+        runtime.config_dir,
+        endpoint_id=endpoint_id,
+        conversation_id=conversation_id,
+        session_id=runtime.session_id,
+        client_ref=client_ref,
+        kind=kind,
+        thread_root_id=thread_root_id,
+        ask=ask,
+    )
+    return record, (text + record.suffix if record is not None else text)
+
+
 def _post_receipt(
     conversation_id: str,
     result: Any,
@@ -1828,6 +1956,7 @@ def _post_receipt(
     thread_root_id: str = "",
     lead: str = "posted to",
     mention_account_id: str = "",
+    ref: str = "",
 ) -> dict[str, Any]:
     """The ONE success receipt for a conversation write (channel_post, dm).
 
@@ -1862,6 +1991,10 @@ def _post_receipt(
         content += f" at seq {seq}"
     if mention_account_id:
         content += f" (mentioning {mention_account_id})"
+    if ref:
+        # Display only: the line was appended to the text the recipient sees,
+        # and the sender is told so it can name this ask later.
+        content += f"; ref {ref} appended to your message"
     receipt: dict[str, Any] = {
         "ok": True,
         "state": "sent",
@@ -1876,6 +2009,8 @@ def _post_receipt(
     }
     if mention_account_id:
         receipt["resolved_account_id"] = mention_account_id
+    if ref:
+        receipt["ref"] = ref
     return receipt
 
 
@@ -2111,8 +2246,11 @@ def _validate_reply_destination(
     if not message_id:
         if runtime.bridge_input_presented and not new_post:
             return _error(
-                "this run received bridge input: supply in_reply_to_message_id "
-                "or intentionally declare new_post; thread_root_id is not reply binding",
+                "this run received bridge input: if this post answers a message you "
+                "were delivered, supply its in_reply_to_message_id; only a post that "
+                "answers none of them is a new_post (declare new_post: true, after "
+                "reading the thread with channel_history); thread_root_id is not "
+                "reply binding",
                 code="reply_binding_required",
             )
         return None
@@ -3099,6 +3237,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
         client_ref = str(uuid.uuid4())
+        # The ledger row and the ask's ref are decided HERE, not in
+        # ``pre_http_guard``: the text is fixed before the client calls the
+        # guard. The duplicate hash is taken from ``params.body`` there, so the
+        # appended ref cannot change it; a duplicate the guard then skips
+        # discards the row below like any send that did not land.
+        ledger, outgoing_text = _begin_outbound(
+            runtime,
+            endpoint_id,
+            channel_id,
+            kind="channel_post",
+            client_ref=client_ref,
+            text=params.body,
+            thread_root_id=thread_root_id,
+            in_reply_to=params.in_reply_to_message_id,
+        )
         # Staged ids are released on every exit that does not land the send,
         # cancellation included (CancelledError is not an ``Exception``).
         landed = False
@@ -3108,7 +3261,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 result = await sender(
                     channel_id,
                     client_ref=client_ref,
-                    text=params.body,
+                    text=outgoing_text,
                     tenant_id=runtime.tenant_id,
                     actor_endpoint_id=endpoint_id,
                     origin_session_id=runtime.session_id,
@@ -3120,6 +3273,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             except DispatchRefused as failure:
                 if file_batch and file_batch.uncertain:
                     return _error(agent_files.UNCERTAIN_MESSAGE, code="delivery_uncertain")
+                reply_guard.discard_outbound(runtime.config_dir, ledger)
                 if slot is not None and not (file_batch and file_batch.uncertain):
                     reply_guard.release(
                         runtime.config_dir,
@@ -3130,6 +3284,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return failure.result
             except Exception as failure:
                 # The hub did not take it: the slot goes back (``reply_guard.release``).
+                if not (file_batch and file_batch.uncertain):
+                    reply_guard.discard_outbound(runtime.config_dir, ledger)
                 if slot is not None and not (file_batch and file_batch.uncertain):
                     reply_guard.release(
                         runtime.config_dir,
@@ -3149,7 +3305,18 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                         else "post_failed"
                     ),
                 )
+            except BaseException:
+                # Cancellation: see the DM send above.
+                if not (file_batch and file_batch.uncertain):
+                    reply_guard.discard_outbound(runtime.config_dir, ledger)
+                raise
             landed = True
+            reply_guard.confirm_outbound(
+                runtime.config_dir,
+                ledger,
+                message_id=_posted_message(result)[0],
+                seq=_posted_message(result)[1],
+            )
         finally:
             if not landed:
                 if file_batch:
@@ -3168,6 +3335,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             result,
             thread_root_id=thread_root_id,
             mention_account_id=recipient_account_id,
+            ref=ledger.ref if ledger is not None and ledger.ref else "",
         )
         if file_batch:
             receipt["file_ids"] = list(file_batch.staged)
@@ -3176,6 +3344,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             receipt["resolved_channel_id"] = channel_id
             receipt["resolved_from_name"] = resolved_from_name
         attachment_warning = _annotate_attachments(receipt, staged_images)
+        _note_reply_destination(runtime, receipt)
         return _with_warnings(
             receipt,
             guard_warning,
@@ -3266,6 +3435,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             )
             await _annotate_body_state(runtime, result["messages"])
             _mark_non_member_senders(result["messages"])
+            _label_own_session_posts(runtime, endpoint_id, channel_id, result["messages"])
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
@@ -3336,6 +3506,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         restored = await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
         await _annotate_body_state(runtime, thread_rows)
         _mark_non_member_senders(thread_rows)
+        _label_own_session_posts(runtime, endpoint_id, channel_id, thread_rows)
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
@@ -3740,6 +3911,50 @@ def _mark_non_member_senders(rows: list[Any]) -> None:
         row["sender_class"] = cls
         if cls == "app":
             row["sender_note"] = APP_SENDER_NOTE
+
+
+#: ``authored_by`` values on a history/thread row (model-facing, English).
+AUTHORED_BY_THIS_SESSION = "you"
+AUTHORED_BY_OTHER_SESSION = "another session of yours"
+
+
+def _label_own_session_posts(
+    runtime: "BridgeRuntime", endpoint_id: str, conversation_id: str, rows: list[Any]
+) -> None:
+    """Say which rows one of THIS agent's sessions wrote, in place.
+
+    WHY. Several local sessions share one bridge identity, so every post any of
+    them made reads as "the agent" in a history page. A session reading the DM
+    could take another session's question for its own and answer the wrong
+    thing, or take its own earlier post for someone else's. The label comes from
+    the outbound ledger, looked up by the hub's MESSAGE ID — never from the row's
+    text, so a body that spells "— ref 7KQ2M" or "you" claims nothing. A row the
+    ledger has no entry for (a post from before the ledger, an expired row, a
+    ledger that could not be read) is left unlabelled rather than guessed.
+    ``ask_ref`` carries the per-ask ref when the ledger holds one.
+    """
+
+    ids = [r["id"] for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)]
+    authored = reply_guard.lookup_authorship(
+        runtime.config_dir,
+        endpoint_id=endpoint_id,
+        conversation_id=conversation_id,
+        message_ids=ids,
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        hit = authored.get(row.get("id", ""))
+        if hit is None:
+            continue
+        session_id, ref = hit
+        row["authored_by"] = (
+            AUTHORED_BY_THIS_SESSION
+            if session_id == runtime.session_id
+            else AUTHORED_BY_OTHER_SESSION
+        )
+        if ref:
+            row["ask_ref"] = ref
 
 
 def _strip_display_names(page: Any) -> None:

@@ -91,6 +91,11 @@ _AMBIENT_VARS = (
     # and how long it queues. Scrubbed; lease cells set their own.
     "LOCAL_OPERATOR_HEAVY_JOB_SLOTS",
     "LOCAL_OPERATOR_HEAVY_JOB_WAIT_S",
+    # The adopted-listener boot deadline (``cli.resolve_adopt_boot_deadline_seconds``):
+    # an operator's inherited small value would make a test's adopted serve
+    # exit early, changing what the serve cells assert. Scrubbed; deadline
+    # cells set their own.
+    "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS",
     # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
     # disable the sensor in every cell, silently waiving what the sensor cells
     # assert. Scrubbed; the sensor-specific cells set it explicitly via

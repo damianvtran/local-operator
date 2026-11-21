@@ -1,0 +1,266 @@
+{
+  "locale": "fr",
+  "namespace": "tui.session_sidebar",
+  "date": "2026-11-20T16:35:57.187470+00:00",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null,
+    "source": "delegation brief; not independently verified"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "eb22c756442d",
+    "date": "2026-11-20T16:35:57.187470+00:00",
+    "result": "failed",
+    "findings": 1
+  },
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "eb22c756442d",
+  "inputs": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.json",
+      "sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/fr/tui.session_sidebar.json",
+      "sha256": "894ca56e46b67e896b8fd23755c05da76c7597dd7349226d700c80e9bf9b91e4"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.context.json",
+      "sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+    }
+  },
+  "status": "failed",
+  "verdict": "fail",
+  "keys_read": 21,
+  "namespace_verdicts": {
+    "tui.session_sidebar": "fail"
+  },
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "FR1",
+        "key": "tui.session_sidebar.footer.hub_note",
+        "line": 3,
+        "current": "hub : {count}",
+        "proposed": "liens : {count}",
+        "reason": "Generic lower-case hub is retained English without a glossary/style-guide exception; context defines the count as Agent Hub links, so liens accurately names the counted objects and fits 10 cells.",
+        "references": [
+          "i18n/glossary.md:19-30,43-50",
+          "i18n/style-guides/fr.md:22-38"
+        ],
+        "widths_current": [
+          7,
+          7,
+          8,
+          8
+        ],
+        "widths_proposed": [
+          9,
+          9,
+          10,
+          10
+        ]
+      }
+    ],
+    "minor": [
+      {
+        "id": "FR2",
+        "key": "tui.session_sidebar.footer.asks_note",
+        "line": 2,
+        "current": "demandes : {count}",
+        "proposed": "quest. {count}",
+        "reason": "The queued questions are questions elsewhere (tui.small.ask_queue.question_waiting and relay.chrome.drawer.questions); demandes broadens the meaning and takes 12/13 cells against 10. A terse question abbreviation without a colon fits; the existing budget need not grow.",
+        "references": [
+          "local_operator/i18n/catalogues/fr/tui.small.json:36",
+          "local_operator/i18n/catalogues/fr/relay.chrome.json:6,68",
+          "i18n/style-guides/fr.md:65-72,89-94"
+        ],
+        "widths_current": [
+          12,
+          12,
+          13,
+          13
+        ],
+        "widths_proposed": [
+          8,
+          8,
+          9,
+          9
+        ]
+      }
+    ],
+    "nit": []
+  },
+  "checks": {
+    "key_parity": "21/21",
+    "argument_name_kind_parity": "21/21 via runtime.message_arguments",
+    "cldr_plural_categories": [
+      "many",
+      "one",
+      "other"
+    ],
+    "plural_selectors": "one/many/other; no =N selectors",
+    "literal_command": "lop stop preserved in rendered tooltip",
+    "manual_bidi_controls": 0,
+    "sample_counts": [
+      0,
+      9,
+      10,
+      99
+    ],
+    "widths_by_key": {
+      "tui.session_sidebar.footer.asks_note": [
+        12,
+        12,
+        13,
+        13
+      ],
+      "tui.session_sidebar.footer.hub_note": [
+        7,
+        7,
+        8,
+        8
+      ],
+      "tui.session_sidebar.footer.opening": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "tui.session_sidebar.footer.refresh_failed": [
+        24,
+        24,
+        24,
+        24
+      ],
+      "tui.session_sidebar.pinned_overflow": [
+        21,
+        22,
+        23,
+        23
+      ],
+      "tui.session_sidebar.row.untitled": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "tui.session_sidebar.section.active": [
+        16,
+        16,
+        16,
+        16
+      ],
+      "tui.session_sidebar.section.pinned": [
+        9,
+        9,
+        9,
+        9
+      ],
+      "tui.session_sidebar.section.previous": [
+        20,
+        20,
+        20,
+        20
+      ],
+      "tui.session_sidebar.section.subagent": [
+        25,
+        25,
+        25,
+        25
+      ],
+      "tui.session_sidebar.state.empty": [
+        26,
+        26,
+        26,
+        26
+      ],
+      "tui.session_sidebar.state.error": [
+        19,
+        19,
+        19,
+        19
+      ],
+      "tui.session_sidebar.state.loading": [
+        24,
+        24,
+        24,
+        24
+      ],
+      "tui.session_sidebar.title": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "tui.session_sidebar.tooltip.location": [
+        12,
+        12,
+        12,
+        12
+      ],
+      "tui.session_sidebar.tooltip.location_network": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "tui.session_sidebar.tooltip.location_network_stale": [
+        42,
+        42,
+        42,
+        42
+      ],
+      "tui.session_sidebar.tooltip.location_stale": [
+        33,
+        33,
+        33,
+        33
+      ],
+      "tui.session_sidebar.tooltip.status_wedged": [
+        41,
+        41,
+        41,
+        41
+      ],
+      "tui.session_sidebar.tooltip.unnamed_device": [
+        17,
+        17,
+        17,
+        17
+      ],
+      "tui.session_sidebar.tooltip.unreachable": [
+        24,
+        24,
+        24,
+        24
+      ]
+    },
+    "over_budget_keys": [
+      "tui.session_sidebar.footer.asks_note"
+    ],
+    "proposal_widths": {
+      "quest. {count}": [
+        8,
+        8,
+        9,
+        9
+      ],
+      "liens : {count}": [
+        9,
+        9,
+        10,
+        10
+      ]
+    },
+    "runtime": "/Users/damian/local-operator/.venv/bin/python with PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-tui-sidebar",
+    "rendered_terminal_frame": "not captured; this audit exercised runtime strings and Rich cell widths only"
+  },
+  "note": "Read-only independent audit. Source HEAD c8343f3a6087; target uncommitted. Remaining 19 keys clean on semantics/register/placeholders; French session/subagent/device terminology aligns with glossary and relay.shell.list.section.active/previous plus relay.chrome.list.section.pinned/list.empty. French is LTR; RTL not applicable. Full multi-digit footer clipping not asserted: only string widths were measured. No repository files edited."
+}

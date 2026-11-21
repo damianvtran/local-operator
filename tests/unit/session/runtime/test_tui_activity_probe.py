@@ -233,6 +233,23 @@ async def test_the_owner_advertises_the_activity_capability(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_the_owner_advertises_the_routed_inbox_capability(tmp_path: Path) -> None:
+    """The connector routes a Team Bridge message only to a session whose record
+    carries this string, so the record a runtime publishes must carry it."""
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.types import TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        assert TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY in record.capabilities, record.capabilities
+        assert TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY == "team-bridge-routed-inbox-v1"
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_a_withheld_activity_capability_sends_nothing(tmp_path: Path) -> None:
     """Skew, new viewer x old owner: the op is a no-op, not a stream-killing send.
 

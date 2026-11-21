@@ -2040,6 +2040,11 @@ def _sweep_missing(config_dir: str | Path) -> None:
             owner = store.group(1)
         elif entry.suffix == ".json" and "." not in entry.stem:
             owner = entry.stem
+        elif entry.name.endswith((".build.lock", ".publish.lock")):
+            # Review round 1, n1: the 0-byte lock files beside a deleted
+            # session's cache. Safe to unlink: with the session directory gone
+            # no writer for it can start, so nobody holds or waits on them.
+            owner = entry.name.rsplit(".", 2)[0]
         else:
             continue
         try:
@@ -3618,7 +3623,129 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
     ``os.replace`` changes the inode — rescans. One retry covers a concurrent
     ``compact_file`` (which replaces the file, changing the inode under the
     read).
+
+    ONE BUILDER PER SESSION ACROSS PROCESSES. The whole ladder runs under a
+    per-session build lock (``<sid>.build.lock`` beside the cache, the same
+    flock + in-process lock :func:`_publish_lock` uses). ``lop serve`` and the
+    mesh relay are separate processes and both open the same journal when a
+    viewer opens a conversation; ``start_refresh``'s single-flight joins only
+    within one process, so each used to scan the same bytes (transcript-index
+    ADR caller map). Under the lock the second builder re-reads the cache AFTER
+    the first one published, takes the exact-signature hit and returns without
+    scanning. Lock order is build -> publish, never the reverse, so the nested
+    ``write_index`` cannot deadlock against it. A waiter costs a blocked worker
+    thread for at most one build — work it would otherwise have spent
+    scanning the same bytes itself — and never more than
+    :data:`_BUILD_LOCK_WAIT_S`, after which it scans independently.
     """
+    if not _journal_path(config_dir, session_id).exists():
+        return None  # No journal, nothing to build: never create a lock for it.
+    lock = index_path(config_dir, session_id).with_suffix(".build.lock")
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # An unwritable cache dir cannot hold a lock either; the ladder below
+        # degrades exactly as it did before the lock existed.
+        return _refresh_index_locked(config_dir, session_id)
+    with _build_lock(lock, _BUILD_LOCK_WAIT_S) as held:
+        if not held:
+            # QA round 1, Q1: a LIVE but frozen holder (a SIGSTOPped or
+            # swapped-out ``serve``) would otherwise pin this worker for as long
+            # as it stays frozen — flock only frees on death. Past the bound,
+            # scan independently: that is exactly the pre-lock behaviour, safe
+            # because the cache write is atomic and idempotent, so the lock is
+            # a dedup optimisation and never a correctness guarantee.
+            logger.info(
+                "transcript index build lock for session %s still held after %.0f s; "
+                "scanning independently",
+                session_id,
+                _BUILD_LOCK_WAIT_S,
+            )
+        return _refresh_index_locked(config_dir, session_id)
+
+
+#: How long a builder waits for another builder of the SAME session before it
+#: scans on its own (see :func:`refresh_index`). Sized above the slowest build
+#: measured, so a waiter behind a healthy build still dedups: a cold scan of the
+#: anchor conversations is ~7-8.5 s of GIL-held CPU in serve
+#: (docs/design/transcript-index-off-process.md, PR #4219), and QA round 1 on
+#: #4224 measured 0.5-2.7 s for its synthetic journals. 30 s leaves ~3.5x for
+#: load and ``_YIELD_TO`` pauses; reaching it means the holder is stuck, not slow.
+_BUILD_LOCK_WAIT_S = 30.0
+#: Poll step for the non-blocking flock retry; small against any build, large
+#: enough that a waiter costs no measurable CPU.
+_BUILD_LOCK_POLL_S = 0.05
+
+
+@contextmanager
+def _build_lock(path: Path, wait_s: float) -> Iterator[bool]:
+    """:func:`_publish_lock`'s two-level lock, but BOUNDED: yields whether held.
+
+    The publish lock may block indefinitely because its holder only writes one
+    document; the build lock is held for a whole scan, so a frozen holder must
+    not freeze its waiters (Q1). The in-process lock is acquired with a timeout
+    and the advisory lock is retried non-blocking until the same deadline.
+    Yields ``False`` (holding nothing) when the deadline passes; the caller
+    then proceeds unlocked. A platform with no advisory lock keeps the
+    in-process half only, as :func:`_publish_lock` does.
+    """
+    deadline = time.monotonic() + wait_s
+    thread_lock = _PUBLISH_THREADS.setdefault(str(path), threading.Lock())
+    if not thread_lock.acquire(timeout=max(wait_s, 0.0)):
+        yield False
+        return
+    handle = None
+    held = True
+    try:
+        try:
+            import fcntl as _fcntl
+        except ImportError:  # pragma: no cover - Windows only
+            _fcntl = None  # type: ignore[assignment]
+        _msvcrt: Any = None
+        if _fcntl is None:  # pragma: no cover - Windows only
+            try:
+                import msvcrt as _msvcrt
+            except ImportError:  # pragma: no cover - exotic platforms
+                _msvcrt = None
+        locking = getattr(_msvcrt, "locking", None) if _msvcrt is not None else None
+        if _fcntl is not None or locking is not None:
+            try:
+                handle = path.open("a")
+            except OSError:
+                handle = None  # Unopenable lock file: in-process half only.
+        if handle is not None:
+            while True:
+                try:
+                    if _fcntl is not None:
+                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                    # ``handle`` is only opened when ``_fcntl`` or ``locking``
+                    # is available, so with no fcntl ``locking`` is set here;
+                    # the explicit check states that for the type checker
+                    # rather than silencing it with an ignore.
+                    elif locking is not None:  # pragma: no cover - Windows only
+                        handle.seek(0)
+                        locking(handle.fileno(), getattr(_msvcrt, "LK_NBLCK", 2), 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        held = False
+                        break
+                    time.sleep(_BUILD_LOCK_POLL_S)
+        if not held:
+            handle.close()  # type: ignore[union-attr]
+            handle = None
+            thread_lock.release()
+            thread_lock = None  # type: ignore[assignment]
+        yield held
+    finally:
+        if handle is not None:
+            handle.close()
+        if thread_lock is not None:
+            thread_lock.release()
+
+
+def _refresh_index_locked(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
+    """:func:`refresh_index`'s ladder; the caller holds the session's build lock."""
     path = _journal_path(config_dir, session_id)
     yield_to = _YIELD_TO.get()
     for attempt in (0, 1):
@@ -3647,8 +3774,14 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
                 and st.st_size > previous.scan.offset
                 and _verify_tail(path, previous.scan.offset, str(previous.sig.get("last_id", "")))
             ):
+                if open_trace.enabled():
+                    # The row that counts SCANS (``index.refresh_start`` counts
+                    # requests, which a hit or a joined build also produce).
+                    open_trace.mark("index.scan", session=session_id, kind="incremental")
                 index = _scan_incremental(path, previous, raw)
             else:
+                if open_trace.enabled():
+                    open_trace.mark("index.scan", session=session_id, kind="full")
                 index = _scan_full(path, raw)
                 # D8's cleanup bullet rides the build pass, and a build is the
                 # only moment that can see the whole cache directory.
@@ -3743,12 +3876,17 @@ def probe_index(config_dir: str | Path, session_id: str) -> IndexProbe:
 
 #: In-flight refreshes and the resident parsed indexes, keyed by
 #: ``(str(config_dir), session_id)``. LOOP-ONLY MUTATION: entries are created,
-#: read and dropped from the event loop thread; the worker only computes and
+#: read and dropped from event loop threads; the worker only computes and
 #: returns (``page_cache``'s cross-thread rule). Each entry carries the loop it
 #: belongs to so a torn-down test loop reads as absent rather than as a future
-#: bound to a dead loop.
+#: bound to a dead loop, and so a caller on ANOTHER live loop joins through
+#: ``_join_across_loops`` instead of touching that loop's task directly.
 _IN_FLIGHT: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, "asyncio.Task[Any]"]] = {}
 _RESIDENT: "OrderedDict[tuple[str, str], TranscriptIndex]" = OrderedDict()
+#: The latest cross-loop proxy per session, with the JOINER's loop, so
+#: :func:`in_flight_refresh` on that loop can find a build another loop owns.
+#: Same loop-only rule as ``_IN_FLIGHT``; each entry drops itself on settle.
+_JOINED: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, "asyncio.Task[Any]"]] = {}
 
 #: The cache file's mtime each resident index was remembered under. The fast
 #: path revalidates the JOURNAL's stat; a naming write (``patch_naming``) moves
@@ -4403,14 +4541,167 @@ def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex |
     return None
 
 
+def _join_across_loops(
+    owner_loop: asyncio.AbstractEventLoop,
+    owner: "asyncio.Task[Any]",
+    loop: asyncio.AbstractEventLoop,
+    session_id: str,
+) -> "asyncio.Task[Any] | None":
+    """A task on ``loop`` that settles with ``owner``'s outcome, or ``None``.
+
+    Neither loop may touch the other's objects directly: asyncio tasks and
+    futures are not thread-safe. So the done-callback is REGISTERED on the
+    owner's loop (``call_soon_threadsafe``) and the result is DELIVERED on the
+    joiner's loop the same way. ``None`` means the owner's loop refused the
+    callback (it closed between the ``is_running`` check and now); the caller
+    then starts its own scan, which is the pre-join behaviour and still correct
+    (same journal, idempotent cache write). The joiner never cancels the
+    owner: cancelling the proxy only abandons this caller's wait.
+    """
+    bridge: asyncio.Future[Any] = loop.create_future()
+
+    def deliver(settled: "asyncio.Task[Any]") -> None:
+        def settle() -> None:
+            if bridge.done():
+                return
+            if settled.cancelled():
+                # Review round 1, m2: the owner is only ever cancelled by its
+                # own loop's teardown (the relay page loop cancels every pending
+                # task on stop). Nobody cancelled THIS caller, so a borrowed
+                # ``CancelledError`` would read as its own cancellation (a
+                # ``persist_record`` under ``shield`` would abort its caller).
+                # Report it as the failure it is.
+                bridge.set_exception(RuntimeError("index refresh owner loop shut down"))
+            elif settled.exception() is not None:
+                bridge.set_exception(settled.exception())  # type: ignore[arg-type]
+            else:
+                bridge.set_result(settled.result())
+
+        try:
+            loop.call_soon_threadsafe(settle)
+        except RuntimeError:
+            pass  # The joiner's loop closed; nobody is left to answer.
+
+    try:
+        owner_loop.call_soon_threadsafe(owner.add_done_callback, deliver)
+    except RuntimeError:
+        return None
+
+    async def _joined() -> Any:
+        return await bridge
+
+    return loop.create_task(_joined(), name=f"transcript-index-join:{session_id}")
+
+
+def current_without_build(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
+    """A CURRENT index for the session if one is already in memory; never builds.
+
+    For callers whose contract is "never a scan" but which run synchronously —
+    several on an event loop (the TUI's render path, the runtime's
+    ``history_page``). Two sources, both bounded by a few ``stat`` calls:
+
+    1. :func:`fresh_resident` — the index a refresh left resident here.
+    2. The persisted publication, but ONLY when this process has already parsed
+       that exact head (the parse memo, keyed by the head's ino/size/mtime) AND
+       its signature still matches the journal. A cold parse is deliberately
+       NOT done here: on an anchor-sized session decoding the document is
+       hundreds of milliseconds, which is exactly the stall this door exists to
+       keep off the caller. :func:`start_refresh` performs that parse off the
+       loop and leaves the result resident for the next ask.
+
+    ``None`` means "not ready"; pair it with :func:`arm_refresh` to start one.
+    """
+    index = fresh_resident(config_dir, session_id)
+    if index is not None:
+        return index
+    path = index_path(config_dir, session_id)
+    try:
+        st = path.stat()
+        journal_st = _journal_path(config_dir, session_id).stat()
+    except OSError:
+        return None
+    identity = (st.st_ino, st.st_size, st.st_mtime_ns)
+    with _PARSED_LOCK:
+        memo = _PARSED.get(str(path))
+    if memo is None or memo[0] != identity or memo[3].get("version") != TRANSCRIPT_INDEX_VERSION:
+        return None
+    view = memo[1]
+    if not view.journal_generation or not _sig_matches(view.sig, journal_st):
+        return None
+    return _detached(view, identity)
+
+
+def in_flight_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any] | None":
+    """The refresh task running for this session on the CALLING loop, if any.
+
+    For a reader that answered "not ready" and wants to re-ask once the armed
+    refresh lands (``mobile/peer_cycles.py``), without polling and without
+    arming anything itself. Either the task this loop owns or, when the build
+    is owned by another live loop, the proxy :func:`start_refresh` gave this
+    loop (``_JOINED``; review round 1, m1 — before it the lookup answered
+    ``None`` after a cross-loop join and the reader never re-asked). ``None``
+    off a loop, or when nothing for this loop is still running.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    key = _key(config_dir, session_id)
+    for table in (_IN_FLIGHT, _JOINED):
+        entry = table.get(key)
+        if entry is not None and entry[0] is loop and not entry[1].done():
+            return entry[1]
+    return None
+
+
+def arm_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any] | None":
+    """Start (or join) the background refresh WITHOUT awaiting it.
+
+    Returns the task now in flight for the caller's loop — the owned task, or
+    the cross-loop proxy :func:`start_refresh` hands a joiner — so a reader
+    that answered "not ready" can re-ask on its completion without polling
+    (``mobile/peer_cycles.py``). Returning the task itself, rather than having
+    the reader look it up again, is what makes the proxy visible: proxies are
+    never recorded in ``_IN_FLIGHT`` (review round 1, m1). ``None`` when the
+    calling thread runs no event loop (a ``to_thread`` worker):
+    ``start_refresh`` is loop-resident and there is no loop here to own the
+    task; such callers build directly instead (see
+    ``peer_cycle_display._index_or_arm``).
+    The failed build's exception is retrieved here because this caller owns no
+    await on the task (the point is not to wait); an unobserved failure would
+    surface as a second, misleading traceback at GC.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    try:
+        task, _started = start_refresh(config_dir, session_id)
+    except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
+        logger.debug("index refresh arm failed for %s", session_id, exc_info=True)
+        return None
+    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+    return task
+
+
 def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Task[Any], bool]":
     """Start (or join) the background refresh for one session.
 
     Single-flight per session, with the strong reference asyncio tasks need —
     a bare ``create_task`` has only a weak referent and would be collected
-    mid-flight (the pattern serving.py uses for the same reason). Callers in
-    another event loop than a recorded entry get a fresh task; the stale entry
-    is replaced.
+    mid-flight (the pattern serving.py uses for the same reason).
+
+    SINGLE-FLIGHT SPANS THE PROCESS'S LOOPS, not just one loop. ``lop serve``
+    runs the desktop bridge on its main loop and the relay's stored-page reads
+    on the relay's own page loop; both open the same journal when a viewer
+    opens a conversation, and before this join each started its own scan of it
+    (the transcript-index ADR's caller map, ``relay.py`` "duplicated, not
+    joined"). A caller on another loop whose recorded task is still running
+    on a LIVE loop now gets a proxy task on its own loop that settles with the
+    owner's result (see :func:`_join_across_loops`) — one scan, one
+    ``index.refresh_start`` row. Only an entry whose loop has stopped (a closed
+    ``asyncio.run``, a torn-down page loop) is replaced with a fresh task: its
+    task can never finish, so joining it would hang the caller.
 
     Returns ``(task, started)``: ``started`` is True only when THIS call created
     the task, False when it joined one already in flight. The distinction is
@@ -4427,6 +4718,18 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
             return task, False
         if entry_loop is loop:
             _IN_FLIGHT.pop(key, None)
+        elif not task.done() and entry_loop.is_running():
+            proxy = _join_across_loops(entry_loop, task, loop, session_id)
+            if proxy is not None:
+                _JOINED[key] = (loop, proxy)
+
+                def _forget(done: "asyncio.Task[Any]", key: tuple[str, str] = key) -> None:
+                    # Only this proxy's own entry: a newer join may have replaced it.
+                    if _JOINED.get(key, (None, None))[1] is done:
+                        _JOINED.pop(key, None)
+
+                proxy.add_done_callback(_forget)
+                return proxy, False
 
     hold = _defer_for_paint(config_dir, session_id)
     if hold is not None:
@@ -4699,6 +5002,7 @@ def _reset_for_tests() -> None:
     able to start clean.
     """
     _IN_FLIGHT.clear()
+    _JOINED.clear()
     _RESIDENT.clear()
     _RESIDENT_STAMP.clear()
     with _PARSED_LOCK:

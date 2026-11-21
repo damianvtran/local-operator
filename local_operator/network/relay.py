@@ -85,7 +85,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, redial, store, uplink, wire
+from local_operator.network import nat64, projection, redial, store, uplink, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -1052,14 +1052,49 @@ def probe_candidates(
                         started = time.monotonic()
                         states[endpoint] = ("issued", started)
                     sock.connect((host, port))
-                except BaseException:
+                except BaseException as exc:
                     # Stamp first: a slow close must not count as time spent
                     # waiting for an answer (U4).
                     ended = time.monotonic()
                     _close_quietly(sock)
-                    raise
+                    # NAT64 (roaming stage 3): an IPv4 literal refused LOCALLY
+                    # (ENETUNREACH/EHOSTUNREACH/EADDRNOTAVAIL — an IPv6-only
+                    # host) is exactly the case the fallback exists for. A
+                    # timeout never tries it: a silent IPv4 dial on a dual-stack
+                    # host is a quiet peer, not a missing route, and a second
+                    # dial would only double the wait. The fallback shares this
+                    # connect's deadline (``started + budget``), and ``ended`` is
+                    # re-stamped once it returns or raises, so the silence gate
+                    # below sees the whole attempt. On ``None`` the ORIGINAL
+                    # error propagates; "issued" still means the first connect.
+                    if (
+                        isinstance(exc, OSError)
+                        and not isinstance(exc, TimeoutError)
+                        and ":" not in host
+                    ):
+                        dial_deadline = started + budget
+                        try:
+                            rescued = nat64.fallback(
+                                host,
+                                port,
+                                exc,
+                                timeout=max(0.0, dial_deadline - time.monotonic()),
+                                deadline=dial_deadline,
+                            )
+                        finally:
+                            ended = time.monotonic()
+                        if rescued is None:
+                            raise
+                        sock = rescued
+                    else:
+                        raise
             else:
-                sock = socket.create_connection((address or endpoint, port), timeout=budget)
+                # ``nat64.create_connection``, not ``socket``'s: the ONE dial seam
+                # that retries an IPv4-only name through this network's NAT64 when
+                # this host has no IPv4 route (roaming stage 3). Same first connect,
+                # same exceptions; trust is still the handshake's call on the
+                # winning socket.
+                sock = nat64.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
             waited = (ended if ended is not None else time.monotonic()) - started
             with opened_lock:
@@ -5025,8 +5060,14 @@ class PeerLink:
         codec: wire.LinkCrypto,
         settings: NetworkSettings,
         reader: wire.FrameReader | None = None,
+        peer_verified: bool = False,
     ) -> None:
         """``reader`` is the HANDSHAKE's reader, when it still holds bytes.
+
+        ``peer_verified`` is whether THIS side proved the peer's identity in the
+        handshake (``HandshakeResult.peer_verified``). Every build site states it
+        explicitly (listener register, pair listener, dialer) so the value a mesh
+        origin stamp relies on is a reviewed decision per site, never a default.
 
         A link takes over the socket the handshake just finished on, and the
         handshake reader may already own bytes of the first record (see
@@ -5047,6 +5088,10 @@ class PeerLink:
         self.device_id = result.peer_device_id
         self.instance_id = result.peer_instance_id
         self.network_id = result.network_id
+        #: Whether this link's PEER identity was proved by the handshake (see the
+        #: constructor). Read by ``_peer_block`` into the block the owner's relay
+        #: MACs for its runtime (G6), where it caps the stamp's ``verified``.
+        self.peer_verified = bool(peer_verified)
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
@@ -5070,6 +5115,9 @@ class PeerLink:
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
+        #: The reader's monotonic timeout and writer's wall-idle check can race;
+        #: the relay claims their single idle audit row under its links lock.
+        self._idle_audited = False
         #: When the writer last sent a keepalive ``ping``. The cadence is measured from
         #: the LATER of this and ``last_frame_at`` — see ``_write_loop``.
         self.last_ping_sent_at = 0.0
@@ -5423,7 +5471,28 @@ class PeerLink:
 
     def _write_loop(self) -> None:
         try:
+            last_wall, last_mono = time.time(), time.monotonic()
             while not self._closed.is_set():
+                now, mono = time.time(), time.monotonic()
+                gap_s = (now - last_wall) - (mono - last_mono)
+                last_wall, last_mono = now, mono
+                if gap_s > self.settings.keepalive_s:
+                    # macOS monotonic time excludes clamshell sleep. Explain that
+                    # gap without publishing absolute clock values, once across
+                    # all writers waking on this host. A large forward wall-clock
+                    # adjustment has the same signature, not proof of suspend.
+                    self.server.audit_host_resume(gap_s=gap_s, clock_offset=now - mono)
+                if (
+                    not self._flushing.is_set()
+                    and now - self.last_frame_at > self.settings.link_idle_s
+                ):
+                    # The reader's monotonic deadline did not spend the sleeping
+                    # minutes. Expire the wall-stale link BEFORE draining new work
+                    # on its first wake tick. An existing close still owns its
+                    # bounded control-frame flush; do not turn it into a timeout.
+                    self.server.audit_idle(self)
+                    self.close("timeout")
+                    return
                 sent = self._drain()
                 if self._flushing.is_set() and self._reliable.empty() and not self._droppable:
                     # BOTH QUEUES EMPTY AND DRAINED BY THIS THREAD: everything a
@@ -6034,8 +6103,8 @@ class RelayServer:
         # so a test can inject a scripted reader; a relay built without
         # ``__init__`` has none, so no ``local_offline`` and no recovery kick.
         self._route_reader: Callable[[str], bool | None] | None = uplink.endpoint_has_route
-        #: Collapses repeats of one identical handshake refusal into one audit row
-        #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
+        #: Collapses identical handshake refusals and redial failures per window
+        #: (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these repeats.
         self._refusal_rows = redial.RefusalCoalescer()
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
@@ -6045,6 +6114,9 @@ class RelayServer:
         #: accepted pair socket, so the check-and-increment must be one step.
         self._pair_parked = 0
         self._pair_parked_lock = threading.Lock()
+        #: A clock discontinuity belongs to the host, not each of its links.
+        #: Compared under _links_lock; absolute clock offsets are never audited.
+        self._resume_clock_offset: float | None = None
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
         self._control_key = wire.b64u(os.urandom(32))
@@ -7370,7 +7442,7 @@ class RelayServer:
                     # loopback on our own port) and will come back by dialling us.
                     # Counted as a failed redial WITHOUT a dial, so the grace window
                     # still escalates to ``down`` on schedule.
-                    self.redial.failed(device_id, cause="waiting_for_peer")
+                    self._note_redial_failure(device_id, cause="waiting_for_peer")
                     continue
                 try:
                     link, reason = self._ensure_link_with_reason(
@@ -7379,9 +7451,43 @@ class RelayServer:
                 except Exception as exc:  # noqa: BLE001 — the loop must survive any dial
                     link, reason = None, f"error:{type(exc).__name__}"
                 if link is None:
-                    self.redial.failed(device_id, cause=reason or "unreachable")
+                    self._note_redial_failure(device_id, cause=reason or "unreachable")
                     if self._peer_route(device_id) is False:
                         unroutable.add(device_id)
+
+    def _note_redial_failure(self, device_id: str, *, cause: str) -> None:
+        """Audit the tracker's actual retry decision, without one row per retry.
+
+        Keep this beside the scheduler's existing cause, not handshake refusal
+        handling: a capped retry can repeat all night, and no peer authenticated
+        merely because this device attempted its stored address. The actor is
+        this device; ``device`` and ``code`` are the intended peer and typed cause.
+        """
+        self.redial.failed(device_id, cause=cause)
+        status = self.redial.snapshot(device_id)
+        if "next_retry_at" not in status:
+            # A concurrent admission already cleared this loss; there is no
+            # scheduled failure left to describe or next deadline to invent.
+            return
+        admitted, repeats = self._refusal_rows.admit(("redial_failed", device_id, cause))
+        if not admitted:
+            return
+        detail: dict[str, Any] = {
+            "device": device_id,
+            "code": cause,
+            "attempt": status["attempts"],
+            "next_retry_at": status["next_retry_at"],
+        }
+        if repeats:
+            detail["repeats"] = repeats
+        self.audit.record(
+            AuditEvent(
+                event="redial_failed",
+                actor=self.identity.device_id,
+                subject=device_id,
+                detail=detail,
+            )
+        )
 
     def _peer_route(self, device_id: str) -> bool | None:
         """Whether this device has a route to any of ``device_id``'s dial candidates.
@@ -8228,6 +8334,9 @@ class RelayServer:
             codec=handshake.codec(),
             settings=self.settings,
             reader=reader,
+            # The listener verified the dialer's auth MAC (``verify_auth``): its id is
+            # PROVEN, and that fact is what a mesh origin stamp may later vouch for.
+            peer_verified=result.peer_verified,
         )
         link.peer_addr = peer_addr
         # A REFUSAL HERE IS A HINT, NOT THE DECISION (see :meth:`_refusal_reason`): it
@@ -8451,7 +8560,28 @@ class RelayServer:
             )
         )
 
+    def audit_host_resume(self, *, gap_s: float, clock_offset: float) -> None:
+        """One gap-only row per host discontinuity, not one per sleeping link."""
+        with self._links_lock:
+            previous: float | None = getattr(self, "_resume_clock_offset", None)
+            if previous is not None and abs(clock_offset - previous) <= self.settings.keepalive_s:
+                return
+            self._resume_clock_offset = clock_offset
+            self.audit.record(
+                AuditEvent(
+                    event="host_resumed",
+                    actor=self.identity.device_id,
+                    detail={"gap_s": round(gap_s, 3)},
+                )
+            )
+
     def audit_idle(self, link: PeerLink) -> None:
+        # Both deadline owners can notice one dead link at once. Claim the audit
+        # fact before either closes it, rather than recording two incidents.
+        with self._links_lock:
+            if getattr(link, "_idle_audited", False):
+                return
+            link._idle_audited = True
         self.audit.record(
             AuditEvent(
                 event="link_idle",
@@ -10121,13 +10251,28 @@ class RelayServer:
     # ordering rule against stream pushes on the same link.
 
     def _peer_block(self, link: PeerLink) -> dict[str, Any]:
-        """The dialing peer's identity, for a refusal that has to name it (§4.4)."""
+        """The dialing peer's identity, for a refusal that has to name it (§4.4).
+
+        Also the identity BLOCK of the relay→runtime proof (mesh-origin-stamp G6):
+        ``network_id``, ``link_id`` and ``peer_verified`` are LINK facts this relay
+        holds, and ``dial.dial_owner`` MACs this block (``origin.canonical_block``)
+        under ``K_relay``, so the runtime can stamp a remote row with the device it
+        came from and believe it only when the proof checks. ``peer_verified`` is
+        the per-link handshake fact, never a constant: a relay that has not proved
+        its peer can only produce an unverified stamp.
+        """
         name = ""
         record = self.store_view.network(link.network_id)
         if record is not None:
             member = record.member(link.device_id)
             name = member.name if member is not None else ""
-        return {"device_id": link.device_id, "name": name}
+        return {
+            "device_id": link.device_id,
+            "name": name,
+            "network_id": str(link.network_id or ""),
+            "link_id": str(link.link_id or ""),
+            "peer_verified": bool(getattr(link, "peer_verified", False)),
+        }
 
     def _session_record(self, session_id: str) -> Any:
         """The live discovery record for one of THIS device's sessions, or None.
@@ -10710,7 +10855,7 @@ class RelayServer:
         prompt_detail = ""
         waited: dict[str, float] = {}
         if prompt:
-            outcome = self._prompt_on(session_id, prompt, frame.get("images"), due=due)
+            outcome = self._prompt_on(session_id, prompt, frame.get("images"), due=due, link=link)
             admitted = bool(outcome["admitted"])
             prompt_state = str(outcome["state"])
             prompt_detail = str(outcome["detail"])
@@ -11618,14 +11763,14 @@ class RelayServer:
         THE REFRESH IS SCHEDULED ON THE PAGE LOOP because ``start_refresh`` is
         loop-resident by construction (it creates a task on the RUNNING loop),
         and this handler runs on the LINK'S READER thread. SINGLE-FLIGHT MEANS
-        PER LOOP HERE: ``transcript_index`` joins an in-flight task only when it
-        was recorded for the same loop — a request from another loop starts a
-        FRESH task and replaces the map's entry. Every stored-page read in this
-        process shares the one page loop, so concurrent frame reads join one
-        scan; a refresh already running on ANOTHER loop (the desktop bridge's,
-        another process) is duplicated, not joined — safe (the same journal, an
-        idempotent cache write), and exactly why this side schedules its own
-        rather than assuming anyone else's scan is in flight. The submit is
+        ACROSS LOOPS AND PROCESSES. Every stored-page read shares the one page
+        loop; a refresh this relay already runs on another of its loops (the
+        source-availability join) is joined through a proxy task
+        (``start_refresh``'s cross-loop join). The desktop bridge's refresh of
+        the same journal runs in ANOTHER PROCESS (``lop serve``), which no task
+        can join: there ``refresh_index``'s per-session build lock makes the
+        later builder wait for the first one's publication and take its
+        exact-signature hit, so the two opens cost one scan. The submit is
         taken under ``_page_loop_lock`` for the same reason
         ``_stored_page_read``'s is: a ``stop`` landing between choosing the loop
         and submitting must hand this read either the live loop or a fresh one,
@@ -11664,14 +11809,14 @@ class RelayServer:
     async def _schedule_frame_index_refresh(self, session_id: str) -> None:
         """Create the index refresh task, on the page loop.
 
-        THE LOOP IS THE JOIN CONDITION, not just the executor: ``start_refresh``
-        joins a task only for the loop it was recorded under, and every
-        stored-page read here shares this one — so concurrent frame reads join
-        ONE scan. (A refresh already running on another loop is not joined; see
-        :meth:`_stored_frame_index` for the scope and why the duplicate is
-        safe.) A coroutine rather than a direct call because ``start_refresh``
-        reads ``asyncio.get_running_loop()`` — it must run where a loop is
-        running, which is the page loop and only the page loop on this side.
+        Every stored-page read here shares this loop, so concurrent frame reads
+        join ONE task; a refresh another of this process's live loops already
+        runs is joined through ``start_refresh``'s cross-loop proxy, and the
+        desktop bridge's build in ``lop serve`` (another process) through
+        ``refresh_index``'s build lock (see :meth:`_stored_frame_index`). A
+        coroutine rather than a direct call because ``start_refresh`` reads
+        ``asyncio.get_running_loop()`` — it must run where a loop is running,
+        which is the page loop and only the page loop on this side.
         """
         from local_operator.session import transcript_index as index_module
 
@@ -12259,7 +12404,13 @@ class RelayServer:
         return {"applied": True, "detail": ""}
 
     def _prompt_on(
-        self, session_id: str, text: str, images: Any, *, due: float | None = None
+        self,
+        session_id: str,
+        text: str,
+        images: Any,
+        *,
+        due: float | None = None,
+        link: "PeerLink | None" = None,
     ) -> dict[str, Any]:
         """Admit the first prompt of a freshly created session, and say what became of it.
 
@@ -12318,7 +12469,11 @@ class RelayServer:
         if due is None:
             due = time.monotonic() + create_op_deadline_s(self.settings.op_wait_s)
         try:
-            dial = self._dial_owned(session_id, capabilities=("prompt",))
+            # ``link`` (the creating member's) rides along so the first prompt of a
+            # remotely created session carries the same peer block, and therefore
+            # the same verifiable mesh origin, as every later relayed prompt; a
+            # linkless dial sends no block and can only stamp unverified (M-6).
+            dial = self._dial_owned(session_id, capabilities=("prompt",), link=link)
         except session_dial.OwnerUnreachable as exc:
             return {"admitted": False, "state": "refused", "detail": str(exc)}
         # After the dial, so connecting to the runtime is paid out of the budget
@@ -12526,6 +12681,16 @@ class RelayServer:
         if not isinstance(inner, dict):
             raise MeshRefusal("protocol_error", "a stream frame must carry the frame it forwards")
         inner_op = str(inner.get("op") or "")
+        from local_operator.network.origin import RELAY_ATTEST_OP
+
+        if inner_op == RELAY_ATTEST_OP:
+            # THE PROOF IS THE OWNER RELAY'S, NEVER A VIEWER'S (M-9). ``relay_attest``
+            # is what THIS relay sends as the first frame of its own dial, and the
+            # runtime already refuses one in any later position; dropping it here as
+            # well means a viewer cannot even put one on the owner's socket.
+            raise MeshRefusal(
+                "not_authorised", "relay_attest is sent by the owner's relay, not a viewer"
+            )
         from local_operator.network.types import INNER_OP_CAPABILITY
 
         required = INNER_OP_CAPABILITY.get(inner_op)
@@ -13663,6 +13828,9 @@ class RelayServer:
                 codec=codec,
                 settings=self.settings,
                 reader=reader,
+                # The pair listener ran ``verify_auth`` and the SAS ceremony proved the joiner,
+                # so the handshake's own proved fact carries over (mesh-origin-stamp §2 r3).
+                peer_verified=result.peer_verified,
             )
             link.peer_addr = peer_addr
             # NOT A FIRST CONTACT FOR THE SLICES: see ``PeerLink.link_up_hooks``.
@@ -14040,7 +14208,10 @@ class RelayServer:
             except ValueError:
                 return None, "bad_endpoint"
             try:
-                sock = socket.create_connection((address or host, port), timeout=budget)
+                # The shared NAT64-aware seam (see ``probe_candidates``): a synthesised
+                # address only carries the bytes; the handshake below still decides
+                # whether the device on the other end is the member we meant.
+                sock = nat64.create_connection((address or host, port), timeout=budget)
             except OSError as exc:
                 return None, f"connect_failed:{exc.__class__.__name__}"
         deadline = wire.deadline_in(budget)
@@ -14104,11 +14275,30 @@ class RelayServer:
                 codec=handshake.codec(),
                 settings=self.settings,
                 reader=reader,
+                # THE DIALER HAS NOT PROVED THE LISTENER (pre-G1): it reads the listener's id
+                # off the challenge unverified (``Handshake.read_challenge``), so this link may
+                # never vouch for its peer in a mesh origin stamp. G1 flips this once the dialer
+                # verifies the listener; until then False is the honest value, pinned here
+                # rather than read off the result so that change is one deliberate edit.
+                peer_verified=False,
             )
             link.peer_addr = host
             refusal = self._admit_link(link, outbound=True)
             if refusal:
                 return None, refusal
+            # Dial-only devices never reach the listener's audit site. Record
+            # this admitted handshake too, without altering either side's proof
+            # or refusal handling (including listener-auth verification).
+            self.audit.record(
+                AuditEvent(
+                    event="link_opened",
+                    actor=result.peer_device_id,
+                    subject=result.network_id,
+                    network_id=result.network_id,
+                    epoch=result.epoch,
+                    detail={"role": "dialer", "epoch": result.epoch, "phase": result.phase},
+                )
+            )
             # The listener's endpoints arrive in its ``welcome``; they are how this
             # device will re-open the link without being told the address again.
             # ``record`` was read before this handshake and is only an id source now:

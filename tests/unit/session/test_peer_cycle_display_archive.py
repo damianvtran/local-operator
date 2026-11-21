@@ -33,6 +33,19 @@ from local_operator.harness.types import (
 from local_operator.session.transcript import Transcript
 
 
+async def _warm_index(directory: Path) -> None:
+    """Make the transcript index current, as the open path's armed refresh does.
+
+    The indexed readers never build (``peer_cycle_display._index_or_arm``): a
+    cold index answers ``building``. These tests pin what the index PROVES, so
+    they bring it current first, through the same single-flight refresh.
+    """
+    from local_operator.session import transcript_index
+
+    task, _started = transcript_index.start_refresh(directory.parent.parent, directory.name)
+    await task
+
+
 def make_cycle(
     index=0, *, wrapped_send=False, send_count=1, fold=None, root_output_lines=1, root_ids=None
 ):
@@ -206,6 +219,7 @@ async def test_sixty_five_cycles_cold_compact_first_and_last_do_not_depend_on_ho
         )
     assert await transcript.compact_file(min_reclaim_bytes=0) > 0
     cold = Transcript(transcript.directory)
+    await _warm_index(cold.directory)
     for index in (0, 64):
         history, expected = cycles[index]
         # Select only this page's raw roots; no full-history traversal is needed.
@@ -231,6 +245,7 @@ async def test_historical_reused_call_ids_select_exact_parent_on_each_separate_p
         await transcript.append_message(history[-1])
         cycles.append((history, record))
     assert cycles[0][1]["id"] != cycles[1][1]["id"]
+    await _warm_index(transcript.directory)
     for history, expected in cycles:
         response = discover_records(transcript, history, "sess")
         assert response is not None and response["records"] == [expected]
@@ -371,6 +386,7 @@ async def test_discovery_accepts_the_journal_directory_instead_of_a_transcript(t
     await transcript.append_messages(history[:-1])
     assert await persist_record(transcript, record)
     await transcript.append_message(history[-1])
+    await _warm_index(transcript.directory)
     through_transcript = discover_records(transcript, history, "sess")
     through_path = discover_records(transcript.directory, history, "sess")
     assert through_path is not None

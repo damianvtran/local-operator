@@ -116,7 +116,8 @@ from local_operator.harness.types import INTERRUPTED_FAULTS
 # later import reads as not-at-top (E402, the earlier slice's CI failure).
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import tr, tr_record
+from local_operator.i18n.keys import tui_tool_card as _tc
+from local_operator.i18n.text import active_locale, tr, tr_record
 from local_operator.tools import diff_archive
 from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
@@ -147,6 +148,20 @@ from local_operator.web_fetch.failure import (
 )
 
 _t = tr("tui.small")
+# The card's own chrome (affordances, live-block states, elision markers, the
+# `Fetched:` row) lives in its OWN namespace rather than in `tui.small`: adding
+# keys to `tui.small` would stale every locale's carried audit of it, whereas a
+# new namespace falls back to English until its own translation/audit wave
+# lands. Every lookup resolves at RENDER time, so a live language change
+# repaints the next frame without a refresher.
+_t_tc = tr("tui.tool_card")
+
+
+def _more_marker(msg) -> str:
+    """An elision marker: the `… ` lead glyph stays code, the words are keyed."""
+    return f"… {_t_tc(msg)}"
+
+
 _profile_copy = tr_record("tui.profile_actions")
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -210,6 +225,8 @@ _RESET_LEADS = ("Session state was reset",)
 #: session was reset, so the row must state that even where there is no notice
 #: sentence to promote (design review round 1, D2).
 _RESET_LABEL = "session reset"
+
+
 #: The word a stopped row states when the owner ACCEPTED the stop but had not
 #: exited when the tool stopped waiting — the collapsed row's whole signal that
 #: this is not a completed stop (UX round 2, U6: it painted the same `✓` as one).
@@ -219,13 +236,27 @@ _RESET_LABEL = "session reset"
 #: fact it belongs to. The receipt in the expansion carries the rest — the wait,
 #: the no-signal statement and the next step — and is promoted below so it wraps
 #: whole instead of being cropped to one line.
-_STOP_PENDING_LABEL = "stop unconfirmed"
+def _stop_pending_label() -> str:
+    return _t_tc(_tc.status_stop_unconfirmed())
+
+
 #: Expansion affordance trailing the summary. Both spellings are the same
 #: click target; only the label flips so the row always says what a click does.
 _LOG = logging.getLogger(__name__)
 
-EXPAND_HINT = "⟨expand⟩"
-COLLAPSE_HINT = "⟨collapse⟩"
+
+#:
+#: Functions, not constants, so the words follow a live language change; the
+#: ⟨ ⟩ brackets are the affordance idiom and stay code. The old constant names
+#: still resolve (English or not) through the module `__getattr__` at the end
+#: of this file, for importers that read them at call time.
+def expand_hint() -> str:
+    return f"⟨{_t_tc(_tc.hint_expand())}⟩"
+
+
+def collapse_hint() -> str:
+    return f"⟨{_t_tc(_tc.hint_collapse())}⟩"
+
 
 #: The cancel affordance for a LIVE image-generation row, painted in the
 #: trailing slot for as long as the call can still be stopped (queued or
@@ -236,7 +267,10 @@ COLLAPSE_HINT = "⟨collapse⟩"
 #: other occupant of the slot. Always spelled out, never shortened to a bare
 #: ``ctrl+c``: copy-mode owns that chord too often for the short form to read
 #: as "interrupt" rather than "copy".
-IMAGE_INTERRUPT_HINT = "⟨ctrl+c to interrupt⟩"
+#: The chord is a literal key name, passed in so it never translates.
+def image_interrupt_hint() -> str:
+    return f"⟨{_t_tc(_tc.hint_interrupt(chord='ctrl+c'))}⟩"  # i18n: ignore key chord
+
 
 #: Answers given in the hint slot when the affordance has nothing to open.
 #: An expander that silently ignores half its activations is indistinguishable
@@ -570,11 +604,16 @@ LIVE_MAX_LINES = 20
 #: per-update work becomes a constant. Sized well above ``LIVE_MAX_LINES`` ×
 #: a wide terminal so the cap is reached by the line count, not by the slice.
 LIVE_INGEST_CHARS = 64 * 1024
+
+
 #: The live block's heading, stating the one thing a half-drawn card must not
 #: leave ambiguous. An expanded running card that showed a command and an
 #: empty output area is byte-identical to a FINISHED call that printed
 #: nothing, and those two frames mean opposite things.
-LIVE_HEADER_RUNNING = "⋯ running"
+def live_header_running() -> str:
+    return f"⋯ {_t_tc(_tc.live_running())}"
+
+
 #: Appended when nothing has STREAMED to this card yet. "no output" alone is
 #: the SETTLED card's answer and means "never will"; this one means "not yet",
 #: and the difference is whether the user should keep waiting.
@@ -588,7 +627,10 @@ LIVE_HEADER_RUNNING = "⋯ running"
 #: it refuses that everywhere else (see :meth:`set_partial_detail`). The
 #: banners are themselves legible as "nothing yet", so the frame stays honest;
 #: it is this clause that stops being load-bearing, not the card.
-LIVE_HEADER_PENDING = "no output yet"
+def live_header_pending() -> str:
+    return _t_tc(_tc.live_no_output_yet())
+
+
 #: The one-cell lead on the live memory advisory (see
 #: :meth:`ToolCard.set_live_advisory`). Named for its live role, the same glyph
 #: :data:`ICON_ATTENTION` puts on a settled row: a glyph rather than colour
@@ -1280,13 +1322,13 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         for part in (
             f"{status}" if status is not None else "",
             ctype,
-            f"cache {cache}",
+            _t_tc(_tc.fetch_cache(state=cache)),
         )
         if part
     )
-    fetched = f"Fetched: {url}"
+    fetched = _t_tc(_tc.fetch_fetched(url=url))
     if final and final != url:
-        fetched += f"  (final: {final})"
+        fetched += "  " + _t_tc(_tc.fetch_final(url=final))
     if meta:
         fetched += f"  ·  {meta}"
     rows: list[str] = []
@@ -1932,6 +1974,12 @@ class ToolCard(ExpandableActionBlock):
         self._removed = 0
         #: Cleaned result lines, populated once the tool finishes.
         self._output: list[str] = []
+        #: The ``(result_text, details)`` a structured (search/fetch) output was
+        #: composed from, kept so a live language switch can recompose it;
+        #: ``None`` for plain output. See :meth:`_compose_output`.
+        self._localized_output_inputs: tuple[str, dict[str, Any] | None] | None = None
+        #: The locale ``_output`` was composed under.
+        self._output_locale = ""
         #: The write/edit tool's rendered unified diff (``details["diff"]``),
         #: colourised at render time. ``None`` (not []) when the tool reported
         #: no diff — a read or bash card expands to its raw output instead.
@@ -3304,8 +3352,55 @@ class ToolCard(ExpandableActionBlock):
             and details.get("op") == "stop"
             and details.get("method") == "pending"
         )
-        name = self.tool_name.lower()
         self._absorb_bridge(details)
+        self._compose_output(result_text, details)
+        from local_operator.profile_actions import ProfileAction
+
+        raw = details.get("profile_action") if isinstance(details, Mapping) else None
+        try:
+            action = ProfileAction.model_validate(dict(raw)) if isinstance(raw, Mapping) else None
+        except ValueError:
+            action = None
+        self.set_class(action is not None, "profile-action-card")
+        if action != self._profile_action:
+            self._profile_action = action
+            self._profile_action_state = "unavailable"
+            self._profile_action_checked = False
+            self._profile_action_source = None
+            self._profile_action_live = None
+        # Persisted descriptors/verified flags are display data, not live proof.
+        if action is not None and self.is_mounted:
+            self.post_message(self.ProfileActionCheck(self))
+
+        diff = details.get("diff") if isinstance(details, Mapping) else None
+        # Canonical follower details are immutable sequences, not concrete
+        # lists. They still carry the same unified diff as the live executor.
+        if isinstance(diff, Sequence) and not isinstance(diff, (str, bytes)) and diff:
+            self._diff = [str(line) for line in diff]
+        else:
+            self._diff = None
+        omitted = details.get("diff_truncated_rows") if isinstance(details, Mapping) else None
+        self._diff_omitted = omitted if isinstance(omitted, int) and omitted > 0 else 0
+        full = details.get(DIFF_FULL_KEY) if isinstance(details, Mapping) else None
+        self._diff_full = full if isinstance(full, Mapping) else None
+        self._full_diff_rows = None
+        self._full_diff_shown = False
+
+    def _compose_output(self, result_text: str, details: dict[str, Any] | None) -> None:
+        """Compose ``self._output`` from a result, in the ACTIVE language.
+
+        Split out of :meth:`_absorb_result` so a live language switch can run it
+        again: the web_search and web_fetch rows (``Fetched:``/``Rendered:``,
+        the search hint) are catalogue text composed into plain strings, so a
+        card settled before ``/language`` would otherwise keep the old language
+        under a header that already repainted (PR #4360 round 1, R1/Q1/D1).
+        The inputs and the locale they were composed under are remembered, and
+        :meth:`_refresh_localized_output` recomposes at paint time when the
+        locale moved. Everything here must stay a pure function of
+        ``(result_text, details, args)`` for that to be safe — side effects that
+        must happen once per result belong in :meth:`_absorb_result`.
+        """
+        name = self.tool_name.lower()
         search_output = _search_result_output(details) if name == "web_search" else []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
         # carries a fetch's details shape) leads with structured header rows and
@@ -3372,37 +3467,18 @@ class ToolCard(ExpandableActionBlock):
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
         self._output = search_output or fetch_output or self._clean_output(result_text)
-        from local_operator.profile_actions import ProfileAction
+        # Only cards whose rows carry catalogue text need recomposing; a plain
+        # output is the tool's own bytes and is never re-derived.
+        self._localized_output_inputs = (
+            (result_text, details) if (search_output or fetch_output) else None
+        )
+        self._output_locale = active_locale()
 
-        raw = details.get("profile_action") if isinstance(details, Mapping) else None
-        try:
-            action = ProfileAction.model_validate(dict(raw)) if isinstance(raw, Mapping) else None
-        except ValueError:
-            action = None
-        self.set_class(action is not None, "profile-action-card")
-        if action != self._profile_action:
-            self._profile_action = action
-            self._profile_action_state = "unavailable"
-            self._profile_action_checked = False
-            self._profile_action_source = None
-            self._profile_action_live = None
-        # Persisted descriptors/verified flags are display data, not live proof.
-        if action is not None and self.is_mounted:
-            self.post_message(self.ProfileActionCheck(self))
-
-        diff = details.get("diff") if isinstance(details, Mapping) else None
-        # Canonical follower details are immutable sequences, not concrete
-        # lists. They still carry the same unified diff as the live executor.
-        if isinstance(diff, Sequence) and not isinstance(diff, (str, bytes)) and diff:
-            self._diff = [str(line) for line in diff]
-        else:
-            self._diff = None
-        omitted = details.get("diff_truncated_rows") if isinstance(details, Mapping) else None
-        self._diff_omitted = omitted if isinstance(omitted, int) and omitted > 0 else 0
-        full = details.get(DIFF_FULL_KEY) if isinstance(details, Mapping) else None
-        self._diff_full = full if isinstance(full, Mapping) else None
-        self._full_diff_rows = None
-        self._full_diff_shown = False
+    def _refresh_localized_output(self) -> None:
+        """Recompose structured result rows when the language changed since."""
+        inputs = self._localized_output_inputs
+        if inputs is not None and self._output_locale != active_locale():
+            self._compose_output(*inputs)
 
     def _clean_output(self, result_text: str) -> list[str]:
         """Normalise the result into displayable rows (empty = nothing to show).
@@ -3919,6 +3995,9 @@ class ToolCard(ExpandableActionBlock):
         command — leaving no state of the card, collapsed or expanded, from
         which a user could learn what had run.
         """
+        # Before ANY read of ``_output`` this frame: a language switch since the
+        # result settled must not leave its structured rows in the old language.
+        self._refresh_localized_output()
         row = self._build_row(width)
         if not self._expanded:
             return row
@@ -4092,7 +4171,7 @@ class ToolCard(ExpandableActionBlock):
         shown = lines[:INPUT_MAX_LINES]
         if len(lines) > len(shown):
             hidden = len(lines) - len(shown)
-            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            marker = _more_marker(_tc.more_lines(count=hidden, shown=str(hidden)))
             shown.append(Text(truncate_cells(marker, width), style=bindings.style("tool.args.dim")))
         return shown
 
@@ -4133,12 +4212,12 @@ class ToolCard(ExpandableActionBlock):
         # known: `no output yet` is what genuinely cannot be claimed here, and
         # the elapsed half is painted by the status column instead, next to the
         # outcome glyph it will settle into.
-        header = LIVE_HEADER_RUNNING
+        header = live_header_running()
         elapsed = self._elapsed()
         if elapsed is not None:
             header = f"{header} · {format_duration(max(0, int(elapsed)))}"
             if not self._live:
-                header = f"{header} · {LIVE_HEADER_PENDING}"
+                header = f"{header} · {live_header_pending()}"
         row.append("\n" + indent, style=dim)
         # See `bindings.BY_ELEMENT["tool.live.header"].note` for why this rides
         # `accent`.
@@ -4165,11 +4244,11 @@ class ToolCard(ExpandableActionBlock):
                 style=advisory_style,
             )
         if self._live_elided or self._live_dropped > 0:
-            plural = "s" if self._live_dropped != 1 else ""
-            marker = (
-                "… earlier output not shown"
+            dropped = self._live_dropped
+            marker = _more_marker(
+                _tc.live_earlier_output_hidden()
                 if self._live_elided
-                else f"… {self._live_dropped} earlier line{plural}"
+                else _tc.live_earlier_lines(count=dropped, shown=str(dropped))
             )
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
@@ -4235,7 +4314,7 @@ class ToolCard(ExpandableActionBlock):
             # see the adapter), so "queue position 3" read off by one — the
             # copy states what the number counts (design round 1, D3).
             requests = view.queue_position
-            ahead = f"{requests} request{'s' if requests != 1 else ''} ahead"
+            ahead = _t_tc(_tc.imagegen_requests_ahead(count=requests, shown=str(requests)))
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(ahead, line_width), style=dim)
         if view.error or view.error_type:
@@ -4265,8 +4344,11 @@ class ToolCard(ExpandableActionBlock):
         dropped = view.log_dropped if view.log_lines else self._live_dropped
         elided = False if view.log_lines else self._live_elided
         if elided or dropped > 0:
-            plural = "s" if dropped != 1 else ""
-            marker = "… earlier output not shown" if elided else f"… {dropped} earlier line{plural}"
+            marker = _more_marker(
+                _tc.live_earlier_output_hidden()
+                if elided
+                else _tc.live_earlier_lines(count=dropped, shown=str(dropped))
+            )
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
         for line in logs:
@@ -4376,7 +4458,7 @@ class ToolCard(ExpandableActionBlock):
             hidden = len(rows) - len(shown)
             if hidden > 0:
                 row.append("\n" + indent, style=dim)
-                marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+                marker = _more_marker(_tc.more_lines(count=hidden, shown=str(hidden)))
                 row.append(truncate_cells(marker, line_width), style=dim)
 
     def _failure_reason(self) -> str:
@@ -4727,7 +4809,7 @@ class ToolCard(ExpandableActionBlock):
             row.append(line, style=ink)
         hidden = len(wrapped) - len(shown)
         if hidden > 0:
-            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            marker = _more_marker(_tc.more_lines(count=hidden, shown=str(hidden)))
             row.append("\n" + indent, style=dim)
             row.append(blanks, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
@@ -4799,7 +4881,7 @@ class ToolCard(ExpandableActionBlock):
             row.append(truncate_cells(line, line_width), style=ink)
         hidden = len(captured) - len(shown)
         if hidden > 0:
-            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            marker = _more_marker(_tc.more_lines(count=hidden, shown=str(hidden)))
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
@@ -4833,7 +4915,7 @@ class ToolCard(ExpandableActionBlock):
             row.append(wrapped_line, style=advisory_ink)
         hidden = len(wrapped) - len(shown)
         if hidden > 0:
-            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            marker = _more_marker(_tc.more_lines(count=hidden, shown=str(hidden)))
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
@@ -4871,7 +4953,7 @@ class ToolCard(ExpandableActionBlock):
             row.append(truncate_cells(line, line_width), style=ink)
         hidden = len(captured) - len(shown)
         if hidden > 0:
-            marker = f"… {hidden} more search line{'s' if hidden != 1 else ''}"
+            marker = _more_marker(_tc.more_search_lines(count=hidden, shown=str(hidden)))
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
@@ -4987,7 +5069,7 @@ class ToolCard(ExpandableActionBlock):
                 row.append(truncate_cells(segment, line_width), style=ink)
         hidden = len(self._output) - len(shown)
         if hidden > 0:
-            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            marker = _more_marker(_tc.more_lines(count=hidden, shown=str(hidden)))
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
@@ -5177,16 +5259,16 @@ class ToolCard(ExpandableActionBlock):
             hidden += self._diff_omitted
         if hidden <= 0:
             return body, None
-        marker = f"… {hidden} more diff line{'s' if hidden != 1 else ''}"
+        marker = _more_marker(_tc.more_diff_lines(count=hidden, shown=str(hidden)))
         body.append("\n" + indent, style=dim)
         painted = truncate_cells(marker, line_width)
         body.append(painted, style=dim)
         # The action at the point of need (UX round 1, U2): the header's own
         # hint, repeated on the marker while a deeper level exists. Dropped
         # rather than clipped when the row cannot hold it whole.
-        if offered and cell_len(painted) + 1 + cell_len(EXPAND_HINT) <= line_width:
+        if offered and cell_len(painted) + 1 + cell_len(hint := expand_hint()) <= line_width:
             body.append(" ")
-            body.append(EXPAND_HINT, style=offer_ink)
+            body.append(hint, style=offer_ink)
         return body, len(shown) + 1
 
     def _name_col(self, width: int) -> int:
@@ -5397,8 +5479,9 @@ class ToolCard(ExpandableActionBlock):
             and live_word != imagegen_mod.STATE_CANCELLING
             and not imagegen_mod.is_video_gen_tool(self.tool_name)
         ):
-            if remaining - (cell_len(IMAGE_INTERRUPT_HINT) + 1) >= _SUMMARY_FLOOR:
-                interrupt_hint = IMAGE_INTERRUPT_HINT
+            interrupt = image_interrupt_hint()
+            if remaining - (cell_len(interrupt) + 1) >= _SUMMARY_FLOOR:
+                interrupt_hint = interrupt
         if interrupt_hint:
             slot = interrupt_hint
         elif self.can_expand():
@@ -5412,9 +5495,9 @@ class ToolCard(ExpandableActionBlock):
                 # An open preview with rows still behind it offers the next
                 # level rather than the collapse the next press will not do.
                 offer = (
-                    COLLAPSE_HINT
+                    collapse_hint()
                     if self._expanded and not self._full_diff_offered()
-                    else EXPAND_HINT
+                    else expand_hint()
                 )
                 if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
                     slot = offer
@@ -5440,7 +5523,7 @@ class ToolCard(ExpandableActionBlock):
         # the command — scrolling back to find your own `! git status` works
         # exactly when the row is narrow enough to hide everything else.
         if self.user_run:
-            chip = "you: "
+            chip = _t_tc(_tc.chip_you()) + " "
             chip_cells = cell_len(chip)
             if chip_cells < budget:
                 row_chip = chip
@@ -5796,7 +5879,7 @@ class ToolCard(ExpandableActionBlock):
                 # states. The word names the ONE fact the row must not lose,
                 # because the receipt that says it lives a click away.
                 glyph = ICON_ATTENTION
-                reason = _STOP_PENDING_LABEL
+                reason = _stop_pending_label()
                 tint = bindings.style("tool.status.partial_glyph")
                 abbreviates = True
             elif self._partial:
@@ -5900,3 +5983,26 @@ class ToolCard(ExpandableActionBlock):
     def spans_multiple_rows(self) -> bool:
         """Exact: the card already tracks its own height, collapsed or not."""
         return self._row_count > 1
+
+
+#: The pre-i18n constant names, kept for the importers outside this module
+#: (``transcript.py``'s expanders import ``EXPAND_HINT``/``COLLAPSE_HINT``
+#: inside their render methods; tests read the others). PEP 562: a name that is
+#: not a module global is resolved HERE on each access, so a call-time
+#: ``from tool_card import EXPAND_HINT`` gets the active language rather than
+#: the English captured at import. A module-level import still freezes the value
+#: of the moment it ran — prefer the functions in new code.
+_LEGACY_COPY = {
+    "EXPAND_HINT": expand_hint,
+    "COLLAPSE_HINT": collapse_hint,
+    "IMAGE_INTERRUPT_HINT": image_interrupt_hint,
+    "LIVE_HEADER_RUNNING": live_header_running,
+    "LIVE_HEADER_PENDING": live_header_pending,
+}
+
+
+def __getattr__(name: str) -> str:
+    try:
+        return _LEGACY_COPY[name]()
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None

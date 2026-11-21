@@ -2391,7 +2391,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         ) from None
     except TemporaryRefusal as error:
         raise HTTPException(error.status, error.envelope()) from None
-    except KeyError:
+    except KeyError as error:
+        # AN UNRESOLVABLE LAUNCH TARGET (``desktop_profiles.UnresolvedTarget``)
+        # keeps the same 404 and the same catalogued sentence, and adds which
+        # team/slot/member failed as machine fields, plus a log line: a team
+        # whose roster names a row that is not a role used to surface only as a
+        # bare 404 that the desktop rendered as "model was not resolved", with
+        # nothing anywhere naming the member. Duck-typed so this ladder does not
+        # import the profile helpers at module load; the ``isinstance(dict)``
+        # check keeps that duck typing honest for the type checker and refuses
+        # to merge anything but a mapping into the catalogued envelope.
+        wire_fields = getattr(error, "wire_fields", None)
+        fields = wire_fields() if callable(wire_fields) else None
+        if isinstance(fields, dict):
+            logger.warning("desktop launch target refused: %s", error)
+            raise HTTPException(404, {**_wd.requested_not_found().envelope(), **fields}) from None
         # A DELETED TEMPORARY CHAT answers its own 404 code on every session
         # route (snapshot, history, events, message, pin, archive, temporary),
         # so a client can say "this temporary chat was deleted" rather than
