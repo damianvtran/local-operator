@@ -38,8 +38,8 @@ import pytest
 
 import local_operator
 from local_operator.secrets import client
-from local_operator.secrets.audit import AuditEntry
 from local_operator.secrets import session as session_module
+from local_operator.secrets.audit import AuditEntry
 from local_operator.secrets.broker import SecretBroker
 from local_operator.secrets.crypto import generate_master_key
 from local_operator.secrets.keys import (
