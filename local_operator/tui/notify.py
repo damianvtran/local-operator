@@ -542,7 +542,8 @@ def remote_agent_ask_location(agent_device: str, device: str) -> str:
     (``remote_attention.signed_card_target``'s leg). "runs on <device>" alone
     left the operator unable to tell an agent's worker from a session they
     opened themselves, so the label is that plain body plus a suffix (the
-    prefix stays identical, so both bodies scan alike). The agent is named by its DEVICE only: a peer create
+    prefix stays identical, so both bodies scan alike). The agent is named by
+    its DEVICE only: a peer create
     carries no starter session id or agent name (``relay`` stamps
     ``source_session_id: ""``), and the device label is resolved by the
     receiving device from its own catalogue, never from peer-supplied text.

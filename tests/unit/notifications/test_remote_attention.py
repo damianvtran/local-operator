@@ -2121,6 +2121,49 @@ def test_label_names_this_device_from_its_own_identity(tmp_path: Path) -> None:
     assert peer_rows._device_names(tmp_path / "empty", {}) == {}
 
 
+@pytest.mark.parametrize(
+    ("peers", "body"),
+    [
+        (
+            {NODE: "lop-remote-node-2", CO: "co-laptop"},
+            "runs on lop-remote-node-2 · started by an agent on co-laptop",
+        ),
+        ({NODE: "lop-remote-node-2"}, "runs on lop-remote-node-2"),
+    ],
+    ids=["co-member-named", "co-member-unknown"],
+)
+def test_a_co_member_placed_childs_site_card_names_the_co_member_when_known(
+    tmp_path: Path, root: Path, peers: dict[str, str], body: str
+) -> None:
+    """Review m1, end to end: a GENUINE signed site card from a child an agent on a
+    CO-MEMBER placed travels node -> wire -> the operator's listing -> its row.
+    The label names the co-member only when the receiver's own peers list does
+    (never the raw device id a peer could have written); otherwise the row
+    keeps the plain "runs on <node>" body byte for byte."""
+    origin = _agent(CO)
+    wire = _wire(_agent_child_node(tmp_path, origin), origin, HEAD, operator_viewer=True)
+    # The co-member-placed leg carries the site card alone (no ordinary ask).
+    assert _keys(wire) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+
+    class _Peer:
+        def __init__(self, device_id: str, name: str) -> None:
+            self.device_id, self.name = device_id, name
+            self.network_id, self.reachable, self.reason = "n_test", True, ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer(device_id, name) for device_id, name in peers.items()]
+
+        def rows(self) -> list[Any]:
+            return [PeerRow.from_json(wire, device_id=NODE)]
+
+    [row] = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+    ra.RemoteAttentionWatcher(root).observe([row])
+    [item] = _items(root)
+    assert item["key"].endswith("a-site")
+    assert item["body_md"] == body
+
+
 def _ask_row(started_by: str, key: str = ASK_KEY) -> SessionRow:
     return _row(notice=(key, 1, "normal", "Which branch should I use?"))._replace(
         remote_started_by_agent_on=started_by
