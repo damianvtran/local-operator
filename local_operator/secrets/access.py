@@ -343,6 +343,19 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
     round-2 invariant applied to this path: degrade to unnotified, never to a
     blocked or failed retrieval.
 
+    **Except inside a live session's lineage, which fails closed.** That
+    invariant holds for callers with no session to notify. A session's tool
+    child (:func:`in_live_session_lineage`) HAS one, and its stdout is the
+    transcript, so "unnotified" there means the value lands in the transcript
+    unredacted — the very leak §6 exists to stop, triggered by nothing rarer
+    than a broker crash mid-session (a respawned daemon has an empty session
+    table, so it denies; the old ``BrokerDenied`` clause then decrypted
+    locally). Such a caller waits a bounded :data:`SESSION_BROKER_WAIT_S` for a
+    broker to serve it and otherwise raises
+    :class:`~local_operator.secrets.errors.SessionBrokerLost`; it never reaches
+    the local decrypt. Plain ``lop secret get`` in an operator's terminal keeps
+    the fallback described above.
+
     **The fallback is keyed on REACHABILITY, not on the refusal.** This is the
     one place the shape deliberately departs from :func:`master_key_for`, and
     the asymmetry is the whole safety property. Falling back after a *live*
@@ -394,6 +407,12 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
     from local_operator.secrets.client import BrokerDenied, ensure_broker, retrieve
 
     hardened = key_mode(base) == "passphrase"
+    owner = None if hardened else in_live_session_lineage(base)
+    if owner is not None:
+        # The keyfile-tier fallback below is for callers with no session to
+        # notify. A registered session's tool child has one, so it never takes
+        # it; see `_retrieve_inside_session` for the bounded wait and refusal.
+        return _retrieve_inside_session(name, base, role=role, owner=owner)
     try:
         if ensure_broker(base):
             return retrieve(name, base, role=role)
@@ -414,3 +433,107 @@ def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent")
 # `BrokerIncompatible` is deliberately absent from the clauses above: it is a
 # LIVE broker, so the reachability rule believes it and it propagates to the
 # caller carrying the daemon's own restart advice.
+
+
+#: Upper bound on how long a retrieval inside a session waits for a broker to
+#: serve it before failing closed. Sized from the client's own spawn budget,
+#: ``client.STARTUP_TIMEOUT_S`` (5 s, the bound a respawned daemon gets to start
+#: listening), plus one second for the session to re-register with it — under
+#: the 8 s ceiling the security owner set for a `$(lop secret get …)` to stall.
+#: Module-level so tests can shrink it rather than sleeping through it.
+SESSION_BROKER_WAIT_S = 6.0
+
+#: Pause between attempts inside that window. Each attempt is a socket
+#: connect plus, when nothing listens, a non-blocking spawn-lock probe, so a
+#: quarter second keeps the loop to ~24 attempts rather than a busy spin.
+_SESSION_BROKER_RETRY_S = 0.25
+
+
+def in_live_session_lineage(base: Path | None = None) -> tuple[int, str] | None:
+    """The registered session whose redactor this process's output reaches, if any.
+
+    Returns ``(pid, session_id)`` of the nearest ANCESTOR holding a live
+    registration with the broker for this store, else ``None``. The answer
+    comes from the lineage markers a registration publishes once the broker
+    has accepted it (``secrets.session.registered_session_ancestor``, which
+    documents why the record lives on disk): the broker's own session table is
+    the authority while it runs (broker.py ``_session_for``), but it dies with
+    the broker — the one case this has to decide.
+
+    Deliberately NOT ``LOCAL_OPERATOR_SESSION_ID``. Every session's tool child
+    carries that (``tools.builtin.session_id_env_injection``) whether or not the
+    session ever reached a broker; a session that booted before the store
+    existed, or whose registration was refused, has no redactor to notify, and
+    its children keep the §13 fallback exactly as before. The env var is also
+    attribution only (builtin.py ``session_id_env_injection`` docstring).
+    """
+    from local_operator.secrets.session import registered_session_ancestor
+
+    try:
+        return registered_session_ancestor(base)
+    except Exception:  # noqa: BLE001 — an unreadable marker must not break a retrieval
+        return None
+
+
+def _retrieve_inside_session(
+    name: str, base: Path | None, *, role: str, owner: tuple[int, str]
+) -> bytes:
+    """Serve a session descendant through the broker, or refuse; never decrypt locally.
+
+    **Why a bounded wait, and why it also retries a denial.** A broker that
+    crashed or rolled leaves two observable states: nothing listening
+    (:class:`BrokerUnavailable`, or ``ensure_broker`` cannot start one) and a
+    fresh daemon that has not yet seen the session re-register, which denies the
+    descendant for want of a registered ancestor (``BrokerDenied``). Both can
+    clear by themselves within a few seconds, so both are retried until
+    :data:`SESSION_BROKER_WAIT_S` elapses. A denial is still never a reason to
+    fall back — the retry only asks the same broker again — so a genuine policy
+    refusal costs a bounded delay and then the same refusal.
+
+    Everything else the broker answers propagates on the first attempt, as on
+    the out-of-session path: a served value, ``SecretNotFound`` (so
+    ``secrets.get(name, default)`` still sees its miss, R11/Q5), the structural
+    ``unredactable`` refusal and ``BrokerIncompatible``.
+
+    The error names the remedy rather than the mechanism: the session has to
+    re-register with a running broker, which today means restarting it.
+    """
+    import time
+
+    from local_operator.secrets.client import (
+        STARTUP_TIMEOUT_S,
+        BrokerDenied,
+        ensure_broker,
+        retrieve,
+    )
+    from local_operator.secrets.errors import SessionBrokerLost
+
+    deadline = time.monotonic() + SESSION_BROKER_WAIT_S
+    last: str = "no secret broker could be started"
+    while True:
+        remaining = deadline - time.monotonic()
+        try:
+            # `ensure_broker`'s own spawn poll is clipped to the window so one
+            # slow start cannot carry the total past the bound.
+            if ensure_broker(base, timeout=max(0.1, min(STARTUP_TIMEOUT_S, remaining))):
+                return retrieve(name, base, role=role)
+            last = "no secret broker could be started"
+        except BrokerUnavailable as exc:
+            last = str(exc)
+        except BrokerDenied as exc:
+            last = str(exc)
+        if time.monotonic() + _SESSION_BROKER_RETRY_S > deadline:
+            break
+        time.sleep(_SESSION_BROKER_RETRY_S)
+    # Plain English, like every message in `secrets.errors`: the CLI prints
+    # `str(exc)` verbatim and this module's errors are not catalogue-keyed.
+    owner_pid, owner_id = owner
+    label = f"{owner_id!r} (pid {owner_pid})" if owner_id else f"pid {owner_pid}"
+    raise SessionBrokerLost(
+        f"refusing to read secret {name!r}: this command runs inside lop session "
+        f"{label}, whose redactor is registered with the secret broker, but no "
+        f"broker is serving that session ({last}). The value was not read, so it "
+        "cannot reach the transcript unredacted. Restart the session so it "
+        "registers with a running broker (`lop secret broker status` shows one), "
+        "then retry."
+    )
