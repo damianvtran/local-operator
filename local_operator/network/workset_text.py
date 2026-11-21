@@ -185,6 +185,15 @@ def summary_lines(
         return [_t(_ws.unsupported(device=who))]
     worktrees = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
     mentioned = [str(p) for p in block.get("mentioned") or [] if isinstance(p, str)]
+    if not worktrees and block.get("cwd_known") is False and mentioned:
+        # THE CWD GAP (``workset.Manifest.cwd_gap``): no record says where this
+        # conversation worked, so "only mentioned" is not a safe reading of these
+        # folders and the move asks. Nothing is planned (the mention rule), so the
+        # sentence says they stay, and why, instead of "No working files".
+        lines = [_t(_ws.cwd_unknown(source=keeper, paths=", ".join(mentioned[:_LIST_LIMIT])))]
+        if advice:
+            lines.append(_t(_ws.cwd_unknown_advice(source=keeper, device=label)))
+        return lines
     if not worktrees:
         lines = [_t(_ws.none())]
         if mentioned:
@@ -371,6 +380,18 @@ def prompt_text(block: Mapping[str, Any], *, session: str, device: str = "") -> 
     return _t(_ws.prompt_stays(session=session, device=label, source=source_label(block, "?")))
 
 
+def cwd_gap(block: Mapping[str, Any]) -> bool:
+    """Whether ``block`` is the CWD GAP (``workset.Manifest.cwd_gap`` with nothing
+    planned): no record says where the conversation worked, and it mentions folders
+    that stay. Read from the block's own fields so every surface agrees."""
+    worktrees = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
+    return not worktrees and block.get("cwd_known") is False and bool(_mentioned(block))
+
+
+def _mentioned(block: Mapping[str, Any]) -> list[str]:
+    return [str(p) for p in block.get("mentioned") or [] if isinstance(p, str)]
+
+
 def receipt_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
     """What the receipt says about the working set after the move. ``source`` is the
     device the files came from or stayed on (the move's ``from_device`` name).
@@ -389,6 +410,22 @@ def receipt_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
         return []
     consent = str(block.get("consent") or "")
     keeper = source_label(block, source)
+    if cwd_gap(block) and consent != "without":
+        # THE RECEIPT NAMES THE FOLDERS THAT STAYED (UX #4403, U2/U8; review R1-m2).
+        # In the gap nothing was planned, so the count below would print "0 worktrees
+        # stay" and list nothing — in exactly the case this receipt is the lasting
+        # record for. ``--without-working-set`` keeps its own line: the user already
+        # chose "leave whatever is there".
+        paths = ", ".join(_mentioned(block)[:_LIST_LIMIT])
+        if block.get("mode") == "keep" or consent == "not_applicable_keep":
+            return [
+                _t(
+                    _ws.receipt_keep_cwd_unknown(
+                        device=device_label(block), source=keeper, paths=paths
+                    )
+                )
+            ]
+        return [_t(_ws.receipt_cwd_unknown(source=keeper, paths=paths))]
     if consent == "not_applicable_keep":
         head = _t(_ws.receipt_keep(device=device_label(block), source=keeper))
     elif consent == "without":

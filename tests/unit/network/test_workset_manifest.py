@@ -19,8 +19,10 @@ or fact rule:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -335,11 +337,39 @@ def test_a_worktree_outside_home_is_left_behind(
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
 
+    # The disposition must survive without inspecting the rejected target. Keep
+    # the original row expectation: replacing it with [] hides a consent loss.
+    calls: list[str] = []
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("discovery")
+        raise AssertionError("outside-home cwd reached filesystem discovery")
+
+    for name in ("_git", "worktree_facts", "_walk_up_for_git"):
+        monkeypatch.setattr(workset, name, forbidden)
+    real_stat, real_realpath = os.stat, os.path.realpath
+
+    def guarded_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(path, int) and str(path).startswith(str(rig.feat)):
+            return forbidden()
+        return real_stat(path, *args, **kwargs)
+
+    def guarded_realpath(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(path).startswith(str(rig.feat)):
+            return forbidden()
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", guarded_stat)
+    monkeypatch.setattr(os.path, "realpath", guarded_realpath)
     manifest = workset.compute_manifest(root, SID, to_device="d", home=elsewhere)
 
     assert [(row.state, row.reason) for row in manifest.worktrees] == [
         ("left_behind", "outside_home")
     ]
+    assert calls == []
+    assert manifest.planned == () and not manifest.empty
+    assert manifest.cwd_unknown_reason == "rejected"
+    assert all(not row.abs_path and not row.abs_repo for row in manifest.worktrees)
 
 
 def test_a_worktree_with_merge_conflicts_is_left_behind_unmerged(root: Path, rig: Rig) -> None:

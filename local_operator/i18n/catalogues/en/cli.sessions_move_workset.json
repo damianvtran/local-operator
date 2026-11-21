@@ -109,5 +109,11 @@
   "cli.sessions_move_workset.deps_summary_unknown": "Some entries could not be read, so this status is incomplete. Nothing was changed.",
   "cli.sessions_move_workset.deps_summary_present_unverified": "The dependency folders exist, but they were not checked and may be incomplete.",
   "cli.sessions_move_workset.deps_summary_nothing_needed": "No dependency trees are needed here.",
-  "cli.sessions_move_workset.deps_none": "No working set of {session} was restored on this device."
+  "cli.sessions_move_workset.deps_none": "No working set of {session} was restored on this device.",
+  "cli.sessions_move_workset.cwd_unknown": "This conversation's working folder is not recorded, so the folders it mentions are not included and stay on {source}: {paths}",
+  "cli.sessions_move_workset.cwd_unknown_advice": "They may hold this conversation's work. Only continue if you can finish or push it on {source}, or you do not need it on {device}.",
+  "cli.sessions_move_workset.yes_cwd_unknown": "--yes did not confirm: lop does not know which folder this conversation worked in, so it cannot tell whether the folders it mentions hold its work, and --yes does not decide that for you. Nothing was moved. Review them with --dry-run, then re-run with --confirm-working-set and the digest it prints to leave them on {source}, or with --without-working-set.",
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": "Review these folders with --dry-run, then re-run with --confirm-working-set {digest} to leave them on {source}, or with --without-working-set.",
+  "cli.sessions_move_workset.receipt_cwd_unknown": "Working files were not transferred: this conversation's working folder is not recorded, so the folders it mentions stay on {source}: {paths}",
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": "The copy on {device} does not have the folders this conversation mentions, because its working folder is not recorded; they stay on {source}: {paths}"
 }

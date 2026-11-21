@@ -470,12 +470,13 @@ def _nothing_to_carry_here(root: Path, session_id: str) -> bool:
             # Emptiness does not depend on the destination; its id only feeds the
             # scope digest, which nothing reads on this path.
             to_device="",
-            cwd_hint=_session_cwd_at(Path(root), session_id),
         )
     except Exception:  # noqa: BLE001 — unknown is not empty (fail closed)
         logger.info("mobility: could not read %s's working set", session_id, exc_info=True)
         return False
-    return bool(manifest.empty)
+    # A cwd gap (unknown cwd, mentioned worktrees) is NOT nothing: those may be the
+    # session's real work, and only the gate's confirmation may let them stay.
+    return bool(manifest.empty) and not manifest.cwd_gap
 
 
 def stale_relay_message(root: Path | str | None = None) -> str:
@@ -1131,10 +1132,13 @@ def _move_refusal(
     return refusal
 
 
-#: ``created_at.json`` is the ONLY entry a bare remnant may hold: it is the birth
-#: sidecar a ``Transcript`` construction publishes, so it is the one file a READER
-#: that never writes leaves behind (see :func:`_bare_remnant`).
-_REMNANT_ALLOWED_NAMES = frozenset({"created_at.json"})
+#: ``created_at.json`` and ``cwd.json`` are the ONLY entries a bare remnant may hold:
+#: they are the birth sidecars a ``Transcript`` construction publishes, so they are
+#: the files a construction that never wrote a row leaves behind (see
+#: :func:`_bare_remnant`). ``cwd.json`` joined it with the durable cwd record: a
+#: transcript built with the creator's cwd and then abandoned is the same corpse,
+#: and must not start blocking the promote it never did.
+_REMNANT_ALLOWED_NAMES = frozenset({"created_at.json", "cwd.json"})
 
 
 def _bare_remnant(directory: Path) -> bool:
@@ -3252,6 +3256,23 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
             "mobility: could not lower the imported origin stamps of %s: %s", target_id, exc
         )
         return _PROMOTE_STAMPS_REFUSED
+    # THE CARRIED ``cwd.json`` IS VALIDATED IN STAGING, BEFORE THE ONE ATOMIC PROMOTE
+    # (security review #4403, S2). It names a path on the SENDER; remapped under THIS
+    # device's home, canonical and contained (``carry.contained_cwd``), or blanked —
+    # and only then does the directory become readable as a local session, so no
+    # reader ever sees an unvalidated sender path as this session's cwd. FAIL CLOSED:
+    # a record that can be neither remapped nor blanked refuses the adoption, exactly
+    # like the stamps above (nothing replaced yet; the staging copy stays out).
+    try:
+        from local_operator.network import carry as _carry
+        from local_operator.network import workset_move as _wm
+
+        _carry.remap_cwd_record(
+            source, target_id, home=str(_wm.home_of(server)), config_root=server.root
+        )
+    except Exception as exc:  # noqa: BLE001 — any failure refuses, see above
+        logger.warning("mobility: could not validate %s's carried cwd record: %s", target_id, exc)
+        return _PROMOTE_REFUSED
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(str(source), str(target))
@@ -3349,7 +3370,6 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         )
     except Exception:  # noqa: BLE001 — a mapping this could not compute must not fail a promote
         logger.warning("mobility: could not map %s's cwd for this host", target_id, exc_info=True)
-
     monitor_cwds: dict[str, int] = {}
     # Before the rebuild, after the cwd rewrite: the session's own monitor load
     # reads this to treat carried cwds as foreign even under a shared home path.
@@ -4464,6 +4484,8 @@ def _workset_manifest(
     from local_operator.network import workset, workset_move
 
     try:
+        rejected: list[str] = []
+        cwd = _source_session_cwd(server, session_id, rejected=rejected)
         manifest = workset.compute_manifest(
             Path(server.root),
             session_id,
@@ -4471,11 +4493,20 @@ def _workset_manifest(
             to_name=to_name or server._member_name(to_device),  # noqa: SLF001
             home=workset_move.home_of(server),
             cap=workset.cap_bytes(Path(server.root)),
-            cwd_hint=_source_session_cwd(server, session_id),
+            cwd_hint=cwd,
+            cwd_rejected=tuple(rejected),
             from_device=server.identity.device_id,
             from_name=str(server._own_label()),  # noqa: SLF001
         )
-        return replace(manifest, carries_files=bool(carries))
+        # A CWD GAP WITH NOTHING PLANNED CARRIES NOTHING (``Manifest.cwd_gap``): the
+        # mentioned worktrees are never planned, so the honest plan is "they stay
+        # here" whatever the destination could take. Saying so is also what makes
+        # ``--yes`` refuse it (#4380's ``carry_unavailable``) instead of consenting
+        # to a carrying plan that would send nothing.
+        stays = (manifest.empty and manifest.cwd_gap) or (
+            not manifest.planned and manifest.cwd_rejected
+        )
+        return replace(manifest, carries_files=bool(carries) and not stays)
     except workset.WorksetUnknown:
         logger.warning(
             "mobility: the working-set manifest for %s could not be read",
@@ -4511,16 +4542,37 @@ def _workset_block(
     return manifest.to_dict()
 
 
-def _workset_keep_block(
-    server: "RelayServer", session_id: str, *, to_device: str, to_name: str = ""
-) -> dict[str, Any] | None:
-    """What a ``--keep`` copy arrives without (manager ruling, 2026-11-18).
+def _workset_keep_gate(
+    server: "RelayServer",
+    session_id: str,
+    *,
+    to_device: str,
+    consent: Mapping[str, Any] | None,
+    to_name: str = "",
+    consent_present: bool = True,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(refusal, block)`` for a ``--keep`` copy: what the fork arrives without.
 
-    A keep copy retires nothing and the source keeps every worktree, so it is not
-    gated — but the copy on the destination is a fork WITHOUT the work, and the
-    receipt must say so plainly rather than let a silent fork look complete:
-    ``consent: "not_applicable_keep"``, ``transferred: false``, each worktree
-    ``left_behind``. ``None`` when the session has no working set.
+    A keep copy retires nothing and the source keeps every worktree, so an ordinary
+    working set is not gated (manager ruling, 2026-11-18) — but the copy on the
+    destination is a fork WITHOUT the work, and the receipt must say so plainly
+    rather than let a silent fork look complete: ``consent: "not_applicable_keep"``,
+    ``transferred: false``, each worktree ``left_behind``. ``(None, None)`` when the
+    session has no working set.
+
+    REJECTED CWD RECORDS ARE ALSO GATED: their metadata-only rows say the files
+    stay without ever reading the rejected folder. Copying must not bypass that
+    files-stay choice just because the source keeps running.
+
+    THE CWD GAP IS GATED LIKE A MOVE (review #4403, R1-M1/U8/Q-1; coordinator ruling
+    1). With no record of where the session worked, its mentioned folders may be the
+    very work the user means to continue on the destination, and a fork that arrives
+    without them is the "move, then find the work missing" outcome the gate exists to
+    prevent. The keep dry run already said ``confirmation_required: true``, so the
+    real command must ask too: the gap goes through :func:`_workset_gate_full` with
+    the same consent (``--confirm-working-set``/``--without-working-set``, and
+    ``--yes``'s #4380 rules on the CLI), and its block — ``cwd_known: false`` plus
+    ``mentioned`` — rides the answer so the receipt names the folders.
     """
     from local_operator.network import workset
 
@@ -4529,12 +4581,28 @@ def _workset_keep_block(
     except workset.WorksetUnknown as failure:
         block = _workset_unknown_block(server, failure, to_device=to_device, to_name=to_name)
         block["transferred"] = False
-    else:
-        if manifest.empty:
-            return None
-        block = workset.arrival_block(manifest)
+        block["consent"] = "not_applicable_keep"
+        return None, block
+    if manifest.cwd_gap or manifest.cwd_rejected:
+        refusal, arrival, _manifest = _workset_gate_full(
+            server,
+            session_id,
+            to_device=to_device,
+            consent=consent,
+            to_name=to_name,
+            consent_present=consent_present,
+            transfer=False,
+        )
+        if arrival is not None:
+            # Additive: tells the receipt this block describes a COPY (the fork lacks
+            # the folders) rather than a move (``workset_text.receipt_lines``).
+            arrival["mode"] = "keep"
+        return refusal, arrival
+    if manifest.empty:
+        return None, None
+    block = workset.arrival_block(manifest)
     block["consent"] = "not_applicable_keep"
-    return block
+    return None, block
 
 
 def _workset_unknown_block(
@@ -4588,16 +4656,32 @@ def _workset_refusal(
     )
     commits = int(totals.get("unpushed_commits") or 0)
     dirty = int(totals.get("dirty_files") or 0)
+    # THE CWD GAP HAS ITS OWN SENTENCE (UX #4403, U3 / QA Q-3). Nothing is planned, so
+    # the count sentence below read "worked in 0 git worktrees (0 unpushed commits, 0
+    # uncommitted files) … Review them": a contradiction an agent reading this
+    # English fallback cannot act on. The truth is that the cwd is unknown and the
+    # mentioned folders would stay.
+    cwd_gap = block.get("cwd_known") is False and bool(block.get("mentioned")) and not count
     messages = {
         "working_set_unconfirmed": (
-            f"this conversation worked in {count} git "
-            f"{'worktree' if count == 1 else 'worktrees'} on this device "
-            f"({commits} unpushed {'commit' if commits == 1 else 'commits'}, "
-            f"{dirty} uncommitted {'file' if dirty == 1 else 'files'}) that the move has "
-            f"to account for before it goes to {to_label}. Nothing was moved. Review them "
-            "with `lop sessions move <id> --to <device> --dry-run`, then confirm with "
-            "--confirm-working-set <scope_digest> or leave them here with "
-            "--without-working-set (an older lop that cannot do either must be updated)."
+            (
+                "this conversation's working folder is not recorded, so lop cannot tell "
+                "whether the git folders it mentions on this device hold its work; nothing "
+                f"was moved to {to_label}. Review them with `lop sessions move <id> --to "
+                "<device> --dry-run`, then leave them here with --confirm-working-set "
+                "<scope_digest> or --without-working-set."
+            )
+            if cwd_gap
+            else (
+                f"this conversation worked in {count} git "
+                f"{'worktree' if count == 1 else 'worktrees'} on this device "
+                f"({commits} unpushed {'commit' if commits == 1 else 'commits'}, "
+                f"{dirty} uncommitted {'file' if dirty == 1 else 'files'}) that the move has "
+                f"to account for before it goes to {to_label}. Nothing was moved. Review them "
+                "with `lop sessions move <id> --to <device> --dry-run`, then confirm with "
+                "--confirm-working-set <scope_digest> or leave them here with "
+                "--without-working-set (an older lop that cannot do either must be updated)."
+            )
         ),
         "working_set_changed": (
             "the working files changed since they were confirmed (a worktree, a withheld "
@@ -4731,7 +4815,12 @@ def _workset_gate_full(
         label = str(unknown["destination"]["name"] or to_device)
         refusal = _workset_refusal(session_id, "working_set_unknown", unknown, to_label=label)
         return refusal, None, None
-    if manifest.empty:
+    # An empty manifest passes ungated, EXCEPT a cwd gap (``Manifest.cwd_gap``): with no
+    # record of where the session worked, its mentioned worktrees may be the work a
+    # move would strand (coordinator retest, v0.111.4), so consent is required even
+    # though nothing is planned. Riding the ordinary refusal is what puts it behind
+    # every existing surface's confirmation, ``--yes``'s #4380 rules included.
+    if manifest.empty and not manifest.cwd_gap:
         return None, None, None
     block = manifest.to_dict()
     label = manifest.to_name or to_device
@@ -5213,6 +5302,9 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
     # ``unknown`` and ``unsupported`` need a decision too: only --without-working-set
     # proceeds past either, so the surface must show them rather than "nothing here".
     required = bool(block.get("worktrees")) or block.get("state") in ("unsupported", "unknown")
+    # Unknown cwd with mentioned worktrees (``Manifest.cwd_gap``): nothing is planned,
+    # but they may be the session's real work, so the user decides (retest, v0.111.4).
+    required = required or bool(block.get("cwd_known") is False and block.get("mentioned"))
     return {
         "ok": True,
         "dry_run": True,
@@ -5278,7 +5370,13 @@ def _last_row_ts(path: Path) -> float:
     return 0.0
 
 
-def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
+def _source_session_cwd(
+    server: "RelayServer",
+    session_id: str,
+    *,
+    durable_hints: bool = True,
+    rejected: list[str] | None = None,
+) -> str:
     """The working directory this device's copy of ``session_id`` was last used in.
 
     WHY THIS EXISTS (the owner's report, clause 4): a session the TUI created and
@@ -5296,7 +5394,11 @@ def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     2. ``carry.resolve_cwd`` — the session's own ``desktop.json`` marker, which
        travels in the copy set when it exists;
     3. the live runtime's discovery record (``find_runtime_record``) — the only
-       record of an open session whose marker was never written.
+       record of an open session whose marker was never written;
+    4. ``cwd.json`` (``session.creation.CWD_RECORD_NAME``) — written at birth and on
+       each runtime start, so an IDLE exec/TUI session still answers;
+
+    Every step passes the same S-2 ``usable`` rule.
 
     THE SESSION DIRECTORY IS NOT A CWD: ``resolve_cwd`` returns it as its last
     resort, so it is filtered out here rather than sent as a value the destination
@@ -5304,13 +5406,50 @@ def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     nothing usable is known, which is what makes the prepare answer carry no
     ``cwd`` key and the destination invent no marker.
     """
-    return _session_cwd_at(Path(server.root), session_id)
+    from local_operator.network import workset_move as _wm
+
+    return _session_cwd_at(
+        Path(server.root),
+        session_id,
+        home=_wm.home_of(server),
+        durable_hints=durable_hints,
+        rejected=rejected,
+    )
 
 
-def _session_cwd_at(root: Path, session_id: str) -> str:
+def _session_cwd_at(
+    root: Path,
+    session_id: str,
+    *,
+    home: Path | str | None = None,
+    durable_hints: bool = True,
+    rejected: list[str] | None = None,
+) -> str:
     """:func:`_source_session_cwd` by config root, for a caller with no relay server
-    object (``request_move``'s stale-relay check runs in the CLI process)."""
+    object (``request_move``'s stale-relay check runs in the CLI process).
+
+    ``home`` is the home the move resolves the working set under
+    (``workset_move.home_of``); the durable hints (step 4) must be contained
+    under it. Default: this user's home.
+
+    ``durable_hints=False`` stops after the three LEGACY sources (security review
+    #4403, S1). The value this returns is also what the prepare sends as the wire
+    ``cwd`` — which the destination may adopt as its ``desktop.json`` marker and
+    wake-index cwd (``carry.rewrite_host_cwd``) with only the legacy "keep a path
+    that exists here" rule. ``cwd.json`` is a new source whose
+    value may have arrived from another device, so they must never reach that path:
+    the wire callers pass ``False``, and the destination gets ``cwd.json`` through
+    the copy set instead, where its promote contains it (``carry.remap_cwd_record``).
+    Discovery (the manifest's seeds) validates all four. ``rejected``, when
+    supplied, collects reason CODES only after every candidate fails. It is a
+    display-only consent signal, never an alternate cwd or discovery input; a
+    valid later candidate suppresses earlier refusals. Wire callers return above
+    disclosure and retain their historical authority unchanged.
+    """
     session_dir = root / "sessions" / session_id
+    home_text = str(home) if home is not None else str(Path.home())
+
+    rejected_values: list[str] = []
 
     def usable(value: Any) -> str:
         """``value`` as an absolute path, or "" to fall through to the next source.
@@ -5326,38 +5465,102 @@ def _session_cwd_at(root: Path, session_id: str) -> str:
             return ""
         try:
             expanded = os.path.expanduser(value.strip())
-            if not os.path.isabs(expanded) or Path(expanded) == session_dir:
+            if Path(expanded) == session_dir:
+                return ""  # resolve_cwd's fallback is absence, not a recorded cwd
+            rejected_values.append(value)
+            if not os.path.isabs(expanded) or (durable_hints and not value.isprintable()):
                 return ""
         except (OSError, ValueError):  # a path this host cannot even spell
+            rejected_values.append(value)
             return ""
         return expanded
 
+    from local_operator.network import carry as carry_mod
+
+    # THE THREE LEGACY SOURCES, in order. Each is read independently (one that cannot
+    # be read is skipped, never fatal) so discovery below can try the next when the
+    # first is unusable.
+    legacy: list[str] = []
     try:
         from local_operator.wakes import store as wake_store
 
         entry = wake_store.read_entry(root, session_id) or {}
-        found = usable(entry.get("cwd"))
-        if found:
-            return found
+        legacy.append(usable(entry.get("cwd")))
     except Exception:  # noqa: BLE001 — a cwd is never worth a failed move
         logger.debug("mobility: could not read %s's wake index cwd", session_id, exc_info=True)
     try:
-        from local_operator.network import carry as carry_mod
-
-        found = usable(carry_mod.resolve_cwd(session_dir))
-        if found:
-            return found
+        legacy.append(usable(carry_mod.resolve_cwd(session_dir)))
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's desktop marker", session_id, exc_info=True)
     try:
         from local_operator.mobile.attach_client import find_runtime_record
 
         record, _pid = find_runtime_record(root, session_id)
-        found = usable(record.cwd) if record is not None else ""
+        legacy.append(usable(record.cwd) if record is not None else "")
+    except Exception:  # noqa: BLE001
+        logger.debug("mobility: could not read %s's runtime record", session_id, exc_info=True)
+    legacy = [value for value in legacy if value]
+    if not durable_hints:
+        # THE WIRE RESOLVER IS UNCHANGED (security review #4403 r2, S4): the first
+        # absolute legacy value, exactly what a destination's marker rule has always
+        # received. Only discovery below validates and falls through.
+        return legacy[0] if legacy else ""
+
+    # DISCOVERY VALIDATES EACH LEGACY CANDIDATE (security review #4403 r2, S4). A
+    # stale marker (a folder since removed, a path adopted from another device) used
+    # to win just by being absolute, and so HID a valid ``cwd.json`` behind it: the
+    # manifest then saw an unusable seed, kept the gap, and the session's real
+    # worktree stayed mention-only. Each legacy value must now pass the same
+    # ``carry.contained_cwd`` rule the durable hints do. The value returned keeps its
+    # recorded spelling (not the realpath): the prepare sends it home-relative, which
+    # a symlinked home spelling must not change.
+    def discovery_cwd(value: str) -> str:
+        # Reject lexical escapes BEFORE realpath/ownership/existence checks. The
+        # source may have recorded an arbitrary other-host path; disclosure must
+        # not inspect that target just to explain why it cannot travel.
+        if not value:
+            return ""
+        allowed = os.path.abspath(home_text)
+        lexical = os.path.abspath(value)
+        if lexical != allowed and not lexical.startswith(allowed.rstrip(os.sep) + os.sep):
+            return ""
+        return carry_mod.contained_cwd(value, home=home_text, config_root=root)
+
+    for value in legacy:
+        if discovery_cwd(value):
+            return value
+    # THE DURABLE RECORD: idle exec/TUI sessions have no legacy source once their
+    # runtime exits. Verify the sidecar and contain its cwd before discovery can run
+    # git or read file facts there, just as for each legacy candidate above.
+    try:
+        from local_operator.session.creation import read_session_cwd
+
+        # 4. ``cwd.json``, written at birth and on every runtime start/change, and
+        # validated at arrival by both import doors (``carry.remap_cwd_record``).
+        found = usable(read_session_cwd(session_dir))
+        found = discovery_cwd(found)
         if found:
             return found
     except Exception:  # noqa: BLE001
-        logger.debug("mobility: could not read %s's runtime record", session_id, exc_info=True)
+        logger.debug("mobility: could not read %s's cwd record", session_id, exc_info=True)
+    # Rejection is disclosure, NEVER cwd authority. Collect only a disposition,
+    # with no recorded bytes: even a protected/malformed path can contain secrets.
+    # A later valid candidate wins above, preserving discovery and wire authority.
+    if rejected is not None and rejected_values:
+        rejected.append("unsafe_path")
+        for value in rejected_values:
+            # Lexical only: do not resolve/stat a rejected target to explain it.
+            # Symlink/ownership/protected-path refusals stay the generic safe code.
+            if not value.isprintable() or not os.path.isabs(value):
+                continue
+            normalized = os.path.abspath(value.strip())
+            allowed = os.path.abspath(home_text)
+            if normalized != allowed and not normalized.startswith(allowed.rstrip(os.sep) + os.sep):
+                rejected[-1] = "outside_home"
+                break
+    # Exhausted validated sources means UNKNOWN, never a rejected legacy value.
+    # Transcript rows (including inherited fork checkpoints) are content, not cwd
+    # authority. Older sessions acquire a durable record when their runtime starts.
     return ""
 
 
@@ -5570,7 +5773,8 @@ def _source_prepare(
     # destination is the device asking to pull — so a digest confirmed for another
     # device answers ``working_set_changed``. A queued move's resume reaches here too,
     # with the consent its record stored, and is re-judged on the then-current tree.
-    # ``--keep`` is not gated: it retires nothing and the source keeps every worktree.
+    # ``--keep`` is not gated (it retires nothing and the source keeps every worktree)
+    # EXCEPT for a cwd gap, which ``_workset_keep_gate`` asks about in the keep branch.
     workset_consent = _consent_frame(
         frame.get("working_set") if isinstance(frame.get("working_set"), dict) else None
     )
@@ -5630,6 +5834,19 @@ def _source_prepare(
         # makes the result safe is that the copy is a FORK by construction: the
         # destination stamps ``origin: fork`` and writes ``fork-boundary.json``, so
         # an off-by-one row boundary is a divergence point, not a corruption (§7.4).
+        #
+        # What the fork arrives WITHOUT: always stated when there is a working set,
+        # and gated only for a cwd gap (see ``_workset_keep_gate``). Asked FIRST, before
+        # the copy set is read or the prepare audited, so a refused keep costs nothing.
+        refused_keep, keep_workset = _workset_keep_gate(
+            server,
+            session_id,
+            to_device=link.device_id,
+            consent=workset_consent,
+            consent_present=consent_present,
+        )
+        if refused_keep is not None:
+            return refused_keep
         manifest = sync_mod.build_manifest(
             server.root,
             session_id,
@@ -5656,13 +5873,12 @@ def _source_prepare(
             "session_roles_stash": roles_stash,
             "session_id": session_id,
         }
-        # What the fork arrives WITHOUT: never gated (the source keeps everything),
-        # always stated when there is a working set (see ``_workset_keep_block``).
-        keep_workset = _workset_keep_block(server, session_id, to_device=link.device_id)
+        # What the fork arrives WITHOUT (``keep_workset``, gated above).
         if keep_workset is not None:
             keep_answer["working_set"] = keep_workset
         # ADDITIVE, and absent when nothing usable is known (see the docstring).
-        keep_cwd = _source_session_cwd(server, session_id)
+        # LEGACY SOURCES ONLY on the wire (S1): see ``_session_cwd_at``'s ``durable_hints``.
+        keep_cwd = _source_session_cwd(server, session_id, durable_hints=False)
         if keep_cwd:
             keep_answer["cwd"] = keep_cwd
         return keep_answer
@@ -5716,7 +5932,10 @@ def _source_prepare(
     # runtime's own discovery record: after the retire there is no process left to
     # ask, and a queued move that resumes here would then lose the only value a
     # marker-less session has. Nothing is mutated by the read.
-    source_cwd = _source_session_cwd(server, session_id)
+    # LEGACY SOURCES ONLY (security review #4403, S1): this value becomes the wire
+    # ``cwd`` the destination may adopt as its marker, so the durable hints stay out
+    # of it — they travel as ``cwd.json``, which the destination's promote contains.
+    source_cwd = _source_session_cwd(server, session_id, durable_hints=False)
     # THE EXPENSIVE PASS RUNS BEFORE THE CONVERSATION IS STOPPED (review round 2, MAJOR
     # 2). Every member of the copy set is digested here — the one pass a move cannot avoid,
     # because the commit compares digests derived from these bytes — and only then is the
@@ -8046,9 +8265,20 @@ def _offload(
     offload_consent = _consent_frame(working_set)
     offload_workset: dict[str, Any] | None = None
     if keep:
-        offload_workset = _workset_keep_block(
-            server, session_id, to_device=target_device, to_name=target_name
+        refused_keep, offload_workset = _workset_keep_gate(
+            server,
+            session_id,
+            to_device=target_device,
+            to_name=target_name,
+            consent=offload_consent,
         )
+        if refused_keep is not None:
+            return _move_refusal(
+                session_id,
+                str(refused_keep["code"]),
+                str(refused_keep["message"]),
+                working_set=refused_keep.get("working_set"),
+            )
     else:
         refused_ws, offload_workset = _workset_gate(
             server,

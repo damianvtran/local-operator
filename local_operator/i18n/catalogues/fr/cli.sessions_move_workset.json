@@ -109,5 +109,11 @@
   "cli.sessions_move_workset.deps_summary_unknown": "Certaines entrées n’ont pas pu être lues : cet état est donc incomplet. Rien n’a été modifié.",
   "cli.sessions_move_workset.deps_summary_present_unverified": "Les dossiers de dépendances existent, mais ils n’ont pas été vérifiés et peuvent être incomplets.",
   "cli.sessions_move_workset.deps_summary_nothing_needed": "Aucun arbre de dépendances n’est nécessaire ici.",
-  "cli.sessions_move_workset.deps_none": "Aucun ensemble de travail de {session} n’a été restauré sur cet appareil."
+  "cli.sessions_move_workset.deps_none": "Aucun ensemble de travail de {session} n’a été restauré sur cet appareil.",
+  "cli.sessions_move_workset.cwd_unknown": "Le répertoire de travail de cette conversation n’est pas enregistré, donc les dossiers qu’elle mentionne ne sont pas inclus et restent sur {source} : {paths}",
+  "cli.sessions_move_workset.cwd_unknown_advice": "Ils peuvent contenir du travail de cette conversation. Ne continuez que si vous pouvez le terminer ou le pousser sur {source}, ou si vous n’en avez pas besoin sur {device}.",
+  "cli.sessions_move_workset.yes_cwd_unknown": "--yes n’a rien confirmé : lop ne sait pas dans quel répertoire cette conversation a travaillé, il ne peut donc pas savoir si les dossiers qu’elle mentionne contiennent son travail, et --yes ne tranche pas cette question à votre place. Rien n’a été déplacé. Vérifiez-les avec --dry-run, puis relancez avec --confirm-working-set et le digest qu’affiche --dry-run pour les laisser sur {source}, ou avec --without-working-set.",
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": "Vérifiez ces dossiers avec --dry-run, puis relancez avec --confirm-working-set {digest} pour les laisser sur {source}, ou avec --without-working-set.",
+  "cli.sessions_move_workset.receipt_cwd_unknown": "Les fichiers de travail n’ont pas été transférés : le répertoire de travail de cette conversation n’est pas enregistré, donc les dossiers qu’elle mentionne restent sur {source} : {paths}",
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": "La copie sur {device} n’a pas les dossiers que mentionne cette conversation, car son répertoire de travail n’est pas enregistré ; ils restent sur {source} : {paths}"
 }

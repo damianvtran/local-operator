@@ -109,5 +109,11 @@
   "cli.sessions_move_workset.deps_summary_unknown": "Algunas entradas no se pudieron leer, así que este estado está incompleto. No se cambió nada.",
   "cli.sessions_move_workset.deps_summary_present_unverified": "Las carpetas de dependencias existen, pero no se comprobaron y pueden estar incompletas.",
   "cli.sessions_move_workset.deps_summary_nothing_needed": "Aquí no hace falta ningún árbol de dependencias.",
-  "cli.sessions_move_workset.deps_none": "No se restauró en este dispositivo ningún conjunto de trabajo de {session}."
+  "cli.sessions_move_workset.deps_none": "No se restauró en este dispositivo ningún conjunto de trabajo de {session}.",
+  "cli.sessions_move_workset.cwd_unknown": "El directorio de trabajo de esta conversación no está registrado, así que las carpetas que menciona no se incluyen y se quedan en {source}: {paths}",
+  "cli.sessions_move_workset.cwd_unknown_advice": "Puede que contengan trabajo de esta conversación. Continúa solo si puedes terminarlo o subirlo en {source}, o si no lo necesitas en {device}.",
+  "cli.sessions_move_workset.yes_cwd_unknown": "--yes no confirmó nada: lop no sabe en qué directorio trabajó esta conversación, así que no puede saber si las carpetas que menciona contienen su trabajo, y --yes no decide eso por ti. No se movió nada. Revísalas con --dry-run y vuelve a ejecutar con --confirm-working-set y el digest que muestra --dry-run para dejarlas en {source}, o con --without-working-set.",
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": "Revisa estas carpetas con --dry-run y vuelve a ejecutar con --confirm-working-set {digest} para dejarlas en {source}, o con --without-working-set.",
+  "cli.sessions_move_workset.receipt_cwd_unknown": "Los archivos de trabajo no se transfirieron: el directorio de trabajo de esta conversación no está registrado, así que las carpetas que menciona se quedan en {source}: {paths}",
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": "La copia en {device} no tiene las carpetas que menciona esta conversación, porque su directorio de trabajo no está registrado; se quedan en {source}: {paths}"
 }

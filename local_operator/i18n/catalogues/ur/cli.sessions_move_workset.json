@@ -109,5 +109,11 @@
   "cli.sessions_move_workset.deps_summary_unknown": "کچھ اندراجات پڑھے نہیں جا سکے، اس لیے یہ حالت نامکمل ہے۔ کچھ بھی تبدیل نہیں کیا گیا۔",
   "cli.sessions_move_workset.deps_summary_present_unverified": "dependency فولڈر موجود ہیں، لیکن انہیں جانچا نہیں گیا اور وہ نامکمل ہو سکتے ہیں۔",
   "cli.sessions_move_workset.deps_summary_nothing_needed": "یہاں کسی dependency ٹری کی ضرورت نہیں۔",
-  "cli.sessions_move_workset.deps_none": "{session} کا کوئی ورکنگ سیٹ اس ڈیوائس پر بحال نہیں ہوا۔"
+  "cli.sessions_move_workset.deps_none": "{session} کا کوئی ورکنگ سیٹ اس ڈیوائس پر بحال نہیں ہوا۔",
+  "cli.sessions_move_workset.cwd_unknown": "اس گفتگو کی ورکنگ ڈائریکٹری درج نہیں ہے، اس لیے گفتگو میں جن فولڈرز کا ذکر ہے وہ شامل نہیں ہیں اور {source} پر رہتے ہیں: {paths}",
+  "cli.sessions_move_workset.cwd_unknown_advice": "ممکن ہے ان میں اس گفتگو کا کام ہو۔ صرف اسی صورت میں جاری رکھیں جب آپ اسے {source} پر مکمل یا push کر سکیں، یا آپ کو {device} پر اس کی ضرورت نہ ہو۔",
+  "cli.sessions_move_workset.yes_cwd_unknown": "--yes نے تصدیق نہیں کی: lop نہیں جانتا کہ یہ گفتگو کس ڈائریکٹری میں کام کر رہی تھی، اس لیے وہ نہیں بتا سکتا کہ گفتگو میں جن فولڈرز کا ذکر ہے ان میں اس کا کام ہے یا نہیں، اور --yes آپ کی جگہ یہ فیصلہ نہیں کرتا۔ کچھ منتقل نہیں ہوا۔ انہیں --dry-run سے دیکھیں، پھر انہیں {source} پر چھوڑنے کے لیے --confirm-working-set اور --dry-run کے دکھائے ہوئے ڈائجسٹ کے ساتھ دوبارہ چلائیں، یا --without-working-set کے ساتھ۔",
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": "ان فولڈرز کو --dry-run سے دیکھیں، پھر --confirm-working-set {digest} کے ساتھ دوبارہ چلائیں تاکہ یہ {source} پر ہی رہیں، یا --without-working-set کے ساتھ۔",
+  "cli.sessions_move_workset.receipt_cwd_unknown": "ورکنگ فائلیں منتقل نہیں ہوئیں: اس گفتگو کی ورکنگ ڈائریکٹری درج نہیں ہے، اس لیے گفتگو میں جن فولڈرز کا ذکر ہے وہ {source} پر رہتے ہیں: {paths}",
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": "{device} پر موجود کاپی میں وہ فولڈرز نہیں ہیں جن کا اس گفتگو میں ذکر ہے، کیونکہ گفتگو کی ورکنگ ڈائریکٹری درج نہیں ہے؛ وہ {source} پر رہتے ہیں: {paths}"
 }

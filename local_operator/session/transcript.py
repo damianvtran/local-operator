@@ -87,6 +87,7 @@ from local_operator.session.channel_spend import (
 )
 from local_operator.session.creation import (
     ensure_session_created_at,
+    record_session_cwd,
     session_created_at,
 )
 from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
@@ -2637,9 +2638,17 @@ class Transcript:
         *,
         defer_materialise: bool = False,
         read_only: bool = False,
+        cwd: str | None = None,
     ) -> None:
         self.directory = Path(directory)
         self._read_only = read_only
+        # THE CREATOR'S WORKING DIRECTORY, recorded at birth beside the created-at
+        # sidecar (``creation.CWD_RECORD_NAME``). Only the session factory knows it
+        # (``build_session``'s ``effective_cwd``); every other constructor passes
+        # nothing and records nothing. Kept on the object because a deferred
+        # (speculative) transcript materialises its directory only at the first
+        # append, which is where the second birth write below runs.
+        self._birth_cwd = cwd
         # ``defer_materialise`` is what makes a speculative runtime leave
         # nothing behind: a viewer's first keystroke warms a runtime BEFORE
         # the user has committed to a message, and an abandoned draft must not
@@ -2729,6 +2738,11 @@ class Transcript:
             self._created_at = ensure_session_created_at(
                 self.directory, self._created_at if self._created_at is not None else time.time()
             )
+            # Write-once (``source="birth"``): an existing record is the creator's or
+            # a runtime's later one, and a reopen from another folder must not win.
+            # An idle exec/TUI session has no other durable cwd record, which is how
+            # a move left its worktree behind (``mobility._session_cwd_at``).
+            record_session_cwd(self.directory, self._birth_cwd, source="birth")
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
         # Paging tokens survive appends, but not a replay-changing mutation or
@@ -3595,6 +3609,9 @@ class Transcript:
             self._created_at = ensure_session_created_at(
                 self.directory, self._created_at if self._created_at is not None else time.time()
             )
+            # The deferred transcript's birth: same write-once record as the
+            # constructor's (see there), now that the directory exists.
+            record_session_cwd(self.directory, self._birth_cwd, source="birth")
             try:
                 with self.path.open("w", encoding="utf-8") as handle:
                     _keep_private(handle.fileno())

@@ -1835,6 +1835,23 @@ def _retarget_cwd(
         carry._write_marker(marker_path, marker)  # noqa: SLF001 — the one marker writer
     except Exception:  # noqa: BLE001 — advice for the next open, never a failure
         logger.debug("workset: could not retarget %s's cwd", session_id, exc_info=True)
+        return
+    # THE DURABLE RECORD FOLLOWS THE RESTORE TOO (review #4403 r2, R2-n1). The
+    # promote's remap ran in staging, before this tree existed, so it left
+    # ``cwd.json`` blank; only the marker above named the restored tree, and a session
+    # with no marker (exec/TUI) would read "cwd unknown" on its next move. Same rule
+    # as every other durable write: contained under this home (``carry.contained_cwd``)
+    # and written through the one safe writer, or not at all.
+    try:
+        from local_operator.session.creation import write_session_cwd
+
+        contained = carry.contained_cwd(str(target), home=str(home), config_root=server.root)
+        if contained:
+            write_session_cwd(
+                Path(server.root) / "sessions" / session_id, contained, source="runtime"
+            )
+    except Exception:  # noqa: BLE001 — advice for the next move, never a failure
+        logger.debug("workset: could not record %s's restored cwd", session_id, exc_info=True)
 
 
 def arrival_receipt(
