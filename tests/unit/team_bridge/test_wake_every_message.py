@@ -1334,9 +1334,13 @@ def test_the_rate_window_is_per_destination_session(tmp_path: Path) -> None:
     assert _pending_reservations(config_dir) == 0
 
 
-def _legacy_group_key(config_dir: Path, owner: Any, metadata: Any, session_id: str) -> Any:
+def _legacy_group_key(
+    config_dir: Path, owner: Any, metadata: Any, session_id: str, *, staggered: bool = False
+) -> Any:
     """The pre-S-26 key, verbatim from origin/main (e6ab76845782), for the
-    routing-off equivalence proof below. ``session_id`` is accepted and ignored."""
+    routing-off equivalence proof below. ``session_id`` is accepted and ignored,
+    and so is ``staggered`` (the urgent-failover partition): this module runs with
+    triage pinned off, where nothing is ever staggered."""
 
     return (
         str(config_dir),

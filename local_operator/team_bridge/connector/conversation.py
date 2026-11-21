@@ -109,6 +109,9 @@ REPLY_STYLE_LINE = "style: in channels/groups reply in the thread; no sign-off l
 #: ``detail`` of a hand-off that deliberately posted NO card because the hub marked
 #: the delivery passive (see ``_hand_off_card``). Terminal, never buffered.
 CARD_PASSIVE = "passive_no_wake"
+#: ``detail`` of a hand-off that posted NO card because channel-wake triage wrote
+#: the row ``deferred`` (``classify_wake``). Terminal like :data:`CARD_PASSIVE`.
+CARD_NO_WAKE = "deferred_no_wake"
 
 
 @dataclass(frozen=True)
@@ -883,6 +886,285 @@ def _screening_fingerprint(owner: Any, receipt_row: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+# -- channel-wake triage ------------------------------------------------------
+#
+# WHY (operator, 2026-11-21): "When a message drops in a channel, all agents seem to
+# always respond ... find ways to make that more token efficient". Baseline the
+# architect measured: 80.4% of channel messages are unaddressed, ~420 ambient turns
+# a day (~$72/day) for the chief of staff alone. The chosen design is DETERMINISTIC
+# (zero extra model calls): the hub already screened the message and resolved who it
+# addresses, so the wake decision is a first-match table over those server facts.
+# A model-judged "should I wake" line would have to ride the hub-pinned V6 screening
+# template, which needs an agent-server v7 — out of reach for a connector change.
+
+
+@dataclass(frozen=True)
+class WakeDecision:
+    """What the connector does with one admitted message's wake.
+
+    ``wake_class`` set → the reservation is written ``deferred`` (see
+    ``Store.record_body_reservation``); ``None`` → an ordinary woken row.
+    ``dwell_s``: ``0`` immediate, ``> 0`` batch window, ``None`` pre-triage timing.
+    ``stagger_delay_s`` is set only for an urgent-failover standby (slot >= 1).
+    ``rule`` is a closed label for logs, never content.
+    """
+
+    rule: str
+    wake_class: str | None = None
+    dwell_s: float | None = None
+    stagger_delay_s: float | None = None
+
+
+#: Pre-triage behaviour: every admitted message wakes on the coalescer's rate.
+WAKE_AS_BEFORE = WakeDecision("triage_off")
+#: How many agents an urgent message can wake: slot 0 now, slots 1..2 as failover.
+URGENT_MAX_SLOTS = 3
+#: Conversation rosters are re-read at most this often per conversation: a member
+#: joining mid-window only shifts which standby wakes, never whether slot 0 does.
+ROSTER_TTL_S = 600.0
+_ROSTERS: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+#: Per-thread reply record the connector sees for free (every admitted message in its
+#: channels, passive ones included): ``(endpoint, conversation, root) -> [(seq,
+#: sender account)]``. The first, zero-cost half of the failover's "already answered"
+#: check; bounded per thread and in keys.
+_THREAD_SEEN: dict[tuple[str, str, str], list[tuple[int, str]]] = {}
+_THREAD_SEEN_CAP = 2048
+_THREAD_SEEN_PER_KEY = 64
+#: The original sender of each buffered staggered message (the answered check must
+#: ignore that sender's own follow-ups). Popped at the check.
+_STAGGER_SENDER: dict[tuple[str, str], str] = {}
+
+
+def classify_wake(
+    ref: ConversationFeedRef,
+    metadata: ConversationCardMetadata,
+    *,
+    body_text: str | None = None,
+    dwell_s: float,
+) -> WakeDecision:
+    """The deterministic triage table: first match wins. Pure, no I/O.
+
+    1. DM, mention, ``addressed=direct``, routed, sender is the owner → wake now.
+    2. hub-marked passive → deferred (``passive``).
+    3. a reply in a thread this agent follows → wake after the dwell window.
+    4. ``addressed=everyone``, a HUMAN's ambient post, or an ambient post whose
+       screened body asks a question ("?") → urgent: one agent now, the rest
+       stagger (``rule='urgent'``; the slot is resolved by :func:`decide_wake`).
+    5. any other ambient post → deferred (``ambient``).
+
+    ``body_text`` is the already-screened body still in the caller's memory; it
+    is only searched for ``?`` and never stored.
+    """
+
+    if (
+        metadata.conversation_kind == "dm"
+        or ref.mention
+        or ref.addressed == "direct"
+        or metadata.routed
+        or ref.sender_relation == "owner"
+    ):
+        return WakeDecision("direct", dwell_s=0.0)
+    if ref.passive:
+        return WakeDecision("passive", wake_class="passive")
+    if metadata.thread_follower is True or ref.addressed == "thread":
+        return WakeDecision("thread_follower", dwell_s=float(dwell_s))
+    if (
+        ref.addressed == "everyone"
+        or (metadata.sender_kind or ref.sender_kind) == "human"
+        or (body_text is not None and "?" in body_text)
+    ):
+        return WakeDecision("urgent", dwell_s=0.0)
+    return WakeDecision("ambient", wake_class="ambient")
+
+
+def urgent_slot(message_id: str, own_account_id: str, agent_account_ids: Any) -> int:
+    """This agent's failover rank for one urgent message (0 = wakes now).
+
+    Rank by ``sha256(message_id:account_id)`` over the conversation's active agent
+    members other than the sender: every connector computes the SAME order without
+    talking to the others, and a fresh order per message spreads first-responder
+    duty evenly across agents. Own account missing from the roster → slot 0 (the
+    pre-triage behaviour: never lose the wake on a stale roster).
+    """
+
+    def rank(account: str) -> str:
+        return hashlib.sha256(f"{message_id}:{account}".encode()).hexdigest()
+
+    ordered = sorted(set(agent_account_ids) | {own_account_id}, key=rank)
+    if own_account_id not in set(agent_account_ids):
+        return 0
+    return ordered.index(own_account_id)
+
+
+async def _agent_roster(
+    client: Any, owner: Any, conversation_id: str, access: Any, *, now: float
+) -> tuple[str, ...] | None:
+    """Active AGENT member account ids of a conversation (cached), or ``None``."""
+
+    key = (str(getattr(owner, "endpoint_id", "") or ""), conversation_id)
+    cached = _ROSTERS.get(key)
+    if cached is not None and now - cached[0] < ROSTER_TTL_S:
+        return cached[1]
+    try:
+        view = await client.conversation(conversation_id, tenant_id=owner.tenant_id, access=access)
+    except Exception:  # noqa: BLE001 — unreadable roster = slot 0, never a lost wake
+        return None
+    members = view.get("members") if isinstance(view, Mapping) else None
+    if not isinstance(members, list):
+        return None
+    roster = tuple(
+        str(m.get("account_id") or "")
+        for m in members
+        if isinstance(m, Mapping)
+        and m.get("kind") == "agent"
+        and m.get("state", "active") == "active"
+        and m.get("account_id")
+    )
+    if len(_ROSTERS) > 512:
+        _ROSTERS.clear()
+    _ROSTERS[key] = (now, roster)
+    return roster
+
+
+def _note_thread_activity(owner: Any, ref: ConversationFeedRef, sender_account_id: str) -> None:
+    """Record ``(seq, sender)`` under the thread this message belongs to."""
+
+    root = ref.thread_root_id or ref.message_id
+    key = (str(getattr(owner, "endpoint_id", "") or ""), ref.conversation_id, root)
+    if key not in _THREAD_SEEN and len(_THREAD_SEEN) >= _THREAD_SEEN_CAP:
+        _THREAD_SEEN.clear()
+    seen = _THREAD_SEEN.setdefault(key, [])
+    seen.append((int(ref.conversation_seq), sender_account_id))
+    del seen[:-_THREAD_SEEN_PER_KEY]
+
+
+def _triage_settings(config_dir: Path) -> Any:
+    """The ``team_bridge`` keys the triage reads (a seam: tests pin a mode here).
+
+    Read per message so a hand edit of the config file applies without a
+    connector restart; ``read_config_values`` is memoised on file identity.
+    """
+
+    from local_operator.config import read_config_values
+
+    from ..settings import TeamBridgeSettings
+
+    return TeamBridgeSettings.from_values(read_config_values(Path(config_dir)) or {})
+
+
+async def decide_wake(
+    owner: Any,
+    ref: ConversationFeedRef,
+    metadata: ConversationCardMetadata,
+    *,
+    config_dir: Path,
+    client: Any,
+    access: Any,
+    body_text: str | None,
+    sender_account_id: str,
+    now: float | None = None,
+) -> WakeDecision:
+    """The ONE wake decision for an admitted message, made before its reservation.
+
+    Both reservation callers (the admission path and the recovery path) call this
+    and pass the result to :func:`_record_body_reservation` and
+    :func:`_hand_off_card`; a replay never re-decides (the row's state stands).
+    Reads ``team_bridge.ambient_triage``: ``off`` is the pre-triage behaviour and
+    ``shadow`` logs the class it would have chosen but behaves as ``off``. The
+    hub's passive bit defers the row in EVERY mode — that is a fix (a passive row
+    left ``pending`` was later drained as a full turn), not a triage choice.
+    """
+
+    moment = time.time() if now is None else now
+    _note_thread_activity(owner, ref, sender_account_id)
+    settings = _triage_settings(config_dir)
+    passive = ref.passive and metadata.conversation_kind != "dm"
+    if settings.ambient_triage == "off":
+        return WakeDecision("passive", wake_class="passive") if passive else WAKE_AS_BEFORE
+    decision = classify_wake(
+        ref, metadata, body_text=body_text, dwell_s=settings.ambient_wake_dwell_seconds
+    )
+    if settings.ambient_triage == "shadow":
+        logger.info("bridge: wake triage shadow rule=%s", decision.rule)
+        return WakeDecision("passive", wake_class="passive") if passive else WAKE_AS_BEFORE
+    if decision.rule != "urgent":
+        logger.info("bridge: wake triage rule=%s", decision.rule)
+        return decision
+    roster = await _agent_roster(client, owner, ref.conversation_id, access, now=moment)
+    if roster is None:
+        slot = 0
+    else:
+        others = [a for a in roster if a != sender_account_id]
+        slot = urgent_slot(ref.message_id, str(getattr(owner, "account_id", "") or ""), others)
+    logger.info("bridge: wake triage rule=urgent slot=%d", min(slot, URGENT_MAX_SLOTS))
+    if slot == 0:
+        return decision
+    if slot >= URGENT_MAX_SLOTS:
+        return WakeDecision("urgent_standby", wake_class="ambient")
+    _STAGGER_SENDER[(ref.conversation_id, ref.message_id)] = sender_account_id
+    return WakeDecision(
+        "urgent_failover",
+        wake_class="staggered",
+        stagger_delay_s=float(slot * settings.urgent_failover_seconds),
+    )
+
+
+async def promote_staggered(
+    owner: Any,
+    metadata: ConversationCardMetadata,
+    *,
+    config_dir: Path,
+    client: Any = None,
+    access: Any = None,
+) -> bool:
+    """The failover check at a standby's flush: wake only if nobody answered.
+
+    Answered = a message in the urgent message's thread, after its seq, from
+    someone other than its sender. First the free local record of what this
+    connector admitted; else ONE ``conversation_replies`` read. A read that fails
+    counts as unanswered: a possibly-duplicate answer beats a lost urgent wake
+    (the same trade ``coalesce._still_owed`` makes). Unanswered → CAS the row
+    ``deferred`` → ``pending`` so the flush posts its card; True when promoted.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    root = metadata.thread_root_id or metadata.message_id
+    sender = _STAGGER_SENDER.pop((metadata.conversation_id, metadata.message_id), "")
+    seq = int(metadata.conversation_seq)
+    key = (str(getattr(owner, "endpoint_id", "") or ""), metadata.conversation_id, root)
+    answered = any(s > seq and who != sender for s, who in _THREAD_SEEN.get(key, ()))
+    if not answered and client is not None:
+        try:
+            page = await client.conversation_replies(
+                metadata.conversation_id,
+                root,
+                tenant_id=owner.tenant_id,
+                endpoint_id=owner.endpoint_id,
+                after_seq=seq,
+                limit=20,
+                access=access,
+            )
+            replies = page.get("replies") if isinstance(page, Mapping) else None
+            answered = any(
+                isinstance(row, Mapping)
+                and isinstance(row.get("sender"), Mapping)
+                and str(row["sender"].get("account_id") or "") not in ("", sender)
+                for row in (replies if isinstance(replies, list) else ())
+            )
+        except Exception:  # noqa: BLE001 — closed code; unanswered by default
+            logger.warning("bridge: staggered answered check failed code=replies_unreadable")
+    logger.info("bridge: staggered wake answered=%s", answered)
+    if answered:
+        return False
+    return Store(config_dir).promote_staggered_reservation(
+        owner,
+        conversation_id=metadata.conversation_id,
+        message_id=metadata.message_id,
+        now=time.time(),
+    )
+
+
 def _record_body_reservation(
     store: Any,
     owner: Any,
@@ -891,6 +1173,7 @@ def _record_body_reservation(
     body_hash: str,
     designation: str,
     routed_session: str | None = None,
+    wake: WakeDecision | None = None,
 ) -> str:
     """Record the CONTENTLESS reservation for one admitted message.
 
@@ -929,6 +1212,7 @@ def _record_body_reservation(
             designated_session=designation,
             now=time.time(),
             routed_session=routed_session,
+            wake_class=wake.wake_class if wake is not None else None,
         )
     except Exception:  # noqa: BLE001 — closed structural code, never content
         logger.warning("bridge: body reservation refused code=store_refused")
@@ -1026,8 +1310,12 @@ async def _hand_off_card(
     *,
     session_id: str,
     config_dir: Path,
+    wake: WakeDecision | None = None,
 ) -> str:
     """Buffer the card in the active coalescing scope, else deliver it now.
+
+    ``wake`` is :func:`decide_wake`'s answer for a FRESH reservation; ``None``
+    (a replay, the recovery path, direct callers) is the pre-triage hand-off.
 
     Screening, admission and the reservation have ALL happened per message by
     the time this runs; only the wake is grouped. Outside a connector
@@ -1060,7 +1348,16 @@ async def _hand_off_card(
         # bit, since such a hub predates #402 and never sends ``passive`` anyway. The hold
         # re-drive and recovery paths reach the wake only through this function, so
         # the guard covers them too.
+        #
+        # The reservation itself is written ``deferred`` (``decide_wake``), so no
+        # pending lookup can later drain it as a full turn — a CARD_PASSIVE hand-
+        # off used to leave a ``pending`` row the session's follow-up re-arm served.
         return CARD_PASSIVE
+    if wake is not None and wake.wake_class in ("passive", "ambient"):
+        # TRIAGE DEFERRED IT (``classify_wake`` rules 2/5, or an urgent standby
+        # ranked past the last failover slot): the row is ``deferred``, readable in
+        # channel history, and wakes nobody. Same exits as the passive branch.
+        return CARD_NO_WAKE
 
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
     # kind + mention bit, never a body or name). Per message, oldest → newest
@@ -1083,7 +1380,12 @@ async def _hand_off_card(
     if gap:
         metadata = replace(metadata, since_last_delivery=gap)
     coalescer = active_coalescer()
+    staggered = wake is not None and wake.wake_class == "staggered"
     if coalescer is None:
+        if staggered:
+            # No flush will run the answered check outside a connector iteration,
+            # and posting now would defeat the stagger: the row stays deferred.
+            return CARD_NO_WAKE
         return await _deliver_card(owner, metadata, session_id=session_id, config_dir=config_dir)
     coalescer.enqueue(
         owner,
@@ -1095,6 +1397,10 @@ async def _hand_off_card(
         # (the ordinary window is shorter): a stranger's burst of replies must not
         # become a burst of turns for a task session.
         min_interval_s=ROUTED_WAKE_MIN_INTERVAL_S if metadata.routed else None,
+        # Channel-wake triage timing. A routed wake keeps its own interval and
+        # never dwells (it is already rate-gated per destination).
+        dwell_s=None if (wake is None or metadata.routed) else wake.dwell_s,
+        staggered_delay_s=wake.stagger_delay_s if staggered and wake is not None else None,
     )
     return CARD_COALESCED
 
@@ -2166,8 +2472,22 @@ async def _deliver_recovered(
             return _RecoveredDelivery(await held(fence_code), terminal)
         if store.designated_session_for(owner) != designation:
             return _RecoveredDelivery(await held("receipt_unavailable"), terminal)
+        # The same ONE wake decision as the admission path. A row it defers reads
+        # ``settled`` in the card-status check below, so the recovery returns
+        # ``duplicate`` and posts no card (a staggered standby found only here
+        # simply stays deferred: recovery is the rare path, slot 0 is the cover).
+        wake = await decide_wake(
+            owner,
+            ref,
+            metadata,
+            config_dir=config_dir,
+            client=client,
+            access=access,
+            body_text=body_text,
+            sender_account_id=str(sender.get("account_id") or ""),
+        )
         recorded = _record_body_reservation(
-            store, owner, ref, body_hash=body_hash, designation=designation
+            store, owner, ref, body_hash=body_hash, designation=designation, wake=wake
         )
         if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
             return _RecoveredDelivery(await held(recorded), terminal)
@@ -2754,6 +3074,16 @@ async def handle_conversation_available(
             sender_account_id=str(sender.get("account_id") or ""),
             thread_root_id=ref.thread_root_id,
         )
+        wake: WakeDecision | None = await decide_wake(
+            owner,
+            ref,
+            replace(metadata, routed=plan.target is not None),
+            config_dir=config_dir,
+            client=client,
+            access=access,
+            body_text=body_text,
+            sender_account_id=str(sender.get("account_id") or ""),
+        )
         recorded = _record_body_reservation(
             store,
             owner,
@@ -2761,9 +3091,13 @@ async def handle_conversation_available(
             body_hash=body_hash,
             designation=designation,
             routed_session=plan.target,
+            wake=wake,
         )
         if recorded == RESERVATION_ALREADY_RECORDED:
             plan = _stored_route(store, owner, ref, config_dir)
+            # A replay never re-decides: the stored row's state stands (a
+            # deferred one reads settled below; an owed one is a plain wake).
+            wake = None
         delivery_session = plan.target or designation
         if plan.target or plan.candidates:
             metadata = replace(
@@ -2820,6 +3154,7 @@ async def handle_conversation_available(
             ref,
             session_id=delivery_session,
             config_dir=config_dir,
+            wake=wake,
         )
         # A BUFFERED card is not a delivered one: the wake_coalescing hold
         # written at enqueue is the only durable trace between this ref's delete
@@ -2888,11 +3223,17 @@ async def handle_conversation_available(
 
 __all__ = [
     "CARD_COALESCED",
+    "CARD_NO_WAKE",
     "CARD_PASSIVE",
     "GUIDANCE_VERSION",
     "REPLY_STYLE_LINE",
     "ConversationCardMetadata",
+    "WakeDecision",
     "build_conversation_card",
     "card_directed",
+    "classify_wake",
+    "decide_wake",
     "handle_conversation_available",
+    "promote_staggered",
+    "urgent_slot",
 ]
