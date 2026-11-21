@@ -1409,14 +1409,15 @@ def _rank(
         # foreign.
         #
         # The legacy family state below treats ignored entries like Git does.
-        # Exact plain commands separately require the same ignored-payload
-        # witness as exact forced cleanup, regardless of the creator.
+        # Plain removal must preserve payload at the resolved linked checkout
+        # regardless of its spelling or creator. Unlike exact-path consent,
+        # these checks can only add a hold, not authorize a removal.
         own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
         relation = own[2] if own is not None else ""
         # A hidden pid with no evidence is ignored for the PLAIN removal only
         # (git itself still refuses untracked content); ``--force`` keeps the
         # strict rule (review M1, PR #4161).
-        plain_payload: dict[str, bool] | None = {} if exact_cleanup and not target.forced else None
+        plain_payload: dict[str, bool] | None = None if target.forced else {}
         state = worktree_state(
             path,
             own=own is not None and (relation == "" or not target.forced),

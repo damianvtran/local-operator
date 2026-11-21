@@ -71,6 +71,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The Bedrock sign-in flow's progress/prompt copy (`providers/bedrock/login.py`,
         # `sso_login.py`) shown by `lop login bedrock`, the TUI and desktop connect.
         "wire.login.bedrock",
+        # Connect-provider copy finished in-process: API-key check verdicts and
+        # the router suggestion's display name (desktop fr census, 2026-11).
+        "wire.providers.connect",
         # A refused-for-good OAuth sign-in (Google Cloud session control): the
         # failover notice and the `lop login-status` state words. DEFERRED.
         "wire.providers.reauth",

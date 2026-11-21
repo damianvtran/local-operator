@@ -1,0 +1,51 @@
+{
+  "locale": "fr",
+  "namespace": "wire.providers.connect",
+  "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+  "target_sha256": "eb4bc6efc9f780b320f2664a2dbabd854474802ee538eb894d0d49d13f577492",
+  "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "provenance": "Identity/model supplied by manager's delegation; translator execution not independently observed. Date is this audit's date, not an independently observed translation timestamp."
+  },
+  "auditor": {
+    "agent": "translation-auditor / conn-audit-fr / session cfc6603aaa44",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "result": "passed",
+    "verdict": "clean-with-findings",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {"blocker": 0, "major": 0, "minor": 1, "nit": 0},
+    "independent_from_translator": true,
+    "fallback_used": false,
+    "actual_model_source": "Session model supplied by harness: openai/gpt-6.1-sol; no fallback used."
+  },
+  "status": "passed",
+  "keys_read": 5,
+  "round": "1",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-backend-english",
+  "head": "b5bb56079c5067fd2efc81d6d223ac0283171142",
+  "findings_detail": [
+    {
+      "id": "T-fr-1",
+      "severity": "minor",
+      "key": "wire.providers.connect.key_invalid_characters",
+      "current": "Cette clé contient des caractères qu’une clé API ne peut pas contenir. Copiez-la de nouveau, puis réessayez.",
+      "proposed": "Cette clé API contient des caractères non autorisés. Copiez-la de nouveau, puis réessayez.",
+      "reason": "108 Unicode characters versus 78 in English (1.38x) for under-field error copy: the proposed shorter phrasing preserves the meaning; otherwise retain the idiomatic current text subject to a rendered narrow-panel fit check. No clipping was observed or claimed."
+    }
+  ],
+  "evidence": {
+    "catalogues_check": "PYTHONPATH=<worktree> ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only => exit 0; check.py: catalogue checks: 0 problem(s)",
+    "argument_parity": "Exact ordered message_arguments equality asserted for all 5 English/French pairs: [], [label], [label], [label,status], []. HTTP {status} preserved byte-for-byte as a technical token.",
+    "rendering": "All 5 target values passed runtime.render_message and equalled render_resolved of their generated Msg in isolated HOME/config with LOP_LANG=fr. label=OpenAI, status=429. No ICU plural, number/date skeleton or markup in this namespace; RTL not applicable to fr.",
+    "real_consumer_helpers": "suggested_model_for('radient') => SuggestedModel(id='auto', name='Automatique'); invalid_characters_reason() => exact French catalogue text. check_api_key with synthetic key and httpx.MockTransport: 401 => valid=False, French refused-key text; 429 => valid=None, French HTTP 429 saved-unverified warning; ConnectError => valid=None, French saved-unverified unreachable warning. No external requests or credentials used.",
+    "source_context": "Read key_check.py verdict classification/render/save semantics, model/defaults.py suggested_model_for/_keyed_name, server/routes/auth.py rejection envelope, save-before-warning reply and _suggestion, server/routes/models.py suggestedModel response. UI provider-grid.tsx consumes suggested_model.name.",
+    "locale_context": "Read French style guide and glossary; full wire.errors.auth and wire.errors.bedrock catalogues plus relevant wire.settings verification/save/automatic wording. UI fr/ui.common.models.json uses Auto (recommandé) and Recommandé : Automatique; zh-CN picker uses 自动（推荐）. Auto is an established French abbreviation, not an English leak or inconsistent concept. Existing auth 'rejeté' and Bedrock 'refusé' are equivalent native refusal verbs; current wording follows Bedrock, with no conflicting mandatory glossary entry.",
+    "limits": "Linguistic/runtime-string audit, not visual sign-off: no browser screenshot, narrow-panel geometry, live HTTP route invocation or persistence test performed. No native-speaker certification claimed. No repository files edited."
+  },
+  "note": "Independent audit of all 5 new French keys. Accurate, idiomatic, consistent vous register, correct saved-versus-rejected distinction and fully preserved ordered parameters; API and HTTP are sanctioned technical vocabulary. One non-gating length advisory above; no blocker/major. auditor.findings counts unresolved blocker/major per docs/design/i18n.md section 6, not total minor findings. No files changed or ledger row appended by auditor."
+}

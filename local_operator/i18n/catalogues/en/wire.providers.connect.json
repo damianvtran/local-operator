@@ -1,0 +1,7 @@
+{
+  "wire.providers.connect.key_invalid_characters": "This key contains characters an API key cannot have. Re-copy it and try again.",
+  "wire.providers.connect.key_rejected": "{label} rejected this API key. Check it and try again.",
+  "wire.providers.connect.key_unreachable": "Could not reach {label} to check this key. It was saved without being verified.",
+  "wire.providers.connect.key_unverified": "{label} could not check this key right now (HTTP {status}). It was saved without being verified.",
+  "wire.providers.connect.suggested_automatic": "Automatic"
+}
