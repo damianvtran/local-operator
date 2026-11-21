@@ -8,6 +8,7 @@ through HTTP requests instead of CLI.
 import asyncio
 import logging
 import secrets
+import threading
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -249,6 +250,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the instance only when THIS boot started it: one already running (a lazy
     # ``service.list_assets`` start, a caller's own indexer) is not ours to end.
     library_indexer = None
+    # Set where the org-hub gate starts; declared here so the ``finally`` below
+    # can read it even when startup raised before that point.
+    org_hub_thread: threading.Thread | None = None
     try:
         from local_operator.library.indexer import ensure_started, is_running
 
@@ -665,10 +669,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
     # never waits on a memberships read. Never raises; ineligible = no-op.
+    # The thread handle is kept so the teardown can join it: it atomically
+    # rewrites ``hub/org_catalogue.json`` under the config root, and a daemon
+    # still mid-write when the lifespan returns races whoever removes or reuses
+    # that root next (CI: a test's ``rmtree`` hit its ``.tmp`` file vanishing).
     try:
         from local_operator.hub_org import enrol as hub_org_enrol
 
-        hub_org_enrol.on_boundary(app.state.config_manager.config_dir, "daemon-start")
+        org_hub_thread = hub_org_enrol.on_boundary(
+            app.state.config_manager.config_dir, "daemon-start"
+        )
     except Exception:  # noqa: BLE001 - the org hub is optional; the daemon is not
         logger.debug("org hub gate refresh could not start", exc_info=True)
 
@@ -814,6 +824,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # ``finally`` so a raise earlier in the teardown cannot leak the threads. ``stop``
         # joins with its own 5 s bound and the loops honour the stop flag
         # between units of work, so this does not hold shutdown on a long scan.
+        # The org-hub gate refresh writes under the config root too (see where
+        # it starts); wait for it before the indexer and before the lifespan
+        # returns. Bounded, because its memberships read is a network call:
+        # shutdown is not held hostage, but a thread that outlives the bound is
+        # logged rather than silently assumed done. Off the loop, like the join
+        # below.
+        if org_hub_thread is not None and org_hub_thread.is_alive():
+            try:
+                await asyncio.to_thread(org_hub_thread.join, 5.0)
+                if org_hub_thread.is_alive():
+                    logger.warning(
+                        "org hub boundary thread still running at shutdown; "
+                        "it may write under the config root"
+                    )
+            except Exception:  # noqa: BLE001 — teardown of a background refresh never raises
+                logger.debug("org hub boundary join failed at shutdown", exc_info=True)
         if library_indexer is not None:
             try:
                 from local_operator.library.indexer import stop_started
