@@ -16,7 +16,9 @@ these cells pin three things:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -286,3 +288,149 @@ def test_the_guide_is_the_only_place_that_could_promise_a_terminal_consent() -> 
     for forbidden in ("speed bump", "human gate", "--accept-consent-version"):
         assert forbidden not in lowered, forbidden
     assert "not from a terminal" in lowered
+
+
+# --- Mesh nodes: Team Bridge is never set up there (operator decision 2026-11-18)
+#
+# A device that JOINED the operator's mesh is a node, not the operator's primary.
+# Consent cannot be proven from it (mesh device auth is not human proof, and the
+# desktop bearer and device key are shell-readable there), so the not-enrolled
+# answer must route bridge/teammate messages through the chief-of-staff session
+# instead of pointing at an app that should never enrol the node.
+
+
+def _network(
+    root: Path,
+    *,
+    self_id: str,
+    created_by: str,
+    trust: str = "active",
+    previous_ids: tuple[str, ...] = (),
+) -> None:
+    from local_operator.network import store as net_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    # ``previous_ids`` models `lop network rotate`: the self member keeps its old
+    # ids there while ``created_by`` still names the pre-rotation id.
+    members = (
+        [MemberRecord(device_id=self_id, previous_ids=list(previous_ids))] if previous_ids else []
+    )
+    net_store.save(
+        NetworkRecord(
+            network_id=f"net-{created_by}",
+            name="mesh",
+            created_by=created_by,
+            self_device_id=self_id,
+            trust=trust,  # type: ignore[arg-type]
+            members=members,
+        ),
+        root,
+    )
+
+
+@pytest.fixture
+def authority(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, bool]]:
+    """Stub the anchor probe so no test touches a real signer or keychain."""
+
+    from local_operator.network import mirror_authority
+
+    state = {"signs": False, "probed": False}
+
+    def _resolve(root):  # noqa: ANN001
+        state["probed"] = True
+        return mirror_authority.Authority(
+            key_id="anchor-1" if state["signs"] else "", signs=state["signs"]
+        )
+
+    monkeypatch.setattr(mirror_authority, "_resolve", _resolve)
+    mirror_authority.reset_cache()
+    yield state
+    mirror_authority.reset_cache()
+
+
+def test_a_joined_mesh_node_is_routed_to_the_chief_of_staff_not_the_app(
+    tmp_path: Path,
+    placed: list[str],
+    authority: dict[str, bool],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _network(tmp_path, self_id="dev-node", created_by="dev-head")
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result == {"ok": False, "code": setup_cli.CODE_MESH_NODE}
+    assert placed == []
+    assert Store(tmp_path).committed_owner_count() == 0
+    lines = setup_cli.render_lines(result)
+    assert len(lines) == 1
+    text = lines[0]
+    assert "chief-of-staff session" in text and "the `send` tool" in text
+    # Design D1 / UX-U3: a person at this shell must not be sent to `lop send`,
+    # which only reaches sessions on this device and has no peer route.
+    assert "lop send" not in text
+    # UX-U2: `peer` is optional (added only when send cannot find the id), so the
+    # line must not forbid it.
+    assert "no `peer`" not in text and "`peer=<primary device>`" in text
+    # UX-U1: the line says where the session id comes from.
+    assert "`sessions` `list`" in text and "guide://network" in text
+    # The app path is NOT offered on a node: neither primary-device line appears.
+    assert "Local Operator app" not in text
+    assert "run this command again" not in text
+
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+    assert setup_cli.main(_args(json=True)) == 1
+    assert '"mesh_node_not_enrolled"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "networks",
+    [
+        [],  # never paired: a standalone primary
+        [("dev-head", "dev-head")],  # created its own network: the operator's device
+        [("dev-head", "dev-other"), ("dev-head", "dev-head")],  # joined one, created one
+        [("dev-node", "dev-head", "untrusted")],  # only an untrusted network
+        # The creator rotated its identity: created_by keeps the old id (M1).
+        [("dev-head2", "dev-head", "active", ("dev-head",))],
+    ],
+)
+def test_a_primary_device_keeps_the_app_guidance(
+    tmp_path: Path, placed: list[str], authority: dict[str, bool], networks: list[tuple[Any, ...]]
+) -> None:
+    for row in networks:
+        _network(
+            tmp_path,
+            self_id=row[0],
+            created_by=row[1],
+            trust=row[2] if len(row) > 2 else "active",
+            previous_ids=row[3] if len(row) > 3 else (),
+        )
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result == {"ok": False, "code": setup_cli.CODE_CONSENT_UI_REQUIRED}
+    assert any("Local Operator app" in line for line in setup_cli.render_lines(result))
+    # A device that created a network never needs its signer probed here.
+    assert authority["probed"] is False
+
+
+def test_a_joined_device_that_signs_for_the_operator_is_still_primary(
+    tmp_path: Path, placed: list[str], authority: dict[str, bool]
+) -> None:
+    """The operator's own Mac may join a network another device created."""
+
+    authority["signs"] = True
+    _network(tmp_path, self_id="dev-mac", created_by="dev-other")
+
+    assert setup_cli.setup(tmp_path)["code"] == setup_cli.CODE_CONSENT_UI_REQUIRED
+
+
+def test_an_enrolled_mesh_node_keeps_its_readiness_path(
+    tmp_path: Path, placed: list[str], authority: dict[str, bool]
+) -> None:
+    """Only the not-enrolled answer changes; an existing enrolment is never undone."""
+
+    _network(tmp_path, self_id="dev-node", created_by="dev-head")
+    _enrol(tmp_path)
+
+    assert setup_cli.setup(tmp_path)["code"] == setup_cli.CODE_ENABLE_IN_APP_REQUIRED

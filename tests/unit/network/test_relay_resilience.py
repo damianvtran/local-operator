@@ -293,7 +293,13 @@ def test_doctor_skips_poisoned_self_hint_but_handshakes_the_foreign_winner(
         }
 
     monkeypatch.setattr(relay, "probe_candidates", fake_probe)
-    server: Any = SimpleNamespace(settings=relay.NetworkSettings(port=4097), _handshake=handshake)
+    # ``_link_for`` -> None: no live link, so the live-link coverage rule
+    # (readiness.mark_covered_by_link) does not apply to this cell's rows.
+    server: Any = SimpleNamespace(
+        settings=relay.NetworkSettings(port=4097),
+        _handshake=handshake,
+        _link_for=lambda *_args, **_kwargs: None,
+    )
     server._redial_candidates = lambda m: relay.RelayServer._redial_candidates(server, m)
     rows = relay.RelayServer._probe_member(server, cast(Any, object()), member, deadline=None)
     assert raced == [["16.52.146.32:4097"]]
@@ -532,6 +538,12 @@ def test_backoff_remains_finite_after_massive_attempt_counts(
     server: Any = object.__new__(relay.RelayServer)
     server.root = None
     server.redial = tracker
+    # This stand-in bypasses __init__; supply its diagnostics dependencies so
+    # the real failure-and-audit path still runs rather than stubbing it away.
+    rows: list[audit_mod.AuditEvent] = []
+    server._refusal_rows = redial.RefusalCoalescer(clock=clock)
+    server.identity = SimpleNamespace(device_id="d_backoff")
+    server.audit = SimpleNamespace(record=rows.append)
     ticks: list[int] = []
 
     def tick(_delay: float) -> bool:
@@ -546,6 +558,11 @@ def test_backoff_remains_finite_after_massive_attempt_counts(
     server._redial_loop()
     assert tracker.snapshot("d_long")["attempts"] == 1102
     assert len(ticks) == 3
+    assert len(rows) == 1, "both ticks use the real coalesced audit path"
+    assert rows[0].event == "redial_failed"
+    assert rows[0].actor == "d_backoff" and rows[0].subject == "d_long"
+    assert rows[0].detail["attempt"] == 1101
+    assert rows[0].detail["code"] == "waiting_for_peer"
 
 
 def test_reader_close_during_admission_keeps_its_newer_loss_schedule(

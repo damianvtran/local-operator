@@ -1,0 +1,70 @@
+{
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_date": "2026-11-16T04:47:17.143000+00:00",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Local Operator — second independent i18n auditor (sd2)",
+    "session": "85af124f4a9f",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host-supplied session context: Model: openai/gpt-6.1-sol; session self-identity confirmed with sessions(info).",
+    "fallback": "none observed or reported by host; no fallback model claimed",
+    "independence": "Fresh second-pass session, not translator acf0a84cd992; no translation authorship or edits. Source/context/glossary/styles/targets audited before consulting first reports; no first reports consulted at all.",
+    "round": 2,
+    "native_speaker_claim": false
+  },
+  "source_audit_revision": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+  "audited_input_kind": "current working-tree bytes; namespace untracked at audit start",
+  "input_hashes": {
+    "en": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+    "context": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693",
+    "target": "76639bf0411f16c4c5a38c3f5ed852df89736e6cfb6c73658b6a7dcc1b261d1d"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+    "context": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+    "target": "local_operator/i18n/catalogues/vi/cli.serve_readiness.json"
+  },
+  "supporting_input_hashes": {
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "local_operator/network/readiness.py": "263973ba412aa3194a85accec36ce9861d79ec3ac25dcf48ac716f871e0ce29e",
+    "i18n/style-guides/vi.md": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+  },
+  "all_keys_audited": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart"
+  ],
+  "current_report_verdict": "passed",
+  "current_bytes_match_audited_hashes": true,
+  "findings": [],
+  "locale_result": "Concise pronoun-free developer Vietnamese: được ghi nhận and chưa xác minh keep records distinct from proved identity. Bản dựng and bản cài đặt keep build and install separate. Được giám sát is the glossary-endorsed supervision wording, with unit/service context elsewhere. Single other branch is invariant and naturally supports multiple daemons/builds. Chạy and kiểm tra are direct instructions without unwanted politeness padding. All target strings are NFC.",
+  "validation": {
+    "renders": 47,
+    "pseudo_renders": 47,
+    "cldr_categories": [
+      "other"
+    ],
+    "exit_code": 0
+  },
+  "first_reports_consulted": false,
+  "comparison_note": "i18n/audits/evidence/fr/cli.serve_readiness/sd2/comparison-note.md",
+  "parent_summary_received_after_independent_review": true,
+  "translation_edits": false,
+  "ledger_history_appended": false,
+  "artifacts": {
+    "audit.log": "i18n/audits/evidence/vi/cli.serve_readiness/sd2/audit.log",
+    "report.md": "i18n/audits/evidence/vi/cli.serve_readiness/sd2/report.md",
+    "rendered.txt": "i18n/audits/evidence/vi/cli.serve_readiness/sd2/rendered.txt"
+  },
+  "shared_reproducer": "i18n/audits/evidence/fr/cli.serve_readiness/sd2/reproduce.py.txt",
+  "independent_verdict": "i18n/audits/evidence/fr/cli.serve_readiness/sd2/independent-verdict.json"
+}

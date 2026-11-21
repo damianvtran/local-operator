@@ -325,7 +325,10 @@ def test_the_tool_parks_and_the_person_runs_phase_two(
     assert row.sas in digest.replace(" ", "")
     assert f"{row.sas[:3]} {row.sas[3:]}" in digest
     assert "pairing started" in digest
-    assert "nothing is joined until the person confirms" in digest
+    # The person's step is the app's Mesh approvals now (operator request: pairing
+    # must not require terminal commands); the receipt says so and names no command.
+    assert "Nothing is joined until the person confirms" in digest
+    assert "Mesh approvals" in digest and "lop network join --confirm" not in digest
 
     # A PARKED PAIRING HAS SENT NOTHING, and the ceremony is held by a REAL process —
     # the one the second call has to reach. The inviter's own parked question is the

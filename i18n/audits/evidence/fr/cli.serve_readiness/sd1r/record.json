@@ -1,0 +1,189 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1r",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon French (i18n-auditor)",
+    "session": "19f657b90086",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "acf0a84cd992",
+    "actual_model_source": "Session runtime Model declaration: openai/gpt-6.1-sol",
+    "fallback": {
+      "observed": false,
+      "reported": false,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "provenance_source": "Requesting task brief; identity not independently queried"
+  },
+  "source_audit_revision": {
+    "base": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+    "includes_uncommitted_catalogues": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/cli.serve_readiness.json",
+      "sha256": "4f3fcbc1a716d020cc9735382e607ca315e5cdbf2d922750f8d333f2e4f9ae68"
+    }
+  },
+  "policy_inputs": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    }
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/report.md",
+      "sha256": "4ab4ff7ee398cb32b6dbd69eb66adcd0dbed70184455f8ef771e88623f72f750"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/audit.log",
+      "sha256": "2f24263ac7048c0101f138a2feac5f79a02a1ea34b44d527eb608fc7121692b5"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/verify.py.txt",
+      "sha256": "02de8cf6d86d1bd6932fc8600346462ef52621293bfa7e49ca4d97636d805187"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/ledger-receipt.json",
+      "sha256": "f5c3068693a218a49c78744b44db5b47e0c1ffa4d932e279775fc2e458e968ae"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/ledger-dry-run.log",
+      "sha256": "023ee7d12a80267a54086c03d66b4e029008ec98c86e53a0fe5c9cbd3170d1ea"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/receipt.json",
+      "sha256": "d688ed94892154e559d5f9659f6d48b483c79f4fae93919ae3288cc78fd913bd"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "FR-SD1-01"
+    ],
+    "fixed_finding_ids": [
+      "FR-SD1-01"
+    ],
+    "open_finding_ids": [],
+    "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/report.md"
+  },
+  "finding_resolutions": [
+    {
+      "id": "FR-SD1-01",
+      "original_severity": "MINOR",
+      "status": "fixed",
+      "key": "cli.serve_readiness.not_reporting",
+      "previous_text": "est enregistré mais ne répond pas (son heartbeat s’est arrêté)",
+      "suggested_text": "est enregistré mais ne répond pas (il n’envoie plus de signal de vie)",
+      "current_text": "est enregistré mais ne répond pas (il n’envoie plus de signal de vie)",
+      "exact_suggestion_applied": true
+    }
+  ],
+  "retained_coverage": {
+    "initial_record": {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/record.json",
+      "sha256": "f2f322d3ac4d38687d83e0e60869a402742af178507e5aeac7ae1779c58eb482"
+    },
+    "initial_report": {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md",
+      "sha256": "4276e6a88cc10b0a42e5232763d4a0cfba28a516d4ee9d0ed392a362b84ab238"
+    },
+    "initial_full_key_count": 11,
+    "changed_keys": [
+      "cli.serve_readiness.not_reporting"
+    ],
+    "unchanged_key_count": 10,
+    "unchanged_bytes_proof": "Replace the sole exact accepted new phrase with its previous value; reconstructed entire file SHA-256 equals sd1 target SHA-256",
+    "previous_target_sha256": "fa709445a56aaae44736e248854e28b4c87721a3d079be8710d7b1a92958ed44",
+    "current_target_sha256": "4f3fcbc1a716d020cc9735382e607ca315e5cdbf2d922750f8d333f2e4f9ae68",
+    "semantic_neighbors_rechecked": [
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.not_this_daemon",
+      "cli.serve_readiness.unknown_state",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.identity_restart"
+    ],
+    "second_independent_pass_claimed": false,
+    "sd1_original_preserved_file_hashes": {
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/audit.log": "f0eabe55491f2487c526c66010e46194294733d9e4511d8b5ec0137127b44b1c",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/verify.py.txt": "44ce583dd974c25a7f4bb6f5fbbad88cc6c72d7b3739451c7aea8cb246b54a73",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md": "4276e6a88cc10b0a42e5232763d4a0cfba28a516d4ee9d0ed392a362b84ab238",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/receipt.json": "aa028ae984c71fb2c951f363035941e9cfd3687b6eaab0112e6f2dfb9a116c66",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/ledger-dry-run.log": "2473e045974f146ddc1d2f2920006ff2f7acc5922dd014a3e844817e3de29271",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/record.json": "f2f322d3ac4d38687d83e0e60869a402742af178507e5aeac7ae1779c58eb482"
+    }
+  },
+  "audit_notes_not_execution_log": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/report.md",
+  "execution_logs": [
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/audit.log",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/ledger-dry-run.log"
+  ],
+  "artifact_provenance": "All companions belong to this record and auditor. Logs carry explicit record references; report is reasoning, not execution evidence. verify.py.txt is the exact executed pure-parser source. receipt.json is the hash manifest; ledger-receipt.json is the append-ready row.",
+  "mechanical_result": {
+    "catalogue_validator_exit_code": 0,
+    "parser_verification_exit_code": 0,
+    "keys_checked": 11,
+    "plural_messages_checked": 3,
+    "french_categories": [
+      "one",
+      "many",
+      "other"
+    ],
+    "new_fragment_integrated_with_unknown": true
+  },
+  "ledger": {
+    "candidate_receipt": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/ledger-receipt.json",
+    "dry_run_exit_code": 0,
+    "expected_history_sha256_at_dry_run": "1a0c016dae22bcae4e717c90b6b2724da6cfa26116e18afdf8db55059d3eb97a",
+    "appended": false,
+    "parent_owns_append": true,
+    "note_length": 147
+  },
+  "coverage_limits": {
+    "audit_type": "original independent auditor remediation pass; not a second independent audit",
+    "live_terminal_or_visual_evidence": false,
+    "translation_or_mt_service_used": false,
+    "translation_files_modified": false,
+    "heavy_tests_or_installs": false,
+    "committed_by_auditor": false,
+    "on_main_claimed": false
+  },
+  "hash_graph_note": "Record hashes every companion; receipt hashes all other companions and references record by path without a circular hash."
+}

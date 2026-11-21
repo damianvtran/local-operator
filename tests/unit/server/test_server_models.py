@@ -20,7 +20,11 @@ from local_operator.clients.openrouter import (
 from local_operator.env import get_env_config
 from local_operator.model import discovery
 from local_operator.model.discovery import DiscoveredModel, merge_models
-from local_operator.model.registry import anthropic_models, deepseek_models
+from local_operator.model.registry import (
+    anthropic_models,
+    deepseek_models,
+    google_models,
+)
 from local_operator.server.app import app
 
 
@@ -54,15 +58,20 @@ def client(monkeypatch):
     # duration of its own test.
     # Local runtime integration has its own owned-HTTP tests. Enumeration
     # tests must not inspect whichever server a developer has running today.
-    # Anthropic joins deepseek here because its branch now reads the same
-    # discovery seam: answering it with the registry rows is what a real
+    # Anthropic and google-vertex join deepseek here because their branches now
+    # read the same discovery seam: answering with registry rows is what a real
     # answer looks like with no cache and no credential.
+    static_by_provider = {
+        "deepseek": deepseek_models,
+        "anthropic": anthropic_models,
+        "google-vertex": google_models,
+    }
     monkeypatch.setattr(
         "local_operator.server.routes.models.available_models",
         lambda provider, **kw: (
             (
-                merge_models(deepseek_models if provider == "deepseek" else anthropic_models, None)
-                if provider in {"deepseek", "anthropic"}
+                merge_models(static_by_provider[provider], None)
+                if provider in static_by_provider
                 else []
             ),
             "static",
@@ -72,9 +81,23 @@ def client(monkeypatch):
     previous = getattr(app.state, "env_config", None)
     if not had_env_config or previous is None:
         app.state.env_config = get_env_config()
+    # The models routes lazily cache a provider auth host on the shared app
+    # (``routes/auth.get_desktop_auth``). Owned per test, as the async client in
+    # ``conftest.py`` owns it: a host left behind leaks an open store into the
+    # next test, and one inherited from a neighbour may already be closed.
+    had_desktop_auth = "desktop_auth" in app.state
+    previous_desktop_auth = getattr(app.state, "desktop_auth", None)
+    app.state.desktop_auth = None
     try:
         yield TestClient(app, headers={"Host": "127.0.0.1:1111"})
     finally:
+        created_auth = getattr(app.state, "desktop_auth", None)
+        if created_auth is not None:
+            created_auth.store.close()
+        if had_desktop_auth:
+            app.state.desktop_auth = previous_desktop_auth
+        else:
+            del app.state["desktop_auth"]
         if had_env_config:
             app.state.env_config = previous
         elif hasattr(app.state, "env_config"):
@@ -112,6 +135,48 @@ def test_deepseek_http_catalogue_uses_authenticated_live_inventory(
     assert rows[0]["info"]["context_window"] == 200_000
     assert seen[0][0] == "deepseek"
     assert "api_key" in seen[0][1]
+
+
+def test_vertex_http_catalogue_uses_live_inventory_with_enriched_prices(
+    client, mock_credential_manager, monkeypatch
+):
+    """``GET /v1/models?provider=google-vertex`` returns live Vertex models enriched with prices."""
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    def listing(provider, **kwargs):
+        seen.append((provider, kwargs))
+        return [DiscoveredModel(id="gemini-4-neon")], "ok"
+
+    def fake_enrich(listed, **_kwargs):
+        return {
+            "google-vertex": [
+                DiscoveredModel(
+                    id="gemini-4-neon",
+                    name="Gemini 4 Neon",
+                    context_window=1_048_576,
+                    max_tokens=65_536,
+                    input_price=3.0,
+                    output_price=15.0,
+                    cache_read_price=0.15,
+                    supports_prompt_cache=True,
+                )
+            ]
+        }
+
+    monkeypatch.setattr("local_operator.server.routes.models.available_models", listing)
+    monkeypatch.setattr("local_operator.server.routes.models._enrich_prices", fake_enrich)
+
+    response = client.get("/v1/models?provider=google-vertex")
+    assert response.status_code == 200
+    rows = response.json()["result"]["models"]
+    assert [row["id"] for row in rows] == ["gemini-4-neon"]
+    assert rows[0]["provider"] == "google-vertex"
+    assert rows[0]["name"] == "Gemini 4 Neon"
+    assert rows[0]["info"]["context_window"] == 1_048_576
+    assert rows[0]["info"]["input_price"] == 3.0
+    assert rows[0]["info"]["output_price"] == 15.0
+    assert seen[0][0] == "google-vertex"
+    assert "account_id" in seen[0][1]
 
 
 def test_list_providers_with_ollama_active(client):
@@ -265,6 +330,36 @@ def test_list_models_with_ollama_inactive(client, mock_credential_manager):
         # Verify no Ollama models are present
         ollama_models = [m for m in models if m.get("provider") == "ollama"]
         assert len(ollama_models) == 0
+
+
+def test_bedrock_is_listed_by_the_authoring_catalogue(client, mock_credential_manager, monkeypatch):
+    """UI QA #1987 Q3: Settings' model picker reads ``/v1/models``, which had no
+    Bedrock branch and so returned zero Bedrock rows while the chat picker
+    listed them. The route must ask the same discovery seam (with the stored
+    connection as the listing credential) and project its rows.
+    """
+    from local_operator.model.registry import bedrock_models
+
+    seen = []
+
+    def listing(provider, **kwargs):
+        seen.append((provider, kwargs))
+        if provider == "bedrock":
+            return merge_models(bedrock_models, None), "static"
+        return [], "static"
+
+    monkeypatch.setattr("local_operator.server.routes.models.available_models", listing)
+    response = client.get("/v1/models?provider=bedrock")
+    assert response.status_code == 200
+    rows = response.json()["result"]["models"]
+    assert rows and {row["provider"] for row in rows} == {"bedrock"}
+    assert {row["id"] for row in rows} == set(bedrock_models)
+    assert "global.anthropic.claude-opus-5-5" in {row["id"] for row in rows}
+    assert seen == [("bedrock", {"api_key": seen[0][1]["api_key"]})]
+
+    # And in the unfiltered list Settings actually requests.
+    everything = client.get("/v1/models?sort=recommended&direction=descending")
+    assert any(row["provider"] == "bedrock" for row in everything.json()["result"]["models"])
 
 
 def test_list_models_no_provider(client, mock_credential_manager):
@@ -677,3 +772,55 @@ def test_anthropic_without_a_cached_document_still_lists_the_registry(
     assert BUNDLED_ANTHROPIC_ID in by_id, sorted(by_id)
     assert by_id[BUNDLED_ANTHROPIC_ID]["info"]["input_price"] == 2.0
     assert fetched.calls == ["anthropic"], "a cold cache must consult the live endpoint"
+
+
+def test_vertex_http_catalogue_builds_no_provider_controller(
+    client, mock_credential_manager, monkeypatch
+):
+    """MINOR 1: the Vertex branch reads the store directly (like anthropic/deepseek)
+    instead of constructing a ProviderController per request that nobody closed."""
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("ProviderController must not be built for google-vertex")
+
+    monkeypatch.setattr("local_operator.server.routes.models.ProviderController", forbidden)
+    monkeypatch.setattr(
+        "local_operator.server.routes.models.available_models",
+        lambda provider, **kw: ([DiscoveredModel(id="gemini-4-neon")], "ok"),
+    )
+    monkeypatch.setattr(
+        "local_operator.server.routes.models._enrich_prices", lambda listed, **_kw: {}
+    )
+    response = client.get("/v1/models?provider=google-vertex")
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()["result"]["models"]] == ["gemini-4-neon"]
+
+
+@pytest.mark.asyncio
+async def test_vertex_listing_credential_passes_oauth_project_and_falls_back_to_key(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from local_operator.server.routes.models import _vertex_listing_credential
+
+    monkeypatch.delenv("GOOGLE_VERTEX_API_KEY", raising=False)
+
+    class Store:
+        def __init__(self, access, key):
+            self._access, self._key = access, key
+
+        async def get_catalogue_access(self, provider):
+            assert provider == "google-vertex"
+            return self._access
+
+        async def get_api_key(self, provider, **_kw):
+            return self._key
+
+    oauth = SimpleNamespace(
+        kind="oauth", access_token="ya29.t", raw={"project_id": "corp-proj"}, org_id=None
+    )
+    oauth_store: Any = Store(oauth, None)
+    key_store: Any = Store(None, "AQ.key")
+    assert await _vertex_listing_credential(oauth_store) == ("ya29.t", True, "corp-proj")
+    assert await _vertex_listing_credential(key_store) == ("AQ.key", False, None)

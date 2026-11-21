@@ -2638,6 +2638,131 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page community view (`/community`, `/orgs`; dark) ──────────── *
+ *
+ * A sibling of the notifications mode (TUI frames T1–T10): header row, the
+ * body (channels rail + message column), one footer hint row. The message
+ * column stacks the scrolling pane, the audience line, the page's OWN
+ * composer and its sender-only status row; the composer is one row and never
+ * grows, so the message list never shifts while typing (frame T1 note). The
+ * rail is a fixed width set from Python (22 cells, 28 from 150 columns) and
+ * becomes a drawer below 72 columns. Overlays (join, browse, report, why,
+ * settings, orgs, keys) replace the body in place. */
+.community-view {
+    padding: 0 1;
+}
+
+.community-view-header {
+    height: 1;
+}
+
+.community-view-body {
+    height: 1fr;
+}
+
+.community-view-rail {
+    height: 1fr;
+    border-right: solid $lo-edge;
+    padding: 0 1 0 0;
+}
+
+.community-view-column {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 0 0 1;
+}
+
+.community-view-pane {
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+.community-view-text {
+    width: 1fr;
+    height: auto;
+}
+
+.community-view-audience {
+    /* 2 rows: the rule between the messages and the composer, then the line
+     * that says who will see the post (frame T1). A 1-row box with a border
+     * left the line itself a 0-row content box. */
+    height: 2;
+    border-top: solid $lo-edge;
+}
+
+.community-view-input {
+    height: 1;
+    border: none;
+    padding: 0;
+}
+
+.community-view-status {
+    /* One row, except a status with no tail clause to pin (the local-command
+     * hint, "can't post here right now · reading still works"): it wraps to
+     * a second row rather than losing half its sentence at 80 columns
+     * (design review D1). Every other row is fitted to one line in Python
+     * (`community_view.fit_pinned`), so the composer does not move. */
+    height: auto;
+    max-height: 2;
+}
+
+/* Outcome tones from the theme, not raw ANSI red/yellow (design review D5):
+ * the dark theme's $lo-danger, $lo-warning and $lo-success are each >= 4.5:1
+ * on both the page ($lo-bg) and the input surface ($lo-surface). */
+.community-view-status.-tone-danger {
+    color: $lo-danger;
+}
+
+.community-view-status.-tone-warning {
+    color: $lo-warning;
+}
+
+.community-view-status.-tone-success {
+    color: $lo-success;
+}
+
+.community-view-overlay {
+    height: 1fr;
+    border: round $lo-edge;
+    padding: 0 1;
+}
+
+.community-view-overlay-input {
+    height: 1;
+    border: none;
+    padding: 0;
+}
+
+.community-view-overlay-text {
+    width: 1fr;
+    height: auto;
+}
+
+.community-view-overlay-title {
+    height: 1;
+}
+
+/* The overlay's reading area scrolls; its controls (agree + Join, Send /
+ * Cancel) sit below it at their natural height and never scroll away. */
+.community-view-overlay-body {
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+.community-view-overlay-controls {
+    height: auto;
+    border-top: solid $lo-edge;
+}
+
+.community-view-footer {
+    height: 1;
+}
+
+
 /* ── full-page projects view ───────────────────────────────────────────── *
  *
  * The fourth sibling MODE (see the org-chart and settings blocks above):
@@ -3252,6 +3377,99 @@ MovePickerScreen .move-picker {
     color: $lo-fg;
 }
 
+/* ── /move --to: the working-set confirmation ──────────────────────────── *
+ *
+ * The same content-sized card over the dimmed transcript as the `/move`
+ * picker above (one family of move surfaces), with the operator's required
+ * approval: a checkbox, and Move disabled until it is ticked. The summary is
+ * plain prose plus `~/` paths, so it wraps inside the card's 86-cell cap
+ * rather than scrolling sideways (docs/design/move-working-set.md §11.3). */
+MoveWorkingSetConfirmScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+/* PINNED CONTROLS (review D1/U1, round 1): the card is a column whose only
+ * flexible child is the summary scroll. Title, checkbox and buttons keep their
+ * own height and are painted at any terminal size; the summary is `height:
+ * auto` up to a row budget the screen measures (`_fit` in
+ * move_workset_confirm.py, which mirrors the numbers below) and scrolls. */
+MoveWorkingSetConfirmScreen .move-workset {
+    width: 86;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    background: $lo-overlay;
+    padding: 1 2;
+    layout: vertical;
+}
+
+#move-workset-title {
+    text-style: bold;
+    color: $lo-fg;
+}
+
+#move-workset-summary {
+    width: 100%;
+    height: auto;
+    color: $lo-fg;
+    background: $lo-overlay;
+    scrollbar-size-vertical: 1;
+}
+
+/* One Static per summary line with a per-line left padding (set from the
+ * line's own indent in Python), so a wrapped continuation keeps its hanging
+ * indent instead of falling back to column 0 (review D3). */
+.move-workset-line {
+    width: 100%;
+    height: auto;
+    color: $lo-fg;
+}
+
+/* No border here, because the stock `tall` border drew stray edge glyphs on the card's
+ * overlay. Focus still reads from the label's selection tint. The toggle's
+ * glyph is HIDDEN until ticked (the stock dim X read as already-ticked in the
+ * first capture), and the ticked state uses the accent, so the one state the
+ * operator must set is unambiguous at a glance. */
+#move-workset-check {
+    width: 100%;
+    height: auto;
+    border: none;
+    padding: 0 1;
+    background: $lo-overlay;
+}
+
+/* The label WRAPS (review D4): the device name the consent depends on is never
+ * cut to an ellipsis at a narrow width (`_WrappingCheckbox` reports the height). */
+#move-workset-check {
+    text-wrap: wrap;
+    text-overflow: fold;
+}
+
+/* The EMPTY box is `$lo-muted` (6.5:1 on `$lo-overlay`, over the 3:1 non-text
+ * floor of WCAG 1.4.11; the old `$lo-sunken` measured 1.37:1 and read as a
+ * smudge — review D5). Its glyph stays hidden (same colour) until ticked. */
+#move-workset-check > .toggle--button {
+    color: $lo-muted;
+    background: $lo-muted;
+}
+
+#move-workset-check.-on > .toggle--button {
+    color: $lo-bg;
+    background: $lo-accent;
+}
+
+#move-workset-buttons {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    align-horizontal: right;
+}
+
+#move-workset-buttons Button {
+    margin-left: 2;
+}
+
 
 /* ── /links: the URL picker ────────────────────────────────────────────── *
  *
@@ -3319,13 +3537,14 @@ LinkPickerScreen .link-picker {
  * `ReportView` — a line-API widget that converts only the lines the compositor
  * asks for. Why that one needed its own shape (it repaints per mouse event, not
  * per key) and its rule (`#analytics-scroll`) are below. */
-AnalyticsScreen, SessionScreen, InfoScreen, NetworkScreen {
+AnalyticsScreen, SessionScreen, InfoScreen, NetworkScreen, CommunityPostScreen {
     align: center middle;
     background: $lo-sunken;
 }
 
 AnalyticsScreen .analytics-panel, SessionScreen .analytics-panel,
-InfoScreen .analytics-panel, NetworkScreen .analytics-panel {
+InfoScreen .analytics-panel, NetworkScreen .analytics-panel,
+CommunityPostScreen .analytics-panel {
     /* Responsive: 90% of the terminal, capped generously so a large screen
      * actually gets a larger frame (the token+cost tables have more columns to
      * show) while a small one still fits. The old max-width of 100 left a wide
@@ -3540,4 +3759,31 @@ AskPickerScreen .ask-picker {
     width: auto;
     height: auto;
     color: $lo-fg;
+}
+
+/* The whole community post behind its approval card (review R1-5,
+ * `widgets/community_post_view.py`): the card's header rows are PINNED above
+ * the scrolling text and the keys line below it, so "who reads this" and
+ * "shown as your own post" can never scroll away from the words they qualify.
+ * Head and hint size to their content; the text takes the rest. */
+#post-view-head {
+    width: 100%;
+    height: auto;
+    padding-bottom: 1;
+}
+
+#post-view-scroll {
+    height: 1fr;
+}
+
+/* One gutter cell before the scrollbar (design review D10): the text ran
+ * straight into it. */
+#post-view-body {
+    padding-right: 1;
+}
+
+#post-view-hint {
+    width: 100%;
+    height: 1;
+    padding-top: 0;
 }

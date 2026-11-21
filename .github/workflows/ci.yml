@@ -25,62 +25,42 @@ on:
   pull_request:
   workflow_dispatch:
 
-# One in-flight run per ref. A review cycle force-pushes repeatedly, and
-# without this every superseded push kept its full job set queued to completion
-# against a 20-job account-wide concurrency cap — 56% of the active queue was
-# once running against commits their own branch had already moved past, while
-# the newest commit (the only one anybody was waiting on) sat behind them.
+# One in-flight run per feature PR, coalesced `main`, and isolated release
+# commits.
 #
-# `github.workflow` is in the key so this workflow never cancels a sibling
-# workflow's run on the same ref (the release/publish line in particular).
+# Feature PRs (`github.ref` = `refs/pull/<n>/merge`): successive pushes to one
+# PR supersede each other (`cancel-in-progress: true`), while two different PRs
+# never collide. Without cancellation, superseded pushes kept their full job set
+# queued against the account-wide concurrency cap while the newest head waited
+# behind them. `github.workflow` stays in the PR group key so this workflow
+# never cancels a sibling workflow on the same ref.
 #
-# `github.ref` is the right granularity: for a `pull_request` event it is the
-# PR's merge ref, so successive pushes to one PR supersede each other while
-# two different PRs never collide.
+# `main` (`refs/heads/main`): coalesces ordinary post-merge runs into the fixed
+# `ci-main` group with `cancel-in-progress: false` — one run executing plus the
+# newest pending, matching `.github/workflows/full-suite.yml` (`full-suite-main`)
+# and `scripts/reap_superseded_runs.py` rule 2a (which already reaps queued
+# ancestor `main` runs every 20 minutes). At ~50 merges/day against a ~23 min
+# workflow duration, per-SHA `main` groups spawned a full 18–32 job run for
+# every intermediate merge (~1,020+ runner-min/day) even though every merged PR
+# already passed PR CI + the full-suite merge gate and the tip run subsumes
+# intermediate post-merge checks. Never cancelling an in-progress `main` run
+# avoids throwing away work mid-flight while GitHub automatically replaces any
+# older pending `ci-main` run with the newest `main` tip.
 #
-# A push to `main` is never cancelled BY A LATER MERGE, and the SHA in the
-# group key is how that is achieved. A push to `main` is a merge whose result
-# is the release signal and the record for that commit, so every one of those
-# runs must complete.
-#
-# The precise guarantee: no `main` run is cancelled or evicted by a run on a
-# DIFFERENT commit. Two runs on the SAME `main` commit — a re-run, or a
-# `workflow_dispatch` at a commit already building — do share a group and the
-# later one supersedes the earlier. That is acceptable because the survivor is
-# on the identical SHA and, not being a `pull_request`, runs the same full
-# both-leg matrix: the CI record is replaced by an equivalent one rather than
-# lost, which is also what a GitHub re-run does by design.
-#
-# `cancel-in-progress: false` alone would NOT deliver that. A concurrency group
-# permits one run in progress and, by default, only ONE run pending: when a
-# third arrives the waiting one is cancelled. With `main` merging faster than
-# this workflow's ~23 min duration (four merges inside 27 minutes was observed
-# while writing this), run A executes, B waits, C arrives and evicts B — and B
-# is then a commit on `main` that no CI ever reported on.
-#
-# Adding `github.sha` for `main` gives every merge commit its OWN group, so
-# `main` runs never contend and none can be cancelled or evicted. Feature
-# branches keep a per-ref group, so successive pushes to one PR still supersede
-# each other, which is where the throughput saving comes from.
-#
-# Why not `queue: max` (the documented way to hold up to 100 pending runs):
-# GitHub rejects `queue: max` combined with a `cancel-in-progress` that can
-# evaluate true, and this workflow needs cancellation on feature branches.
-# Tried, and it failed the run at plan time with:
-#   "The combination of 'queue: max' and 'cancel-in-progress: true'
-#    is not allowed"
-# A unique group per `main` commit reaches the same guarantee with keys that
-# have been supported all along, and it does not queue `main` runs behind each
-# other — they simply run.
-#
-# The unit suites (`test`, `coverage-report`, `tui-e2e`) no longer run in this
-# workflow at all: they moved to `.github/workflows/full-suite.yml` (push to
-# `main`, nightly, dispatch), which has its own one-running-plus-newest-pending
-# group. Every `main` run here still completes for the kept jobs, which carry
-# the packaging and cross-platform signal for that commit.
+# Release-bump commits (`chore(release)...`) and manual `workflow_dispatch` runs
+# on `main` keep their own per-SHA / per-event lane (`ci-main-release-...`) with
+# `cancel-in-progress: false` (`github.ref != 'refs/heads/main'`). A subsequent
+# merge onto `main` can therefore neither cancel nor evict a queued release-bump
+# run before `gh release create` tags that SHA, preserving the release-commit CI
+# record invariant enforced by `reap_superseded_runs.py` rule 2b.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'shared' }}
-  cancel-in-progress: true
+  group: >-
+    ${{ github.ref == 'refs/heads/main'
+    && ((github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore(release)'))
+        && format('ci-main-release-{0}-{1}', github.event_name, github.sha)
+        || 'ci-main')
+    || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Classifies this diff and exposes one flag per job. The classifier
@@ -360,6 +340,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          # `refs/pull/N/merge` has base as `HEAD^1` and PR head as `HEAD^2`;
+          # depth 2 lets `lint_targets` diff `HEAD^1 HEAD` locally with no extra
+          # network fetch, matching `changes` and `version-bump-guard`.
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -372,14 +357,196 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # Scope PR lint to changed `.py` files instead of walking all ~4,600 `.py`
+      # files on every push (~449 s cold on ubuntu-latest: black 281 s, flake8
+      # 130 s, isort 19 s). Style and formatting rules in flake8, black and isort
+      # are strictly file-local: an untouched file cannot change its lint verdict
+      # unless tool versions, lint configuration, or the lint workflow itself
+      # changed — and every one of those paths falls back to `mode=full`.
+      #
+      # Invariants:
+      # 1. Non-PR runs (`push` to `main`, `workflow_dispatch`) always run `full`.
+      # 2. Unresolvable `HEAD^1`, failed `git diff`, or empty diff fails OPEN to
+      #    `full` with a `::warning::`, never silently skipping.
+      # 3. Any change to lint/formatter config or workflow (`pyproject.toml`,
+      #    `.flake8`, `setup.cfg`, `tox.ini`, `.isort.cfg`, or `.github/workflows/ci.yml`)
+      #    runs `full` across the whole repository.
+      # 4. Explicit file arguments bypass directory-walk exclusions unless
+      #    filtered per tool (`flake8`'s `_filenames_from` yields non-directory
+      #    args unconditionally, `black` skips `extend-exclude` on explicit paths,
+      #    and `isort`'s `extend_skip` matches directory paths rather than files
+      #    inside them). When `mode=changed`, per-tool target lists are filtered
+      #    against the exact configured exclusions from `.flake8` and
+      #    `pyproject.toml` so excluded trees (`i18n/audits/evidence`, vendored
+      #    `evaluation_examples`) keep identical semantics to whole-tree `.`.
+      # 5. If `needs.changes.outputs.lint != 'false'` ran the job on a PR with
+      #    zero unexcluded changed `.py` files (e.g. a non-Python asset change
+      #    without a config change), `mode=none` skips invoking the tools on an
+      #    empty argument list rather than paying 449 s for zero relevant inputs.
+      - name: Select lint targets
+        id: lint_targets
+        run: |
+          python - <<'PY'
+          import configparser
+          import fnmatch
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import tomllib
+
+          FULL_FALLBACK_PATHS = {
+              "pyproject.toml",
+              ".flake8",
+              "setup.cfg",
+              "tox.ini",
+              ".isort.cfg",
+              ".github/workflows/ci.yml",
+          }
+
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          out_path = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          temp_dir = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp"))
+
+          def emit(mode: str, reason: str) -> None:
+              print(f"lint scope: mode={mode} ({reason})")
+              with out_path.open("a", encoding="utf-8") as fh:
+                  fh.write(f"mode={mode}\n")
+
+          if event != "pull_request":
+              emit("full", f"event is {event!r}, not pull_request")
+              raise SystemExit(0)
+
+          base_proc = subprocess.run(
+              ["git", "rev-parse", "--verify", "HEAD^1"],
+              capture_output=True,
+              text=True,
+          )
+          if base_proc.returncode != 0:
+              print("::warning title=Lint target scoping unavailable::HEAD^1 could not be resolved; falling back to whole-tree lint.")
+              emit("full", "HEAD^1 unresolvable (fail-open)")
+              raise SystemExit(0)
+
+          all_proc = subprocess.run(
+              ["git", "diff", "-z", "--name-only", "HEAD^1", "HEAD"],
+              capture_output=True,
+              text=True,
+          )
+          if all_proc.returncode != 0:
+              print("::warning title=Lint target scoping unavailable::git diff HEAD^1 HEAD failed; falling back to whole-tree lint.")
+              emit("full", "git diff failed (fail-open)")
+              raise SystemExit(0)
+
+          all_changed = [entry for entry in all_proc.stdout.split("\0") if entry]
+          if not all_changed:
+              print("::warning title=Lint target scoping unavailable::diff against HEAD^1 is empty; falling back to whole-tree lint.")
+              emit("full", "empty diff against HEAD^1 (fail-open)")
+              raise SystemExit(0)
+
+          config_hits = sorted(p for p in all_changed if p in FULL_FALLBACK_PATHS)
+          if config_hits:
+              emit("full", f"config/workflow touched: {', '.join(config_hits)}")
+              raise SystemExit(0)
+
+          py_proc = subprocess.run(
+              ["git", "diff", "-z", "--name-only", "--diff-filter=ACMR", "HEAD^1", "HEAD", "--", "*.py"],
+              capture_output=True,
+              text=True,
+          )
+          if py_proc.returncode != 0:
+              print("::warning title=Lint target scoping unavailable::git diff for *.py failed; falling back to whole-tree lint.")
+              emit("full", "git diff *.py failed (fail-open)")
+              raise SystemExit(0)
+
+          py_files = [
+              p for p in py_proc.stdout.split("\0")
+              if p and pathlib.Path(p).is_file()
+          ]
+
+          # Read tool exclusions from the committed configs so explicit file lists
+          # honour the exact same exclusions as whole-tree `.`.
+          flake8_cfg = configparser.ConfigParser()
+          flake8_cfg.read(".flake8", encoding="utf-8")
+          flake8_raw = flake8_cfg.get("flake8", "exclude", fallback="")
+          flake8_excludes = [
+              item.strip().strip("/").removeprefix("./")
+              for item in flake8_raw.split(",")
+              if item.strip()
+          ]
+
+          def flake8_excluded(rel: str) -> bool:
+              parts = pathlib.PurePosixPath(rel).parts
+              for pat in flake8_excludes:
+                  if rel == pat or rel.startswith(f"{pat}/"):
+                      return True
+                  if fnmatch.fnmatch(rel, pat) or any(fnmatch.fnmatch(part, pat) for part in parts):
+                      return True
+              return False
+
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          black_pattern = pyproject.get("tool", {}).get("black", {}).get("extend-exclude", "")
+          black_re = re.compile(black_pattern) if black_pattern else None
+
+          isort_cfg = pyproject.get("tool", {}).get("isort", {})
+          isort_skips = [
+              item.strip().strip("/").removeprefix("./")
+              for item in list(isort_cfg.get("skip", [])) + list(isort_cfg.get("extend_skip", []))
+              if item.strip()
+          ]
+          isort_globs = list(isort_cfg.get("skip_glob", [])) + list(isort_cfg.get("extend_skip_glob", []))
+
+          def isort_excluded(rel: str) -> bool:
+              parts = pathlib.PurePosixPath(rel).parts
+              for skip in isort_skips:
+                  if rel == skip or rel.startswith(f"{skip}/") or skip in parts:
+                      return True
+              return any(
+                  fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(f"/{rel}", pat)
+                  for pat in isort_globs
+              )
+
+          flake8_files = [p for p in py_files if not flake8_excluded(p)]
+          black_files = [p for p in py_files if not (black_re and black_re.search(f"/{p}"))]
+          isort_files = [p for p in py_files if not isort_excluded(p)]
+
+          for name, items in (
+              ("flake8", flake8_files),
+              ("black", black_files),
+              ("isort", isort_files),
+          ):
+              target_file = temp_dir / f"lint_{name}_files.txt"
+              target_file.write_bytes(b"".join(f"{item}\0".encode("utf-8") for item in items))
+              with out_path.open("a", encoding="utf-8") as fh:
+                  fh.write(f"{name}_count={len(items)}\n")
+
+          if not (flake8_files or black_files or isort_files):
+              emit("none", f"0 unexcluded .py files in diff ({len(all_changed)} path(s) changed)")
+          else:
+              emit(
+                  "changed",
+                  f"flake8={len(flake8_files)}, black={len(black_files)}, isort={len(isort_files)} changed .py file(s)",
+              )
+          PY
+
       - name: Install dependencies
         id: lint_install
+        if: steps.lint_targets.outputs.mode != 'none'
         run: |
           python -m pip install --upgrade pip
           pip install flake8==7.4.1 black==26.1.0 isort==5.13.2
 
       - name: Run flake8
-        run: flake8 .
+        if: >-
+          steps.lint_targets.outputs.mode == 'full' ||
+          (steps.lint_targets.outputs.mode == 'changed' && steps.lint_targets.outputs.flake8_count != '0')
+        env:
+          LINT_MODE: ${{ steps.lint_targets.outputs.mode }}
+        run: |
+          if [ "$LINT_MODE" = "changed" ]; then
+            xargs -0 flake8 -- < "$RUNNER_TEMP/lint_flake8_files.txt"
+          else
+            flake8 .
+          fi
 
       # BOTH FORMATTERS RUN once the tools are installed, whatever an earlier check
       # said. With the default `success()` a flake8 or Black failure skipped isort
@@ -392,14 +559,32 @@ jobs:
       - name: Run black
         if: >-
           !cancelled() &&
-          steps.lint_install.outcome == 'success'
-        run: black --check --diff .
+          steps.lint_install.outcome == 'success' &&
+          (steps.lint_targets.outputs.mode == 'full' ||
+           (steps.lint_targets.outputs.mode == 'changed' && steps.lint_targets.outputs.black_count != '0'))
+        env:
+          LINT_MODE: ${{ steps.lint_targets.outputs.mode }}
+        run: |
+          if [ "$LINT_MODE" = "changed" ]; then
+            xargs -0 black --check --diff -- < "$RUNNER_TEMP/lint_black_files.txt"
+          else
+            black --check --diff .
+          fi
 
       - name: Run isort
         if: >-
           !cancelled() &&
-          steps.lint_install.outcome == 'success'
-        run: isort --check --diff .
+          steps.lint_install.outcome == 'success' &&
+          (steps.lint_targets.outputs.mode == 'full' ||
+           (steps.lint_targets.outputs.mode == 'changed' && steps.lint_targets.outputs.isort_count != '0'))
+        env:
+          LINT_MODE: ${{ steps.lint_targets.outputs.mode }}
+        run: |
+          if [ "$LINT_MODE" = "changed" ]; then
+            xargs -0 isort --check --diff -- < "$RUNNER_TEMP/lint_isort_files.txt"
+          else
+            isort --check --diff .
+          fi
 
   # The i18n gate: the committed `Intl` tables and per-key modules must match
   # their generator (blocking), and the string ratchet + catalogue parity run

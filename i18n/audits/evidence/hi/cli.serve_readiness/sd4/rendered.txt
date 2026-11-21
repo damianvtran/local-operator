@@ -1,0 +1,367 @@
+# sd4 current catalogue renders — hi
+UTC 2026-11-16T05:18:32.631978+00:00; raw logical-order text, not terminal screenshots.
+
+## cli.serve_readiness.unproven | count=1 | CLDR=n/a
+
+रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)
+
+## cli.serve_readiness.not_reporting | count=1 | CLDR=n/a
+
+रिकॉर्ड मौजूद है, लेकिन कोई जवाब नहीं मिल रहा (हार्टबीट रुक गई है)
+
+## cli.serve_readiness.not_this_daemon | count=1 | CLDR=n/a
+
+रिकॉर्ड मौजूद है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है
+
+## cli.serve_readiness.unknown_state | count=1 | CLDR=n/a
+
+अज्ञात स्थिति वाला रिकॉर्ड
+
+## cli.serve_readiness.install_unknown | count=1 | CLDR=n/a
+
+ऐसे बिल्ड पर चलता है जिसकी तुलना इंस्टॉल किए गए बिल्ड से नहीं की जा सकती
+
+## cli.serve_readiness.cgroup_unknown | count=1 | CLDR=n/a
+
+ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है
+
+## cli.serve_readiness.recorded_gap | count=1 | CLDR=n/a
+
+रिकॉर्ड में बिल्ड v0.99.0+recorded दर्ज है; इंस्टॉल किया गया बिल्ड v0.99.2+installed है
+
+## cli.serve_readiness.unknown | count=0 | CLDR=one
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+
+## cli.serve_readiness.unknown | count=1 | CLDR=one
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+
+## cli.serve_readiness.unknown | count=2 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=3 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=4 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=5 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=11 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=21 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=22 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=25 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=1.5 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=1000000 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.unknown | count=1500000 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन — DIAGS-opaque-ß, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+
+## cli.serve_readiness.stale | count=0 | CLDR=one
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+
+## cli.serve_readiness.stale | count=1 | CLDR=one
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+
+## cli.serve_readiness.stale | count=2 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=3 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=4 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=5 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=11 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=21 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=22 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=25 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=1.5 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=1000000 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.stale | count=1500000 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन (4101, 4102) v0.99.1+running पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.99.2+installed है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+
+## cli.serve_readiness.other_unit | count=0 | CLDR=one
+
+host-sd4 पर `lop serve` डेमन किसी दूसरी सेवा (worker.service) के अधीन है, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=1 | CLDR=one
+
+host-sd4 पर `lop serve` डेमन किसी दूसरी सेवा (worker.service) के अधीन है, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=2 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=3 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=4 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=5 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=11 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=21 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=22 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=25 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=1.5 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=1000000 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.other_unit | count=1500000 | CLDR=other
+
+host-sd4 पर `lop serve` डेमन दूसरी सेवाओं (worker.service) के अधीन हैं, lop serve यूनिट के नहीं
+
+## cli.serve_readiness.identity_restart | count=1 | CLDR=n/a
+
+host-sd4 पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है
+
+## cli.serve_readiness.pid_reason | count=0 | CLDR=one
+
+प्रक्रिया ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1 | CLDR=one
+
+प्रक्रिया ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=2 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=3 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=4 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=5 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=11 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=21 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=22 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=25 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1.5 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1000000 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1500000 | CLDR=other
+
+प्रक्रियाओं के ID 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.and_more | count=0 | CLDR=one
+
+और 0 अन्य
+
+## cli.serve_readiness.and_more | count=1 | CLDR=one
+
+और 1 अन्य
+
+## cli.serve_readiness.and_more | count=2 | CLDR=other
+
+और 2 अन्य
+
+## cli.serve_readiness.and_more | count=3 | CLDR=other
+
+और 3 अन्य
+
+## cli.serve_readiness.and_more | count=4 | CLDR=other
+
+और 4 अन्य
+
+## cli.serve_readiness.and_more | count=5 | CLDR=other
+
+और 5 अन्य
+
+## cli.serve_readiness.and_more | count=11 | CLDR=other
+
+और 11 अन्य
+
+## cli.serve_readiness.and_more | count=21 | CLDR=other
+
+और 21 अन्य
+
+## cli.serve_readiness.and_more | count=22 | CLDR=other
+
+और 22 अन्य
+
+## cli.serve_readiness.and_more | count=25 | CLDR=other
+
+और 25 अन्य
+
+## cli.serve_readiness.and_more | count=1.5 | CLDR=other
+
+और 1.5 अन्य
+
+## cli.serve_readiness.and_more | count=1000000 | CLDR=other
+
+और 10,00,000 अन्य
+
+## cli.serve_readiness.and_more | count=1500000 | CLDR=other
+
+और 15,00,000 अन्य
+
+## cli.serve_readiness.identity_no_action | count=0 | CLDR=one
+
+जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=1 | CLDR=one
+
+जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=2 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=3 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=4 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=5 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=11 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=21 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=22 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=25 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=1.5 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=1000000 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_no_action | count=1500000 | CLDR=other
+
+जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## cli.serve_readiness.identity_restart_manual | count=1 | CLDR=n/a
+
+host-sd4 पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop serve` को मैन्युअल रूप से फिर शुरू करें; यह मौजूदा प्रक्रिया में खुद को फिर से लोड नहीं कर सकता
+
+## COMPOSED current unproven record / non-required no-action
+
+host-sd4 पर `lop serve` डेमन — प्रक्रिया ID 4101 — रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी), इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं; जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+
+## COMPOSED grouped recorded gap / reloadable remedy
+
+host-sd4 पर `lop serve` डेमन — प्रक्रियाओं के ID 4101, 4102 — रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी); रिकॉर्ड में बिल्ड v0.99.0+recorded दर्ज है; इंस्टॉल किया गया बिल्ड v0.99.2+installed है, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं; host-sd4 पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है
+
+## COMPOSED grouped recorded gap / manual remedy
+
+host-sd4 पर `lop serve` डेमन — प्रक्रियाओं के ID 4101, 4102 — रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी); रिकॉर्ड में बिल्ड v0.99.0+recorded दर्ज है; इंस्टॉल किया गया बिल्ड v0.99.2+installed है, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं; host-sd4 पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop serve` को मैन्युअल रूप से फिर शुरू करें; यह मौजूदा प्रक्रिया में खुद को फिर से लोड नहीं कर सकता
+
+## COMPOSED mixed PID groups and keyed overflow
+
+host-sd4 पर `lop serve` डेमन — प्रक्रिया ID 4101 — रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी); प्रक्रियाओं के ID 4102, 4103 — रिकॉर्ड मौजूद है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है और 22 अन्य, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+

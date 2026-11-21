@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "audit_id": "community-round-3-zh-CN-wire.community-08c6dfffd961",
+  "audit_kind": "bounded_independent_second_safety_audit",
+  "repository": "damianvtran/local-operator",
+  "pr": 4221,
+  "locale": "zh-CN",
+  "namespace": "wire.community",
+  "audit_date": "2026-11-18",
+  "audited_revision": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+  "candidate_tree": "13010a25c61439070020148c7f01d0a6261a9f09",
+  "combined_patch_sha256": "7a520bb614cd7694422cd7d955c3b400b830a5e3d2f1bb7b6ae0d74a291db17f",
+  "scope": "Approval-card keys only. The card describes audience, moderation, attribution and per-post consent, not the TUI keyboard gate. None of the five strings asserts approval or publication has already happened.",
+  "auditor": {
+    "agent": "reviewer",
+    "model": "openai/gpt-6.2-sol",
+    "date": "2026-11-18",
+    "session": "08c6dfffd961",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "first_auditors": [
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "c739715f0519",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/zh-CN/community-primary/record.json",
+      "sha256": "987741bb49f4a5bbb656fa1e7cbee231ca58cd0058e65b74df285cca73fe25d4"
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.json",
+      "sha256": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.context.json",
+      "sha256": "b0c568ca3380d372c4f2ca43f2046ccc9dd8bf19e4c22014e037dcb63518e769"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.community.json",
+      "sha256": "252c0e226362893b015de0a88835991ed05f22b2637775f54fcba0efd8beb351"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "deferred_non_gating_finding_ids": []
+  },
+  "keys_semantically_audited": [
+    "wire.community.post_card_audience",
+    "wire.community.post_card_each_time",
+    "wire.community.post_card_label",
+    "wire.community.post_card_tainted",
+    "wire.community.post_card_title"
+  ],
+  "per_key": {
+    "wire.community.post_card_audience": {
+      "en": "Audience: all members of {channel} · checked by the community's moderator before anyone sees it.",
+      "target": "受众：{channel}的所有成员 · 在任何人看到之前，会先由社区版主审核。",
+      "verdict": "pass",
+      "reason": "所有成员 names the full audience, and 先由社区版主审核 puts moderator review before visibility."
+    },
+    "wire.community.post_card_each_time": {
+      "en": "Each post asks you; there are no standing permissions yet.",
+      "target": "每条帖子都会询问你；目前还没有长期权限。",
+      "verdict": "pass",
+      "reason": "每条帖子 and 还没有长期权限 keep per-post confirmation and no standing permissions."
+    },
+    "wire.community.post_card_label": {
+      "en": "Shown as your own post: this server can't label agent posts yet, so others won't see it came from your agent.",
+      "target": "将显示为你本人的帖子：此服务器暂时无法标记智能体发布的帖子，所以其他人看不出它来自你的智能体。",
+      "verdict": "pass",
+      "reason": "你本人的帖子 and 看不出它来自你的智能体 preserve attribution and invisible agent origin."
+    },
+    "wire.community.post_card_tainted": {
+      "en": "Your agent read community posts in this session, so no standing permission applies until a new session; only your answer posts this.",
+      "target": "你的智能体在此会话中读过社区帖子，因此在开始新会话之前，任何长期权限都不适用；只有你的回答才能发布这条帖子。",
+      "verdict": "pass",
+      "reason": "任何长期权限都不适用 before a new session; 只有你的回答才能 preserves the exclusive human decision."
+    },
+    "wire.community.post_card_title": {
+      "en": "Post to {channel} in {community}, as you?",
+      "target": "以你的身份发帖到{channel}（{community}）？",
+      "verdict": "pass",
+      "reason": "以你的身份 … ？ is a question, not a claim of approval, with both destinations."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/community-r3-safety-wire/report.md",
+      "sha256": "d84678d4b4bdb0fb28b50b064f1a00ef41c99104e3c8a97b8a1c291fd17052f6"
+    }
+  ]
+}

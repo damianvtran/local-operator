@@ -37,7 +37,11 @@ from local_operator.network.credentials import (
     offline_hold_s,
 )
 from local_operator.network.credentials import owner as owner_mod
-from local_operator.network.credentials.client import GrantCache, MeshCredentialClient
+from local_operator.network.credentials.client import (
+    CLIENT_DEADLINE_S,
+    GrantCache,
+    MeshCredentialClient,
+)
 from local_operator.network.credentials.types import BrokerError, CredentialRef, Grant
 from local_operator.network.store import audit_path
 from tests.unit.network import conftest as net_fixtures
@@ -254,11 +258,20 @@ def _hold_records(root: Any) -> list[dict[str, Any]]:
     return [row for row in rows if str(row.get("event", "")).startswith("credential.held")]
 
 
-@pytest.fixture
-def short_hold(mesh: Any) -> tuple[MeshCredentialClient, Grant]:  # noqa: F811
-    """grant_ttl 2 s and an offline hold of 5 s on BOTH devices, then one borrow."""
+#: The real-path tests' grant TTL: short, so the grant end is two seconds away.
+SHORT_GRANT_TTL_S = 2.0
+
+
+def _borrow_with_hold(
+    mesh: Any, offline_hold: float  # noqa: F811
+) -> tuple[MeshCredentialClient, Grant]:
+    """Write ``SHORT_GRANT_TTL_S`` and ``offline_hold`` on BOTH devices, then borrow once.
+
+    Both sides need the hold: the OWNER stamps ``hold_until_ms`` from its config, and
+    the BORROWER caps it from its own receipt (``Grant.hold_end_ms``).
+    """
     for root in (mesh.a.root, mesh.b.root):
-        _write_config(root, grant_ttl_s=2.0, offline_hold_s=5.0)
+        _write_config(root, grant_ttl_s=SHORT_GRANT_TTL_S, offline_hold_s=offline_hold)
     _share(mesh)
     _pull(mesh)
     client = _client(mesh)
@@ -266,6 +279,12 @@ def short_hold(mesh: Any) -> tuple[MeshCredentialClient, Grant]:  # noqa: F811
     assert isinstance(grant, Grant), grant
     assert grant.hold_until_ms > grant.grant_expires_at_ms, "the owner stated no hold"
     return client, grant
+
+
+@pytest.fixture
+def short_hold(mesh: Any) -> tuple[MeshCredentialClient, Grant]:  # noqa: F811
+    """grant_ttl 2 s and an offline hold of 5 s on BOTH devices, then one borrow."""
+    return _borrow_with_hold(mesh, 5.0)
 
 
 def test_an_outage_past_the_grant_is_served_and_past_the_hold_lapses_honestly(
@@ -544,16 +563,42 @@ def test_a_revoke_heard_mid_hold_ends_serving(mesh: Any, short_hold: Any) -> Non
     assert client.grants.peek(STUB_PROVIDER, "sess-1") is None
 
 
-def test_a_forced_refresh_is_never_served_from_the_hold(
-    mesh: Any, short_hold: Any  # noqa: F811
-) -> None:
-    """T12: and it does not end the hold for the next plain request."""
-    client, grant = short_hold
+def test_a_forced_refresh_is_never_served_from_the_hold(mesh: Any) -> None:  # noqa: F811
+    """T12: and it does not end the hold for the next plain request.
+
+    WHY THIS TEST SIZES ITS OWN HOLD (main CI run 43982447524, 2026-11-17): on the
+    5 s ``short_hold`` the two requests below had to fit in the ~2.9 s left after
+    the grant end, on the wall clock. A loaded shard runner overran it: the plain
+    request reached ``_held_or`` after the hold had honestly lapsed and got
+    ``owner_offline`` -- correct product behaviour, reported as ``assert False``.
+    Reproduced by sleeping inside the forced request: +2.5 s still serves the hold
+    (so the forced path does not end it), +3.0 s fails exactly as CI did.
+
+    The hold here is a DERIVED bound, not a bigger guess: each request's only
+    network hop is its control dial, cut off at the client's ``deadline_s``, so
+    the grant end plus two whole deadlines (plus one TTL of slack for the wait's
+    own overshoot) covers both requests however slow the dial is. Nothing waits
+    for the hold to END, so the size costs no test time. What the test proves is
+    unchanged: past the grant end, a forced refresh is refused, and the very next
+    plain request is served from the same, still-live hold.
+    """
+    hold_s = 2 * SHORT_GRANT_TTL_S + 2 * CLIENT_DEADLINE_S
+    client, grant = _borrow_with_hold(mesh, hold_s)
+    assert client.deadline_s == CLIENT_DEADLINE_S, "the hold below is sized from this deadline"
     _stop_owner(mesh)
     assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 100)
     forced = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1", force_refresh=True)
     assert isinstance(forced, BrokerError) and forced.code == "owner_offline", forced
-    assert isinstance(client.request_grant_sync(STUB_PROVIDER, session_id="sess-1"), Grant)
+    # Precondition, stated so a future overrun reads as a budget overrun with its
+    # number, never again as a bare ``assert False`` that looks like T12 regressing.
+    issued_ms = time.time() * 1000
+    assert issued_ms < grant.hold_until_ms, (
+        f"the plain request was issued {issued_ms - grant.hold_until_ms:.0f} ms past "
+        "the hold end: a test-budget overrun, not a forced refresh ending the hold"
+    )
+    held = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
+    assert isinstance(held, Grant), held
+    assert held.held_offline and held.grant_id == grant.grant_id, held
 
 
 def test_receipts_drop_unlisted_fields_and_never_the_token(tmp_path: Any) -> None:

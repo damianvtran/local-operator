@@ -176,7 +176,11 @@ def owned_pids(
             continue
         if not observed_owner or (owner and observed_owner != owner):
             continue
-        if config_dir is not None and reclaim.config_root_of(env) != str(config_dir):
+        # A root that cannot be decided COUNTS (#4222 QA Q2): this selection
+        # licenses a supervisor move and an update's unit restart, and both end
+        # what they miss. Over-counting only defers them; a mismatch is the one
+        # answer that excludes. ``sweep`` below fails safe the other way.
+        if config_dir is not None and reclaim.config_root_matches(env, config_dir) is False:
             continue
         session_id = reclaim.session_id_of(env)
         if session_id:
@@ -316,7 +320,10 @@ def sweep(
             continue
         if owner and observed_owner != owner:
             continue
-        if reclaim.config_root_of(row.command) != str(config_dir):
+        # Signal only a root PROVEN to be this one: ``None`` (undecidable) is
+        # skipped here, the opposite of ``owned_pids``, because a signal to
+        # another store's conversation cannot be taken back.
+        if reclaim.config_root_matches(row.command, config_dir) is not True:
             continue
         session_id = reclaim.session_id_of(row.command)
         if not session_id:

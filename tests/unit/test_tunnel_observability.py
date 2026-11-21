@@ -522,3 +522,25 @@ def test_the_mobile_daemon_names_why_it_refused(tmp_path, monkeypatch):
         ("/login", 401, "login_failed"),
         ("/login", 403, "cross_origin"),
     ]
+
+
+def test_status_names_a_connector_running_an_older_build():
+    """2026-11-18: an upgraded connector on the OLD build read as healthy.
+
+    `dispatch` passes the census line in; the human status prints it, and
+    prints nothing when the census proved nothing.
+    """
+    from local_operator.tunnels.cli import _status_text
+
+    payload = {
+        "connector": {"state": "running", "reason": "", "detail": "", "since": None},
+        "login": {"state": "ok"},
+        "requests": {"recent": [], "counts": {}, "window": 0},
+    }
+    record = {"id": "synthetic", "status": "active"}
+
+    stale = _status_text(payload, record, "cached", stale_build="running an older build (g1)")
+    plain = _status_text(payload, record, "cached")
+
+    assert "running an older build (g1)" in stale.splitlines()
+    assert "older build" not in plain

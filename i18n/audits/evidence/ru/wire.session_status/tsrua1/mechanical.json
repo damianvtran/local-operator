@@ -1,0 +1,714 @@
+{
+  "hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/wire.session_status.json",
+      "sha256": "b15cc559652777694f2e252404862095bbdc902f90fe72fcee930a03b698f47c"
+    }
+  },
+  "key_count": 17,
+  "rows": [
+    {
+      "key": "wire.session_status.retired_label",
+      "en": "{base} — retired for an update",
+      "ru": "{base} — из-за обновления",
+      "context": {
+        "role": "Sidebar/picker row status label (a plain-text suffix) for a session whose turn was cut by a build update",
+        "tone": "terse status label with cause",
+        "note": "EN-only context sidecar. {base} is the row's ALREADY-composed status word (currently `Interrupted`), inserted verbatim; the suffix after the em dash names the cause (the app retired the turn to update; the operator did not stop it). One logical line: keep the cause short."
+      },
+      "structure": [
+        {
+          "name": "base",
+          "kind": "simple",
+          "selectors": []
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "base": "Прервано"
+          },
+          "text": "Прервано — из-за обновления"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.interrupted",
+      "en": "Interrupted",
+      "ru": "Прервано",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Прервано"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.unseen_interruption",
+      "en": "Unseen interruption",
+      "ru": "Прервано (не просмотрено)",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Прервано (не просмотрено)"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.retired",
+      "en": "Interrupted — retired for an update",
+      "ru": "Прервано для обновления",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Прервано для обновления"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.unseen_retirement",
+      "en": "Unseen interruption — retired for an update",
+      "ru": "Прервано для обновления (не просмотрено)",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Прервано для обновления (не просмотрено)"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.signal_stop",
+      "en": "Interrupted — stopped with a signal{command, select, none {} other { by {command}}}",
+      "ru": "Прервано — процесс остановлен сигналом{command, select, none {} other { по команде {command}}}",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      },
+      "structure": [
+        {
+          "name": "command",
+          "kind": "select",
+          "selectors": [
+            "none",
+            "other"
+          ]
+        },
+        {
+          "name": "command",
+          "kind": "simple",
+          "selectors": []
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "text": "Прервано — процесс остановлен сигналом"
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "text": "Прервано — процесс остановлен сигналом по команде /stop --all"
+        },
+        {
+          "params": {
+            "command": "lop sessions stop audit-synthetic-id"
+          },
+          "text": "Прервано — процесс остановлен сигналом по команде lop sessions stop audit-synthetic-id"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.unseen_signal_stop",
+      "en": "Unseen interruption — stopped with a signal{command, select, none {} other { by {command}}}",
+      "ru": "Прервано (не просмотрено) — процесс остановлен сигналом{command, select, none {} other { по команде {command}}}",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      },
+      "structure": [
+        {
+          "name": "command",
+          "kind": "select",
+          "selectors": [
+            "none",
+            "other"
+          ]
+        },
+        {
+          "name": "command",
+          "kind": "simple",
+          "selectors": []
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "text": "Прервано (не просмотрено) — процесс остановлен сигналом"
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "text": "Прервано (не просмотрено) — процесс остановлен сигналом по команде /stop --all"
+        },
+        {
+          "params": {
+            "command": "lop sessions stop audit-synthetic-id"
+          },
+          "text": "Прервано (не просмотрено) — процесс остановлен сигналом по команде lop sessions stop audit-synthetic-id"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.forced_kill",
+      "en": "Interrupted — killed{command, select, none {} other { by {command}}}",
+      "ru": "Прервано — процесс принудительно завершён{command, select, none {} other { по команде {command}}}",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      },
+      "structure": [
+        {
+          "name": "command",
+          "kind": "select",
+          "selectors": [
+            "none",
+            "other"
+          ]
+        },
+        {
+          "name": "command",
+          "kind": "simple",
+          "selectors": []
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "text": "Прервано — процесс принудительно завершён"
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "text": "Прервано — процесс принудительно завершён по команде /stop --all"
+        },
+        {
+          "params": {
+            "command": "lop sessions stop audit-synthetic-id"
+          },
+          "text": "Прервано — процесс принудительно завершён по команде lop sessions stop audit-synthetic-id"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.unseen_forced_kill",
+      "en": "Unseen interruption — killed{command, select, none {} other { by {command}}}",
+      "ru": "Прервано (не просмотрено) — процесс принудительно завершён{command, select, none {} other { по команде {command}}}",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      },
+      "structure": [
+        {
+          "name": "command",
+          "kind": "select",
+          "selectors": [
+            "none",
+            "other"
+          ]
+        },
+        {
+          "name": "command",
+          "kind": "simple",
+          "selectors": []
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "text": "Прервано (не просмотрено) — процесс принудительно завершён"
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "text": "Прервано (не просмотрено) — процесс принудительно завершён по команде /stop --all"
+        },
+        {
+          "params": {
+            "command": "lop sessions stop audit-synthetic-id"
+          },
+          "text": "Прервано (не просмотрено) — процесс принудительно завершён по команде lop sessions stop audit-synthetic-id"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.complete",
+      "en": "Complete",
+      "ru": "Завершено",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Завершено"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.unseen_completion",
+      "en": "Unseen completion",
+      "ru": "Завершено (не просмотрено)",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Завершено (не просмотрено)"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.recent",
+      "en": "Recent",
+      "ru": "Недавно",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Недавно"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.dormant",
+      "en": "Stopped ({count, plural, one {# wake dormant} other {# wakes dormant}})",
+      "ru": "Остановлено ({count, plural, one {# пробуждение приостановлено} few {# пробуждения приостановлены} many {# пробуждений приостановлено} other {# пробуждения приостановлено}})",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {count} is the number of armed wakes made dormant by stopping; use locale plural rules. Not cancelled or scheduled to fire."
+      },
+      "structure": [
+        {
+          "name": "count",
+          "kind": "plural",
+          "selectors": [
+            "one",
+            "few",
+            "many",
+            "other"
+          ]
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "count": 0
+          },
+          "text": "Остановлено (0 пробуждений приостановлено)"
+        },
+        {
+          "params": {
+            "count": 1
+          },
+          "text": "Остановлено (1 пробуждение приостановлено)"
+        },
+        {
+          "params": {
+            "count": 2
+          },
+          "text": "Остановлено (2 пробуждения приостановлены)"
+        },
+        {
+          "params": {
+            "count": 5
+          },
+          "text": "Остановлено (5 пробуждений приостановлено)"
+        },
+        {
+          "params": {
+            "count": 11
+          },
+          "text": "Остановлено (11 пробуждений приостановлено)"
+        },
+        {
+          "params": {
+            "count": 21
+          },
+          "text": "Остановлено (21 пробуждение приостановлено)"
+        },
+        {
+          "params": {
+            "count": 22
+          },
+          "text": "Остановлено (22 пробуждения приостановлены)"
+        },
+        {
+          "params": {
+            "count": 55
+          },
+          "text": "Остановлено (55 пробуждений приостановлено)"
+        },
+        {
+          "params": {
+            "count": 101
+          },
+          "text": "Остановлено (101 пробуждение приостановлено)"
+        },
+        {
+          "params": {
+            "count": 1000001
+          },
+          "text": "Остановлено (1 000 001 пробуждение приостановлено)"
+        },
+        {
+          "params": {
+            "count": 1.5
+          },
+          "text": "Остановлено (1,5 пробуждения приостановлено)"
+        },
+        {
+          "params": {
+            "count": 2.5
+          },
+          "text": "Остановлено (2,5 пробуждения приостановлено)"
+        },
+        {
+          "params": {
+            "count": 0.5
+          },
+          "text": "Остановлено (0,5 пробуждения приостановлено)"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.error",
+      "en": "Error",
+      "ru": "Ошибка",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Ошибка"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.unseen_error",
+      "en": "Unseen error",
+      "ru": "Ошибка (не просмотрена)",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+      },
+      "structure": [],
+      "expansions": [
+        {
+          "params": {},
+          "text": "Ошибка (не просмотрена)"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.error_cause",
+      "en": "{cause, select, user_stop {Error — stopped by the user} runtime_stall_bound {Error — runtime ended itself after its stall bound} continuation_limit {Error — continuation limit reached; pending message dropped} output_limit {Error — model output limit reached; could not continue} runtime_retired {Error — retired for an update} runtime_shutdown {Error — runtime terminated during the turn} runtime_overdue {Error — runtime left for an update after its progress bound} runtime_update_failed {Error — update did not finish; runtime kept its loaded build} runtime_killed {Error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Error — install replaced during the turn} owner_lost {Error — runtime stopped answering during the turn} disposed {Error — session disposed during the turn} other {Error}}",
+      "ru": "{cause, select, user_stop {Ошибка — выполнение остановлено пользователем} runtime_stall_bound {Ошибка — рантайм сам завершил работу по достижении предела простоя} continuation_limit {Ошибка — достигнут лимит продолжений; ожидающее сообщение отброшено} output_limit {Ошибка — достигнут лимит вывода модели; продолжить не удалось} runtime_retired {Ошибка — работа прервана для обновления} runtime_shutdown {Ошибка — рантайм завершил работу во время хода} runtime_overdue {Ошибка — рантайм завершил работу для обновления, исчерпав лимит ожидания прогресса} runtime_update_failed {Ошибка — обновление не завершилось; рантайм сохранил загруженную сборку} runtime_killed {Ошибка — рантайм исчез без штатного завершения; остановка не запрашивалась} install_mid_update {Ошибка — установленная копия заменена во время хода} owner_lost {Ошибка — рантайм перестал отвечать во время хода} disposed {Ошибка — сессия окончательно закрыта во время хода} other {Ошибка}}",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+      },
+      "structure": [
+        {
+          "name": "cause",
+          "kind": "select",
+          "selectors": [
+            "user_stop",
+            "runtime_stall_bound",
+            "continuation_limit",
+            "output_limit",
+            "runtime_retired",
+            "runtime_shutdown",
+            "runtime_overdue",
+            "runtime_update_failed",
+            "runtime_killed",
+            "install_mid_update",
+            "owner_lost",
+            "disposed",
+            "other"
+          ]
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "cause": "user_stop"
+          },
+          "text": "Ошибка — выполнение остановлено пользователем"
+        },
+        {
+          "params": {
+            "cause": "runtime_stall_bound"
+          },
+          "text": "Ошибка — рантайм сам завершил работу по достижении предела простоя"
+        },
+        {
+          "params": {
+            "cause": "continuation_limit"
+          },
+          "text": "Ошибка — достигнут лимит продолжений; ожидающее сообщение отброшено"
+        },
+        {
+          "params": {
+            "cause": "output_limit"
+          },
+          "text": "Ошибка — достигнут лимит вывода модели; продолжить не удалось"
+        },
+        {
+          "params": {
+            "cause": "runtime_retired"
+          },
+          "text": "Ошибка — работа прервана для обновления"
+        },
+        {
+          "params": {
+            "cause": "runtime_shutdown"
+          },
+          "text": "Ошибка — рантайм завершил работу во время хода"
+        },
+        {
+          "params": {
+            "cause": "runtime_overdue"
+          },
+          "text": "Ошибка — рантайм завершил работу для обновления, исчерпав лимит ожидания прогресса"
+        },
+        {
+          "params": {
+            "cause": "runtime_update_failed"
+          },
+          "text": "Ошибка — обновление не завершилось; рантайм сохранил загруженную сборку"
+        },
+        {
+          "params": {
+            "cause": "runtime_killed"
+          },
+          "text": "Ошибка — рантайм исчез без штатного завершения; остановка не запрашивалась"
+        },
+        {
+          "params": {
+            "cause": "install_mid_update"
+          },
+          "text": "Ошибка — установленная копия заменена во время хода"
+        },
+        {
+          "params": {
+            "cause": "owner_lost"
+          },
+          "text": "Ошибка — рантайм перестал отвечать во время хода"
+        },
+        {
+          "params": {
+            "cause": "disposed"
+          },
+          "text": "Ошибка — сессия окончательно закрыта во время хода"
+        },
+        {
+          "params": {
+            "cause": "other"
+          },
+          "text": "Ошибка"
+        },
+        {
+          "params": {
+            "cause": "unrecognized_synthetic_cause"
+          },
+          "text": "Ошибка"
+        }
+      ]
+    },
+    {
+      "key": "wire.session_status.unseen_error_cause",
+      "en": "{cause, select, user_stop {Unseen error — stopped by the user} runtime_stall_bound {Unseen error — runtime ended itself after its stall bound} continuation_limit {Unseen error — continuation limit reached; pending message dropped} output_limit {Unseen error — model output limit reached; could not continue} runtime_retired {Unseen error — retired for an update} runtime_shutdown {Unseen error — runtime terminated during the turn} runtime_overdue {Unseen error — runtime left for an update after its progress bound} runtime_update_failed {Unseen error — update did not finish; runtime kept its loaded build} runtime_killed {Unseen error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Unseen error — install replaced during the turn} owner_lost {Unseen error — runtime stopped answering during the turn} disposed {Unseen error — session disposed during the turn} other {Unseen error}}",
+      "ru": "{cause, select, user_stop {Ошибка (не просмотрена) — выполнение остановлено пользователем} runtime_stall_bound {Ошибка (не просмотрена) — рантайм сам завершил работу по достижении предела простоя} continuation_limit {Ошибка (не просмотрена) — достигнут лимит продолжений; ожидающее сообщение отброшено} output_limit {Ошибка (не просмотрена) — достигнут лимит вывода модели; продолжить не удалось} runtime_retired {Ошибка (не просмотрена) — работа прервана для обновления} runtime_shutdown {Ошибка (не просмотрена) — рантайм завершил работу во время хода} runtime_overdue {Ошибка (не просмотрена) — рантайм завершил работу для обновления, исчерпав лимит ожидания прогресса} runtime_update_failed {Ошибка (не просмотрена) — обновление не завершилось; рантайм сохранил загруженную сборку} runtime_killed {Ошибка (не просмотрена) — рантайм исчез без штатного завершения; остановка не запрашивалась} install_mid_update {Ошибка (не просмотрена) — установленная копия заменена во время хода} owner_lost {Ошибка (не просмотрена) — рантайм перестал отвечать во время хода} disposed {Ошибка (не просмотрена) — сессия окончательно закрыта во время хода} other {Ошибка (не просмотрена)}}",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+      },
+      "structure": [
+        {
+          "name": "cause",
+          "kind": "select",
+          "selectors": [
+            "user_stop",
+            "runtime_stall_bound",
+            "continuation_limit",
+            "output_limit",
+            "runtime_retired",
+            "runtime_shutdown",
+            "runtime_overdue",
+            "runtime_update_failed",
+            "runtime_killed",
+            "install_mid_update",
+            "owner_lost",
+            "disposed",
+            "other"
+          ]
+        }
+      ],
+      "expansions": [
+        {
+          "params": {
+            "cause": "user_stop"
+          },
+          "text": "Ошибка (не просмотрена) — выполнение остановлено пользователем"
+        },
+        {
+          "params": {
+            "cause": "runtime_stall_bound"
+          },
+          "text": "Ошибка (не просмотрена) — рантайм сам завершил работу по достижении предела простоя"
+        },
+        {
+          "params": {
+            "cause": "continuation_limit"
+          },
+          "text": "Ошибка (не просмотрена) — достигнут лимит продолжений; ожидающее сообщение отброшено"
+        },
+        {
+          "params": {
+            "cause": "output_limit"
+          },
+          "text": "Ошибка (не просмотрена) — достигнут лимит вывода модели; продолжить не удалось"
+        },
+        {
+          "params": {
+            "cause": "runtime_retired"
+          },
+          "text": "Ошибка (не просмотрена) — работа прервана для обновления"
+        },
+        {
+          "params": {
+            "cause": "runtime_shutdown"
+          },
+          "text": "Ошибка (не просмотрена) — рантайм завершил работу во время хода"
+        },
+        {
+          "params": {
+            "cause": "runtime_overdue"
+          },
+          "text": "Ошибка (не просмотрена) — рантайм завершил работу для обновления, исчерпав лимит ожидания прогресса"
+        },
+        {
+          "params": {
+            "cause": "runtime_update_failed"
+          },
+          "text": "Ошибка (не просмотрена) — обновление не завершилось; рантайм сохранил загруженную сборку"
+        },
+        {
+          "params": {
+            "cause": "runtime_killed"
+          },
+          "text": "Ошибка (не просмотрена) — рантайм исчез без штатного завершения; остановка не запрашивалась"
+        },
+        {
+          "params": {
+            "cause": "install_mid_update"
+          },
+          "text": "Ошибка (не просмотрена) — установленная копия заменена во время хода"
+        },
+        {
+          "params": {
+            "cause": "owner_lost"
+          },
+          "text": "Ошибка (не просмотрена) — рантайм перестал отвечать во время хода"
+        },
+        {
+          "params": {
+            "cause": "disposed"
+          },
+          "text": "Ошибка (не просмотрена) — сессия окончательно закрыта во время хода"
+        },
+        {
+          "params": {
+            "cause": "other"
+          },
+          "text": "Ошибка (не просмотрена)"
+        },
+        {
+          "params": {
+            "cause": "unrecognized_synthetic_cause"
+          },
+          "text": "Ошибка (не просмотрена)"
+        }
+      ]
+    }
+  ],
+  "cldr_missing_few_admission_exit": 0
+}

@@ -1,0 +1,11 @@
+Pinned source/context SHA-256: PASS
+JSON/key count/order: PASS (17 keys)
+Historical retired_label value exact preservation: PASS
+ICU parser and placeholder name/kind/order parity: PASS (17/17)
+CLDR zh-CN: PASS (dormant other only)
+All stable select arms and cause identifiers: PASS
+Markup/backtick/printf-token parity; single-line and no bidi controls: PASS
+Repository checker: scripts.i18n.check.main(["--catalogues-only"]), isolated candidate fixture
+check.py: catalogue checks: 0 problem(s)
+Library-only ICU expansion: PASS (55 cases, including all cause arms, unknown select fallback, command none/exact bytes, counts 0/1/2/5/100)
+No UI/runtime/visual validation or independent language audit claimed; no repository writes

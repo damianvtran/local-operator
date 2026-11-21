@@ -1,0 +1,89 @@
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+EXIT_CODE=0
+
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python -c 
+import json,re,unicodedata
+from pathlib import Path
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+base=Path('local_operator/i18n/catalogues')
+ns='cli.serve_readiness'
+def strict(path):
+    def pairs(items):
+        result={}
+        for key,value in items:
+            assert key not in result, ('duplicate JSON key',key)
+            result[key]=value
+        return result
+    return json.loads(path.read_text(),object_pairs_hook=pairs)
+en=strict(base/'en'/f'{ns}.json'); es=strict(base/'es'/f'{ns}.json'); context=strict(base/'en'/f'{ns}.context.json')
+assert set(en)==set(es)==set(context) and len(es)==11
+print('STRICT JSON/key/context parity: PASS, 11 keys, no duplicate/added/dropped keys')
+def branches(text):
+    nodes=rt.parse_message(text)
+    if len(nodes)==1 and getattr(nodes[0],'kind',None)=='plural':
+        return dict(nodes[0].parts)
+    return {'plain':nodes}
+def argtypes(nodes):
+    return [(n.name,n.kind,n.skeleton) for n in nodes if hasattr(n,'kind')]
+def literals(nodes):
+    return ''.join(n.value for n in nodes if hasattr(n,'value'))
+params={'device':'node-1','pids':'123, 456','holders':'custom.service','builds':'build-old','install':'build-new','recorded':'build-old','reasons':'pid 123: identidad sin comprobar'}
+for key in en:
+    assert rt.message_arguments(en[key])==rt.message_arguments(es[key]),key
+    eb=branches(en[key]); sb=branches(es[key])
+    if 'plain' not in eb:
+        assert set(eb)=={'one','other'} and set(sb)=={'one','many','other'},key
+    for selector,nodes in sb.items():
+        source_nodes=eb.get(selector,eb.get('other'))
+        assert argtypes(nodes)==argtypes(source_nodes),(key,selector,'branch argument types')
+        a=literals(source_nodes); b=literals(nodes)
+        assert re.findall(r'`[^`]*`',a)==re.findall(r'`[^`]*`',b),(key,selector,'code spans')
+        assert re.findall(r'</?[A-Za-z][^>]*>',a)==re.findall(r'</?[A-Za-z][^>]*>',b),(key,selector,'tags')
+    assert not any(unicodedata.category(c)=='Cf' for c in es[key]),key
+    assert unicodedata.normalize('NFC',es[key])==es[key],key
+    hints={k:v for k,v in context[key].items() if k in ('maxCells','maxChars')}
+    print(key, 'PASS args='+str(rt.message_arguments(es[key]))+' selectors='+str(rt.plural_selectors(es[key]))+' width_hints='+str(hints))
+    counts=(0,1,2,1000000) if 'plain' not in sb else (1,)
+    for count in counts:
+        rendered=rt.render_message(es[key],dict(params,count=count),'es')
+        print('  count='+str(count)+' cells='+str(cell_len(rendered))+' chars='+str(len(rendered))+': '+rendered)
+print('Independent branch-level checks PASS; no maxCells/maxChars in sidecar; sample widths are descriptive, not a rendered UI/layout certification.')
+
+STRICT JSON/key/context parity: PASS, 11 keys, no duplicate/added/dropped keys
+cli.serve_readiness.unproven PASS args=() selectors=() width_hints={}
+  count=1 cells=126 chars=126: está registrado, pero no se puede comprobar la identidad de su proceso (no se pudo comparar ninguna marca de tiempo de inicio)
+cli.serve_readiness.not_reporting PASS args=() selectors=() width_hints={}
+  count=1 cells=57 chars=57: está registrado pero no responde (su heartbeat se detuvo)
+cli.serve_readiness.not_this_daemon PASS args=() selectors=() width_hints={}
+  count=1 cells=54 chars=54: está registrado, pero ahora otro proceso tiene ese PID
+cli.serve_readiness.unknown_state PASS args=() selectors=() width_hints={}
+  count=1 cells=40 chars=40: está registrado en un estado desconocido
+cli.serve_readiness.install_unknown PASS args=() selectors=() width_hints={}
+  count=1 cells=67 chars=67: ejecuta una compilación que no se puede comparar con la instalación
+cli.serve_readiness.cgroup_unknown PASS args=() selectors=() width_hints={}
+  count=1 cells=61 chars=61: se ejecuta en un cgroup que esta comprobación no puede ubicar
+cli.serve_readiness.recorded_gap PASS args=(('recorded', 'simple'), ('install', 'simple')) selectors=() width_hints={}
+  count=1 cells=93 chars=93: compilación registrada build-old, instalación build-new (identidad del proceso sin comprobar)
+cli.serve_readiness.unknown PASS args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) selectors=(('one', 'many', 'other'),) width_hints={}
+  count=0 cells=143 chars=143: los daemons `lop serve` en node-1: pid 123: identidad sin comprobar, por lo que no se sabe si coinciden con la instalación y están supervisados
+  count=1 cells=138 chars=138: el daemon `lop serve` en node-1: pid 123: identidad sin comprobar, por lo que no se sabe si coincide con la instalación y está supervisado
+  count=2 cells=143 chars=143: los daemons `lop serve` en node-1: pid 123: identidad sin comprobar, por lo que no se sabe si coinciden con la instalación y están supervisados
+  count=1000000 cells=143 chars=143: los daemons `lop serve` en node-1: pid 123: identidad sin comprobar, por lo que no se sabe si coinciden con la instalación y están supervisados
+cli.serve_readiness.stale PASS args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) selectors=(('one', 'many', 'other'),) width_hints={}
+  count=0 cells=164 chars=164: los daemons `lop serve` en node-1 (123, 456) ejecutan build-old, pero la instalación es build-new: las sesiones remotas que alojan ejecutan esas otras compilaciones
+  count=1 cells=156 chars=156: el daemon `lop serve` en node-1 (123, 456) ejecuta build-old, pero la instalación es build-new: las sesiones remotas que aloja ejecutan esa otra compilación
+  count=2 cells=164 chars=164: los daemons `lop serve` en node-1 (123, 456) ejecutan build-old, pero la instalación es build-new: las sesiones remotas que alojan ejecutan esas otras compilaciones
+  count=1000000 cells=164 chars=164: los daemons `lop serve` en node-1 (123, 456) ejecutan build-old, pero la instalación es build-new: las sesiones remotas que alojan ejecutan esas otras compilaciones
+cli.serve_readiness.other_unit PASS args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) selectors=(('one', 'many', 'other'),) width_hints={}
+  count=0 cells=111 chars=111: los daemons `lop serve` en node-1 están a cargo de otros servicios (custom.service), no de una unidad lop serve
+  count=1 cells=106 chars=106: el daemon `lop serve` en node-1 está a cargo de otro servicio (custom.service), no de una unidad lop serve
+  count=2 cells=111 chars=111: los daemons `lop serve` en node-1 están a cargo de otros servicios (custom.service), no de una unidad lop serve
+  count=1000000 cells=111 chars=111: los daemons `lop serve` en node-1 están a cargo de otros servicios (custom.service), no de una unidad lop serve
+cli.serve_readiness.identity_restart PASS args=(('device', 'simple'),) selectors=() width_hints={}
+  count=1 cells=201 chars=201: en node-1, ejecuta `lop services status` para inspeccionar los registros y luego `lop services restart` para registrar las identidades de los procesos; el reinicio comprueba cada daemon antes de actuar
+Independent branch-level checks PASS; no maxCells/maxChars in sidecar; sample widths are descriptive, not a rendered UI/layout certification.
+
+EXIT_CODE=0

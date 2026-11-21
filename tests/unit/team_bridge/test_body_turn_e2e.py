@@ -212,7 +212,11 @@ def _epoch(store: Store) -> int:
 
 
 def _reserve(
-    store: Store, message_id: str = MESSAGE_ID, seq: int = 3, config_dir: Path | None = None
+    store: Store,
+    message_id: str = MESSAGE_ID,
+    seq: int = 3,
+    config_dir: Path | None = None,
+    routed_session: str | None = None,
 ) -> None:
     assert store.record_body_reservation(
         _owner(),
@@ -226,6 +230,7 @@ def _reserve(
         consent_version="bridge_consent_v1",
         designated_session=SESSION_ID,
         now=time.time(),
+        routed_session=routed_session,
     )
     if config_dir is not None:
         _allow_receipt(config_dir, message_id)
@@ -270,13 +275,13 @@ def _allow_receipt(config_dir: Path, message_id: str) -> None:
         )
 
 
-def _runtime(config_dir: Path, client: FakeBridgeClient) -> Any:
+def _runtime(config_dir: Path, client: FakeBridgeClient, session_id: str = SESSION_ID) -> Any:
     return SimpleNamespace(
         client=client,
         config_dir=config_dir,
         tenant_id=TENANT,
         owner=_owner(),
-        session_id=SESSION_ID,
+        session_id=session_id,
     )
 
 
@@ -371,6 +376,60 @@ async def test_the_admitted_body_reaches_every_provider_call_of_the_turn(tmp_pat
     assert row["state"] == "completed", row["last_error"]
     assert row["completed_entry_id"]
     assert _transcript_text(tmp_path / "sess").count(BODY) == 0, "no body in the transcript"
+
+
+ROUTED_SESSION = "sess_task"
+
+
+async def _serve_as(
+    tmp_path, session_id: str, *, routed: str | None
+) -> tuple[CapturingStream, dict[str, Any], Any]:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir, routed_session=routed)
+    stream = CapturingStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient(), session_id))
+    try:
+        session._ensure_pending_body_followup()
+        waiter = session._pending_body_followup_task
+        if waiter is not None:
+            await waiter
+    finally:
+        await session.dispose()
+    return stream, _row(config_dir), waiter
+
+
+@pytest.mark.asyncio
+async def test_a_busy_routed_session_serves_the_row_routed_to_it(tmp_path) -> None:
+    """The routed session is NOT the designated one: the follow-up waiter that serves
+    a body arriving mid-turn must still arm for it, or the row sits pending until the
+    sweep hands it to the designated session (the failure routing exists to remove)."""
+
+    stream, row, waiter = await _serve_as(tmp_path, ROUTED_SESSION, routed=ROUTED_SESSION)
+
+    assert waiter is not None, "a row routed to this session must arm the follow-up waiter"
+    assert len(stream.requests) == 1
+    assert len([t for t in stream.texts(0) if BODY in t]) == 1
+    assert row["state"] == "completed", row["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_non_designated_session_never_serves_a_row_routed_elsewhere(tmp_path) -> None:
+    """Negative control: the relaxed fence admits ONLY a row routed to the caller."""
+
+    stream, row, waiter = await _serve_as(tmp_path, "sess_third", routed=ROUTED_SESSION)
+
+    assert waiter is None and stream.requests == []
+    assert row["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_non_designated_session_never_serves_an_unrouted_row(tmp_path) -> None:
+    stream, row, waiter = await _serve_as(tmp_path, ROUTED_SESSION, routed=None)
+
+    assert waiter is None and stream.requests == []
+    assert row["state"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -1714,7 +1773,10 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
     """
     from local_operator.harness.render import _default_convert_to_llm
     from local_operator.mobile import peer_send
-    from local_operator.team_bridge.card_projection import PENDING_CARD
+
+    # The journal card's marker now names its ids (bridge-body design §5) but
+    # still never carries a body; what is pinned is the retention prefix.
+    PENDING_CARD = "[team_bridge: body not retained in history"
     from local_operator.team_bridge.connector.conversation import (
         ConversationCardMetadata,
         _deliver_card,
@@ -1786,8 +1848,11 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
                 "expect:",
                 "sender-name-canary",
                 "private-room-canary",
-                CONVERSATION_ID,
-                MESSAGE_ID,
+                # The ids ARE in the marker now (bridge-body design §5: the
+                # agent needs them to re-read the message), but only inside
+                # the marker; the raw envelope's id lines never render.
+                f"conversation_id: {CONVERSATION_ID}",
+                f"message_id: {MESSAGE_ID}",
                 BODY,
                 "<team-bridge-message",
             ):
@@ -1803,6 +1868,14 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
             _message_texts(session._render_history(session._transcript.build_llm_history()))
         )
         assert PENDING_CARD in later, later
+        # Property B, ids-only form: the journal's ids-only marker is not a
+        # completion oracle — the marker bytes the model saw while the body
+        # was pending are unchanged in the settled history. ``later`` is the
+        # history WITHOUT the session's request transform, so this pins the
+        # stored marker only; the replay excerpt (design §5, which does differ
+        # after completion by design) is pinned in test_card_body.py.
+        marker = [line for line in before_body if PENDING_CARD in line]
+        assert marker and all(line in later for line in marker), (marker, later)
         assert "mention: no" not in later and "sender-name-canary" not in later, later
         assert BODY not in _transcript_text(tmp_path / "sess")
         print(

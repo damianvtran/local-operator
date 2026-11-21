@@ -7,6 +7,7 @@
   "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' ouvre un lecteur sur spec.resume ; il ne rattache ni équipes, ni profils, ni outils, ni noms, ni objectifs, ni politiques d’approbation — cela relève du propriétaire de la session. Définissez uniquement resume dans ce spec (ou utilisez mode=''own''). Champs en cause : {fields}.",
   "wire.errors.sdk_spec.attach_output_unsupported": "une contrainte de sortie ne peut pas être définie sur une session rattachée ; le runtime propriétaire en décide",
   "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' exige spec.resume : un lecteur se rattache à un identifiant",
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": "mcp_ready_timeout_s : timeout_s doit être un nombre fini >= 0",
   "wire.errors.sdk_spec.mode_invalid": "mode doit valoir ''own'' ou ''attach'', pas {mode}",
   "wire.errors.sdk_spec.output_format_invalid": "output_format doit être l’une des valeurs suivantes : {formats}",
   "wire.errors.sdk_spec.output_retries_range": "output_retries doit être compris entre 0 et 5",

@@ -82,6 +82,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
+from local_operator.i18n.catalogues import context_entry_problem
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import _resolve_workspace_path
 from local_operator.tools.confinement import ToolConfinement, confinement_of
@@ -573,19 +574,19 @@ def _read_context_catalogue(text: str, key: str | None) -> str:
         raise ValueError("context catalogue must be valid JSON") from exc
     if not isinstance(payload, dict):
         raise ValueError("context catalogue must be a JSON object")
-    for name, metadata in payload.items():
-        if not isinstance(name, str) or not isinstance(metadata, dict):
+    # The field set and types live in ONE place shared with the authoring
+    # check (catalogues.CONTEXT_FIELDS); the refusals below stay fixed strings
+    # so neither a field name nor a value from the file reaches the model.
+    for metadata in payload.values():
+        problem = context_entry_problem(metadata)
+        if problem is None:
+            continue
+        kind, _field = problem
+        if kind == "not-object":
             raise ValueError("context entries must be metadata objects")
-        for field, value in metadata.items():
-            if field in {"role", "tone", "note"}:
-                valid = isinstance(value, str)
-            elif field == "maxCells":
-                # bool is an int subclass, but is not a documented width value.
-                valid = type(value) is int
-            else:
-                raise ValueError("context metadata contains an unsupported field")
-            if not valid:
-                raise ValueError("context metadata has an invalid field type")
+        if kind == "unsupported-field":
+            raise ValueError("context metadata contains an unsupported field")
+        raise ValueError("context metadata has an invalid field type")
     if key is None:
         return json.dumps(payload, ensure_ascii=False, indent=1)
     if key not in payload:

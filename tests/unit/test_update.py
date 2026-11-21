@@ -1762,6 +1762,9 @@ def test_rolling_receipt_measures_the_runtime_census_within_its_namespaces(
     assert runtimes["known_old_busy"] == 1, "the live busy session on the old generation"
     assert runtimes["known_old_idle"] == 1, "the pre-heartbeat runtime, deduped from the mobile row"
     assert runtimes["unknown"] == 0
+    # Idle old-generation runtimes leave on their own soft refresh, so the
+    # receipt calls them retiring; the busy one is not (update-parity item 4).
+    assert runtimes["retiring"] == 1
 
 
 def test_rolling_receipt_names_each_unreadable_runtime_namespace(
@@ -1794,6 +1797,7 @@ def test_rolling_receipt_names_each_unreadable_runtime_namespace(
 
     assert rolling["runtimes"]["measured"] is False
     assert rolling["runtimes"]["known_old_busy"] is None
+    assert rolling["runtimes"]["retiring"] is None, "an unmeasured census claims no retiring"
     reason = rolling["central_services_incomplete_reason"]
     assert "runtime census unreadable" in reason
     assert "run/mobile" in reason, "the reason names the namespace to look at"
@@ -2118,12 +2122,26 @@ def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, 
     subcommand of this one group. 2 keeps a usage error distinct from the 1 the
     sibling ``install`` group returns for its own, which this deliberately mirrors.
     """
-    from local_operator.cli import main
+    import argparse
+
+    from local_operator.cli import build_cli_parser, main
+
+    # The synopsis is a hand-written string in ``main``; derive the expected verb
+    # list from the parser itself so adding a verb (``heavy`` did) fails here only
+    # when the synopsis forgot it, not every time the group grows.
+    def _subparsers(
+        parser: argparse.ArgumentParser,
+    ) -> argparse._SubParsersAction[argparse.ArgumentParser]:
+        return next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+
+    services = _subparsers(build_cli_parser()).choices["services"]
+    verbs = ", ".join(_subparsers(services).choices)
 
     monkeypatch.setattr("sys.argv", ["lop", "services"])
     assert main() == 2
     err = capsys.readouterr().err
-    assert err.strip() == "usage: lop services {status, restart, reclaim}"
+    assert "heavy" in verbs, "the derivation must still see the verb this PR added"
+    assert err.strip() == f"usage: lop services {{{verbs}}}"
     assert "{credential,config,agents" not in err, "the whole program's verb list"
 
 

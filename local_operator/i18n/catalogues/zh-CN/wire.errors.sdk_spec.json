@@ -7,6 +7,7 @@
   "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach''会打开spec.resume所指会话的查看器；不会附加团队、配置档案、工具、名称、目标或审批策略——这些由会话控制方负责。此spec中只能设置resume（或使用mode=''own''）。不支持的字段：{fields}。",
   "wire.errors.sdk_spec.attach_output_unsupported": "不能为附接的会话设置输出约束；这由控制该会话的运行时决定",
   "wire.errors.sdk_spec.attach_resume_required": "mode=''attach''需要spec.resume：查看器通过会话ID附接到会话",
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": "mcp_ready_timeout_s：timeout_s必须为>= 0的有限数值",
   "wire.errors.sdk_spec.mode_invalid": "mode必须为''own''或''attach''，不能为{mode}",
   "wire.errors.sdk_spec.output_format_invalid": "output_format必须为以下值之一：{formats}",
   "wire.errors.sdk_spec.output_retries_range": "output_retries必须在0到5之间",

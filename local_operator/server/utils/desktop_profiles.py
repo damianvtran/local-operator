@@ -303,28 +303,77 @@ def _clamped_effort(spec: Any, requested: str) -> str | None:
     return clamped if clamped is not None else spec.reasoning_effort
 
 
+class UnresolvedTarget(KeyError):
+    """A launch target, or one name in its roster, resolves to nothing attachable.
+
+    A ``KeyError`` on purpose: every caller (``errors()`` on the desktop routes,
+    the session create path) already maps ``KeyError`` to its 404 contract, and
+    that status must not change. What a bare ``KeyError('iac-engineer')`` lost
+    was WHICH team and WHICH slot failed — a new chat on a hub team showed only
+    "model was not resolved", with nothing in the response or the log naming the
+    roster member behind it. This carries both, as data (``team``, ``member``,
+    ``slot``) for a machine reader and as a developer-facing sentence for logs.
+    """
+
+    def __init__(self, member: str, *, team: str | None = None, slot: str = "target") -> None:
+        super().__init__(member)
+        self.member = member
+        self.team = team
+        self.slot = slot
+
+    def __str__(self) -> str:
+        # i18n: ignore developer-facing log/exception text; the wire sentence is catalogued.
+        if self.team is None:
+            return f"{self.slot} {self.member!r} is not an installed role, specialist or team"
+        return (
+            f"team {self.team!r} {self.slot} {self.member!r} "
+            "is not an installed role, specialist or team"
+        )
+
+    def wire_fields(self) -> dict[str, Any]:
+        """Additive, machine-readable fields for a refusal envelope."""
+        return {"unresolved": {"team": self.team, "slot": self.slot, "member": self.member}}
+
+
 def validate_target(agents: Any, teams: Any, kind: str, name: str) -> str:
     """Validate the complete declared launch graph without installing anything.
 
     Delegation stays lazy. Validation prevents the first manager prompt from
     claiming a roster that cannot resolve, without spawning that roster here.
+
+    Raises :class:`UnresolvedTarget` (a ``KeyError``) naming the first name that
+    does not resolve and, for a team, the team and slot it sits in.
     """
     if kind == "agent":
-        return str(profile_detail(agents, name, detail=False)["name"])
+        try:
+            return str(profile_detail(agents, name, detail=False)["name"])
+        except UnresolvedTarget:
+            raise
+        except KeyError:
+            raise UnresolvedTarget(name, slot="agent") from None
     from local_operator.teams import MAX_ORG_DEPTH
+
+    def resolve(team_name: str, slot: str, role: str) -> None:
+        try:
+            profile_detail(agents, role, detail=False)
+        except UnresolvedTarget:
+            raise
+        except KeyError:
+            raise UnresolvedTarget(role, team=team_name, slot=slot) from None
 
     def visit(candidate: str, ancestors: tuple[str, ...]) -> str:
         team = teams.get_team_by_name(candidate)
         if team is None:
-            raise KeyError(candidate)
+            parent = ancestors[-1] if ancestors else None
+            raise UnresolvedTarget(candidate, team=parent, slot="member" if parent else "team")
         if team.name in ancestors or len(ancestors) >= MAX_ORG_DEPTH:
             raise ValueError("The team roster contains a cycle or exceeds the nesting limit")
-        profile_detail(agents, team.manager, detail=False)
+        resolve(team.name, "manager", team.manager)
         for member in team.members:
             if member.kind == "team":
                 visit(member.role, (*ancestors, team.name))
             else:
-                profile_detail(agents, member.role, detail=False)
+                resolve(team.name, "member", member.role)
         return team.name
 
     return visit(name, ())

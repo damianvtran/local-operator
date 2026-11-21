@@ -1,0 +1,185 @@
+Actual subprocess execution log; timestamps UTC capture completion.
+
+$ git rev-parse HEAD
+[UTC capture completed 2026-11-16T05:16:50.971946+00:00]
+stdout:
+1fc11dab96954dcc4c31abcc695c696baf2ead8c
+
+stderr:
+
+exit_code: 0
+
+$ git show HEAD:local_operator/i18n/catalogues/vi/cli.serve_readiness.json
+[UTC capture completed 2026-11-16T05:16:50.973986+00:00]
+stdout:
+{
+  "cli.serve_readiness.unproven": "đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)",
+  "cli.serve_readiness.not_reporting": "đã được ghi nhận nhưng không phản hồi (heartbeat đã ngừng)",
+  "cli.serve_readiness.not_this_daemon": "đã được ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác",
+  "cli.serve_readiness.unknown_state": "được ghi nhận ở trạng thái không xác định",
+  "cli.serve_readiness.install_unknown": "chạy bản dựng không thể đối chiếu với bản cài đặt",
+  "cli.serve_readiness.cgroup_unknown": "chạy trong cgroup mà lần kiểm tra này chưa phân loại được",
+  "cli.serve_readiness.recorded_gap": "bản dựng được ghi nhận {recorded}, bản cài đặt {install} (chưa xác minh danh tính tiến trình)",
+  "cli.serve_readiness.unknown": "{count, plural, other {daemon `lop serve` trên {device}: {reasons}, nên chưa biết có khớp với bản cài đặt và được giám sát hay không}}",
+  "cli.serve_readiness.stale": "{count, plural, other {daemon `lop serve` trên {device} ({pids}) chạy {builds}, nhưng bản cài đặt là {install}: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó}}",
+  "cli.serve_readiness.other_unit": "{count, plural, other {daemon `lop serve` trên {device} thuộc dịch vụ khác ({holders}), không thuộc unit lop serve}}",
+  "cli.serve_readiness.identity_restart": "trên {device}, chạy `lop services status` để kiểm tra các bản ghi, rồi chạy `lop services restart` để ghi nhận danh tính tiến trình; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện"
+}
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+[UTC capture completed 2026-11-16T05:16:51.929348+00:00]
+stdout:
+check.py: catalogue checks: 0 problem(s)
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python -c 'import json,hashlib,re,unicodedata,subprocess
+from pathlib import Path
+from local_operator.i18n.runtime import parse_message,message_arguments,plural_selectors,render_message
+from rich.cells import cell_len
+root=Path.cwd();ns='"'"'cli.serve_readiness'"'"'
+def unique(pairs):
+    out={}
+    for k,v in pairs:
+        assert k not in out,('"'"'duplicate JSON key'"'"',k)
+        out[k]=v
+    return out
+def load(p):return json.loads(p.read_text(),object_pairs_hook=unique)
+en=load(root/f'"'"'local_operator/i18n/catalogues/en/{ns}.json'"'"');vi=load(root/f'"'"'local_operator/i18n/catalogues/vi/{ns}.json'"'"');ctx=load(root/f'"'"'local_operator/i18n/catalogues/en/{ns}.context.json'"'"')
+base_bytes=subprocess.check_output(['"'"'git'"'"','"'"'show'"'"',f'"'"'HEAD:local_operator/i18n/catalogues/vi/{ns}.json'"'"'])
+base=json.loads(base_bytes,object_pairs_hook=unique)
+base_lines=base_bytes.splitlines();target_lines=(root/f'"'"'local_operator/i18n/catalogues/vi/{ns}.json'"'"').read_bytes().splitlines()
+unchanged=[k for k in base if base[k]==vi.get(k)]
+assert len(unchanged)==4
+for k in unchanged:
+    marker=json.dumps(k).encode()+b'"'"':'"'"'
+    old=next(line for line in base_lines if marker in line);new=next(line for line in target_lines if marker in line)
+    assert old==new,k
+    assert en[k]==json.loads(subprocess.check_output(['"'"'git'"'"','"'"'show'"'"',f'"'"'HEAD:local_operator/i18n/catalogues/en/{ns}.json'"'"']))[k],k
+    print('"'"'RETAINED exact target line UTF-8 SHA256'"'"',k,hashlib.sha256(new).hexdigest())
+assert len(en)==len(vi)==len(ctx)==15 and en.keys()==vi.keys()==ctx.keys()
+params=dict(count=2,device='"'"'node-a'"'"',pids='"'"'123, 456'"'"',reason=vi[ns+'"'"'.unproven'"'"'],reasons='"'"'mã định danh tiến trình 123, 456 — '"'"'+vi[ns+'"'"'.unproven'"'"'],recorded='"'"'v1'"'"',install='"'"'v2'"'"',builds='"'"'v1, v0'"'"',holders='"'"'example.service'"'"')
+opaque='"'"'OPAQUE_{count}_[red]_--flag_/tmp/a'"'"'
+for k,v in vi.items():
+    parse_message(v);assert message_arguments(v)==message_arguments(en[k]),k
+    branches=plural_selectors(v);assert all(set(b)=={'"'"'other'"'"'} for b in branches),k
+    assert unicodedata.normalize('"'"'NFC'"'"',v)==v,k
+    assert not any(unicodedata.category(c) in ('"'"'Mn'"'"','"'"'Me'"'"') for c in v),k
+    assert not any(unicodedata.bidirectional(c) in ('"'"'RLE'"'"','"'"'LRE'"'"','"'"'RLO'"'"','"'"'LRO'"'"','"'"'PDF'"'"','"'"'LRI'"'"','"'"'RLI'"'"','"'"'FSI'"'"','"'"'PDI'"'"') for c in v),k
+    assert set(re.findall(r'"'"'`([^`]+)`'"'"',v))==set(re.findall(r'"'"'`([^`]+)`'"'"',en[k])),k
+    assert v.count('"'"'`'"'"')%2==0,k
+    assert re.findall(r'"'"'</?[A-Za-z][^>]*>|\[/?[A-Za-z][^\]]*\]'"'"',v)==re.findall(r'"'"'</?[A-Za-z][^>]*>|\[/?[A-Za-z][^\]]*\]'"'"',en[k]),k
+    samples=[]
+    for count in (0,1,2,5,101):
+        samples.append(render_message(v,dict(params,count=count),'"'"'vi'"'"'))
+    for name,kind in message_arguments(v):
+        if kind=='"'"'simple'"'"':
+            out=render_message(v,dict(params,**{name:opaque}),'"'"'vi'"'"')
+            assert opaque in out,(k,name,'"'"'opaque token was altered'"'"')
+    rendered=samples[2]
+    assert '"'"'maxChars'"'"' not in ctx[k] or len(rendered)<=ctx[k]['"'"'maxChars'"'"'],k
+    assert '"'"'maxCells'"'"' not in ctx[k] or cell_len(rendered)<=ctx[k]['"'"'maxCells'"'"'],k
+    print('"'"'KEY PASS'"'"',k,'"'"'args'"'"',message_arguments(v),'"'"'plural'"'"',branches,'"'"'chars'"'"',len(rendered),'"'"'cells'"'"',cell_len(rendered),'"'"'budgets'"'"',{x:ctx[k][x] for x in ('"'"'maxChars'"'"','"'"'maxCells'"'"') if x in ctx[k]})
+    print('"'"'RENDER'"'"',rendered)
+    if k==ns+'"'"'.and_more'"'"':print('"'"'OVERFLOW COUNTS'"'"',list(zip((0,1,2,5,101),samples)))
+# Render the actual catalogue composition shape, without loading or invoking services.
+for status in ('"'"'unproven'"'"','"'"'not_reporting'"'"','"'"'not_this_daemon'"'"','"'"'unknown_state'"'"','"'"'install_unknown'"'"','"'"'cgroup_unknown'"'"'):
+    why=vi[ns+'"'"'.'"'"'+status]
+    if status=='"'"'unproven'"'"':why+='"'"'; '"'"'+render_message(vi[ns+'"'"'.recorded_gap'"'"'],params,'"'"'vi'"'"')
+    grouped=render_message(vi[ns+'"'"'.pid_reason'"'"'],dict(params,reason=why),'"'"'vi'"'"')
+    grouped+='"'"' '"'"'+render_message(vi[ns+'"'"'.and_more'"'"'],dict(params,count=5),'"'"'vi'"'"')
+    detail=render_message(vi[ns+'"'"'.unknown'"'"'],dict(params,reasons=grouped),'"'"'vi'"'"')
+    assert '"'"':'"'"' not in detail and '"'"'::'"'"' not in detail, status
+    if status=='"'"'unproven'"'"':assert detail.count('"'"'không thể xác minh danh tính tiến trình'"'"')==1 and '"'"'chưa xác minh danh tính tiến trình'"'"' not in detail
+    print('"'"'GROUPED'"'"',status,detail)
+print('"'"'ALL 15 mechanically valid; all Vietnamese other branches rendered for counts 0/1/2/5/101; opaque simple arguments unchanged. Catalogue composition only, not live process/source-selection execution.'"'"')
+'
+[UTC capture completed 2026-11-16T05:17:32.164947+00:00]
+stdout:
+RETAINED exact target line UTF-8 SHA256 cli.serve_readiness.install_unknown b2054c569dc7669b090a79e2d68c8590d4b6f1d1574ac02140a7ad4f15b382cc
+RETAINED exact target line UTF-8 SHA256 cli.serve_readiness.cgroup_unknown f7cadd7af5b54239c803df7de793bc0e90cb96ffa50f1dcafe980b9a9b219d40
+RETAINED exact target line UTF-8 SHA256 cli.serve_readiness.stale f54aa6739f84410107214587c8ddba4494eeb5d8474134ca5e080961a38602b9
+RETAINED exact target line UTF-8 SHA256 cli.serve_readiness.other_unit 3c7669cb128fa8f41f9fca86d8c22e91ab8755a1f2218b4a7dbc99e6d7163390
+KEY PASS cli.serve_readiness.unproven args () plural () chars 114 cells 114 budgets {}
+RENDER đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)
+KEY PASS cli.serve_readiness.not_reporting args () plural () chars 53 cells 53 budgets {}
+RENDER đã ghi nhận nhưng không phản hồi (heartbeat đã ngừng)
+KEY PASS cli.serve_readiness.not_this_daemon args () plural () chars 55 cells 55 budgets {}
+RENDER đã ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác
+KEY PASS cli.serve_readiness.unknown_state args () plural () chars 36 cells 36 budgets {}
+RENDER bản ghi có trạng thái không xác định
+KEY PASS cli.serve_readiness.install_unknown args () plural () chars 49 cells 49 budgets {}
+RENDER chạy bản dựng không thể đối chiếu với bản cài đặt
+KEY PASS cli.serve_readiness.cgroup_unknown args () plural () chars 57 cells 57 budgets {}
+RENDER chạy trong cgroup mà lần kiểm tra này chưa phân loại được
+KEY PASS cli.serve_readiness.recorded_gap args (('recorded', 'simple'), ('install', 'simple')) plural () chars 55 cells 55 budgets {}
+RENDER bản ghi cho biết bản dựng v1; bản dựng đã cài đặt là v2
+KEY PASS cli.serve_readiness.unknown args (('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) plural (('other',),) chars 248 cells 248 budgets {}
+RENDER daemon `lop serve` trên node-a — mã định danh tiến trình 123, 456 — đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+KEY PASS cli.serve_readiness.stale args (('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) plural (('other',),) chars 140 cells 140 budgets {}
+RENDER daemon `lop serve` trên node-a (123, 456) chạy v1, v0, nhưng bản cài đặt là v2: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+KEY PASS cli.serve_readiness.other_unit args (('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) plural (('other',),) chars 95 cells 95 budgets {}
+RENDER daemon `lop serve` trên node-a thuộc dịch vụ khác (example.service), không thuộc unit lop serve
+KEY PASS cli.serve_readiness.identity_restart args (('device', 'simple'),) plural () chars 161 cells 161 budgets {}
+RENDER trên node-a, chạy `lop services restart` để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện
+KEY PASS cli.serve_readiness.pid_reason args (('count', 'plural'), ('pids', 'simple'), ('reason', 'simple')) plural (('other',),) chars 149 cells 149 budgets {}
+RENDER mã định danh tiến trình 123, 456 — đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)
+KEY PASS cli.serve_readiness.and_more args (('count', 'plural'),) plural (('other',),) chars 8 cells 8 budgets {}
+RENDER và 2 nữa
+OVERFLOW COUNTS [(0, 'và 0 nữa'), (1, 'và 1 nữa'), (2, 'và 2 nữa'), (5, 'và 5 nữa'), (101, 'và 101 nữa')]
+KEY PASS cli.serve_readiness.identity_no_action args (('count', 'plural'),) plural (('other',),) chars 138 cells 138 budgets {}
+RENDER bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+KEY PASS cli.serve_readiness.identity_restart_manual args (('device', 'simple'),) plural () chars 158 cells 158 budgets {}
+RENDER trên node-a, khởi động lại `lop serve` thủ công để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; daemon không thể tự nạp lại trong tiến trình hiện tại
+GROUPED unproven daemon `lop serve` trên node-a — mã định danh tiến trình 123, 456 — đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu); bản ghi cho biết bản dựng v1; bản dựng đã cài đặt là v2 và 5 nữa, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+GROUPED not_reporting daemon `lop serve` trên node-a — mã định danh tiến trình 123, 456 — đã ghi nhận nhưng không phản hồi (heartbeat đã ngừng) và 5 nữa, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+GROUPED not_this_daemon daemon `lop serve` trên node-a — mã định danh tiến trình 123, 456 — đã ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác và 5 nữa, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+GROUPED unknown_state daemon `lop serve` trên node-a — mã định danh tiến trình 123, 456 — bản ghi có trạng thái không xác định và 5 nữa, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+GROUPED install_unknown daemon `lop serve` trên node-a — mã định danh tiến trình 123, 456 — chạy bản dựng không thể đối chiếu với bản cài đặt và 5 nữa, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+GROUPED cgroup_unknown daemon `lop serve` trên node-a — mã định danh tiến trình 123, 456 — chạy trong cgroup mà lần kiểm tra này chưa phân loại được và 5 nữa, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+ALL 15 mechanically valid; all Vietnamese other branches rendered for counts 0/1/2/5/101; opaque simple arguments unchanged. Catalogue composition only, not live process/source-selection execution.
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --help
+[UTC capture completed 2026-11-16T05:17:32.205531+00:00]
+stdout:
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale vi --namespace cli.serve_readiness
+[UTC capture completed 2026-11-16T05:17:32.449305+00:00]
+stdout:
+4330a9220c24d6bfd1d59088d66a89ecd21e1822894c082f6b38227fa6aaf9a0
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/vi/cli.serve_readiness/sd3/ledger-receipt.json --expected-history-sha 4330a9220c24d6bfd1d59088d66a89ecd21e1822894c082f6b38227fa6aaf9a0 --dry-run
+[UTC capture completed 2026-11-16T05:19:00.186747+00:00]
+stdout:
+i18n/audit-history/vi/cli.serve_readiness.json
+
+stderr:
+
+exit_code: 0

@@ -1,0 +1,94 @@
+{
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_date": "2026-11-16T05:18:32.631978+00:00",
+  "key_count": 15,
+  "auditor": {
+    "agent": "Local Operator — independent SECOND i18n auditor, sd4",
+    "session": "85af124f4a9f",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host-provided session runtime model declaration; same resumed independent auditor session.",
+    "fallback": "none observed or reported",
+    "independence": "Not translator 170903662c6e or prior translator acf0a84cd992. No source or translation contribution authored; no first-auditor sd3/sd4 reports consulted. Current source/context/targets independently read before verdict.",
+    "native_speaker_claim": false
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "input_hashes": {
+    "en": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+    "context": "40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428",
+    "target": "68589105a34916a64d5a66028e9f042b7686128a50b851bd88967142c9d7c347"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+    "context": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+    "target": "local_operator/i18n/catalogues/vi/cli.serve_readiness.json"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "deferred_findings": [
+    {
+      "id": "N1",
+      "subject": "preexisting cgroup jargon",
+      "disposition": "retained deferred, unchanged/outside current remediation"
+    }
+  ],
+  "all_keys_audited": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "fresh_semantic_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "retained_byte_identical_keys": [
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.stale"
+  ],
+  "prior_second_pass_record": "i18n/audits/evidence/vi/cli.serve_readiness/sd2r/record.json",
+  "retention_proof": "HEAD entire prior target SHA256 matches sd2r; exactly four current values equal HEAD values.",
+  "artifacts": {
+    "report": "i18n/audits/evidence/vi/cli.serve_readiness/sd4/report.md",
+    "rendered": "i18n/audits/evidence/vi/cli.serve_readiness/sd4/rendered.txt",
+    "delta": "i18n/audits/evidence/vi/cli.serve_readiness/sd4/delta.json",
+    "shared_log": "i18n/audits/evidence/fr/cli.serve_readiness/sd4/audit.log",
+    "input_manifest": "i18n/audits/evidence/fr/cli.serve_readiness/sd4/input-manifest.json",
+    "reproducer": "i18n/audits/evidence/fr/cli.serve_readiness/sd4/catalogue-audit.py.txt"
+  },
+  "validation": {
+    "ordinary_renders": 87,
+    "opaque_pseudo_renders": 87,
+    "composed_samples": 4,
+    "categories": [
+      "other"
+    ],
+    "exit_code": 0
+  },
+  "ledger_history_appended": false,
+  "translation_edits": false
+}

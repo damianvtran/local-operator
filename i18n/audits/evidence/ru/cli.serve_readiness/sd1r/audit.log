@@ -1,0 +1,69 @@
+Actual execution log. Provenance reference: i18n/audits/evidence/ru/cli.serve_readiness/sd1r/record.json
+UTC started: 2026-11-16T04:51:45.678203+00:00
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python i18n/audits/evidence/ru/cli.serve_readiness/sd1r/mechanical.py.txt
+STDOUT:
+PASS unchanged en SHA-256: 6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e
+PASS unchanged context SHA-256: e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693
+PASS exact accepted replacement: cli.serve_readiness.not_reporting
+PASS exact accepted replacement: cli.serve_readiness.cgroup_unknown
+PASS exact accepted replacement: cli.serve_readiness.identity_restart
+PASS reversing only the 3 accepted replacements recreates the exact sd1 target SHA-256; all 8 other keys and formatting unchanged
+Current target SHA-256: 96e894546a1cfee95ea96aabcdefd029af9b3d7fd78a7523bd4143d8edf8d256
+PASS strict JSON, duplicate rejection, exact source/target/context key parity: 11/11
+Note: independent explicit category check supplements repo validator, which rejects invalid categories but need not require every category.
+PASS cli.serve_readiness.unproven: args=(); plural=(); rendered cells=118..118; width hints={}
+PASS cli.serve_readiness.not_reporting: args=(); plural=(); rendered cells=72..72; width hints={}
+PASS cli.serve_readiness.not_this_daemon: args=(); plural=(); rendered cells=64..64; width hints={}
+PASS cli.serve_readiness.unknown_state: args=(); plural=(); rendered cells=39..39; width hints={}
+PASS cli.serve_readiness.install_unknown: args=(); plural=(); rendered cells=58..58; width hints={}
+PASS cli.serve_readiness.cgroup_unknown: args=(); plural=(); rendered cells=59..59; width hints={}
+PASS cli.serve_readiness.recorded_gap: args=(('recorded', 'simple'), ('install', 'simple')); plural=(); rendered cells=93..93; width hints={}
+RENDER cli.serve_readiness.unknown count=1: демон `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+RENDER cli.serve_readiness.unknown count=2: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=5: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=1.5: демоны `lop serve` на node-1: pid 123: зарегистрирован в неизвестном состоянии, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+PASS cli.serve_readiness.unknown: args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=170..172; width hints={}
+RENDER cli.serve_readiness.stale count=1: демон `lop serve` на node-1 (123, 456) использует build-A, но установленная сборка — build-B: размещённые на нём удалённые сессии используют ту другую сборку
+RENDER cli.serve_readiness.stale count=2: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=1.5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+PASS cli.serve_readiness.stale: args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=157..158; width hints={}
+RENDER cli.serve_readiness.other_unit count=1: демон `lop serve` на node-1 находится под управлением другой службы (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=2: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=1.5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+PASS cli.serve_readiness.other_unit: args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')); plural=(('one', 'few', 'many', 'other'),); rendered cells=106..106; width hints={}
+PASS cli.serve_readiness.identity_restart: args=(('device', 'simple'),); plural=(); rendered cells=199..199; width hints={}
+PASS 11/11 mechanical checks; 3 plural messages exercised at 0,1,2,5,11,21,22,25,101,1.5. Plain-text width measurements only, not rendered UI or wrapping proof.
+PASS remediation delta mechanics and retained whole-group mechanics
+
+STDERR:
+
+EXIT_CODE: 0
+
+In-process assertion PASS: all sd1 policy input hashes unchanged.
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ru --namespace cli.serve_readiness
+STDOUT:
+f4c584f306307ea1de39d543ae0323122d26d68e065c4da36d20d156f5af4e89
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/ru/cli.serve_readiness/sd1r/ledger-receipt.json --expected-history-sha f4c584f306307ea1de39d543ae0323122d26d68e065c4da36d20d156f5af4e89 --dry-run
+STDOUT:
+i18n/audit-history/ru/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE: 0

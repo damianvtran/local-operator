@@ -3982,7 +3982,9 @@ def _infra_runner(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["AWS_INSTANCE_TYPE", "OSWORLD_ENABLE_PROXY"])
+@pytest.mark.parametrize(
+    "name", ["AWS_INSTANCE_TYPE", "OSWORLD_ENABLE_PROXY", "EVALUATOR_TOOL_PATH"]
+)
 async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
     tmp_path: Path, episode_id: str, name: str
 ) -> None:
@@ -4149,6 +4151,19 @@ def test_every_disclosed_infra_value_is_gated_and_stamped_from_one_table() -> No
     # silently overwrite the first's disclosure.
     keys = list(DISCLOSED_INFRA_METADATA_KEYS.values())
     assert len(keys) == len(set(keys))
+
+
+def test_a_declared_evaluator_tool_path_is_stamped_as_requested() -> None:
+    """A run that widened its evaluators' tool search path says so, verbatim:
+    the adapter accepts only normalised absolute directories, so the request
+    is the applied list. Unset leaves no key at all."""
+
+    import scripts.run_episode as run_episode
+
+    value = os.pathsep.join(("/opt/tools/bin", "/srv/imaging/bin"))
+    stamped = run_episode._infra_disclosure_metadata([f"EVALUATOR_TOOL_PATH={value}"])
+    assert stamped["evaluator_tool_path"] == value
+    assert "evaluator_tool_path" not in run_episode._infra_disclosure_metadata([])
 
 
 def test_an_undisclosed_infra_value_is_never_stamped() -> None:

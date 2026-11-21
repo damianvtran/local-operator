@@ -3,8 +3,11 @@
 import pytest
 
 from local_operator.compaction.cutpoint import (
+    RELAUNCH_ELISION_NOTE,
+    RELAUNCH_ID_PREFIX,
     _message_tokens,
     advance_cut_to_wire_band,
+    collapse_relaunch_briefs,
     extract_preserved_user_turns,
     find_cut_point,
     prepare_partitions,
@@ -882,3 +885,108 @@ def test_replayed_tail_does_not_spuriously_veto_backward_retention():
     ]
     assert find_cut_point(messages, 300) == 2
     assert_partition_pair_integrity(*prepare_partitions(messages, 2))
+
+
+# ---------------------------------------------------------------------------
+# collapse_relaunch_briefs: one copy of a re-stamped subagent launch brief
+# ---------------------------------------------------------------------------
+
+_BRIEF = "\n".join(
+    ["[team: lopdev]", "You are the coder on this team.", "Rule one: never push to main."]
+    + [f"Standing rule {i}: keep the gate." for i in range(40)]
+)
+
+
+def _launch(job: str, header: str = "", task: str = "Fix the flaky test.") -> dict[str, str]:
+    text = (header + "\n" if header else "") + _BRIEF + "\n" + task
+    return {"id": f"{RELAUNCH_ID_PREFIX}{job}", "text": text}
+
+
+def _text(turn) -> str:
+    """A preserved turn's text as ``str`` (the mapping's values are ``object``)."""
+    return str(turn["text"])
+
+
+def test_relaunch_prefix_matches_the_id_the_harness_mints():
+    """The rule keys on PROVENANCE (the id the harness mints), never on wording.
+
+    Pinned to the one definition rather than imported: ``compaction`` must not
+    import the session package (the session imports ``compaction`` lazily so a
+    missing package degrades to no compaction).
+    """
+    from local_operator.session.frontend_state import LAUNCH_MESSAGE_ID_PREFIX
+
+    assert RELAUNCH_ID_PREFIX == LAUNCH_MESSAGE_ID_PREFIX
+
+
+def test_older_relaunches_keep_only_what_the_latest_brief_does_not_say():
+    """Each resume re-stamps the whole launch brief onto a new user-role turn.
+
+    Measured on the live store: 8 of the 11 sessions whose preserved block
+    exceeded 20k tokens were this shape (one held 39 such turns, 128k tokens,
+    of which 22.5k were distinct), and the block's token cap then evicted nine
+    DISTINCT resume notes to make room for the copies.
+    """
+    first = _launch("a")
+    second = _launch("b", "[resume context — the previous attempt ended: paused. Last step: edit.]")
+    third = _launch(
+        "c", "[resume context — the previous attempt ended: cancelled. Last step: bash.]"
+    )
+    out = collapse_relaunch_briefs([first, second, third])
+
+    assert [t["id"] for t in out] == [first["id"], second["id"], third["id"]]
+    assert out[2] == third, "the newest launch is carried verbatim"
+    assert "previous attempt ended: paused" in _text(out[1])
+    assert "Standing rule 7" not in _text(out[1])
+    assert _text(out[1]).splitlines()[-1] == RELAUNCH_ELISION_NOTE
+    assert _text(out[0]) == RELAUNCH_ELISION_NOTE, "nothing distinct: only the note"
+    # Nothing is lost: every line of every original is in the block somewhere.
+    block = "\n".join(_text(t) for t in out)
+    for original in (first, second, third):
+        for line in _text(original).splitlines():
+            assert line in block
+
+
+def test_a_line_the_latest_brief_dropped_survives_on_the_older_turn():
+    """Line-exact against the NEWEST copy only: a changed instruction is kept."""
+    old = _launch("a", task="Fix the flaky test, and do NOT touch billing.py.")
+    new = _launch("b", task="Fix the flaky test.")
+    out = collapse_relaunch_briefs([old, new])
+    assert "do NOT touch billing.py" in _text(out[0])
+    assert "Standing rule 7" not in _text(out[0])
+    assert out[1] == new
+
+
+def test_operator_turns_and_a_single_launch_are_untouched():
+    """Only turns the harness minted as launches are ever rewritten."""
+    typed = {"id": "0f3c", "text": _BRIEF + "\nFix the flaky test."}
+    again = {"id": "9a1d", "text": _BRIEF + "\nFix the flaky test."}
+    assert collapse_relaunch_briefs([typed, again]) == [typed, again]
+    only = _launch("a")
+    assert collapse_relaunch_briefs([typed, only]) == [typed, only]
+    assert collapse_relaunch_briefs([]) == []
+
+
+def test_collapsing_twice_is_the_same_as_collapsing_once():
+    """A pass re-harvests the block it wrote, so the rewrite must be a fixpoint.
+
+    Two shapes: the same block again, and the block after a NEWER launch has
+    arrived (the previous newest is then reduced; earlier notes are not
+    stacked).
+    """
+    turns = [_launch("a"), _launch("b", "[resume context — one]"), _launch("c", "[resume — two]")]
+    once = collapse_relaunch_briefs(turns)
+    assert collapse_relaunch_briefs(once) == once
+
+    later = collapse_relaunch_briefs([*once, _launch("d", "[resume context — three]")])
+    assert _text(later[-1]).startswith("[resume context — three]")
+    for turn in later[:-1]:
+        assert _text(turn).count(RELAUNCH_ELISION_NOTE) == 1
+    assert "[resume — two]" in _text(later[2])
+    assert "Standing rule 7" not in _text(later[2])
+
+
+def test_extra_keys_on_a_turn_survive_the_rewrite():
+    old = {**_launch("a", "[resume context — one]"), "extra": 7}
+    out = collapse_relaunch_briefs([old, _launch("b")])
+    assert out[0]["extra"] == 7

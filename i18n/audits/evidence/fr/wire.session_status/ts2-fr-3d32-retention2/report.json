@@ -1,0 +1,947 @@
+{
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "pass": "SECOND independent full pass",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-fr-zh-second-audit",
+    "session": "3d32baae3ed6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session Model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "independent_from_translator_session": "a14cc322d1da",
+    "independent_from_translator": true,
+    "independent_from_first_auditor_session": "4730cb4c2fb8",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/a14cc322d1da/scratchpad/wire.session_status.fr.json",
+      "sha256": "1b48011bda6364f5091c78e236020980018fa15934ff9424feca4280f5a9429d"
+    }
+  },
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "per_key_and_branch_report": [
+    {
+      "key": "wire.session_status.retired_label",
+      "source": "{base} — retired for an update",
+      "current_text": "{base} — retiré pour une mise à jour",
+      "branches": [
+        {
+          "params": {
+            "base": "BASE_STATUS"
+          },
+          "output": "BASE_STATUS — retiré pour une mise à jour",
+          "cells": 41,
+          "chars": 41,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Legacy unchanged key: base argument remains opaque, suffix preserves update agency; not used by the new formatter. No new base-label grammar policy inferred.",
+      "context": {
+        "role": "Sidebar/picker row status label (a plain-text suffix) for a session whose turn was cut by a build update",
+        "tone": "terse status label with cause",
+        "note": "EN-only context sidecar. {base} is the row's ALREADY-composed status word (currently `Interrupted`), inserted verbatim; the suffix after the em dash names the cause (the app retired the turn to update; the operator did not stop it). One logical line: keep the cause short."
+      }
+    },
+    {
+      "key": "wire.session_status.interrupted",
+      "source": "Interrupted",
+      "current_text": "Interrompue",
+      "branches": [
+        {
+          "params": {},
+          "output": "Interrompue",
+          "cells": 11,
+          "chars": 11,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Session interruption, not completion or deletion; terse status.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_interruption",
+      "source": "Unseen interruption",
+      "current_text": "Interruption non lue",
+      "branches": [
+        {
+          "params": {},
+          "output": "Interruption non lue",
+          "cells": 20,
+          "chars": 20,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread state qualifies interruption and does not imply a new failure.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.retired",
+      "source": "Interrupted — retired for an update",
+      "current_text": "Interrompue — retirée pour une mise à jour",
+      "branches": [
+        {
+          "params": {},
+          "output": "Interrompue — retirée pour une mise à jour",
+          "cells": 42,
+          "chars": 42,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Interruption specifically for an update, not operator action.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_retirement",
+      "source": "Unseen interruption — retired for an update",
+      "current_text": "Interruption non lue — retirée pour une mise à jour",
+      "branches": [
+        {
+          "params": {},
+          "output": "Interruption non lue — retirée pour une mise à jour",
+          "cells": 51,
+          "chars": 51,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread marker and update-specific interruption both retained.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Runtime retired for a build update, NOT an operator stop. Keep update agency explicit."
+      }
+    },
+    {
+      "key": "wire.session_status.signal_stop",
+      "source": "Interrupted — stopped with a signal{command, select, none {} other { by {command}}}",
+      "current_text": "Interrompue — arrêtée par un signal{command, select, none {} other { via {command}}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "Interrompue — arrêtée par un signal",
+          "cells": 35,
+          "chars": 35,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "Interrompue — arrêtée par un signal via /stop --all",
+          "cells": 51,
+          "chars": 51,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "Interrompue — arrêtée par un signal via lop sessions stop abc --force",
+          "cells": 69,
+          "chars": 69,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Signal stop distinct from forced kill; none branch has no attribution; other branches preserve exact command bytes.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_signal_stop",
+      "source": "Unseen interruption — stopped with a signal{command, select, none {} other { by {command}}}",
+      "current_text": "Interruption non lue — arrêtée par un signal{command, select, none {} other { via {command}}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "Interruption non lue — arrêtée par un signal",
+          "cells": 44,
+          "chars": 44,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "Interruption non lue — arrêtée par un signal via /stop --all",
+          "cells": 60,
+          "chars": 60,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "Interruption non lue — arrêtée par un signal via lop sessions stop abc --force",
+          "cells": 78,
+          "chars": 78,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread marker retained independently from signal-stop outcome; none omits attribution; commands unchanged.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.forced_kill",
+      "source": "Interrupted — killed{command, select, none {} other { by {command}}}",
+      "current_text": "Interrompue — arrêt forcé{command, select, none {} other { via {command}}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "Interrompue — arrêt forcé",
+          "cells": 25,
+          "chars": 25,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "Interrompue — arrêt forcé via /stop --all",
+          "cells": 41,
+          "chars": 41,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "Interrompue — arrêt forcé via lop sessions stop abc --force",
+          "cells": 59,
+          "chars": 59,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Forced termination distinct from signal stop; none omits attribution; commands unchanged.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_forced_kill",
+      "source": "Unseen interruption — killed{command, select, none {} other { by {command}}}",
+      "current_text": "Interruption non lue — arrêt forcé{command, select, none {} other { via {command}}}",
+      "branches": [
+        {
+          "params": {
+            "command": "none"
+          },
+          "output": "Interruption non lue — arrêt forcé",
+          "cells": 34,
+          "chars": 34,
+          "verdict": "passed",
+          "semantic_judgment": "No attribution and no literal none leaked."
+        },
+        {
+          "params": {
+            "command": "/stop --all"
+          },
+          "output": "Interruption non lue — arrêt forcé via /stop --all",
+          "cells": 50,
+          "chars": 50,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        },
+        {
+          "params": {
+            "command": "lop sessions stop abc --force"
+          },
+          "output": "Interruption non lue — arrêt forcé via lop sessions stop abc --force",
+          "cells": 68,
+          "chars": 68,
+          "verdict": "passed",
+          "semantic_judgment": "Technical command string remains byte-identical; surrounding attribution is localized."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread marker independent from forced-termination outcome; none omits attribution; commands unchanged.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {command} is the exact technical stop command (e.g. /stop --all), or sentinel none when unknown; select none omits attribution. Translate the complete connector, not command bytes."
+      }
+    },
+    {
+      "key": "wire.session_status.complete",
+      "source": "Complete",
+      "current_text": "Terminée",
+      "branches": [
+        {
+          "params": {},
+          "output": "Terminée",
+          "cells": 8,
+          "chars": 8,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Completion state, without implying read status.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_completion",
+      "source": "Unseen completion",
+      "current_text": "Fin de session non lue",
+      "branches": [
+        {
+          "params": {},
+          "output": "Fin de session non lue",
+          "cells": 22,
+          "chars": 22,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Completion and unread state independently conveyed.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.recent",
+      "source": "Recent",
+      "current_text": "Récente",
+      "branches": [
+        {
+          "params": {},
+          "output": "Récente",
+          "cells": 7,
+          "chars": 7,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Recent session activity status; natural locale phrasing.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic."
+      }
+    },
+    {
+      "key": "wire.session_status.dormant",
+      "source": "Stopped ({count, plural, one {# wake dormant} other {# wakes dormant}})",
+      "current_text": "Arrêtée ({count, plural, one {# réveil en sommeil} many {# de réveils en sommeil} other {# réveils en sommeil}})",
+      "branches": [
+        {
+          "params": {
+            "count": 0
+          },
+          "category": "one",
+          "output": "Arrêtée (0 réveil en sommeil)",
+          "cells": 29,
+          "chars": 29,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1
+          },
+          "category": "one",
+          "output": "Arrêtée (1 réveil en sommeil)",
+          "cells": 29,
+          "chars": 29,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 2
+          },
+          "category": "other",
+          "output": "Arrêtée (2 réveils en sommeil)",
+          "cells": 30,
+          "chars": 30,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 5
+          },
+          "category": "other",
+          "output": "Arrêtée (5 réveils en sommeil)",
+          "cells": 30,
+          "chars": 30,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 21
+          },
+          "category": "other",
+          "output": "Arrêtée (21 réveils en sommeil)",
+          "cells": 31,
+          "chars": 31,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 55
+          },
+          "category": "other",
+          "output": "Arrêtée (55 réveils en sommeil)",
+          "cells": 31,
+          "chars": 31,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1000000
+          },
+          "category": "many",
+          "output": "Arrêtée (1 000 000 de réveils en sommeil)",
+          "cells": 41,
+          "chars": 41,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1500000
+          },
+          "category": "other",
+          "output": "Arrêtée (1 500 000 réveils en sommeil)",
+          "cells": 38,
+          "chars": 38,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1000000000000
+          },
+          "category": "many",
+          "output": "Arrêtée (1 000 000 000 000 de réveils en sommeil)",
+          "cells": 49,
+          "chars": 49,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 0.5
+          },
+          "category": "one",
+          "output": "Arrêtée (0,5 réveil en sommeil)",
+          "cells": 31,
+          "chars": 31,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 1.5
+          },
+          "category": "one",
+          "output": "Arrêtée (1,5 réveil en sommeil)",
+          "cells": 31,
+          "chars": 31,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        },
+        {
+          "params": {
+            "count": 2.5
+          },
+          "category": "other",
+          "output": "Arrêtée (2,5 réveils en sommeil)",
+          "cells": 32,
+          "chars": 32,
+          "verdict": "passed",
+          "semantic_judgment": "Correct CLDR category, numeral formatting and noun agreement; dormant meaning retained."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Stopped plus dormant wakes, not cancelled or scheduled to fire. Glossary wake term and count retained. All locale CLDR categories explicitly present. Fraction probes are formatter robustness samples, not a claim that fractional wakes are real domain input.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {count} is the number of armed wakes made dormant by stopping; use locale plural rules. Not cancelled or scheduled to fire."
+      }
+    },
+    {
+      "key": "wire.session_status.error",
+      "source": "Error",
+      "current_text": "Erreur",
+      "branches": [
+        {
+          "params": {},
+          "output": "Erreur",
+          "cells": 6,
+          "chars": 6,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Generic error without inventing diagnostic information.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_error",
+      "source": "Unseen error",
+      "current_text": "Erreur non lue",
+      "branches": [
+        {
+          "params": {},
+          "output": "Erreur non lue",
+          "cells": 14,
+          "chars": 14,
+          "verdict": "passed"
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Unread state independent from error outcome.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. Used only when no diagnostic is present. An unknown nonempty external diagnostic retains the legacy English label outside this namespace so its only desktop detail is not lost."
+      }
+    },
+    {
+      "key": "wire.session_status.error_cause",
+      "source": "{cause, select, user_stop {Error — stopped by the user} runtime_stall_bound {Error — runtime ended itself after its stall bound} continuation_limit {Error — continuation limit reached; pending message dropped} output_limit {Error — model output limit reached; could not continue} runtime_retired {Error — retired for an update} runtime_shutdown {Error — runtime terminated during the turn} runtime_overdue {Error — runtime left for an update after its progress bound} runtime_update_failed {Error — update did not finish; runtime kept its loaded build} runtime_killed {Error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Error — install replaced during the turn} owner_lost {Error — runtime stopped answering during the turn} disposed {Error — session disposed during the turn} other {Error}}",
+      "current_text": "{cause, select, user_stop {Erreur — arrêtée par l’utilisateur} runtime_stall_bound {Erreur — le runtime s’est arrêté de lui-même après le délai maximal sans progression} continuation_limit {Erreur — limite de continuation atteinte ; message en attente abandonné} output_limit {Erreur — limite de sortie du modèle atteinte ; impossible de continuer} runtime_retired {Erreur — retirée pour une mise à jour} runtime_shutdown {Erreur — runtime arrêté pendant le tour} runtime_overdue {Erreur — runtime arrêté pour une mise à jour après le délai maximal sans progression} runtime_update_failed {Erreur — mise à jour inachevée ; le runtime a conservé sa version chargée} runtime_killed {Erreur — runtime disparu sans arrêt normal ; aucun arrêt demandé} install_mid_update {Erreur — installation remplacée pendant le tour} owner_lost {Erreur — le runtime ne répondait plus pendant le tour} disposed {Erreur — session fermée pendant le tour} other {Erreur}}",
+      "branches": [
+        {
+          "params": {
+            "cause": "user_stop"
+          },
+          "output": "Erreur — arrêtée par l’utilisateur",
+          "cells": 34,
+          "chars": 34,
+          "verdict": "passed",
+          "semantic_judgment": "Explicit user agency, unlike update retirement."
+        },
+        {
+          "params": {
+            "cause": "runtime_stall_bound"
+          },
+          "output": "Erreur — le runtime s’est arrêté de lui-même après le délai maximal sans progression",
+          "cells": 84,
+          "chars": 84,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime ends itself after its no-progress/stall bound, not a user kill."
+        },
+        {
+          "params": {
+            "cause": "continuation_limit"
+          },
+          "output": "Erreur — limite de continuation atteinte ; message en attente abandonné",
+          "cells": 71,
+          "chars": 71,
+          "verdict": "passed",
+          "semantic_judgment": "Continuation limit AND dropped pending message both stated."
+        },
+        {
+          "params": {
+            "cause": "output_limit"
+          },
+          "output": "Erreur — limite de sortie du modèle atteinte ; impossible de continuer",
+          "cells": 70,
+          "chars": 70,
+          "verdict": "passed",
+          "semantic_judgment": "Model output limit AND inability to continue both stated."
+        },
+        {
+          "params": {
+            "cause": "runtime_retired"
+          },
+          "output": "Erreur — retirée pour une mise à jour",
+          "cells": 37,
+          "chars": 37,
+          "verdict": "passed",
+          "semantic_judgment": "Update-specific retirement; does not blame operator."
+        },
+        {
+          "params": {
+            "cause": "runtime_shutdown"
+          },
+          "output": "Erreur — runtime arrêté pendant le tour",
+          "cells": 39,
+          "chars": 39,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime termination during the turn; no unsupported shutdown reason added."
+        },
+        {
+          "params": {
+            "cause": "runtime_overdue"
+          },
+          "output": "Erreur — runtime arrêté pour une mise à jour après le délai maximal sans progression",
+          "cells": 84,
+          "chars": 84,
+          "verdict": "passed",
+          "semantic_judgment": "Departure for update after the progress allowance/bound, distinct from generic stall self-termination by update purpose."
+        },
+        {
+          "params": {
+            "cause": "runtime_update_failed"
+          },
+          "output": "Erreur — mise à jour inachevée ; le runtime a conservé sa version chargée",
+          "cells": 73,
+          "chars": 73,
+          "verdict": "passed",
+          "semantic_judgment": "Update incomplete; still-loaded old build retained. No false successful-update claim."
+        },
+        {
+          "params": {
+            "cause": "runtime_killed"
+          },
+          "output": "Erreur — runtime disparu sans arrêt normal ; aucun arrêt demandé",
+          "cells": 64,
+          "chars": 64,
+          "verdict": "passed",
+          "semantic_judgment": "Disappearance without clean exit AND no stop request both retained; not falsely attributed to user."
+        },
+        {
+          "params": {
+            "cause": "install_mid_update"
+          },
+          "output": "Erreur — installation remplacée pendant le tour",
+          "cells": 47,
+          "chars": 47,
+          "verdict": "passed",
+          "semantic_judgment": "Install replaced during the turn, not deletion of session history."
+        },
+        {
+          "params": {
+            "cause": "owner_lost"
+          },
+          "output": "Erreur — le runtime ne répondait plus pendant le tour",
+          "cells": 53,
+          "chars": 53,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime stopped answering during the turn, not necessarily a kill."
+        },
+        {
+          "params": {
+            "cause": "disposed"
+          },
+          "output": "Erreur — session fermée pendant le tour",
+          "cells": 39,
+          "chars": 39,
+          "verdict": "passed",
+          "semantic_judgment": "Session resource disposed/closed during turn; neither locale asserts history deleted."
+        },
+        {
+          "params": {
+            "cause": "other"
+          },
+          "output": "Erreur",
+          "cells": 6,
+          "chars": 6,
+          "verdict": "passed",
+          "semantic_judgment": "Generic localized error only."
+        },
+        {
+          "params": {
+            "cause": "unknown_future_cause"
+          },
+          "output": "Erreur",
+          "cells": 6,
+          "chars": 6,
+          "verdict": "passed",
+          "semantic_judgment": "Unknown cause selects generic other; this synthetic formatter fallback does not claim localization of the separate intentionally unresolved external-diagnostic legacy path."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Every stable cause arm retained with generic other fallback. See branch-level semantic judgments.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+      }
+    },
+    {
+      "key": "wire.session_status.unseen_error_cause",
+      "source": "{cause, select, user_stop {Unseen error — stopped by the user} runtime_stall_bound {Unseen error — runtime ended itself after its stall bound} continuation_limit {Unseen error — continuation limit reached; pending message dropped} output_limit {Unseen error — model output limit reached; could not continue} runtime_retired {Unseen error — retired for an update} runtime_shutdown {Unseen error — runtime terminated during the turn} runtime_overdue {Unseen error — runtime left for an update after its progress bound} runtime_update_failed {Unseen error — update did not finish; runtime kept its loaded build} runtime_killed {Unseen error — runtime disappeared without a clean exit; no stop requested} install_mid_update {Unseen error — install replaced during the turn} owner_lost {Unseen error — runtime stopped answering during the turn} disposed {Unseen error — session disposed during the turn} other {Unseen error}}",
+      "current_text": "{cause, select, user_stop {Erreur non lue — arrêtée par l’utilisateur} runtime_stall_bound {Erreur non lue — le runtime s’est arrêté de lui-même après le délai maximal sans progression} continuation_limit {Erreur non lue — limite de continuation atteinte ; message en attente abandonné} output_limit {Erreur non lue — limite de sortie du modèle atteinte ; impossible de continuer} runtime_retired {Erreur non lue — retirée pour une mise à jour} runtime_shutdown {Erreur non lue — runtime arrêté pendant le tour} runtime_overdue {Erreur non lue — runtime arrêté pour une mise à jour après le délai maximal sans progression} runtime_update_failed {Erreur non lue — mise à jour inachevée ; le runtime a conservé sa version chargée} runtime_killed {Erreur non lue — runtime disparu sans arrêt normal ; aucun arrêt demandé} install_mid_update {Erreur non lue — installation remplacée pendant le tour} owner_lost {Erreur non lue — le runtime ne répondait plus pendant le tour} disposed {Erreur non lue — session fermée pendant le tour} other {Erreur non lue}}",
+      "branches": [
+        {
+          "params": {
+            "cause": "user_stop"
+          },
+          "output": "Erreur non lue — arrêtée par l’utilisateur",
+          "cells": 42,
+          "chars": 42,
+          "verdict": "passed",
+          "semantic_judgment": "Explicit user agency, unlike update retirement."
+        },
+        {
+          "params": {
+            "cause": "runtime_stall_bound"
+          },
+          "output": "Erreur non lue — le runtime s’est arrêté de lui-même après le délai maximal sans progression",
+          "cells": 92,
+          "chars": 92,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime ends itself after its no-progress/stall bound, not a user kill."
+        },
+        {
+          "params": {
+            "cause": "continuation_limit"
+          },
+          "output": "Erreur non lue — limite de continuation atteinte ; message en attente abandonné",
+          "cells": 79,
+          "chars": 79,
+          "verdict": "passed",
+          "semantic_judgment": "Continuation limit AND dropped pending message both stated."
+        },
+        {
+          "params": {
+            "cause": "output_limit"
+          },
+          "output": "Erreur non lue — limite de sortie du modèle atteinte ; impossible de continuer",
+          "cells": 78,
+          "chars": 78,
+          "verdict": "passed",
+          "semantic_judgment": "Model output limit AND inability to continue both stated."
+        },
+        {
+          "params": {
+            "cause": "runtime_retired"
+          },
+          "output": "Erreur non lue — retirée pour une mise à jour",
+          "cells": 45,
+          "chars": 45,
+          "verdict": "passed",
+          "semantic_judgment": "Update-specific retirement; does not blame operator."
+        },
+        {
+          "params": {
+            "cause": "runtime_shutdown"
+          },
+          "output": "Erreur non lue — runtime arrêté pendant le tour",
+          "cells": 47,
+          "chars": 47,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime termination during the turn; no unsupported shutdown reason added."
+        },
+        {
+          "params": {
+            "cause": "runtime_overdue"
+          },
+          "output": "Erreur non lue — runtime arrêté pour une mise à jour après le délai maximal sans progression",
+          "cells": 92,
+          "chars": 92,
+          "verdict": "passed",
+          "semantic_judgment": "Departure for update after the progress allowance/bound, distinct from generic stall self-termination by update purpose."
+        },
+        {
+          "params": {
+            "cause": "runtime_update_failed"
+          },
+          "output": "Erreur non lue — mise à jour inachevée ; le runtime a conservé sa version chargée",
+          "cells": 81,
+          "chars": 81,
+          "verdict": "passed",
+          "semantic_judgment": "Update incomplete; still-loaded old build retained. No false successful-update claim."
+        },
+        {
+          "params": {
+            "cause": "runtime_killed"
+          },
+          "output": "Erreur non lue — runtime disparu sans arrêt normal ; aucun arrêt demandé",
+          "cells": 72,
+          "chars": 72,
+          "verdict": "passed",
+          "semantic_judgment": "Disappearance without clean exit AND no stop request both retained; not falsely attributed to user."
+        },
+        {
+          "params": {
+            "cause": "install_mid_update"
+          },
+          "output": "Erreur non lue — installation remplacée pendant le tour",
+          "cells": 55,
+          "chars": 55,
+          "verdict": "passed",
+          "semantic_judgment": "Install replaced during the turn, not deletion of session history."
+        },
+        {
+          "params": {
+            "cause": "owner_lost"
+          },
+          "output": "Erreur non lue — le runtime ne répondait plus pendant le tour",
+          "cells": 61,
+          "chars": 61,
+          "verdict": "passed",
+          "semantic_judgment": "Runtime stopped answering during the turn, not necessarily a kill."
+        },
+        {
+          "params": {
+            "cause": "disposed"
+          },
+          "output": "Erreur non lue — session fermée pendant le tour",
+          "cells": 47,
+          "chars": 47,
+          "verdict": "passed",
+          "semantic_judgment": "Session resource disposed/closed during turn; neither locale asserts history deleted."
+        },
+        {
+          "params": {
+            "cause": "other"
+          },
+          "output": "Erreur non lue",
+          "cells": 14,
+          "chars": 14,
+          "verdict": "passed",
+          "semantic_judgment": "Generic localized error only."
+        },
+        {
+          "params": {
+            "cause": "unknown_future_cause"
+          },
+          "output": "Erreur non lue",
+          "cells": 14,
+          "chars": 14,
+          "verdict": "passed",
+          "semantic_judgment": "Unknown cause selects generic other; this synthetic formatter fallback does not claim localization of the separate intentionally unresolved external-diagnostic legacy path."
+        }
+      ],
+      "verdict": "passed",
+      "semantic_judgment": "Every stable cause arm retained with generic other fallback; unread qualifier preserved in every branch. See branch-level semantic judgments.",
+      "context": {
+        "role": "Sidebar/picker terminal status label",
+        "tone": "terse, factual",
+        "note": "Complete backend-composed sidebar/picker terminal status; rendered verbatim in desktop feed and TUI. One logical line, no fixed cell cap. Unseen means not yet read, not a new failure. Never insert an English base label or stored diagnostic. {cause} is a semantic harness-cause code, never prose; preserve every select arm. These short summaries omit forensic detail retained in the raw completion record/CLI JSON. Unknown provider diagnostics retain the complete legacy English label and diagnostic outside this namespace; that unresolved programme path is not claimed localized."
+      }
+    }
+  ],
+  "scoped_validator": {
+    "entrypoint": "scripts.i18n.check.check_catalogues()",
+    "isolation": "unittest.mock.patch catalogues.catalogue_root to scratch fixture containing ONLY en/fr/zh-CN wire.session_status, exact candidate content; no production generated assets or repo writes",
+    "normal_admission_problems": [],
+    "negative_controls": {
+      "missing_key": {
+        "rejected": true,
+        "actual_output": [
+          "fr/wire.session_status: missing key 'wire.session_status.complete'"
+        ]
+      },
+      "wrong_placeholder": {
+        "rejected": true,
+        "actual_output": [
+          "fr/wire.session_status: wire.session_status.retired_label: arguments (('wrong', 'simple'),) != en's (('base', 'simple'),): argument 1 is 'wrong', en's is 'base' (renamed or reordered)"
+        ]
+      },
+      "broken_icu": {
+        "rejected": true,
+        "actual_output": [
+          "fr/wire.session_status: wire.session_status.dormant: expected a word (at offset 110 of 'Arrêtée ({count, plural, one {# réveil en sommeil} many {# de réveils en sommeil} other {# réveils en sommeil}')"
+        ]
+      },
+      "invalid_locale_category": {
+        "rejected": true,
+        "actual_output": [
+          "fr/wire.session_status: wire.session_status.dormant: plural category 'few' not in ['many', 'one', 'other']"
+        ]
+      },
+      "missing_required_many": {
+        "rejected": false,
+        "actual_output": [],
+        "interpretation": "Known validator gap: legal category check does not require all categories for ordinary plurals; actual target has one/many/other."
+      }
+    }
+  },
+  "fit": {
+    "fixed_budget": "No maxCells/maxChars in any of the 17 context entries; one logical line. No overflow finding inferred without layout constraint.",
+    "max_sample_cells": 92,
+    "max_sample_chars": 92,
+    "max_sample": "Erreur non lue — le runtime s’est arrêté de lui-même après le délai maximal sans progression",
+    "width_method": "rich.cells.cell_len on every formatter sample",
+    "visual_validation": false
+  },
+  "idiom_register_terminology": "Feminine session agreement; concise product statuses; runtime kept English as required; réveil/session glossary terms; typographic apostrophes and U+202F before prose semicolons preserved.",
+  "scope_exclusions": [
+    "No visual/runtime-app/pseudo/shaping proof; formatter-only samples.",
+    "Existing retired_label unchanged and unused by new formatter.",
+    "Unknown nonempty external diagnostic legacy English remains intentionally UNRESOLVED outside this namespace.",
+    "No translation service, SDK or machine back-translation used.",
+    "No repository files edited or history applied."
+  ],
+  "first_receipt_crosscheck": {
+    "path": "/Users/damian/.local-operator/sessions/4730cb4c2fb8/scratchpad/first-receipt.fr.json",
+    "sha256": "c692ae7a5a699e4d808791efb0a5bce685d2b2c9fe3b9aff595571caff4a9cf9",
+    "all_three_hashes_match": true,
+    "first_auditor_session": "4730cb4c2fb8",
+    "ordering": "Read full source/context/targets, independently decided clean, executed scoped admission/branches, then read first receipts and compared hashes."
+  },
+  "execution_log": "/Users/damian/.local-operator/sessions/3d32baae3ed6/scratchpad/audit.log",
+  "log_disclosure": "Actual log retains initial probe ImportError and a negative-fixture mistake (removed punctuation rather than ICU brace); corrected probe then exited 0. Neither initial error was a target defect.",
+  "retention": "SCRATCH candidate only, prepared for manager-owned tracked retention at i18n/audits/evidence/fr/wire.session_status/ts2-fr-3d32; not claimed present on main."
+}

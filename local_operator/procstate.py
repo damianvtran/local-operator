@@ -854,6 +854,77 @@ def birth_token(pid: int) -> str | None:
     return None if sample is None else sample.birth
 
 
+def start_epochs(pids: Iterable[int]) -> dict[int, float | None]:
+    """Wall-clock start time (epoch seconds) of each live pid, from ONE probe.
+
+    WHY A SECOND READING OF THE BIRTH TOKEN EXISTS. Every other caller compares a
+    token with another token of the same process, which is why the token stays
+    opaque. A cache sweeper has no recorded token: all it has is a FILE a writer
+    left behind, named after that writer's pid, and the file's mtime. The writer
+    started before it created the file, so a process now holding that pid whose
+    start is LATER than the file's mtime is a stranger — the writer died and its
+    pid was reused. That comparison needs a wall-clock start, so the conversion
+    lives HERE, beside the platform probe that produced the token, rather than in
+    a caller that would have to parse another module's opaque format.
+
+    Keyed by every pid the probe SAMPLED (zombies included — this answers "when",
+    not "alive"); ``None`` when a sampled start could not be converted. Absent
+    pids were not sampled (exited, Windows, ``ps`` failure): callers MUST read
+    absence and ``None`` as doubt, never as death.
+    Resolution is one second on macOS (``lstart``) and one clock tick on Linux.
+    """
+    import calendar
+
+    samples = process_samples(pids)
+    if not samples:
+        return {}
+    scheme = birth_scheme()
+    boot: float | None = None
+    ticks = 0
+    if scheme == BIRTH_SCHEME_PROC_STARTTIME:
+        try:
+            for line in Path("/proc/stat").read_text().splitlines():
+                if line.startswith("btime "):
+                    boot = float(line.split()[1])
+                    break
+            ticks = int(os.sysconf("SC_CLK_TCK"))
+        except (OSError, ValueError, IndexError):
+            boot = None
+    out: dict[int, float | None] = {}
+    for pid, sample in samples.items():
+        token = sample.birth
+        epoch: float | None = None
+        try:
+            if token and scheme == BIRTH_SCHEME_PROC_STARTTIME and boot is not None and ticks:
+                epoch = boot + int(token) / ticks
+            elif token and scheme == BIRTH_SCHEME_PS_LSTART:
+                # The collapsed C-locale, UTC form `_ps_samples`/`_lstart_token`
+                # store ("Thu Nov 20 09:14:03 2026"). Parsed with this module's own
+                # name tables, never `time.strptime`, whose %a/%b follow the
+                # PROCESS locale — the drift `_PS_PINNED_ENV` exists to rule out.
+                _day, month, mday, clock, year = token.split()
+                hour, minute, second = (int(part) for part in clock.split(":"))
+                epoch = float(
+                    calendar.timegm(
+                        (
+                            int(year),
+                            _LSTART_MONTHS.index(month) + 1,
+                            int(mday),
+                            hour,
+                            minute,
+                            second,
+                            0,
+                            0,
+                            0,
+                        )
+                    )
+                )
+        except (ValueError, IndexError):
+            epoch = None
+        out[pid] = epoch
+    return out
+
+
 #: ``pid -> token`` for THIS process. The token is fixed at process creation and
 #: cannot change while the process lives, so one probe answers every later
 #: question — but it is keyed by pid and re-sampled if that ever differs, so a

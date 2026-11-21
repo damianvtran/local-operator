@@ -64,6 +64,12 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # workloads"; also served by the live /v1/models listing under a Claude
     # Pro/Max OAuth grant, so the subscription route can use it too.
     "anthropic": SuggestedModel("claude-opus-5-5", "Claude Opus 5.5"),
+    # Bedrock: the same model through the GLOBAL cross-Region inference
+    # profile — first-party price (regional/geo ids cost 1.10x, AWS Price
+    # List 2026-11-18) and callable from every commercial source Region.
+    # Bedrock prompt-caching docs list ``anthropic.claude-opus-5-5`` (read
+    # 2026-11-18). A worker that needs data residency picks ``us.``/``eu.``.
+    "bedrock": SuggestedModel("global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Bedrock)"),
     # developers.openai.com/api/docs/models/gpt-6-astra: "our most capable
     # model". The ChatGPT-subscription (Codex) route serves the same id, which is
     # what scripts/bench_openai_oauth_cache.py drives over OAuth.
@@ -90,6 +96,10 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # agents". Chosen over a Pro model at the operator's direction: it is the
     # model an agent harness should start on for price/latency.
     "google": SuggestedModel("gemini-3.8-flash", "Gemini 3.8 Flash"),
+    # Vertex AI serves the same Gemini publisher model ids as Google AI Studio.
+    # The name carries the ``Vertex `` prefix its static picker row carries
+    # (model/registry.py), so "Default model set to <name>" matches the picker.
+    "google-vertex": SuggestedModel("gemini-3.8-flash", "Vertex Gemini 3.8 Flash"),
     # The API-key host (api.moonshot.cn) spells Kimi K3 ``kimi-k3`` (models.dev,
     # OpenRouter's moonshotai/kimi-k3). An OAuth sign-in reaches the coding-plan
     # host instead, which spells it ``k3`` -- see OAUTH_SUGGESTED_MODELS.

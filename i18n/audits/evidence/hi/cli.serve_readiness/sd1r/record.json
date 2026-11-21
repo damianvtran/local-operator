@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1r",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Current host session-state names openai/gpt-6.1-sol; same auditor session resumed for delta audit; no provider fallback indicated.",
+    "fallback": {
+      "observed": false,
+      "requested_model": null,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "translator": {
+    "agent": "task acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Task assignment from requesting session; auditor did not independently inspect translator runtime."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/cli.serve_readiness.json",
+      "sha256": "c83b91c4e5297457edb1d1f281af71c80acac1b27f9953733bdcbe004e8bea9b"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/report.md",
+      "sha256": "f5b45ebeae48bc5f3e7fdebfda8ea23397e825f3ddea8f320bff4ed9033e4bb2"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/audit.log",
+      "sha256": "d947b9d846d20c8c696fc9d336162ebd77b9b66fc9dc90e4c2b085742c5728e5"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/receipt.json",
+      "sha256": "b6fe3da42b9c3d7a61d60d1552847660edd6e5854c0f91e0bc72684c603075db"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/ledger-receipt.json",
+      "sha256": "fa26df9dd459e598134468a0f8eb52e0c4cbf9d006ce0bd440b2781c7f264f02"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "fixed_finding_ids": [
+      "HI-SD1-01"
+    ],
+    "report_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/report.md",
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "finding_resolutions": [
+    {
+      "finding_id": "HI-SD1-01",
+      "status": "fixed",
+      "key": "cli.serve_readiness.cgroup_unknown",
+      "exact_suggested_replacement_applied": true
+    }
+  ],
+  "retained_coverage": {
+    "record": {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/record.json",
+      "sha256": "dbdea45ca3836541862d38d60f83ea9601cb787b177d7f9790782aab573cd813"
+    },
+    "report": {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/report.md",
+      "sha256": "71588dd2647a40ea08bec4b29a9d9eb99967dadc66efd106f9a91668c0595c8b"
+    },
+    "initial_key_count": 11,
+    "unchanged_key_count": 10,
+    "unchanged_key_proof": "Replacing only the exact new cgroup_unknown phrase with the sd1 old phrase in memory restores entire original target byte SHA-256. No disk changes to catalogue.",
+    "original_target_sha256": "44980d359b70259062ec915d495235869e62996247beaa7e851e05b8a65ab439",
+    "english_context_glossary_and_style_unchanged": true,
+    "fresh_semantic_keys": [
+      "cli.serve_readiness.cgroup_unknown",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.other_unit",
+      "cli.serve_readiness.install_unknown",
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.identity_restart"
+    ],
+    "remaining_semantic_keys_retained_without_new_full_audit": [
+      "cli.serve_readiness.not_reporting",
+      "cli.serve_readiness.not_this_daemon",
+      "cli.serve_readiness.unknown_state",
+      "cli.serve_readiness.stale"
+    ]
+  },
+  "reference_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    }
+  ],
+  "validation": {
+    "catalogues_only_exit_code": 0,
+    "catalogues_problem_count": 0,
+    "independent_structural_verification_exit_code": 0,
+    "all_11_key_structures_checked": true,
+    "hi_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "neighbor_render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "changed_text_chars": 68,
+    "changed_text_rich_cells": 49,
+    "maxCells_or_maxChars_hints_present": false,
+    "rendered_frame_evidence": false,
+    "mt_service_used": false,
+    "second_independently_staffed_pass_claimed": false,
+    "rtl": "not applicable: Hindi LTR"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "evidence_classification": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "receipt.json": "companion hash receipt with explicit record reference",
+    "ledger-receipt.json": "proposed passing ledger append receipt; dry-run only"
+  },
+  "ledger": {
+    "receipt_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/ledger-receipt.json",
+    "note": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/record.json; HI-SD1-01 fixed; cgroup classification wording verified; sd1 unchanged 10-key coverage retained; 0 open blocker/major.",
+    "note_characters": 180,
+    "append_dry_run_exit_code": 0,
+    "expected_history_sha256": "f9940bcdee0c1ada942b6eaadefa5bdf740518393f930cf44ec55b2d53ef7ccd",
+    "applied": false,
+    "parent_appends_history": true
+  },
+  "retention": {
+    "canonical_root": "i18n/audits/evidence",
+    "repo_only_not_shipped": true,
+    "preserved_initial_record": "i18n/audits/evidence/hi/cli.serve_readiness/sd1/record.json",
+    "no_commit_by_auditor": true,
+    "tracking_at_handoff": "New repo evidence; parent must add/commit. No assertion of merge/main inclusion."
+  },
+  "limitations": [
+    "Delta audit plus retained initial all-key coverage, not a new second auditor.",
+    "No heavy tests, installs, live providers, service actions, or physical rendered frames."
+  ]
+}

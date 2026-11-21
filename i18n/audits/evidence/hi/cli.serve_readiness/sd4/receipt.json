@@ -1,0 +1,14 @@
+{
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd4",
+  "sha256": {
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd4/record.json": "3fe642b9a3703de938aa9a01357d056346332cddfe0aeca99c040b6686253413",
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd4/report.md": "244f3e7cedf334377da8d071c52d1f0658c4fce9463f6a5f2c11ad8410c2e49e",
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd4/rendered.txt": "ff63a0d53b56b548bcc9ce6e70d635b39db7737349c54358f2d0cf4335be69df",
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd4/delta.json": "e477860e6d378f7434d8ea7627a213eac14c09478ad099ccb17079adb0d699d1",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd4/audit.log": "fec3c6e4b135569cd4d20edc8e897ae98f8171b602924e7af505cac139b95a02",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd4/input-manifest.json": "e87a73d67203668ea37386ca9e92a7f56ae9810ff179a20505daa38b739650bf",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd4/catalogue-audit.py.txt": "832557381615d10b8c4fed9167cc8c760a31cc2e7332fc5e89c78f01b3121b8b"
+  }
+}

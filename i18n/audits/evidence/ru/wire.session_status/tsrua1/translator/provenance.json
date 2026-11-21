@@ -1,0 +1,159 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "wire.session_status",
+  "status": "translated",
+  "audit_status": "not_audited",
+  "created_at": "2026-11-19T20:52:50.276148+00:00",
+  "frozen_worktree": "/Users/damian/local-operator/.worktrees/i18n-terminal-status",
+  "frozen_head": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "3f1cf5b56ba0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state model declaration",
+    "fallback_used": false,
+    "date": "2026-11-19"
+  },
+  "key_count": 17,
+  "new_messages_translated": 16,
+  "preserved_legacy_keys": [
+    "wire.session_status.retired_label"
+  ],
+  "input_hashes": [
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ru/wire.session_status.json",
+      "sha256": "eccbf565af102adc9f26b5ba14a67f514336623cd54668156b8f12410dace891"
+    },
+    {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    },
+    {
+      "path": "scripts/i18n/check.py",
+      "sha256": "42f327a238dabe6c6becf5d9d591038fa1246c4e15d056a0d58a34bd658f89df"
+    },
+    {
+      "path": "scripts/i18n/ledger.py",
+      "sha256": "453553885bd5e03f5a3d0c6958fc43d2f5f5aa3cd1d756e18ea217feff7f07cd"
+    },
+    {
+      "path": "local_operator/i18n/runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+    },
+    {
+      "path": "local_operator/i18n/data/plural_rules.json",
+      "sha256": "a58fc97ed92a6fdc1c31cd6c40c856fa9c6539f54e1ce76461ec6cff9f235ffe"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/wire.session_status.json",
+      "sha256": "b15cc559652777694f2e252404862095bbdc902f90fe72fcee930a03b698f47c"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/receipt.json",
+      "sha256": "b8fc61625c03a84df83be8f87d7a1a62f48b6af359a7898e2e59301d52f63f29"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/mechanical-check.log",
+      "sha256": "fe5ab6432dd4ad79a87f64f2baccf3bc1e28bc56512880b374649d2299b4c166"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/receipt-dry-run.log",
+      "sha256": "4ffe3ef79bb2e9d283d1226c8a160f030f6602995b92624774ea446f23e2cee6"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/expected-history-sha.txt",
+      "sha256": "dfa8fcb3b52220f8cf4833fe7b4e0113c029af4269ad5c8bb42f9be00b216c46"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3f1cf5b56ba0/scratchpad/terminal-status-ru/check_candidate.py",
+      "sha256": "3d72ab322abbd999bae6796741e0264d0a470e58b1dacf9083d291355e776e9c"
+    }
+  ],
+  "expected_history_sha256": "5b709925ccf156f7113b2087b753b481e12e72dc3ecb04d845965d600f8dce43",
+  "mechanical_checks": {
+    "catalogue_validator": "Existing scripts/i18n/check.py main([--catalogues-only]) with catalogues._CATALOGUES set to isolated scratch EN/RU namespace fixture",
+    "exit_code": 0,
+    "output": "check.py: catalogue checks: 0 problem(s)",
+    "scope": "candidate namespace only; not whole repository",
+    "branch_samples": "both command arms in four messages; all 13 cause arms in two messages; count 0,1,2,5,11,21,22,25,101,1.5",
+    "append_compatibility": "actual ledger.py append --receipt receipt.json --expected-history-sha <recorded> --dry-run exited 0; no apply"
+  },
+  "native_decisions": [
+    {
+      "term": "unseen",
+      "decision": "Use «(не просмотрено)» for neuter impersonal outcomes and «(не просмотрена)» with «Ошибка». It means the existing result has not been viewed, never a new interruption/error."
+    },
+    {
+      "term": "retired",
+      "decision": "Use «для обновления» explicitly, not operator stop; legacy retired_label is preserved byte-for-byte as a value."
+    },
+    {
+      "term": "signal vs forced kill",
+      "decision": "«процесс остановлен сигналом» versus «процесс принудительно завершён». The unknown-command sentinel none emits no attribution; real command bytes follow «по команде» unchanged."
+    },
+    {
+      "term": "dormant wakes",
+      "decision": "«пробуждение приостановлено» and inflected Russian count arms distinguish dormancy from cancellation or an active firing schedule."
+    },
+    {
+      "term": "disposed",
+      "decision": "«сессия окончательно закрыта» avoids asserting that stored session data was deleted; source says disposed, not deleted."
+    },
+    {
+      "term": "install replaced",
+      "decision": "«установленная копия заменена» refers to the installation, not the update operation itself."
+    }
+  ],
+  "glossary_proposals": [
+    {
+      "en": "turn",
+      "ru": "ход"
+    },
+    {
+      "en": "dormant wake",
+      "ru": "приостановленное пробуждение"
+    },
+    {
+      "en": "stall bound",
+      "ru": "предел простоя"
+    },
+    {
+      "en": "progress bound",
+      "ru": "лимит ожидания прогресса"
+    },
+    {
+      "en": "session disposed",
+      "ru": "сессия окончательно закрыта"
+    }
+  ],
+  "limits": [
+    "Not independently audited: two independent safety-copy passes still required.",
+    "No visual or application-runtime clearance; mechanical string interpolation is not app execution.",
+    "Unknown external diagnostic English legacy branch remains intentionally preserved outside this namespace: unresolved programme gap, not an allowed localization exception.",
+    "No repository, generated file, history, build, install, server, commit or PR writes performed.",
+    "Artifacts are scratch translation handoff only, not final tracked audit evidence."
+  ]
+}

@@ -1,0 +1,168 @@
+{
+  "locale": "ur",
+  "namespace": "tui.tool_card",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "target_sha256": "b4e35a13025cdab09390ad121ce9c913b3cf697dec93db38063023276c587779",
+  "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor (session 21f87c71e5ed)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "fallback": "none",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": [
+    "tui.tool_card.more.diff_lines",
+    "tui.tool_card.fetch.cache",
+    "tui.tool_card.live.no_output_yet"
+  ],
+  "keys_read": {
+    "changed": 3,
+    "neighbours": 13,
+    "total": 16
+  },
+  "render_evidence": [
+    {
+      "key": "tui.tool_card.more.diff_lines",
+      "count": 0,
+      "en": "0 more diff lines",
+      "ur": "فرق کی 0 مزید لائنیں",
+      "en_cells": 17,
+      "ur_cells": 20
+    },
+    {
+      "key": "tui.tool_card.more.diff_lines",
+      "count": 1,
+      "en": "1 more diff line",
+      "ur": "فرق کی 1 مزید لائن",
+      "en_cells": 16,
+      "ur_cells": 18
+    },
+    {
+      "key": "tui.tool_card.more.diff_lines",
+      "count": 2,
+      "en": "2 more diff lines",
+      "ur": "فرق کی 2 مزید لائنیں",
+      "en_cells": 17,
+      "ur_cells": 20
+    },
+    {
+      "key": "tui.tool_card.more.diff_lines",
+      "count": 5,
+      "en": "5 more diff lines",
+      "ur": "فرق کی 5 مزید لائنیں",
+      "en_cells": 17,
+      "ur_cells": 20
+    },
+    {
+      "key": "tui.tool_card.more.diff_lines",
+      "count": 21,
+      "en": "21 more diff lines",
+      "ur": "فرق کی 21 مزید لائنیں",
+      "en_cells": 18,
+      "ur_cells": 21
+    },
+    {
+      "key": "tui.tool_card.fetch.cache",
+      "count": 0,
+      "en": "cache miss",
+      "ur": "کیشے miss",
+      "en_cells": 10,
+      "ur_cells": 9
+    },
+    {
+      "key": "tui.tool_card.fetch.cache",
+      "count": 1,
+      "en": "cache miss",
+      "ur": "کیشے miss",
+      "en_cells": 10,
+      "ur_cells": 9
+    },
+    {
+      "key": "tui.tool_card.fetch.cache",
+      "count": 2,
+      "en": "cache miss",
+      "ur": "کیشے miss",
+      "en_cells": 10,
+      "ur_cells": 9
+    },
+    {
+      "key": "tui.tool_card.fetch.cache",
+      "count": 5,
+      "en": "cache miss",
+      "ur": "کیشے miss",
+      "en_cells": 10,
+      "ur_cells": 9
+    },
+    {
+      "key": "tui.tool_card.fetch.cache",
+      "count": 21,
+      "en": "cache miss",
+      "ur": "کیشے miss",
+      "en_cells": 10,
+      "ur_cells": 9
+    },
+    {
+      "key": "tui.tool_card.live.no_output_yet",
+      "count": 0,
+      "en": "no output yet",
+      "ur": "ابھی آؤٹ پٹ نہیں",
+      "en_cells": 13,
+      "ur_cells": 16
+    },
+    {
+      "key": "tui.tool_card.live.no_output_yet",
+      "count": 1,
+      "en": "no output yet",
+      "ur": "ابھی آؤٹ پٹ نہیں",
+      "en_cells": 13,
+      "ur_cells": 16
+    },
+    {
+      "key": "tui.tool_card.live.no_output_yet",
+      "count": 2,
+      "en": "no output yet",
+      "ur": "ابھی آؤٹ پٹ نہیں",
+      "en_cells": 13,
+      "ur_cells": 16
+    },
+    {
+      "key": "tui.tool_card.live.no_output_yet",
+      "count": 5,
+      "en": "no output yet",
+      "ur": "ابھی آؤٹ پٹ نہیں",
+      "en_cells": 13,
+      "ur_cells": 16
+    },
+    {
+      "key": "tui.tool_card.live.no_output_yet",
+      "count": 21,
+      "en": "no output yet",
+      "ur": "ابھی آؤٹ پٹ نہیں",
+      "en_cells": 13,
+      "ur_cells": 16
+    }
+  ],
+  "composition_evidence": [
+    "… فرق کی 0 مزید لائنیں ⟨پھیلائیں⟩",
+    "… فرق کی 1 مزید لائن ⟨پھیلائیں⟩",
+    "… فرق کی 2 مزید لائنیں ⟨پھیلائیں⟩",
+    "… فرق کی 5 مزید لائنیں ⟨پھیلائیں⟩",
+    "… فرق کی 21 مزید لائنیں ⟨پھیلائیں⟩",
+    "⋯ چل رہا ہے · 4s · ابھی آؤٹ پٹ نہیں",
+    "200 · text/html · کیشے miss",
+    "200 · text/html · کیشے hit",
+    "200 · text/html · کیشے revalidated"
+  ],
+  "note": "Delta-only independent semantic audit; all 16 English/Urdu values read for neighbour composition, only 3 changed keys adjudicated. Current file hashes above. Scoped message_arguments parity passed; Urdu one/other rendered at 0,1,2,5,21; no many category. No embedded bidi controls. Preserved cache machine tokens per English context; output/cache/line use Urdu-script loanwords, not residual Latin UI prose. No maxCells on changed keys. String-level render/cell_len proof only; no terminal screenshot or native RTL shaping certification. Does not substitute for round-1 full audit."
+}

@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import shutil
 import tempfile
 from typing import Annotated, Optional
@@ -34,6 +35,45 @@ from local_operator.stt.radient_cleanup import (
 )
 
 router = APIRouter()
+
+
+#: The only suffix shape kept from a client filename: a dot and a short
+#: alphanumeric extension (``.webm``, ``.mp3``, ``.m4a``). Anything else falls
+#: back to :data:`_FALLBACK_SUFFIX`.
+_SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,16}")
+#: The suffix an upload with no usable extension gets. ``.tmp`` is what the
+#: old ``audio.tmp`` fallback (empty filename) already sent upstream.
+_FALLBACK_SUFFIX = ".tmp"
+
+
+def _upload_temp_path(temp_dir: str, filename: Optional[str]) -> str:
+    """The server-chosen path inside ``temp_dir`` for one uploaded file.
+
+    Why: the multipart filename is client-controlled. Joining it onto the temp
+    directory let an absolute name or a ``..`` chain place the write anywhere
+    the daemon can write, and this route answers without a login in the
+    standalone posture. So the name on disk is always ``upload<suffix>``; the
+    client filename contributes at most its extension, and only when that
+    extension matches :data:`_SAFE_SUFFIX`.
+
+    Constraint: keep the extension. The Radient client sends this path as the
+    multipart part's filename, and the upstream STT providers key decoding off
+    that suffix — dropping it would change what the provider sees. Only the
+    stem changes, the same naming the cascade route (``routes/stt.py``)
+    already uses for its temp file. Backslashes are read as separators so a
+    Windows-style ``C:\\dir\\clip.webm`` still yields ``.webm``.
+
+    The containment check is defence in depth: the name is fixed above, so it
+    can only fire if that construction is ever changed to admit a separator.
+    """
+    basename = os.path.basename((filename or "").replace("\\", "/"))
+    suffix = os.path.splitext(basename)[1]
+    if not _SAFE_SUFFIX.fullmatch(suffix):
+        suffix = _FALLBACK_SUFFIX
+    path = os.path.join(temp_dir, f"upload{suffix}")
+    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(temp_dir):
+        raise ValueError("upload path escaped its temporary directory")
+    return path
 
 
 # The upstream failure mapping that used to live here (the credit markers, the
@@ -116,7 +156,7 @@ async def create_transcription_endpoint(
     # was a temp directory leaked on every failed upload.
     temp_dir = tempfile.mkdtemp()
     try:
-        temp_file_path = os.path.join(temp_dir, file.filename if file.filename else "audio.tmp")
+        temp_file_path = _upload_temp_path(temp_dir, file.filename)
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:

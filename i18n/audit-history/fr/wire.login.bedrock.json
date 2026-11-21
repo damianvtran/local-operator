@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "wire.login.bedrock",
+  "history_sha256": "d177017cf6171f0a1c1753b8d5b8f4e55d977cd5cdea6450bb680f64f2f0239f",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "wire.login.bedrock",
+      "source_sha256": "9e9bab9f80d4422057d9c41303bb18da6783b0e3c75225c800a93206845d5025",
+      "context_sha256": "5c8a9309e5e4b10e148c1bb5a2f4384627c4b97ee62e71cc0e487ab23f7f0e99",
+      "target_sha256": "2dc73117aa189a07a0b018bb2dfe3bf3a4177cb65b870159f87aaeb7c5278525",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job c1195a706c14, commit fc78a78d8fd6",
+        "session": "c1195a706c14",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session a9c39601124d; did not author these translations and read no translator scratchpad",
+        "session": "a9c39601124d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) round 1: independent audit of new namespace wire.login.bedrock, 67/67 keys, against en 9e9bab9f80d4 with context sidecar. Mechanical: key set equals en; placeholder set and order parity; ICU plural (method_profile_desc) carries the locale's CLDR arms per glossary; leading/trailing whitespace parity (choice prompts keep the significant trailing space); verbatim tokens aws login, aws configure, aws configure sso, AWS CLI (aws), AKIA…, us-east-1, providers.bedrock.region, IAM, IAM Identity Center, SSO, AWS, Bedrock; NFC; no manual bidi controls; no maxCells in context. Semantic: vous address; U+202F before : ; ? per style guide; 'token' kept English per fr kept-English list (Token de session); identifiants for credentials; région; plural arms one/many/other (many '# de profils' matches the audited credential_timeout pattern). Nit (not changed): kind_assume_role 'rôle assumé' is acceptable AWS FR usage. Findings: blocker 0, major 0, nit 1 (noted, not changed). Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r1"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.login.bedrock",
+      "source_sha256": "e04450e78b6923e9de8cb4565ab248bc44e507c218b7a3b81965bb74b8c588bc",
+      "context_sha256": "ccbb2ba785ae47453dcf31d1416172ff2d51279fc590171b9262da880f774f14",
+      "target_sha256": "d171861b25de3650c90f3d8c4166b6386dbeb6a7b22a4d66dc4e9ad45f450773",
+      "translator": {
+        "agent": "task (lopdev i18n translator lane), job 32730d3d6997, commit 6499f4ab40fe",
+        "session": "32730d3d6997",
+        "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "fallback": "none reported by the manager"
+      },
+      "auditor": {
+        "agent": "i18n auditor (team lopdev, task role, independent auditor brief), session 350ecfa493e1; did not author the English (coder jobs 556253a34235 / 4de55f98f6fe) or the translations (jobs 32730d3d6997 / 48f1eebcc45e) and read no translator scratchpad",
+        "session": "350ecfa493e1",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "note": "PR #4270 (Bedrock interactive login) remediation round: independent delta audit of wire.login.bedrock after en moved 9e9bab9f80d4 -> e04450e78b69 (7 added, 16 changed, 0 removed). Delta keys read in full against en + context: field_hint, kind_assume_role, kind_login, kind_other, kind_process, kind_sso, kind_static, kind_web_identity, method_access_key, method_access_key_desc, method_ambient, method_ambient_desc, method_ambient_desc_none, method_profile_desc, method_profile_none, method_sso, method_sso_desc, method_sso_none, no_profiles, no_sso_profiles, picker_title, sso_deferred, sso_profile_title. Carry-forward proof vs f89b01d92ea3 (last audited pr4270-r1 rows): the 51 en-unchanged keys are value-identical in en and in the en context sidecar, and in this locale except where this audit edited them (listed below). Mechanical: key set equals en (74); placeholder set and order parity; ICU plural arms per locale CLDR set (glossary plurals row); leading/trailing whitespace parity; verbatim tokens aws login, aws configure, aws configure sso, AWS_PROFILE, AgentCore, IAM, IAM Identity Center, SSO, AWS SSO, Amazon Bedrock; NFC; no manual bidi controls. Corrections (auditor, minor M1): 6 delta keys used U+0020 before a high punctuation mark where the fr style guide and this namespace's 13 previously audited occurrences use U+202F — field_hint ' ;', method_access_key_desc ' ;', method_ambient_desc ' :', method_sso_desc ' ;', sso_deferred ' :', sso_profile_title ' ?' → U+202F. Semantic: vous address; identifiants for credentials; 'Rôle assumé' kept for Assume role (same rendering as UI and as the descs; prior nit retained, acceptable AWS FR usage); kind_login 'AWS login' kept verbatim per context. Cross-surface: the 5 method names (method_profile/sso/access_key/api_key/ambient) and 7 kind badges are byte-identical to local-operator-ui PR #1987 ui.providers.bedrock tab_*/kind_* in this locale after this audit. All findings fixed in this commit; unresolved blocker/major 0. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4270-r2"
+    }
+  ]
+}

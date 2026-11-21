@@ -93,7 +93,8 @@ async def test_tick_approval_edge_survives_another_subscriber_open(
     assert opening_b["payload"]["approvals_pending"] is True
     assert feed._approvals_pending is False, "B must not consume A's pending ticker edge"
     await feed._maybe_emit_approvals()
-    assert frames == [("approvals", {"pending": True, "pair_request": None})]
+    # ``pairing_id`` (mesh pairing cards) rides the same frame; ``None`` = no card open.
+    assert frames == [("approvals", {"pending": True, "pair_request": None, "pairing_id": None})]
     assert feed._approvals_pending is True
 
 
@@ -197,18 +198,23 @@ async def test_a_live_pairing_rides_the_next_approvals_tick(
     monkeypatch.setattr(feed, "_publish", lambda kind, payload: frames.append((kind, payload)))
     feed._approvals_probed_at = 0.0
     await feed._maybe_emit_approvals()
-    assert frames == [("approvals", {"pending": True, "pair_request": "ap_PAIR1"})]
+    assert frames == [
+        ("approvals", {"pending": True, "pair_request": "ap_PAIR1", "pairing_id": None})
+    ]
     # The card is signed and running: still the live pairing, still pending=False.
     rows[0]["state"] = "connecting"
     feed._approvals_token = None  # a record write moves the directory fingerprint
     feed._approvals_probed_at = 0.0
     await feed._maybe_emit_approvals()
-    assert frames[-1] == ("approvals", {"pending": False, "pair_request": "ap_PAIR1"})
+    assert frames[-1] == (
+        "approvals",
+        {"pending": False, "pair_request": "ap_PAIR1", "pairing_id": None},
+    )
     rows[0]["state"] = "connected"
     feed._approvals_token = None
     feed._approvals_probed_at = 0.0
     await feed._maybe_emit_approvals()
-    assert frames[-1] == ("approvals", {"pending": False, "pair_request": None})
+    assert frames[-1] == ("approvals", {"pending": False, "pair_request": None, "pairing_id": None})
 
 
 @pytest.mark.asyncio
@@ -244,3 +250,45 @@ async def test_the_open_snapshot_carries_a_live_pair_request(
     assert opening["payload"]["approvals_pair_request"] == "ap_PAIR1"
     # A subscriber snapshot never commits the ticker's published edge.
     assert feed._approvals_pair_request is None
+
+
+@pytest.mark.asyncio
+async def test_an_open_mesh_pairing_card_lights_the_approvals_level(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Mesh pairing cards (``features.mesh_pairing``) ride the 1 s approvals probe.
+
+    An open inviter record ORs into ``pending`` and names itself in ``pairing_id``, so
+    the badge lights at feed latency instead of on the tray's 15 s poll — the "the
+    operator did not see it" half of the window fix. Clearing the card publishes again.
+    """
+    import time as time_mod
+
+    from local_operator.network import approvals, store, types
+
+    monkeypatch.setattr(approvals, "list_records", lambda **kwargs: [])
+    feed = DesktopFeed(tmp_path, bridged=lambda: set())
+    frames: list[Any] = []
+    monkeypatch.setattr(feed, "_publish", lambda kind, payload: frames.append((kind, payload)))
+    store.save_pending_pairing(
+        types.PendingPairing(
+            invite_id="i_feed1",
+            network_id="n_" + "5" * 24,
+            network_name="home-net",
+            joiner_device_id="d_" + "c" * 32,
+            joiner_name="laptop",
+            sas="481926",
+            fingerprint="K7QM",
+            expires_at=time_mod.time() + 300,
+        ),
+        tmp_path,
+    )
+    feed._approvals_probed_at = 0.0
+    await feed._maybe_emit_approvals()
+    assert frames == [
+        ("approvals", {"pending": True, "pair_request": None, "pairing_id": "inviter:i_feed1"})
+    ]
+    store.clear_pending_pairing("i_feed1", tmp_path)
+    feed._approvals_probed_at = 0.0
+    await feed._maybe_emit_approvals()
+    assert frames[-1] == ("approvals", {"pending": False, "pair_request": None, "pairing_id": None})

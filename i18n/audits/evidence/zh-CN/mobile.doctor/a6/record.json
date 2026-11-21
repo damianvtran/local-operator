@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "audit_id": "a6",
+  "audit_kind": "independent_translation_reaudit_changed_keys",
+  "locale": "zh-CN",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-18",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #4216 round 2: the 4 mobile.doctor.watches keys changed by 193e08e33, judged side by side with English, round-1 wording and en/mobile.doctor.context.json; other keys unchanged since round 1 (a4/a5) and not re-audited",
+  "key_count": 37,
+  "keys_audited": 4,
+  "changed_keys": [
+    "mobile.doctor.watches.near",
+    "mobile.doctor.watches.at_limit",
+    "mobile.doctor.watches.instances_near",
+    "mobile.doctor.watches.instances_at_limit"
+  ],
+  "source_sha256": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+  "target_sha256": "c6dd561d94a9e4e30076cbf468fa93dee580d0834997fc01b1036277eddc42f8",
+  "source_audit_revision": "193e08e33f5de800203275dce399f0b4730ca7d6",
+  "branch": "fix/inotify-followups",
+  "worktree": "~/local-operator/.worktrees/inotify-followups",
+  "translator": {
+    "agent": "coder subagent of PR #4216 round-1 remediation (commit 193e08e33; rewrote the English source and all 7 translations of the 4 keys)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-18"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n re-auditor, lopdev team member (`task` subagent), session 1689332f69cf; did not write or audit-correct these translations in any earlier round and edited no locale value",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-18",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+    "context": "37cd00260c30fd76cef084e713715cf50f504e8f15a0297b2e4d629674eeed5e",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guide": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "checks": [
+    "placeholder set identical to English for all 4 keys; {how} select has exactly command/program/other arms",
+    "rendered all 3 arms x 4 keys with synthetic params via local_operator.i18n.runtime.render_message: 12/12 OK (sysctl present, {command} verbatim in command arm, holder absent in other arm, no braces, no '? (', no empty parens)",
+    "no arm begins with {name}; fs.inotify.max_user_watches / max_user_instances, {command} and quoted OS errors verbatim",
+    "terminology unchanged from round-1 passed wording (file watch vs watch handle kept distinct)",
+    "copy_scan.py over rendered sentences: 0 findings",
+    "Select arms complete; 其中大部分属于 / 其中…占用最多 retained from round 1; half-width spaces around {command} and sysctl names kept; full-width punctuation."
+  ],
+  "renders": [
+    [
+      "near",
+      "command",
+      "你的账户在此电脑上使用了8100个文件监视（上限8192个），已接近上限。其中大部分属于node（进程4242）：请运行 systemctl --user restart dev.service 重启它，或请管理员调高 fs.inotify.max_user_watches。"
+    ],
+    [
+      "near",
+      "program",
+      "你的账户在此电脑上使用了8100个文件监视（上限8192个），已接近上限。其中大部分属于node（进程4242）：请重启该程序，或请管理员调高 fs.inotify.max_user_watches。"
+    ],
+    [
+      "near",
+      "other",
+      "你的账户在此电脑上使用了8100个文件监视（上限8192个），已接近上限。请管理员调高 fs.inotify.max_user_watches。"
+    ],
+    [
+      "at_limit",
+      "command",
+      "你的账户已用完此电脑上的文件监视（8100个，上限8192个），因此监视文件的程序会报错“No space left on device”。其中大部分属于node（进程4242）：请运行 systemctl --user restart dev.service 重启它，或请管理员调高 fs.inotify.max_user_watches。"
+    ],
+    [
+      "at_limit",
+      "program",
+      "你的账户已用完此电脑上的文件监视（8100个，上限8192个），因此监视文件的程序会报错“No space left on device”。其中大部分属于node（进程4242）：请重启该程序，或请管理员调高 fs.inotify.max_user_watches。"
+    ],
+    [
+      "at_limit",
+      "other",
+      "你的账户已用完此电脑上的文件监视（8100个，上限8192个），因此监视文件的程序会报错“No space left on device”。请管理员调高 fs.inotify.max_user_watches。"
+    ],
+    [
+      "instances_near",
+      "command",
+      "你的账户在此电脑上使用了126个监视句柄（上限128个），已接近上限。其中node（进程4242）占用最多：请运行 systemctl --user restart dev.service 重启它，或请管理员调高 fs.inotify.max_user_instances。"
+    ],
+    [
+      "instances_near",
+      "program",
+      "你的账户在此电脑上使用了126个监视句柄（上限128个），已接近上限。其中node（进程4242）占用最多：请重启该程序，或请管理员调高 fs.inotify.max_user_instances。"
+    ],
+    [
+      "instances_near",
+      "other",
+      "你的账户在此电脑上使用了126个监视句柄（上限128个），已接近上限。请管理员调高 fs.inotify.max_user_instances。"
+    ],
+    [
+      "instances_at_limit",
+      "command",
+      "你的账户已用完此电脑上的监视句柄（126个，上限128个），因此监视文件的程序会报错“Too many open files”。其中node（进程4242）占用最多：请运行 systemctl --user restart dev.service 重启它，或请管理员调高 fs.inotify.max_user_instances。"
+    ],
+    [
+      "instances_at_limit",
+      "program",
+      "你的账户已用完此电脑上的监视句柄（126个，上限128个），因此监视文件的程序会报错“Too many open files”。其中node（进程4242）占用最多：请重启该程序，或请管理员调高 fs.inotify.max_user_instances。"
+    ],
+    [
+      "instances_at_limit",
+      "other",
+      "你的账户已用完此电脑上的监视句柄（126个，上限128个），因此监视文件的程序会报错“Too many open files”。请管理员调高 fs.inotify.max_user_instances。"
+    ]
+  ],
+  "not_verified": [
+    "native-speaker review",
+    "rendered desktop/terminal frame"
+  ]
+}

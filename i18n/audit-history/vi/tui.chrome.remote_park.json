@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.chrome.remote_park",
-  "history_sha256": "d2c64b142f91df162bb811dadb5bebe3e03b403d6a9393cf35ac81d4efe1c485",
+  "history_sha256": "c39d2021259de66e00c0dcb815539bf1e8916449c3ae980859b3969bda1cb32c",
   "entries": [
     {
       "locale": "vi",
@@ -39,6 +39,76 @@
       },
       "status": "passed",
       "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 3 minor, 3 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.chrome.remote_park",
+      "source_sha256": "8d3cce5ad16be492a7b0ced9591b2b8892daa8d636e2ac2e1cdd1ff844ea464d",
+      "context_sha256": "f34bf588287f7303769fee4e124a1d2994d0bf5c46f4646cfe11276906069e79",
+      "target_sha256": "75b7d5ff92a4e64309ca1e8cfb8524fd3cc84d7afdf82dac91735fcb410d6ecc",
+      "translator": {
+        "agent": "coder (team lopdev), commit b1550a814 (PR #4372)",
+        "session": "not relayed",
+        "session_kind": "translator session id was not relayed to the auditor; identified by commit",
+        "model": "not relayed to the auditor",
+        "date": "2026-11-21",
+        "fallback": "unknown (not relayed)"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, task role, independent i18n auditor of PR #4372; did not author the English or these translations and read no translator scratchpad), session 88f5179a9146",
+        "session": "88f5179a9146",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-21",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "round": "pr4372-r1",
+      "note": "PR #4372 round 1: independent audit of the one new key tui.chrome.remote_park.ask_agent_started (commit b1550a814) against en 8d3cce5ad16b with context sidecar f34bf588287f (meaning: an agent running on {agent_device} started the session, which runs on {device}; agent = AI agent). Mechanical: key set equals en; placeholders {agent_device} and {device} preserved exactly; NFC; no format/bidi control characters; no final punctuation, matching en. Semantic: 'Câu hỏi từ một phiên do tác nhân trên {agent_device} khởi chạy trên {device}': 'do X khởi chạy' is the idiomatic agentive passive; glossary phiên/tác nhân; 'trên {device}' as in 'chạy trên {device}'. Carry-forward: the other 15 keys are byte-identical — removing the new key from current en, the en context sidecar and this locale and re-serialising reproduces the base 1a8dae591 bytes exactly, and those base file hashes equal the previous receipt's source/context/target hashes — so that audit carries onto the new en hash. Native-speaker review and rendered-frame certification not claimed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.chrome.remote_park",
+      "source_sha256": "b7026931018e80d7acc612f4344d10fecf7c741359cc1fc7572d70e23d220e2f",
+      "context_sha256": "a895de8f5d0355eb30ea68150d74db9172f6124bc84f2c9d5945ecf36d4a1f31",
+      "target_sha256": "f9065c4cfe1c51953a18092fcede17ad0b3a9a6428766633587f6374c2048992",
+      "translator": {
+        "agent": "coder (team lopdev), commit 943d47ac3 (PR #4372 round-1 remediation)",
+        "session": "not relayed",
+        "session_kind": "translator session id was not relayed to the auditor; identified by commit",
+        "model": "not relayed to the auditor",
+        "date": "2026-11-21",
+        "fallback": "unknown (not relayed)"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, task role, independent i18n auditor of PR #4372 round 2; did not author the English or these translations and read no translator scratchpad), session 732c95203da0",
+        "session": "732c95203da0",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-21",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "round": "pr4372-r2",
+      "note": "PR #4372 round 2: independent re-audit of the one changed key tui.chrome.remote_park.ask_agent_started (commit 943d47ac3) against en b7026931018e ('runs on {device} · started by an agent on {agent_device}') with context sidecar a895de8f5d03 (prefix must equal ask_hint_floor; implied subject the session). Mechanical: key set and order equal en; placeholders {device} and {agent_device} exactly once each; the text before ' · ' is byte-identical to this locale's ask_hint_floor; separator U+0020 U+00B7 U+0020; no format/bidi control characters; no final punctuation, matching en. Semantic: 'chạy trên {device} · do tác nhân trên {agent_device} khởi chạy': prefix byte-identical to ask_hint_floor 'chạy trên {device}'; 'do X khởi chạy' is the idiomatic agentive construction (avoids the calque 'được … bởi'); 'tác nhân' per glossary; 'khởi chạy' matches existing vi catalogue usage for starting; no gender agreement applies. Carry-forward: c5b1f1dc2..943d47ac3 changes only this key in en, the en context sidecar and this locale (key-by-key comparison, order unchanged), so the round-1 audit of the other 15 keys carries onto the new hashes. Native-speaker review and rendered-frame certification not claimed."
     }
   ]
 }

@@ -688,9 +688,13 @@ waiter matched itself forever and read as a heavy job in another lane's check). 
 waiter exists yet: the `bash` tool takes the slot itself for a heavy command
 (`pytest -n N`, JS builds, `tsc`/`vue-tsc` and `typecheck` scripts; not
 mypy/pyright), queues up to 15 min and names the holder. A serial `python -m
-pytest` takes no slot, so it never queues behind a held one. Otherwise check `lop
-services status` once (it names the holder without waiting), or take a specific
-run's exact pid once and wait with a bounded `kill -0 <pid>` loop. Never wait on any
+pytest` of targeted FILES or node ids takes no slot while its effective xdist
+workers (command line over `PYTEST_ADDOPTS` over addopts) are 0-2, so it never
+queues behind a held one; this repo's addopts say `-n auto`, so pass `-n 0`.
+More workers, a directory or whole-suite pytest (`-k` or not: collection
+imports the tree) and `affected_tests.py --run/--evidence` take the slot.
+Otherwise check `lop services status` once (it names the holder without
+waiting), or take a specific run's exact pid once and wait with a bounded `kill -0 <pid>` loop. Never wait on any
 `pgrep -f` pattern for test or heavy names: the waiter's shell, its `timeout`
 wrapper and the parent `bash -c` all carry the text, and `[p]ytest` still matches
 a later literal in that same command line.
@@ -934,6 +938,17 @@ named on the last stderr line); spawned cleanup-required runs also write
 `<run_id>.spawn.json` and `.exit.json` naming the group it owned (`--run-id` or
 `$LOCAL_OPERATOR_RUN_ID` binds the id); see `scripts/run_bounded.py`'s RUN
 RECORD section for the schema.
+
+`--start-by <epoch | ISO-8601 with offset/Z>` (also on `lop services heavy run`)
+enforces a granted window's latest start ("start by 08:05Z"): checked after any
+queue/lease wait, immediately before spawn; if it has passed the command is
+never started and the status is **79**. `run_bounded.py` writes a completion
+record for it (`cause=late-start`, `spawned=no`); `heavy run` prints a stderr
+line and appends a `late-start` row to the lease trail
+(`<config>/run/heavy-jobs/heavy-lease.jsonl`), which `heavy status` shows only
+while the queue is enabled. An unreadable or out-of-range value is a usage
+error (2) before any wait;
+`--timeout` and runtime are untouched.
 
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
 nothing runs a sweep in that case — what protects the group there is that the
@@ -2427,6 +2442,16 @@ install moved to a strictly newer version, and the head has at least one other
 active member. Once open, the relay driver re-asks parked members every
 `CADENCE_S` (300 s), and on the generation layout a busy runtime keeps its build
 and is retired once idle (`buildwatch` convergence) — no drain.
+
+**Team Bridge is not on a mesh node.** `lop team-bridge setup` never enrols a
+mesh node (an enrolment copied from the primary is left as it is), and nodes
+don't send agent messages on the operator's behalf, because consent cannot be
+proven remotely. To reach a teammate or post to the bridge, use the `send` tool
+to give the request — what to send and to whom — to the operator's
+chief-of-staff session on the primary device (by session id; add
+`peer=<primary device>` if the id is not found); it relays and tells you what it
+did. The `lop send` shell command is local-only. See `guide://network` "Team
+Bridge does not travel".
 
 **Visual evidence on a headless node has no browser tool.** Electron capture
 still works there under Xvfb through `capturePage()` — a working example is

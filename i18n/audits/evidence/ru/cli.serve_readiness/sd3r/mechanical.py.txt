@@ -1,0 +1,36 @@
+"""Final single-key remediation and retained whole-catalogue mechanical audit.
+Provenance: i18n/audits/evidence/ru/cli.serve_readiness/sd3r/record.json
+"""
+from pathlib import Path
+import hashlib
+import json
+import runpy
+ROOT=Path(__file__).resolve().parents[6]
+prior=ROOT/'i18n/audits/evidence/ru/cli.serve_readiness/sd3'
+r=json.loads((prior/'record.json').read_text())
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+key='cli.serve_readiness.not_this_daemon'
+changes={
+    'en':('recorded, but another process now holds that PID','recorded, but PID reuse was detected'),
+    'ru':('есть запись, но этот PID теперь принадлежит другому процессу','есть запись, но обнаружено повторное использование PID')
+}
+for locale,(old,new) in changes.items():
+    item=r['input_hashes'][locale];p=ROOT/item['path'];raw=p.read_text();obj=json.loads(raw)
+    assert obj[key]==new
+    assert raw.count(new)==1
+    reconstructed=raw.replace(new,old).encode('utf-8')
+    assert hashlib.sha256(reconstructed).hexdigest()==item['sha256'],locale
+    print(f'PASS {locale}: exact accepted replacement; reverse replacement recreates sd3 input hash, proving other 14 values and formatting unchanged')
+item=r['input_hashes']['context'];p=ROOT/item['path'];raw=p.read_text();ctx=json.loads(raw)
+new=ctx[key]['note'];old=ctx['cli.serve_readiness.unproven']['note']
+assert raw.count(new)==1
+assert hashlib.sha256(raw.replace(new,old).encode('utf-8')).hexdigest()==item['sha256']
+print('PASS context: only not_this_daemon note changed; reverse replacement recreates sd3 context hash')
+for item in r['policy_input_hashes']:
+    assert sha(ROOT/item['path'])==item['sha256'],item['path']
+assert sha(ROOT/r['source_implementation_input']['path'])==r['source_implementation_input']['sha256']
+print('PASS glossary/style/HOWTO/evidence contract and source selection implementation unchanged from sd3')
+p=prior/'mechanical.py.txt';expected=next(a['sha256'] for a in r['artifacts'] if a['path'].endswith('/mechanical.py.txt'))
+assert sha(p)==expected
+runpy.run_path(str(p),run_name='__main__')
+print('PASS RU-SD3-01 exact accepted number-neutral replacement; 14-key retained coverage byte-proven; all 15 mechanical/render/opaque checks rerun')

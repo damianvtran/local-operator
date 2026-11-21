@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1r",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon Vietnamese",
+    "session": "77442ce206e1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "acf0a84cd992",
+    "actual_model_source": "Session host declares openai/gpt-6.1-sol; resumed same auditor session 77442ce206e1; no model fallback incident observed.",
+    "fallback": null,
+    "date": "2026-11-16",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "provenance_source": "Requesting task explicitly identifies translator task and actual model; translator runtime not independently inspected."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/cli.serve_readiness.json",
+      "sha256": "a2a52a9ae4d17d96c11f57a1cfb75ba5ba3dc673480cb3ec31eb3f1051423d22"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/report.md",
+      "sha256": "19666d183522c9bc2a35ae3df5d13c4f8968385d1154909c1b8ed385e5c1d438"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/audit.log",
+      "sha256": "70295dfdc40ed37a81185a6bd62618475c4717213dc6d39585dcdbdb2277441c"
+    },
+    "ledger-receipt.json": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/ledger-receipt.json",
+      "sha256": "ee925bb46be177bdaee22fca571fbef5eec6ba75d4c131f7a22ec119fde07526"
+    }
+  },
+  "artifact_roles": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "ledger-receipt.json": "append_ready_single_row_dry_run_validated",
+    "receipt.json": "bundle_integrity_manifest_explicit_record_reference"
+  },
+  "guidance_hashes": [
+    {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    }
+  ],
+  "retained_coverage": {
+    "prior_record": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/record.json",
+      "sha256": "d6e820ec3de87bb844927685042b6023276993b80ae7d39fb544e6a9c5f6061b"
+    },
+    "prior_report": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/report.md",
+      "sha256": "6dd44a653faf2b124b527045f21ebe033dfa95b18455e47b4e3d225f9bfc871a"
+    },
+    "prior_bundle_hashes": {
+      "report.md": "6dd44a653faf2b124b527045f21ebe033dfa95b18455e47b4e3d225f9bfc871a",
+      "ledger-receipt.json": "f3868eb3cd6b754df5e05bb65cc3ba72b9ebd0cd75256876ea260bdeea89f6b6",
+      "audit.log": "1ade5d35c85aab1e4596f7abacc3f3477ed898f666babd2847bc0bfb10ac4eb9",
+      "record.json": "d6e820ec3de87bb844927685042b6023276993b80ae7d39fb544e6a9c5f6061b",
+      "receipt.json": "2795573508d7bfd49da62af8a8751ce5f7fb5e074b5446bda450d132986bd7a2"
+    },
+    "unchanged_key_count": 10,
+    "unchanged_coverage_retained": true,
+    "english_and_context_unchanged": true,
+    "only_target_value_changed": "cli.serve_readiness.cgroup_unknown",
+    "original_target_sha256_reproduced_by_reverting_only_changed_value": true,
+    "changed_key_reaudited": true,
+    "direct_semantic_neighbors": [
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.other_unit",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.identity_restart"
+    ],
+    "independent_second_pass_claimed": false
+  },
+  "finding_dispositions": [
+    {
+      "id": "VI-SD1-01",
+      "original_severity": "MINOR",
+      "status": "fixed",
+      "key": "cli.serve_readiness.cgroup_unknown",
+      "exact_requested_replacement_applied": true,
+      "report": "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/report.md"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "fixed_finding_ids": [
+      "VI-SD1-01"
+    ],
+    "open_finding_ids": [],
+    "unresolved_minor_nit_count": 0
+  },
+  "mechanical_validation": {
+    "catalogue_validator_exit_code": 0,
+    "catalogue_problem_count": 0,
+    "per_key_parser_exit_code": 0,
+    "key_count": 11,
+    "vi_plural_categories": [
+      "other"
+    ],
+    "changed_key_chars": 57,
+    "changed_key_cells": 57,
+    "rendered_ui_claimed": false,
+    "rtl": "not_applicable_vi_ltr"
+  },
+  "receipt_validation": {
+    "mode": "dry-run",
+    "exit_code": 0,
+    "expected_history_sha256": "cb85f93d7815a8750a87858c0c40bfa0ca1c4931e84c12765e8e5ead3bebf5f7",
+    "note_length": 156,
+    "history_appended_by_auditor": false
+  },
+  "current_bytes_match_audited_hashes": true,
+  "retention": {
+    "canonical_root": "i18n/audits/evidence",
+    "prior_evidence_preserved": true,
+    "catalogues_edited": false,
+    "committed_by_auditor": false,
+    "parent_owns_history_append_and_commit": true
+  },
+  "original_lost_evidence": {
+    "status": "not_applicable_no_original_lost"
+  },
+  "backdated": false
+}

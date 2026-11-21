@@ -529,12 +529,31 @@ async def _auto_approve_gate(
     taint_raised: bool = False,
     bridge_latched: bool = False,
 ) -> bool:
-    """The ``auto()`` posture: every gated call is approved.
+    """The ``auto()`` posture: every gated call is approved — except a person-only gate.
 
     Accepts the Team Bridge flags so a latched session keeps the auto posture
     the embedder chose: closed for ask mode; accepted risk in auto/yolo
     (docs/security/team-bridge-egress.md, "Status").
+
+    PERSON-ONLY GATES (``harness.approval.never_auto_approved``: an account
+    profile save, a community post). ``auto()`` is the embedder's consent to
+    tool calls, not to public speech under the owner's name or a rewrite of
+    account-wide agents, and there is no person on this gate to ask — so it
+    raises the typed refusal ``refuse()`` uses rather than answering. ``--yolo``
+    fails closed the same way (``session_factory._make_request_approval``);
+    review R1-2 found this the one auto mode that did not.
     """
+    from local_operator.harness.approval import ApprovalUnavailableError
+    from local_operator.harness.bridge_egress import ApprovalGrant, session_grant_covers
+
+    # The shared predicate every auto path asks (the TUI's approve-all and
+    # desktop full-auto included), so the person-only list lives in one place.
+    if not session_grant_covers(ApprovalGrant(auto=True), title=tool_name):
+        raise ApprovalUnavailableError(
+            tool_name,
+            "ApprovalPolicy.auto() does not answer this gate: it needs a person "
+            "(use ApprovalPolicy.callback() to present it)",
+        )
     return True
 
 
@@ -779,6 +798,10 @@ async def _build_session(
         except OutputContractError as error:
             raise SessionSpecError(str(error)) from error
         session.set_output_contract(contract)
+    # Shape only: the wait itself is the session's first-turn MCP gate
+    # (``session/declared_mcp_ready.py``); this tells it an SDK owner wants
+    # every configured server, not just declared ones, or (None) no wait.
+    session.set_first_turn_mcp_wait(spec.mcp_ready_timeout_s)
     _install_approval_policy(session, spec.approvals)
     return session
 
@@ -1004,6 +1027,11 @@ async def open_session(
                 await session.dispose()
 
 
+#: ``SessionSpec.mcp_ready_timeout_s``'s default, read from the dataclass so
+#: the attach/spawn refusals below cannot drift from it.
+_DEFAULT_MCP_READY_TIMEOUT_S = SessionSpec.__dataclass_fields__["mcp_ready_timeout_s"].default
+
+
 def _refuse_attach_extras(spec: SessionSpec) -> None:
     """Attach opens a viewer; nothing but ``resume`` may be set on the spec.
 
@@ -1034,6 +1062,10 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         )
         if value is not None
     ]
+    # The first-prompt MCP wait runs in the OWNER's turn loop; a viewer's
+    # setting would never be consulted, so only the default passes.
+    if spec.mcp_ready_timeout_s != _DEFAULT_MCP_READY_TIMEOUT_S:
+        set_fields.append("mcp_ready_timeout_s")  # i18n: ignore spec field identifier
     occupancy = [
         name
         for name, value in (
@@ -1097,6 +1129,9 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
         )
         if value not in (None, False)
     ]
+    # Post-open state like the rest: no channel carries it to a NEW child.
+    if spec.mcp_ready_timeout_s != _DEFAULT_MCP_READY_TIMEOUT_S:
+        blockers.append("mcp_ready_timeout_s")  # i18n: ignore spec field identifier
     output_fields = [
         name
         for name, value in (

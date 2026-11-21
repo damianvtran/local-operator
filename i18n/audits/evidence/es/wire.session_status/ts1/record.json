@@ -1,0 +1,74 @@
+{
+  "locale": "es",
+  "namespace": "wire.session_status",
+  "audit_id": "ts1",
+  "audit_date": "2026-11-19",
+  "key_count": 17,
+  "source_commit": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "auditor": {
+    "agent": "i18n-auditor (terminal-status-es-audit; first independent pass)",
+    "session": "f9eeb42530ec",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "b39246e0d986",
+    "actual_model_source": "developer session-state Model field: openai/gpt-6.1-sol",
+    "fallback": "none observed",
+    "date": "2026-11-19"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/b39246e0d986/scratchpad/terminal-status-es/wire.session_status.json",
+      "sha256": "b13626dbcbc240488738922d287663f0ede62b191e461ed1767de9a56a0ee128"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "report.json",
+      "sha256": "17cab507db5e2e676e433dd0352387da9f6f310e4f565790a3daefad3e50994e"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "ca1fb2f630e949e5f188737190146b18d037ce04dca179b1f241979d888b35fe"
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "97e70ef2ffa018c12f14c5211033e5b562b15e93b7686ea25fd041969632ffa4"
+    },
+    {
+      "path": "samples.json",
+      "sha256": "39ad3370ca92cc05f4d077c80501e85f58d5d8a5c6901fb98ae1a10ddccfc1c9"
+    },
+    {
+      "path": "validate.py",
+      "sha256": "01b07454fb68b5bc2a7fe755d9f04425995ef4985920c2a0c3650eb65f3387f9"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "executed_at": "2026-11-19T21:03:05.813895+00:00",
+  "evidence_classification": {
+    "report.json": "audit_notes_not_execution_log",
+    "audit.log": "actual execution output, including initial failed assertion and successful rerun",
+    "mechanical.json": "actual executed check results",
+    "samples.json": "actual isolated ICU formatter output; not integrated runtime or visual proof"
+  },
+  "retention": {
+    "current_location": "/Users/damian/.local-operator/sessions/f9eeb42530ec/scratchpad/es-first",
+    "intended_tracked_directory": "i18n/audits/evidence/es/wire.session_status/ts1",
+    "tracked_on_main": false,
+    "coordinator_action_required": "Copy this bundle unchanged to the canonical tracked evidence root; no repo writes authorized for auditor."
+  },
+  "second_independent_pass_required": true,
+  "scope": "17 keys and all 13 cause arms in both cause keys; no native/pseudo/rendered/integrated runtime proof",
+  "original_lost_evidence": null
+}
