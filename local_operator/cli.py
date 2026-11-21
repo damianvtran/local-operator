@@ -1667,7 +1667,8 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # in `guides/configuration/GUIDE.md`. They are added below, after the other
     # visible commands, and a new visible command must be added here too.
     sessions_subparsers = sessions_parser.add_subparsers(
-        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync,notifications}"
+        dest="sessions_command",
+        metavar="{cleanup,reclaim,resume,move,setup-deps,sync,notifications}",
     )
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
@@ -2004,6 +2005,34 @@ def build_cli_parser() -> LocalizedArgumentParser:
         help=_wsh.help_yes().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
+
+    # `lop sessions setup-deps <id> --status`: the READ-ONLY dependency status of a
+    # working set that arrived on this device (design move-working-set.md §9). A move
+    # never carries node_modules/.venv; this says, per restored worktree, what is still
+    # to be created, what exists (unverified) and what could not be read. It runs
+    # NOTHING: the security ruling on #4378 (owner 60334) is that a CLI flag, stdin or
+    # the moved agent's shell is not the operator's authority to run a package
+    # manager's install scripts, so there is no `--yes` and no run mode. `--status` is
+    # REQUIRED so the verb's only form today says what it does; a future run mode
+    # needs the authenticated, move-bound operator opt-in (§9 "Phase 2 exit criteria").
+    deps_parser = sessions_subparsers.add_parser(
+        "setup-deps",
+        help=_wsh.deps_help().envelope(locale=help_locale)["text"],
+        description=_wsh.deps_description().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    deps_parser.add_argument(
+        "session", help=_wsh.deps_session_help().envelope(locale=help_locale)["text"]
+    )
+    deps_parser.add_argument(
+        "--status",
+        action="store_true",
+        required=True,
+        help=_wsh.deps_status_help().envelope(locale=help_locale)["text"],
+    )
+    deps_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
     )
 
@@ -8460,6 +8489,78 @@ def _sessions_move_plan_broken_text(result: dict[str, Any], to: str) -> str:
     )
 
 
+def sessions_setup_deps_command(args: argparse.Namespace) -> int:
+    """``lop sessions setup-deps <id> --status``: read-only dependency status here.
+
+    Reads THIS device's restore record and trees (``network/workset_setup.py``) and
+    prints one row per dependency kind per restored worktree, then a summary. It
+    never runs, installs, links or removes anything, whatever the caller. Exit 0
+    when a status was produced (whatever it says — a query that answered did not
+    fail), 1 when no working set of ``<id>`` was restored on this device.
+    """
+    import json as _json
+
+    from local_operator.network import workset_setup
+
+    session_id = str(args.session)
+    as_json = bool(getattr(args, "json", False))
+    status = workset_setup.dependency_status(Path(config_dir()), Path.home(), session_id)
+    if status is None:
+        if as_json:
+            print(
+                _json.dumps(
+                    {
+                        "schema": workset_setup.STATUS_SCHEMA,
+                        "executes": False,
+                        "ran": False,
+                        "session_id": session_id,
+                        "state": "no_working_set",
+                        "rows": [],
+                        "not_restored": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(render_resolved(_wsh.deps_none(session=session_id)), file=sys.stderr)
+        return 1
+    if as_json:
+        print(_json.dumps(status.to_json(), indent=2, sort_keys=True))
+        return 0
+    labels = {
+        "pending": _wsh.deps_state_pending,
+        "present_unverified": _wsh.deps_state_present_unverified,
+        "unknown": _wsh.deps_state_unknown,
+        "refused": _wsh.deps_state_refused,
+        "manual": _wsh.deps_state_manual,
+        "not_needed": _wsh.deps_state_not_needed,
+    }
+    print(render_resolved(_wsh.deps_header(session=session_id)))
+    for row in status.rows:
+        # An unrecognised state renders as "unknown": the report never upgrades a
+        # value it does not understand into a reassuring label.
+        label = render_resolved(labels.get(row.state, _wsh.deps_state_unknown)())
+        if row.kind:
+            line = _wsh.deps_row(state=label, cwd=row.cwd, kind=row.kind)
+        else:
+            line = _wsh.deps_row_plain(state=label, cwd=row.cwd)
+        print(render_resolved(line))
+        if row.missing_tool:
+            hint = render_resolved(_wsh.deps_missing_tool(tool=row.missing_tool))
+            print("  " + hint)  # i18n: ignore indentation around a keyed line
+    for path in status.not_restored:
+        print(render_resolved(_wsh.deps_not_restored(path=str(path))))
+    summary = {
+        "unknown": _wsh.deps_summary_unknown,
+        "pending": _wsh.deps_summary_pending,
+        "present_unverified": _wsh.deps_summary_present_unverified,
+        "nothing_needed": _wsh.deps_summary_nothing_needed,
+    }[status.state]
+    print(render_resolved(summary()))
+    return 0
+
+
 def _sessions_move_dry_run(session_id: str, *, to: str, as_json: bool) -> int:
     """``lop sessions move <id> --to <peer> --dry-run``: the manifest, nothing moved.
 
@@ -8808,6 +8909,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "sync":
         return sessions_sync_command(args)
+
+    if getattr(args, "sessions_command", None) == "setup-deps":
+        return sessions_setup_deps_command(args)
 
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer
