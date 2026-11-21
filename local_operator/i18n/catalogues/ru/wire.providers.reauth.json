@@ -1,0 +1,6 @@
+{
+  "wire.providers.reauth.sign_in_expired": "Срок действия входа в {label} истёк, и продлить его автоматически нельзя. Войдите снова: /login {provider} в приложении или lop login {provider} в терминале.",
+  "wire.providers.reauth.session_policy": "Ваша организация в Google Workspace требует повторного входа в {label} («Управление сеансами Google Cloud»), поэтому продлить срок действия входа автоматически нельзя. Войдите снова: /login {provider} в приложении или lop login {provider} в терминале.",
+  "wire.providers.reauth.status_sign_in_required": "нужен повторный вход",
+  "wire.providers.reauth.status_session_policy": "нужен повторный вход (политика Workspace)"
+}

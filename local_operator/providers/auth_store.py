@@ -228,6 +228,13 @@ REFRESH_SEND_UNCONFIRMED_KEY = "refresh_send_unconfirmed"
 #: them) and the unit follows its writer's clock helper, ``_now_ms``.
 GRANT_DEAD_AT_KEY = "grant_dead_at"
 
+#: Payload key: WHY the grant died, when the IdP said so in a way worth telling
+#: the user (today only ``callback_server.REAUTH_REASON_SESSION_POLICY``, Google
+#: Cloud session control's ``invalid_rapt``). Written with, and cleared with,
+#: :data:`GRANT_DEAD_AT_KEY`; it is never a verdict on its own -- a row without
+#: the tombstone is alive whatever this says.
+GRANT_DEAD_REASON_KEY = "grant_dead_reason"
+
 #: Payload key: an operator-signed delegation is IN FORCE for this login, so this
 #: device must not present its refresh token (design §3.2, Fence 1). Written by the
 #: owner's mint and cleared by its handback adoption or revoke.
@@ -1752,6 +1759,13 @@ class AuthStore:
         # pool whose members are all equally valid.
         self._deprioritized: dict[str, dict[int, int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
+        #: Row id -> the provider's own sentence for a refresh it refused before
+        #: sending because LOCAL configuration can never work (e.g. a custom
+        #: Vertex OAuth client id with no secret). Process-local on purpose: it
+        #: is re-earned by the next attempt, cleared by any attempt that gets
+        #: past configuration, and read by the failover walk so the user is told
+        #: what to configure instead of "wait for the limit to reset".
+        self._refresh_config_refusals: dict[int, str] = {}
         #: Identity of this process in lease rows, so a release only frees a
         #: lease THIS process took. Same shape as :class:`UsageCacheStore`.
         self._refresh_holder = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -2746,6 +2760,7 @@ class AuthStore:
         # own distinct key, so the provider send-marker reset stays unchanged.
         if provider != "mcp-oauth":
             payload.pop(GRANT_DEAD_AT_KEY, None)
+            payload.pop(GRANT_DEAD_REASON_KEY, None)
         payload.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
         # Unlike updated_at this is a login event, not a refresh timestamp.
         # MCP refresh also uses upsert, so it cannot attest an incarnation yet.
@@ -3977,7 +3992,39 @@ class AuthStore:
             and self._grant_dead_at(row.data) is not None
         )
 
-    def _mark_grant_dead(self, credential_id: int, *, rejected_refresh_token: str | None) -> bool:
+    def refresh_configuration_error(self, credential_id: int) -> str | None:
+        """Why this row's last refresh was refused locally as misconfigured, if it was.
+
+        Set only when a provider refused BEFORE sending because its own
+        configuration cannot work (a ``ConfigurationError`` under
+        ``RefreshNotSentError``), cleared by the next attempt that gets further.
+        The failover walk reads it so a missing client secret is reported as
+        what it is, not as a resting quota.
+        """
+        return self._refresh_config_refusals.get(credential_id)
+
+    def grant_dead_reason(self, credential_id: int) -> str | None:
+        """The recorded cause of a dead grant, or ``None`` (alive, or no cause known).
+
+        Read-only, like :meth:`grant_is_dead`, so ``login-status`` and the
+        fallback notice can say "your Workspace requires a fresh sign-in" rather
+        than a bare "expired" without presenting the token again.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or not isinstance(row.data, dict):
+            return None
+        if self._grant_dead_at(row.data) is None:
+            return None
+        reason = row.data.get(GRANT_DEAD_REASON_KEY)
+        return reason if isinstance(reason, str) and reason else None
+
+    def _mark_grant_dead(
+        self,
+        credential_id: int,
+        *,
+        rejected_refresh_token: str | None,
+        reason: str | None = None,
+    ) -> bool:
         """Record that this row's refresh token was refused by the IdP for good.
 
         The tombstone is the OUTCOME of a refusal the caller has already
@@ -4020,6 +4067,10 @@ class AuthStore:
                 data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
                 return True
             data[GRANT_DEAD_AT_KEY] = self._now_ms()
+            if reason:
+                data[GRANT_DEAD_REASON_KEY] = reason
+            else:
+                data.pop(GRANT_DEAD_REASON_KEY, None)
             # The refusal IS the definitive answer to the send marker: the IdP
             # told us what happened to the presented token, so there is nothing
             # left for the marker to protect. This pop is deliberately NOT
@@ -4595,6 +4646,7 @@ class AuthStore:
             # re-adding it as a top-level import. This is a refresh path that
             # has already paid for the module, so the cost is zero here.
             from local_operator.providers.oauth.callback_server import (
+                ConfigurationError,
                 InvalidGrantError,
                 LoginError,
                 RefreshNotSentError,
@@ -4716,6 +4768,7 @@ class AuthStore:
                     # other field (claims, markers, delegate records) as they stood
                     # before the POST.
                     sent = json.loads(json.dumps(fresh))
+                    self._refresh_config_refusals.pop(row.id, None)
                     async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
                         refreshed = await refresh(fresh)
                 except AuthStoreError:
@@ -4732,6 +4785,8 @@ class AuthStore:
                     # refusal still surfaces as the store's own error type, as
                     # every refresh failure here does.
                     self._clear_send_marker(row.id, armed)
+                    if isinstance(exc.__cause__, ConfigurationError):
+                        self._refresh_config_refusals[row.id] = str(exc)
                     raise AuthStoreError(
                         f"OAuth refresh for '{row.provider}' was refused before sending: {exc}"
                     ) from exc
@@ -4772,7 +4827,13 @@ class AuthStore:
                     # refresh attempt to re-earn it, and only an interactive login
                     # clears it. The marker is resolved by the write — the IdP told
                     # us what happened to the presented token.
-                    self._mark_grant_dead(row.id, rejected_refresh_token=presented)
+                    self._mark_grant_dead(
+                        row.id,
+                        rejected_refresh_token=presented,
+                        # ``ReauthRequiredError`` carries the policy cause; a
+                        # plain dead grant has none.
+                        reason=getattr(exc, "reason", None),
+                    )
                     # §3.5's node-side stop (R1-5): past the race guard the token we
                     # presented was this row's OWN current token, so the family moved
                     # outside this device. The watch wipes the delegated material,
