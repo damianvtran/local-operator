@@ -2,7 +2,7 @@
   "tui.bridge_card.frame.untrusted": "External message · untrusted content",
   "tui.bridge_card.body.loading": "Loading message…",
   "tui.bridge_card.body.pending": "Waiting to be delivered to your agent",
-  "tui.bridge_card.body.held": "Held by moderation",
+  "tui.bridge_card.body.held": "Held for review",
   "tui.bridge_card.body.held_transient": "Waiting for screening — not shown to your agent yet",
   "tui.bridge_card.body.refused": "Refused by moderation",
   "tui.bridge_card.body.not_admitted": "Not delivered to your agent",
@@ -10,12 +10,16 @@
   "tui.bridge_card.body.signed_out": "Sign in to Radient to see this message",
   "tui.bridge_card.body.other_account": "Received under another Radient account",
   "tui.bridge_card.body.not_member": "You are no longer in this conversation",
-  "tui.bridge_card.body.offline": "Couldn't reach Radient — close and reopen to retry",
+  "tui.bridge_card.body.offline": "Couldn't reach Radient — retrying",
   "tui.bridge_card.body.deleted": "This message was deleted",
   "tui.bridge_card.body.show_more": "Show full message · {total, plural, one {# line} other {# lines}}",
   "tui.bridge_card.body.show_less": "Show less",
   "tui.bridge_card.body.more_messages": "{count, plural, one {# more message in this card} other {# more messages in this card}}",
   "tui.bridge_card.header.held_transient": "Waiting for screening",
   "tui.bridge_card.header.open_to_load": "Open to load message",
-  "tui.bridge_card.header.offline": "Couldn't reach Radient — open to retry"
+  "tui.bridge_card.header.offline": "Couldn't reach Radient — open to retry",
+  "tui.bridge_card.context.dm": "Direct message",
+  "tui.bridge_card.context.channel": "Channel",
+  "tui.bridge_card.context.group": "Group conversation",
+  "tui.bridge_card.context.thread_reply": "Thread reply"
 }
