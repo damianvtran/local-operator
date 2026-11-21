@@ -60,6 +60,10 @@ def refused_old_signer() -> Msg:
     return Msg("browser.site_approval.refused_old_signer", {})
 
 
+def refused_outcome_unknown() -> Msg:
+    return Msg("browser.site_approval.refused_outcome_unknown", {})
+
+
 def refused_unreachable() -> Msg:
     return Msg("browser.site_approval.refused_unreachable", {})
 
