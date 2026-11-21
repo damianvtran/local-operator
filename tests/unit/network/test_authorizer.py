@@ -132,6 +132,7 @@ def test_the_vocabulary_is_the_one_agreed_set() -> None:
             "approve",
             "unattended",
             "update",
+            "workset_import",
         }
     )
     for rejected in ("broker:request", "broker:grant", "member:admin", "trust"):
@@ -155,7 +156,9 @@ def test_roles_are_the_documented_sets() -> None:
     assert types.ROLE_CAPABILITIES["read"] == frozenset({"list", "view"})
     assert "prompt" not in types.ROLE_CAPABILITIES["read"]
     assert "admin" in types.ROLE_CAPABILITIES["admin"]
-    assert types.ROLE_CAPABILITIES["admin"] == types.CAPABILITIES
+    # Everything but ``workset_import`` (security-lead ruling, #4245): accepting a
+    # peer's working files is granted per member on the receiving device, never by role.
+    assert types.ROLE_CAPABILITIES["admin"] == types.CAPABILITIES - {"workset_import"}
 
 
 # ---------------------------------------------------------------------------

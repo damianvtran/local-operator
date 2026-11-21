@@ -2837,7 +2837,7 @@ async def _acquire_heavy_lease(
     on_update: Callable[[AgentToolUpdate], None] | None,
     heavy: heavy_lease.HeavyClass | None,
     memory_budget: memory_guard.Budget,
-) -> heavy_lease.Lease | ToolResult | None:
+) -> heavy_lease.Lease | heavy_lease.InheritedLease | ToolResult | None:
     """Queue a heavy command for the machine-wide slot; None for everything else.
 
     Why: the 2026-11-16 node-2 OOM (parallel esbuild/node/chrome builds from
@@ -2865,6 +2865,12 @@ async def _acquire_heavy_lease(
     command's run and starts at spawn, so queueing never eats into it (PR
     #4104 K2: capping the queue at the 120 s default timeout refused a build
     queued behind an ordinary 5-10 minute one).
+
+    Re-entrant: a runtime that itself runs inside a leased command (a ``lop
+    exec`` or nested lop launched from one) gets a
+    :class:`heavy_lease.InheritedLease` back from ``acquire`` once the lock it
+    inherited is verified, and runs under its ancestor's slot instead of
+    queueing behind it (the 2026-11-20 self-deadlock).
     """
     if heavy is None or not heavy_lease.supported():
         return None
@@ -2925,7 +2931,20 @@ async def _acquire_heavy_lease(
         memory_mb=None if memory_budget.source == "disabled" else memory_budget.ceiling_mb,
         on_wait=_on_wait,
         aborted=(lambda: signal is not None and signal.aborted),
+        # The segment that made the line heavy, not its first word: the
+        # 2026-11-20 holder of the only slot read `rm` for a `go test -race`.
+        label=heavy.label(preview),
     )
+    if isinstance(result, heavy_lease.InheritedLease):
+        if on_update is not None:
+            line = heavy_lease.nested_line(result) + cap_off
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
+        return result
     if isinstance(result, heavy_lease.Lease):
         if cap_off and on_update is not None:
             # Only when the cap is off: an ordinary acquisition stays silent,
@@ -2949,7 +2968,9 @@ async def _acquire_heavy_lease(
     )
 
 
-def _release_heavy_lease_on_exit(process: Any, lease: heavy_lease.Lease) -> None:
+def _release_heavy_lease_on_exit(
+    process: Any, lease: heavy_lease.Lease | heavy_lease.InheritedLease
+) -> None:
     """Release ``lease`` when ``process`` exits, however the tool call ends.
 
     Tied to the PROCESS, not the tool call, so one rule covers a foreground
@@ -5105,16 +5126,23 @@ async def execute_bash(
     )
     if isinstance(heavy, ToolResult):
         return heavy
-    heavy_slot: heavy_lease.Lease | None = heavy
+    heavy_slot: heavy_lease.Lease | heavy_lease.InheritedLease | None = heavy
     spawn_options: dict[str, Any] = dict(detached_popen_kwargs())
     lease_fd = heavy_slot.fileno() if heavy_slot is not None else None
-    if lease_fd is not None and os.name == "posix":
+    passed_lease = heavy_slot if lease_fd is not None and os.name == "posix" else None
+    if passed_lease is not None:
         # The command inherits the lease descriptor, so the flock lives until
         # BOTH this harness and the command are gone: a harness SIGKILLed or
         # OOM-killed mid-build no longer frees the slot beside its still
         # running, detached build (PR #4104 QA Q1). A normal end still frees
         # it at once: Lease.release() unlocks the shared description.
         spawn_options["pass_fds"] = (lease_fd,)
+    # ...and the marker naming that descriptor, so a `lop services heavy run`
+    # (or nested lop) INSIDE this command runs under its slot instead of
+    # queueing behind its own ancestor: on 2026-11-20 one did, for its whole
+    # 3300 s timeout, while every other heavy command was refused at 900 s.
+    # Without a passed fd any inherited marker is cleared instead.
+    heavy_lease.export_marker(env, passed_lease)
     # Filesystem clock, not monotonic or wall: compared with the mtime of a
     # lock git writes during this call (guardrails/interrupted_worktree_add.py).
     spawned_at = interrupted_worktree_add.spawn_stamp(params.command)
@@ -27699,8 +27727,14 @@ async def _node_site_access(
             details={**details, "state": "none"},
         )
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    # THE SITE-CARD DOOR (security review 60334): a ``task`` subagent with no
+    # queue hands over only the typed facts of this reply, and its nearest
+    # ancestor with a queue rebuilds the card and binds it to this requester
+    # and entry. A session with its own queue has no door and keeps the plain
+    # ``enqueue_ask`` path unchanged.
+    site_door: Any = getattr(context, "enqueue_site_card", None) if context is not None else None
     entry_id = str(result.get("entryId") or "")
-    if not callable(enqueue) or not entry_id:
+    if (not callable(enqueue) and not callable(site_door)) or not entry_id:
         await _withdraw_entry()
         return _error(
             tool_call_id,
@@ -27708,7 +27742,8 @@ async def _node_site_access(
             _node_no_approver_text(
                 origin,
                 "this session cannot queue an ask for the operator (no queued-ask "
-                "engine), so the card cannot be raised.",
+                "engine: no ask surface is attached, or the operator turned queued "
+                "asks off with LOP_ASK_NONBLOCKING=0), so the card cannot be raised.",
             ),
             details={**details, "state": "none"},
         )
@@ -27774,17 +27809,101 @@ async def _node_site_access(
             withdraw_site(origin, keep_question_id=question_id)
         except Exception:  # noqa: BLE001 — the stale card's own timeout is the floor
             logger.debug("node site access: withdrawing a stale card failed", exc_info=True)
-    outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    if not callable(site_door):
+        outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    else:
+        outcome = site_door(
+            site_approval.SiteAccessFacts.from_bridge_reply(result, origin),
+            timeout_s,
+            tool_call_id=tool_call_id,
+            cancel=_withdraw_entry,
+        )
+        if isinstance(outcome, Mapping) and outcome.get("no_ancestor"):
+            # FAIL CLOSED, as a top-level session with no queue does — but
+            # saying why: no session up this subagent's tree can show a card.
+            await _withdraw_entry()
+            return _error(
+                tool_call_id,
+                "browser",
+                _node_no_approver_text(
+                    origin,
+                    "this subagent has no ask queue of its own, and none of the "
+                    "sessions that delegated to it can queue an ask for the operator, "
+                    "so the card cannot be raised. Report the site to whoever "
+                    "delegated this work.",
+                ),
+                details={**details, "state": "none"},
+            )
     receipt: Mapping[str, Any] = outcome if isinstance(outcome, Mapping) else {}
     ask_details = receipt.get("details")
     ask_id = str(ask_details.get("ask_id") or "") if isinstance(ask_details, Mapping) else ""
     wait = _node_wait_text(url, origin, reraised=lapsed > 0)
+    if receipt.get("busy"):
+        # ONE OPEN CARD PER ORIGIN (narrowed design, round 4; manager 79): another
+        # open card already asks the operator about this origin. The refusal is
+        # machine-actionable — a stable code plus that card's ids — and names the
+        # one next step, ``await_access``, so the agent never loops on retries.
+        # This request's own entry is deliberately NOT cancelled here: it stays
+        # pending until the extension's TTL (60334 design correction (2) prefers
+        # bounded expiry to an async cancel keyed by origin and requester while
+        # this same requester may retry), and that is what lets await_access
+        # report the other card's approve — a node-wide grant settles every
+        # pending entry for the origin.
+        card_question_id = (
+            str(ask_details.get("question_id") or "") if isinstance(ask_details, Mapping) else ""
+        )
+        return _error(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(
+                f"card_busy: the operator already has a card open for {origin} on this "
+                f"node (ask {ask_id}), raised for another agent in this task, so no "
+                "second card was raised for you. Your own request stays pending in the "
+                f"node's browser. Next: call action='await_access' url={url} to "
+                "wait on that card's answer — an approve covers this whole node, so it "
+                "reports allowed. If that card has been answered or has closed and "
+                "await_access still reports pending, call request_access once: a deny is "
+                "remembered and answers denied, and otherwise a card is raised for you. "
+                "Do not call request_access while that card is open."
+            ),
+            details={
+                "origin": origin,
+                "state": "pending",
+                "approval": "card_busy",
+                "code": "card_busy",
+                "card_ask_id": ask_id,
+                "card_question_id": card_question_id,
+                "next_action": "await_access",
+            },
+        )
     if not receipt.get("ok"):
         error = str(receipt.get("error") or "the ask was refused")
+        if receipt.get("code") == site_approval.SITE_REQUESTER_CLOSED:
+            # THE TEARDOWN OWNS THIS ENTRY (60334 R4 / R2-2 residual). The fence
+            # closed while this dispatch was in flight, so the teardown holds
+            # its cancel and runs it after this call finishes, behind the guard
+            # that skips an origin whose card of this requester is ``deciding``
+            # or ``unknown``. Cancelling here would bypass that guard; the
+            # extension's TTL is the floor if the teardown's wait runs out.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"Refused request_access for {url}: this subagent has finished, so no "
+                "card was raised and nothing will notify the operator.",
+                details={
+                    "origin": origin,
+                    "code": site_approval.SITE_REQUESTER_CLOSED,
+                    "state": "none",
+                },
+            )
         if "already carries that question" in error:
-            # This origin is already on the operator's card, bound to THIS
-            # entry: any card for another entry was withdrawn above, so the
-            # identical text the queue refuses is the live card's.
+            # This origin is already on an operator card with this exact text.
+            # Through the child door that card is bound to THIS entry and
+            # requester (``_queue_site_card``). On the top-level path the
+            # queue's identical-text refusal may instead name ANOTHER
+            # requester's card in this family (a child's, which the scoped
+            # withdraw above leaves alone). Either way the operator has been
+            # asked, so the copy holds and nothing is withdrawn.
             return _text(
                 tool_call_id,
                 "browser",
@@ -27946,9 +28065,58 @@ async def _bridge_access(
                         "pinned_origin": pin.origin,
                     },
                 )
-        result, problem = await _bridge_call(
-            tool_call_id, "request_access", {"url": url, **identity}, client=client
+        # THE TEARDOWN FENCE, BEFORE DISPATCH (60334 design correction (2)): a
+        # queue-less subagent whose teardown has begun sends no new request,
+        # and one sent before it is tracked until its reply becomes a card, so
+        # the teardown can cancel an entry that crossed the fence in flight.
+        begin_site: Any = (
+            getattr(context, "begin_site_request", None) if context is not None else None
         )
+        finish_site: Any = None
+        if callable(begin_site):
+
+            async def _cancel_dispatched() -> None:
+                await _bridge_call(
+                    tool_call_id, "cancel_access", {"url": url, **identity}, client=client
+                )
+
+            finish_site = begin_site(_cancel_dispatched)
+            if finish_site is None:
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    f"Refused request_access for {url}: this subagent has finished, so no "
+                    "approval request was sent and nothing will notify the operator.",
+                    details={
+                        "code": "requester_closed",
+                        "state": "refused",
+                        "approval_request_sent": False,
+                    },
+                )
+        node_result: ToolResult | None = None
+        try:
+            result, problem = await _bridge_call(
+                tool_call_id, "request_access", {"url": url, **identity}, client=client
+            )
+            if (
+                problem is None
+                and result is not None
+                and str(result.get("approval") or "") in ("signed", "no_approver")
+            ):
+                # A HEADLESS NODE's extension answered (``site_approval.py``):
+                # no person can click its popup, so the popup copy below would
+                # send the agent to wait on nothing.
+                node_result = await _node_site_access(
+                    tool_call_id,
+                    context,
+                    result,
+                    url,
+                    str(result.get("origin", url)),
+                    client=client,
+                )
+        finally:
+            if callable(finish_site):
+                finish_site()
         if problem is not None:
             if instruction:
                 problem.content.append(TextContent(text=f"\n\n{instruction}"))
@@ -27956,13 +28124,7 @@ async def _bridge_access(
         assert result is not None
         state_value = str(result.get("state", ""))
         origin = str(result.get("origin", url))
-        if str(result.get("approval") or "") in ("signed", "no_approver"):
-            # A HEADLESS NODE's extension answered (``site_approval.py``): no
-            # person can click its popup, so the popup copy below would send the
-            # agent to wait on nothing.
-            node_result = await _node_site_access(
-                tool_call_id, context, result, url, origin, client=client
-            )
+        if node_result is not None:
             if instruction:
                 node_result.content.append(TextContent(text=f"\n\n{instruction}"))
             return node_result

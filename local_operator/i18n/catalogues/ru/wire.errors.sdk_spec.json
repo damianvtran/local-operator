@@ -7,6 +7,7 @@
   "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' открывает средство просмотра для spec.resume; он не подключает команды, профили, инструменты, имена, цели или политики одобрения — это сторона владельца. Задайте в этой спецификации только resume (или используйте mode=''own''). Недопустимые поля: {fields}.",
   "wire.errors.sdk_spec.attach_output_unsupported": "принудительный формат вывода нельзя задать для подключённой сессии; решает рантайм-владелец",
   "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' требует spec.resume: средство просмотра подключается к id",
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": "mcp_ready_timeout_s: timeout_s должен быть конечным числом >= 0",
   "wire.errors.sdk_spec.mode_invalid": "mode должен быть ''own'' или ''attach'', а не {mode}",
   "wire.errors.sdk_spec.output_format_invalid": "output_format должен быть одним из: {formats}",
   "wire.errors.sdk_spec.output_retries_range": "output_retries должен быть от 0 до 5",

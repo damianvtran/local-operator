@@ -641,6 +641,8 @@ def test_capability_is_advertised_only_on_an_authenticated_listing(tmp_path, mon
         "durable_idempotency": True,
         "receipt_capacity": 4096,
         "effort": True,
+        "agent": True,
+        "team": True,
     }
     anonymous = TestClient(build_app(r.daemon), follow_redirects=False)
     assert anonymous.get("/api/sessions").status_code in (401, 403)
@@ -659,6 +661,11 @@ def test_protocol_doc_matches_the_advertised_contract():
         "create_receipts_unavailable",
         "start_request_too_large",
         "invalid_start_effort",
+        "invalid_start_target",
+        "unknown_start_target",
+        "start_target_registry_unavailable",
+        "start_target_unsaved",
+        "/api/start-targets",
     ):
         assert token in doc
     # The documented byte cap is the enforced one.
@@ -758,3 +765,277 @@ def test_effort_reaches_the_child_environment_and_absence_scrubs_it(tmp_path, mo
     assert "LOP_MOBILE_CHILD_EFFORT" not in envs[1]
     # A level alone is a birth sample, not a model override.
     assert "LOP_MODEL_SELECTION_OVERRIDE" not in envs[0]
+
+
+# --------------------------------------------------------------------------
+# Launch target (operator: "make this available to be able to start a
+# conversation with a team enabled" from the phone's new chat)
+# --------------------------------------------------------------------------
+
+
+def _seed_targets(root: Path, *, broken_member: bool = False) -> None:
+    """One custom role and one team in the rig's isolated config root.
+
+    ``manager``/``coder`` resolve as packaged seeds, so the team needs no
+    install of its own roster; ``broken_member`` adds a slot naming nothing.
+    """
+    from datetime import datetime, timezone
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.teams import Team, TeamMember, TeamRegistry
+
+    root.mkdir(parents=True, exist_ok=True)
+    fields: dict[str, object] = {
+        key: None for key in AgentEditFields.model_fields if key not in ("name", "tags")
+    }
+    AgentRegistry(root).create_agent(
+        AgentEditFields(**{**fields, "name": "auditor", "description": "Audits", "tags": ["role"]})
+    )
+    members = [TeamMember(role="coder")]
+    if broken_member:
+        members.append(TeamMember(role="ghost-role"))
+    TeamRegistry(root).save_team(
+        Team(
+            id="t-squad",
+            name="squad",
+            created_date=datetime.now(timezone.utc),
+            description="Fixture team",
+            manager="manager",
+            members=members,
+        )
+    )
+
+
+def _attachment(root: Path, sid: str) -> dict[str, str] | None:
+    path = root / "sessions" / sid / "attachment.json"
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+class TargetRig(Rig):
+    """A rig whose spawn spy records the sidecar AS THE CHILD WOULD SEE IT."""
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **seed: bool):
+        super().__init__(tmp_path, monkeypatch)
+        _seed_targets(self.root, **seed)
+        self.seen: list[dict[str, str] | None] = []
+        inner = self.daemon.spawn_session
+
+        async def spawn(cwd, provider=None, model_id=None, resume=None, effort=None):
+            self.seen.append(_attachment(self.root, str(resume)))
+            return await inner(cwd, provider, model_id, resume, effort)
+
+        monkeypatch.setattr(self.daemon, "spawn_session", spawn)
+
+    def session_dirs(self) -> list[str]:
+        sessions = self.root / "sessions"
+        return sorted(p.name for p in sessions.iterdir()) if sessions.is_dir() else []
+
+
+def _target_body(keyed: bool, **fields: object) -> dict[str, object]:
+    return body(**fields) if keyed else {"cwd": "~", **fields}
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        ({"team": "SQUAD"}, {"team": "squad", "agent": ""}),
+        ({"agent": " auditor "}, {"team": "", "agent": "auditor"}),
+        ({"agent": "coder", "team": "  "}, {"team": "", "agent": "coder"}),
+    ],
+)
+def test_target_is_bound_canonically_before_the_child_spawns(
+    tmp_path, monkeypatch, keyed, fields, expected
+):
+    r = TargetRig(tmp_path, monkeypatch)
+    response = r.start(_target_body(keyed, **fields))
+    assert response.status_code == 200, response.text
+    sid = response.json()["session_id"]
+    # The spy read the sidecar at spawn time: it was ALREADY there, which is
+    # what lets ``Session.__init__``'s restore bind before the first turn.
+    assert r.seen == [{**expected, "goal": ""}]
+    assert _attachment(r.root, sid) == {**expected, "goal": ""}
+    if keyed:
+        kind = next(k for k in ("agent", "team") if expected[k])
+        intent_name = str(fields[kind]).strip()
+        assert json.loads(r.rows()[0][1])[kind] == expected[kind]
+        # The fingerprinted intent keeps the caller's spelling.
+        assert json.loads(canonical_request(_target_body(True, **fields))[1])[kind] == intent_name
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"agent": "auditor", "team": "squad"},
+        {"team": 7},
+        {"agent": ["coder"]},
+        {"team": "x" * 129},
+    ],
+)
+def test_malformed_or_double_target_is_refused_before_any_side_effect(
+    tmp_path, monkeypatch, keyed, fields
+):
+    r = TargetRig(tmp_path, monkeypatch)
+    response = r.start(_target_body(keyed, **fields))
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_start_target"
+    assert r.calls == 0
+    assert r.rows() == []
+    assert r.session_dirs() == []
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+@pytest.mark.parametrize(
+    "fields,broken,unresolved",
+    [
+        ({"team": "nope"}, False, {"team": None, "slot": "team", "member": "nope"}),
+        ({"agent": "nope"}, False, {"team": None, "slot": "agent", "member": "nope"}),
+        ({"team": "squad"}, True, {"team": "squad", "slot": "member", "member": "ghost-role"}),
+    ],
+)
+def test_unknown_target_is_a_404_not_a_broken_receipt_store(
+    tmp_path, monkeypatch, keyed, fields, broken, unresolved
+):
+    """Regression guard for the ``_database`` trap: ``UnresolvedTarget`` is a
+    ``KeyError`` and would otherwise surface as ``create_receipts_unavailable``."""
+    r = TargetRig(tmp_path, monkeypatch, broken_member=broken)
+    response = r.start(_target_body(keyed, **fields))
+    assert response.status_code == 404, response.text
+    assert response.json()["code"] == "unknown_start_target"
+    assert response.json()["unresolved"] == unresolved
+    assert r.calls == 0
+    assert r.rows() == []
+    assert r.session_dirs() == []
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+def test_registry_failure_is_a_typed_503_with_nothing_written(tmp_path, monkeypatch, keyed):
+    from local_operator.server.utils import desktop_profiles
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    r = TargetRig(tmp_path, monkeypatch)
+
+    def unavailable(*_args, **_kwargs):
+        raise ProfileRegistryUnavailable(1)
+
+    monkeypatch.setattr(desktop_profiles, "validate_target", unavailable)
+    response = r.start(_target_body(keyed, team="squad"))
+    assert response.status_code == 503, response.text
+    assert response.json()["code"] == "start_target_registry_unavailable"
+    assert r.calls == 0
+    assert r.rows() == []
+    assert r.session_dirs() == []
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+def test_unsaved_binding_refuses_and_never_spawns(tmp_path, monkeypatch, keyed):
+    from local_operator import resume as resume_module
+
+    r = TargetRig(tmp_path, monkeypatch)
+    # The best-effort writer's observable failure mode: nothing lands.
+    monkeypatch.setattr(resume_module, "write_session_attachment", lambda *a, **k: None)
+    response = r.start(_target_body(keyed, team="squad"))
+    assert response.status_code == 503, response.text
+    assert response.json()["code"] == "start_target_unsaved"
+    assert r.calls == 0
+    if keyed:
+        # The claim already minted the SID; its retry answers that SID, as a
+        # failed temporary mark's does.
+        sid = response.json()["session_id"]
+        assert [row[2] for row in r.rows()] == [sid]
+
+
+def test_a_targetless_request_fingerprints_exactly_as_before_the_field():
+    _, request = canonical_request(body())
+    assert request == '{"cwd":"~","model_id":"fixture-model","provider":"openai"}'
+    _, blank = canonical_request(body(agent=None, team="  "))
+    assert blank == request
+
+
+def test_the_same_key_with_a_different_target_is_a_conflict_and_replay_keeps_the_sidecar(
+    tmp_path, monkeypatch
+):
+    r = TargetRig(tmp_path, monkeypatch)
+    first = r.start(body(team="squad"))
+    assert first.status_code == 200, first.text
+    sid = first.json()["session_id"]
+    # The user later cleared the team in that chat; a lost-response replay
+    # must not re-bind it (the sidecar is written on the FRESH start only).
+    (r.root / "sessions" / sid / "attachment.json").write_text(
+        json.dumps({"team": "", "agent": "", "goal": ""})
+    )
+    monkeypatch.setattr(
+        r.daemon,
+        "recover_started_session",
+        lambda sid_: asyncio.sleep(0, result={"ok": True, "pid": 970123, "session_id": sid_}),
+    )
+    replay = r.start(body(team="squad"))
+    assert replay.json().get("session_id") == sid
+    assert _attachment(r.root, sid) == {"team": "", "agent": "", "goal": ""}
+    for other in (body(team="SQUAD"), body(agent="auditor"), body()):
+        conflict = r.start(other)
+        assert conflict.status_code == 409
+        assert conflict.json()["code"] == "create_conflict"
+    assert r.calls == 1
+
+
+def test_start_targets_lists_agents_and_teams_with_painted_labels(tmp_path, monkeypatch):
+    from local_operator.agent_avatar import AgentIdentity
+
+    r = TargetRig(tmp_path, monkeypatch)
+    import local_operator.agent_avatar as avatar_module
+
+    real_index = avatar_module.agent_index
+
+    def index(root):
+        rows = dict(real_index(root))
+        rows["auditor"] = AgentIdentity(agent_id=rows["auditor"].agent_id, avatar_sha256="ab" * 32)
+        return rows
+
+    monkeypatch.setattr(avatar_module, "agent_index", index)
+    payload = r.client.get("/api/start-targets").json()
+    assert payload["degraded"] is False
+    agents = {row["name"]: row for row in payload["agents"]}
+    auditor = agents["auditor"]
+    assert set(auditor) == {
+        "name",
+        "label",
+        "kind",
+        "source",
+        "description",
+        "agent_id",
+        "avatar_sha256",
+    }
+    assert auditor["kind"] == "role" and auditor["source"] == "custom"
+    assert auditor["agent_id"] and auditor["avatar_sha256"] == "ab" * 32
+    # A packaged seed nobody installed: listed, with no id to fetch a picture by.
+    assert agents["coder"]["agent_id"] is None and agents["coder"]["source"] == "builtin"
+    from local_operator.display_labels import display_form
+
+    assert agents["coder"]["label"] == display_form("coder", "Coder")
+    assert payload["teams"] == [
+        {
+            "name": "squad",
+            "label": "squad",
+            "description": "Fixture team",
+            "manager": "manager",
+            "member_count": 1,
+        }
+    ]
+
+
+def test_start_targets_degrades_on_registry_failure_and_is_gated(tmp_path, monkeypatch):
+    from local_operator.server.utils import desktop_profiles
+
+    r = TargetRig(tmp_path, monkeypatch)
+
+    def broken(_registry):
+        raise OSError("fixture: unreadable")
+
+    monkeypatch.setattr(desktop_profiles, "profile_catalogue", broken)
+    reply = r.client.get("/api/start-targets")
+    assert reply.status_code == 200
+    assert reply.json() == {"agents": [], "teams": [], "degraded": True}
+    anonymous = TestClient(build_app(r.daemon), follow_redirects=False)
+    assert anonymous.get("/api/start-targets").status_code in (401, 403)

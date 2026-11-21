@@ -2939,6 +2939,26 @@ class ToolContext(BaseModel):
     #: (review R4-1). Bound beside
     #: :attr:`withdraw_site_asks`, ``None`` where it is.
     site_ask_lapses: Callable[[str], int] | None = None
+    #: THE SITE-CARD DOOR (security review 60334). A ``task`` subagent is
+    #: built without an ask handler, so it has no queue and :attr:`enqueue_ask`
+    #: is ``None``. ``enqueue_site_card(facts, timeout, tool_call_id="",
+    #: cancel=None)`` takes ONLY a typed ``site_approval.SiteAccessFacts``
+    #: (never a question) and hands it to the nearest live ancestor with a
+    #: queue, which rebuilds the canonical signed card itself and binds it to
+    #: this requester and request. ``cancel`` is the tool's ``cancel_access``
+    #: closure for the entry, kept for this requester's teardown. Returns the
+    #: ask receipt shape (``{"ok", "details"/"error"}``); ``"busy": True``
+    #: means another open card already asks about the origin (its ids in
+    #: ``details``); ``"no_ancestor": True`` means no session up the tree can
+    #: queue it. Bound ONLY on a subagent with no queue; a session with its
+    #: own queue keeps :attr:`enqueue_ask`.
+    enqueue_site_card: Callable[..., Mapping[str, Any]] | None = None
+    #: THE TEARDOWN FENCE, before dispatch (60334 design correction (2)):
+    #: ``begin_site_request(cancel)`` returns a ``finish()`` to call once the
+    #: ``request_access`` reply has been handled, or ``None`` once the
+    #: session's teardown has begun — then nothing may be dispatched. Bound
+    #: beside :attr:`enqueue_site_card`.
+    begin_site_request: Callable[..., Any] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
     #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``

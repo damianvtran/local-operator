@@ -1012,6 +1012,28 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
         return
 
 
+def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool:
+    """Bind a NEW session to a profile or team before anything runs in it.
+
+    ``write_session_attachment`` is best-effort by contract (an attach mid-session
+    must never fail its turn), but a CREATE that names a target is a different
+    promise: the caller is about to tell a user "this chat runs as lopdev". So the
+    write is read back, and ``False`` means "do not start this session" -- the
+    alternative is a conversation that silently runs the default agent while
+    the surface that started it shows the chosen one.
+
+    ONE helper for every creator (desktop ``DesktopSessions.create`` and the
+    relay's ``POST /api/sessions/start``) so the two cannot drift on the bytes,
+    the empty ``goal`` or what counts as "landed". It must run BEFORE the
+    session's runtime is constructed: ``Session.__init__`` restores the sidecar
+    unconditionally, which is what binds the manager role, the briefs and the
+    roster on the first turn rather than after it.
+    """
+    write_session_attachment(session_dir, agent=agent, team=team, goal="")
+    stored = read_session_attachment(session_dir)
+    return stored is not None and stored.agent == agent and stored.team == team
+
+
 def read_goal_record(session_dir: Path) -> dict[str, Any] | None:
     """Parse ``goal.json``, or ``None`` when absent or unusable.
 

@@ -32,11 +32,12 @@ because the legacy ``bridge send`` path never reaches a conversation.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -1105,17 +1106,269 @@ async def _deliver_card(
     session_id: str,
     config_dir: Path,
 ) -> str:
-    """Hand the metadata card to the designated session (shipped mailbox wake)."""
+    """Hand the metadata card to the designated session (shipped mailbox wake).
 
+    IDEMPOTENT HAND-OFF (PR #3478 QA r1, comments 6663928534 / 6663979598). The
+    peer accepted a card, ``mark_body_card_posted`` then failed, and a forced
+    replay posted a SECOND card: each hand-off minted a fresh peer message id,
+    so the receiver's existing duplicate gate had nothing to match. The card's
+    id is now bound to its reservation rows BEFORE dispatch
+    (:meth:`Store.bind_card_handoff`) and every replay re-sends that same id on
+    the EXISTING ``message_id`` field — no new wire field, operation, retry
+    policy or transport. See :func:`_card_handoff_settled` for what a replay's
+    answer may and may not prove.
+
+    ROUTING (#4258): a ``routed`` card goes to the session that asked
+    (``live_only``), falling back to the designated session when that target
+    is gone; both legs run under the one bound id.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    from .wake import CARD_HANDOFF, CardHandoff
+
+    members = list(metadata.coalesced_message_ids or (metadata.message_id,))
+    store = Store(config_dir)
+    # ROUTED ROWS (merge with #4258): a routed card is addressed to the session
+    # that asked, but its rows keep ``designated_session`` = the designation
+    # they were reserved under (``routed_session`` names the target). The bind
+    # fences the rows against the DESIGNATION, so a routed card passes the
+    # current designation, never its target — the target would mismatch every
+    # routed row and hold the card forever.
+    fence_session = session_id
     if metadata.routed:
-        try:
-            return await _deliver_routed(owner, metadata, session_id, config_dir)
-        except RoutedSessionGone:
-            # The target died or went wedged between the decision and the wake.
-            # Nothing was delivered: give the row(s) back to the designated
-            # session and send it the ordinary card instead.
-            return await _fall_back_to_designated(owner, metadata, session_id, config_dir)
-    return await _deliver_card_to(owner, metadata, session_id, config_dir, live_only=False)
+        fence_session = store.designated_session_for(owner) or ""
+    bound = _bind_card_handoff(
+        store, owner, metadata.conversation_id, members, fence_session, _card_record(metadata)
+    )
+    if bound is not None and bound[1]:
+        # A REPLAY RE-SENDS THE ORIGINAL CARD (PR #4348 r2: R5/S-4/Q2): the
+        # id's first card, rebuilt from the record written when it was minted,
+        # so a re-driven subset is widened back to every original member
+        # instead of being split off under a new id (a duplicate when the first
+        # card had committed) or sent alone under the old one (a lost sibling
+        # when it had not). No record (bound before the record existed) is only
+        # reachable here when the requested rows are the whole owed set, which
+        # the bind has already checked; then the live card is that same set.
+        record = store.card_handoff_record(owner, metadata.conversation_id, bound[0])
+        if record is not None:
+            metadata = _card_from_record(record, metadata, members)
+    handoff = CardHandoff(bound[0]) if bound is not None else None
+    token = CARD_HANDOFF.set(handoff)
+    try:
+        # ONE identity across the routed attempt and its designated fallback:
+        # the routed target died before accepting anything (a confirmed
+        # non-delivery), so the fallback card is the same logical card and
+        # re-uses the id. Its typed answer then replaces the routed attempt's.
+        if metadata.routed:
+            try:
+                detail = await _deliver_routed(owner, metadata, session_id, config_dir)
+            except RoutedSessionGone:
+                # The target died or went wedged between the decision and the wake.
+                # Nothing was delivered: give the row(s) back to the designated
+                # session and send it the ordinary card instead. The routed
+                # attempt's FAILED outcome proves nothing about the card, so it
+                # must not reach ``_card_handoff_settled`` if the fallback sends
+                # nothing (``route_claimed``).
+                if handoff is not None:
+                    handoff.outcome = None
+                detail = await _fall_back_to_designated(owner, metadata, session_id, config_dir)
+        else:
+            detail = await _deliver_card_to(
+                owner, metadata, session_id, config_dir, live_only=False
+            )
+    finally:
+        CARD_HANDOFF.reset(token)
+    if handoff is not None and bound is not None:
+        _card_handoff_settled(
+            store, owner, metadata.conversation_id, members, handoff, replay=bound[1]
+        )
+    return detail
+
+
+#: The free-text display fields a card carries. They are NEVER written to the
+#: card record: ``body_reservations`` is contentless by contract (B1, guarded by
+#: ``test_admission_records_exactly_one_contentless_reservation``, which scans
+#: every column for the conversation subject and sender label). A rebuilt card
+#: takes them from the live metadata of the members re-driven now instead.
+_CARD_RECORD_LABELS = ("conversation_label", "sender_label")
+#: The ROUTING fields (#4258) are not presentation of the original card but
+#: the current DELIVERY decision: the caller re-reads the stored route on every
+#: replay and passes the matching ``session_id`` (the routed target, or the
+#: designation once the row was handed back). Rebuilding them from the record
+#: would pair a stale ``routed`` flag with a live target, so like the labels
+#: they are never recorded and always come from the live metadata. Keeping
+#: them out also keeps session ids out of the record.
+_CARD_RECORD_LIVE = ("routed", "routed_ask_ref", "routed_via_thread", "route_candidates")
+#: ``merge_metadata``'s label for a group whose senders differ.
+_SEVERAL_SENDERS = "several members"
+
+
+def _card_record(metadata: ConversationCardMetadata) -> str:
+    """The write-once, CONTENTLESS record of a card, stored at mint time.
+
+    The fields of :class:`ConversationCardMetadata` (a type that by
+    construction cannot carry a body) minus its two free-text labels: ids,
+    seq, closed-vocabulary kinds, flags, counts and the fixed-template withheld
+    notes. ``sender_several`` keeps the one fact about the labels the rebuild
+    needs: whether the card named one sender or ``several members``. Output-
+    equivalent even for a sender literally named that, since both arms then
+    render the same text.
+    """
+
+    raw = asdict(metadata)
+    for name in (*_CARD_RECORD_LABELS, *_CARD_RECORD_LIVE):
+        raw.pop(name, None)
+    raw["sender_several"] = metadata.sender_label == _SEVERAL_SENDERS
+    return json.dumps(raw, sort_keys=True, separators=(",", ":"))
+
+
+def _card_from_record(
+    record: str, live: ConversationCardMetadata, members: list[str]
+) -> ConversationCardMetadata:
+    """Rebuild the id's original card; refuse (hold) on any drift.
+
+    Membership, ordering, locator, flags and counts come from the record; the
+    conversation label and (for a one-sender card) the sender label come from
+    ``live``, the metadata of the members re-driven now — the same
+    conversation, and for a one-sender card the same sender. The requested
+    members must all be members of the recorded card and it must name this
+    conversation; otherwise the record and the bindings disagree, and sending
+    either would be a guess.
+    """
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    try:
+        raw = json.loads(record)
+        known = {f.name for f in fields(ConversationCardMetadata)} - {
+            *_CARD_RECORD_LABELS,
+            *_CARD_RECORD_LIVE,
+        }
+        if not isinstance(raw, dict):
+            raise ValueError("record shape")
+        several = raw.pop("sender_several")
+        if not isinstance(several, bool) or not set(raw) <= known:
+            raise ValueError("record shape")
+        raw["coalesced_message_ids"] = tuple(raw.get("coalesced_message_ids") or ())
+        rebuilt = ConversationCardMetadata(
+            **raw,
+            conversation_label=live.conversation_label,
+            sender_label=_SEVERAL_SENDERS if several else live.sender_label,
+            **{name: getattr(live, name) for name in _CARD_RECORD_LIVE},
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        raise StoreRefused("card_binding_mismatch", "handoff record") from exc
+    recorded = set(rebuilt.coalesced_message_ids or (rebuilt.message_id,))
+    if rebuilt.conversation_id != live.conversation_id or not set(members) <= recorded:
+        raise StoreRefused("card_binding_mismatch", "handoff record")
+    return rebuilt
+
+
+def _bind_card_handoff(
+    store: Any,
+    owner: Any,
+    conversation_id: str,
+    members: list[str],
+    session_id: str,
+    card_record: str | None = None,
+) -> tuple[str, bool] | None:
+    """``(handoff_id, replay)`` for this card, ``None`` for an unreserved card.
+
+    A card with NO reservation row at all (the unadmitted recovery card) keeps
+    the historical minted id: there is no durable row to bind an identity to,
+    so it stays at-least-once exactly as before. A mix of reserved and
+    unreserved members, or of different bindings, is refused before dispatch
+    (the coalescer partitions by binding first, so a mix is drift).
+    """
+
+    from local_operator.mobile.peer_send import mint_peer_message_id
+    from local_operator.team_bridge.store import (
+        CARD_HANDOFF_LEGACY,
+        CARD_HANDOFF_UNRESERVED,
+        StoreRefused,
+    )
+
+    bindings = store.card_handoff_bindings(owner, conversation_id, members)
+    values = set(bindings.values())
+    if values == {CARD_HANDOFF_UNRESERVED}:
+        return None
+    if CARD_HANDOFF_LEGACY in values:
+        # Closed code, never an id: this is the legacy-provenance hold.
+        logger.warning("bridge: card held code=card_provenance_unknown")
+        raise StoreRefused("card_provenance_unknown")
+    if CARD_HANDOFF_UNRESERVED in values:
+        raise StoreRefused("card_handoff_split")
+    return store.bind_card_handoff(
+        owner,
+        conversation_id,
+        members,
+        designated_session=session_id,
+        minted_id=mint_peer_message_id(),
+        card_record=card_record,
+    )
+
+
+def _card_handoff_settled(
+    store: Any,
+    owner: Any,
+    conversation_id: str,
+    members: list[str],
+    handoff: Any,
+    *,
+    replay: bool,
+) -> None:
+    """Decide what a hand-off's TYPED answer proves; raise to keep it owed.
+
+    First send (``replay`` False): today's semantics, unchanged — delivered,
+    mailbox and unconfirmed all settle the card (a failed one already raised).
+
+    Replay under a bound id — only the receiver's own answer counts, never a
+    transcript body or any other local inference:
+
+    * ``mailbox`` — the receiver answered DUPLICATE+COMMITTED (or its row was
+      found by id on disk): the earlier hand-off landed, so the caller may mark
+      the card posted. No second card exists.
+    * ``delivered`` — accepted as NEW: the id was never committed before, so
+      no earlier card under it reached anyone, and this card carried EVERY
+      member bound to it — a replay always re-sends the id's ORIGINAL card
+      (``_card_from_record``), widened back to its full membership whatever
+      subset was re-driven, so no sibling can be left bound to an id that a
+      card without it committed, and no member is ever re-sent under a second
+      id. Nothing to write after the send, hence no post-send window a refused
+      write or a kill could turn into a lost wake (PR #4348 r1 R2/S-1/Q1, r2
+      R5/S-4/Q2).
+    * ``unconfirmed`` (in flight at the receiver, queued, or no answer) —
+      truthfully unknown: raise ``card_unconfirmed`` so the reservation stays
+      owed and held. The retry re-sends the SAME id (deduplicated), never a
+      fresh one, so this is not a resend-a-new-card loop.
+
+    No typed outcome (a cold target with no durable history, whose errand
+    carries no id, or a test double): nothing more is known than before, so
+    today's at-least-once behaviour stands — a documented residual.
+    """
+
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        DELIVERY_MAILBOX,
+        DELIVERY_UNCONFIRMED,
+    )
+    from local_operator.team_bridge.store import StoreRefused
+
+    outcome = handoff.outcome
+    if not replay or outcome is None:
+        return
+    state = getattr(outcome, "state", None)
+    if state == DELIVERY_MAILBOX:
+        logger.info("bridge: card replay deduplicated code=card_already_delivered")
+        return
+    if state == DELIVERY_DELIVERED:
+        return
+    if state == DELIVERY_UNCONFIRMED:
+        logger.warning("bridge: card replay held code=card_unconfirmed")
+        raise StoreRefused("card_unconfirmed")
+    # Any other state is drift: unknown is never delivered.
+    raise StoreRefused("card_unconfirmed")
 
 
 async def _deliver_routed(

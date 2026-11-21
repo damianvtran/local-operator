@@ -847,6 +847,7 @@ export type MessageParams = {
   "wire.errors.sdk_spec.attach_fields_unsupported": { "fields": string };
   "wire.errors.sdk_spec.attach_output_unsupported": undefined;
   "wire.errors.sdk_spec.attach_resume_required": undefined;
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": undefined;
   "wire.errors.sdk_spec.mode_invalid": { "mode": string };
   "wire.errors.sdk_spec.output_format_invalid": { "formats": string };
   "wire.errors.sdk_spec.output_retries_range": undefined;
@@ -1664,6 +1665,12 @@ export type MessageParams = {
   "wire.settings.max_learnings_history.label": undefined;
   "wire.settings.memory_guard.description": undefined;
   "wire.settings.memory_guard.title": undefined;
+  "wire.settings.mesh_move_working_set_max_bytes.help": undefined;
+  "wire.settings.mesh_move_working_set_max_bytes.label": undefined;
+  "wire.settings.mesh_move_working_set_roots.help": undefined;
+  "wire.settings.mesh_move_working_set_roots.label": undefined;
+  "wire.settings.mesh_moves.description": undefined;
+  "wire.settings.mesh_moves.title": undefined;
   "wire.settings.mesh_updates.description": undefined;
   "wire.settings.mesh_updates.title": undefined;
   "wire.settings.model.description": undefined;

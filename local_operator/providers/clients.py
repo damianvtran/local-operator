@@ -6227,7 +6227,10 @@ GOOGLE_API_URL = "https://generativelanguage.googleapis.com"
 VERTEX_API_URL = "https://aiplatform.googleapis.com"
 
 
-_GEMINI_MAJOR_RE = re.compile(r"gemini-(\d+)(?:[.\-]|$)")
+# ``@`` closes the major too: Vertex model ids carry a version suffix
+# (``gemini-4@001``, ``gemini-4-neon@default``), and without it a bare major
+# followed by ``@`` failed the gate and silently lost the Gemini 3+ wire rules.
+_GEMINI_MAJOR_RE = re.compile(r"gemini-(\d+)(?:[.\-@]|$)")
 
 
 def _is_gemini_3_or_later(model_id: str) -> bool:
@@ -6243,8 +6246,8 @@ def _is_gemini_3_or_later(model_id: str) -> bool:
 
     Only the last path segment is read, so a vendor or resource prefix
     (``google/``, ``models/``, ``publishers/google/models/``) does not matter.
-    The match is anchored at that segment's start and needs ``-``/``.``/end after
-    the digits, so ``gemini-exp-1206``, ``gemma-3-27b`` and ``xgemini-4`` are
+    The match is anchored at that segment's start and needs ``-``/``.``/``@``/end
+    after the digits, so ``gemini-exp-1206``, ``gemma-3-27b`` and ``xgemini-4`` are
     not Gemini 3+, and ``gemini-10-ultra`` is (no lexical compare).
     """
     bare = model_id.rsplit("/", 1)[-1].strip().lower()
@@ -6290,30 +6293,51 @@ _GOOGLE_PREFIX_SNAPSHOTS_MAX = 128
 #: eviction; a smaller-minimum model merely under-reports a few evictions.
 _GOOGLE_IMPLICIT_CACHE_MIN_TOKENS = 4096
 
-#: Local diagnostic tolerance, NOT a claim about Google's cache block size.
-#: The operator's 2049-token boundary tolerates a <=2048-token shortfall;
-#: greater losses get their own label rather than calling a partial hit full.
-_GOOGLE_PARTIAL_EVICTION_TOKENS = 2048
+#: Largest identical-prefix shortfall that is still a HEALTHY read, inclusive.
+#:
+#: Evidence (PR #4340 QA Q-O1, and the operator's read-only analytics.db,
+#: ``provider='google-vertex'`` rows through 2026-11-20): when the whole
+#: previous prompt is a byte-identical prefix, Vertex reads back either
+#: ``prev_prompt + 1`` (a full hit) or a little LESS than ``prev_prompt``, and
+#: that shortfall was never above 2049 -- 713, 1503, 1779, and exactly 2049 on
+#: 4 of the operator's 25 adjacent pairs and on every non-baseline row of
+#: QA's live ``lop exec`` runs. The recurring exact 2049 is the fingerprint of
+#: implicit caching committing whole blocks and leaving the final partial
+#: block of the previous prompt unread; no larger shortfall appeared without
+#: an idle gap or prefix change. Such a turn is not a break, so it gets the
+#: non-break label ``unchanged_block_tail`` with its honest
+#: ``cache_missed_tokens`` (a distinct label, rather than plain ``unchanged``,
+#: so a ledger query can still measure what the block tail costs and notice if
+#: Google's granularity ever moves). Inclusive, because 2049 itself is the
+#: observed healthy maximum; anything larger is ``partial_eviction``.
+_GOOGLE_CACHE_BLOCK_TAIL_TOKENS = 2049
+
+#: Google ``cache_miss_type`` values that are NOT a prefix break. Shared by
+#: ``SessionStreamFn._log_cache_break`` and any ledger analysis so the new
+#: healthy-tail label can never be counted (or logged) as a break.
+GOOGLE_CACHE_DIAGNOSIS_NO_BREAK = frozenset({"baseline", "unchanged", "unchanged_block_tail"})
 
 
 class _GooglePrefixSnapshot(NamedTuple):
-    system_hash: str
-    tools_hash: str
-    tool_config_hash: str
-    contents_hashes: tuple[str, ...]
+    # Raw 32-byte SHA-256 digests: only ever compared for equality, so the
+    # 64-char hex form would just double the memory of every kept chain.
+    system_hash: bytes
+    tools_hash: bytes
+    tool_config_hash: bytes
+    contents_hashes: tuple[bytes, ...]
     prompt_tokens: int = 0
 
 
 _GOOGLE_PREFIX_SNAPSHOTS: OrderedDict[tuple[str, ...], _GooglePrefixSnapshot] = OrderedDict()
 
 
-def _google_digest(value: Any) -> str:
+def _google_digest(value: Any) -> bytes:
     # Canonical JSON (sorted keys, no whitespace) so a dict-ordering difference
     # that Google would never see is not reported as a break.
     encoded = json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(encoded).digest()
 
 
 def _google_prefix_snapshot(body: Mapping[str, Any]) -> _GooglePrefixSnapshot:
@@ -6335,10 +6359,10 @@ def _google_cache_diagnosis(
 
     Section order and names follow Anthropic's ``cache_miss_reason.type`` so
     one ledger query spans providers; ``tool_config_changed``,
-    ``evicted_or_rerouted`` and ``partial_eviction`` are Google-only.
-    ``cache_missed_tokens`` is the previously-cacheable prompt that was not
-    read back: ``previous.prompt_tokens - cached_tokens`` (never negative), or
-    0 when nothing was lost (``baseline``, ``unchanged``).
+    ``evicted_or_rerouted``, ``partial_eviction`` and ``unchanged_block_tail``
+    are Google-only. ``cache_missed_tokens`` is the previously-cacheable prompt
+    that was not read back: ``previous.prompt_tokens - cached_tokens`` (never
+    negative), or 0 when nothing was lost (``baseline``, ``unchanged``).
     """
     if previous is None:
         return "baseline", 0
@@ -6359,8 +6383,10 @@ def _google_cache_diagnosis(
         if previous.prompt_tokens >= _GOOGLE_IMPLICIT_CACHE_MIN_TOKENS:
             return "evicted_or_rerouted", previous.prompt_tokens
         return "unchanged", 0
-    if shortfall > _GOOGLE_PARTIAL_EVICTION_TOKENS:
+    if shortfall > _GOOGLE_CACHE_BLOCK_TAIL_TOKENS:
         return "partial_eviction", shortfall
+    if shortfall > 0:
+        return "unchanged_block_tail", shortfall
     return "unchanged", 0
 
 
@@ -6397,6 +6423,22 @@ def _google_record_prefix(
     while len(_GOOGLE_PREFIX_SNAPSHOTS) > _GOOGLE_PREFIX_SNAPSHOTS_MAX:
         _GOOGLE_PREFIX_SNAPSHOTS.popitem(last=False)
     return miss
+
+
+def forget_google_cache_chain(chain: str) -> None:
+    """Drop every snapshot of one comparison chain (its stream fn closed).
+
+    The LRU bound alone would keep a closed conversation's snapshots until 128
+    newer chains pushed them out; a closed ``SessionStreamFn`` can never send
+    on that chain again, so its entries are dead weight. Best-effort: teardown
+    must never fail on telemetry.
+    """
+    try:
+        for key in tuple(_GOOGLE_PREFIX_SNAPSHOTS):
+            if key[0] == chain:
+                _GOOGLE_PREFIX_SNAPSHOTS.pop(key, None)
+    except Exception:  # noqa: BLE001 — telemetry teardown, never fatal
+        logger.debug("google cache chain eviction failed", exc_info=True)
 
 
 class GoogleClient:
@@ -6868,7 +6910,14 @@ class GoogleClient:
 
         body = self._build_body(request, scope=scope)
         cache_key = _google_chain_key(request, self._base_url, self._is_vertex(request), scope)
-        prefix = _google_prefix_snapshot(body) if cache_key is not None else None
+        prefix: _GooglePrefixSnapshot | None = None
+        if cache_key is not None:
+            # Silent telemetry must never fail a turn: a hashing bug only
+            # loses this call's diagnosis (no snapshot, so nothing recorded).
+            try:
+                prefix = _google_prefix_snapshot(body)
+            except Exception:  # noqa: BLE001 — telemetry is best-effort
+                logger.debug("google cache snapshot failed", exc_info=True)
         prompt_tokens = 0
         async with self._open_content_stream(request, url, body, headers) as response:
             started = False
@@ -7000,12 +7049,18 @@ class GoogleClient:
             # Commit only after a successful, non-empty stream. GeneratorExit,
             # transport failures and provider-error finishes leave the last
             # usable baseline intact, even when a partial usage chunk arrived.
-            cache_miss_type, cache_missed_tokens = _google_record_prefix(
-                cache_key,
-                prefix,
-                prompt_tokens=prompt_tokens,
-                cached_tokens=usage.cache_read_tokens,
-            )
+            try:
+                cache_miss_type, cache_missed_tokens = _google_record_prefix(
+                    cache_key,
+                    prefix,
+                    prompt_tokens=prompt_tokens,
+                    cached_tokens=usage.cache_read_tokens,
+                )
+            except Exception:  # noqa: BLE001 — telemetry is best-effort
+                # Same contract as the snapshot step: the completed stream
+                # still ends normally, just without a diagnosis.
+                cache_miss_type, cache_missed_tokens = None, 0
+                logger.debug("google cache diagnosis failed", exc_info=True)
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,

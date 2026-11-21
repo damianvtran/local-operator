@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "audit_id": "mt-secondary-fr",
+  "audit_kind": "second independent safety semantic audit (PR #4245 delta keys)",
+  "locale": "fr",
+  "audit_date": "2026-11-18",
+  "audited_head": "4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10",
+  "delta_base": "696a18338",
+  "keys_audited": {
+    "cli.sessions_move_workset": [
+      "cli.sessions_move_workset.receipt_transferred",
+      "cli.sessions_move_workset.receipt_restored_row",
+      "cli.sessions_move_workset.receipt_pending",
+      "cli.sessions_move_workset.receipt_left_row",
+      "cli.sessions_move_workset.receipt_recipe",
+      "cli.sessions_move_workset.receipt_rewrite",
+      "cli.sessions_move_workset.reason.primary_absent",
+      "cli.sessions_move_workset.reason.restore_failed",
+      "cli.sessions_move_workset.reason.snapshot_failed",
+      "cli.sessions_move_workset.reason.restore_path_refused",
+      "cli.sessions_move_workset.reason.url_refused",
+      "cli.sessions_move_workset.reason.destination_declined",
+      "cli.sessions_move_workset.receipt_branch_moved",
+      "cli.sessions_move_workset.import_not_granted",
+      "cli.sessions_move_workset.reason.import_not_granted",
+      "cli.sessions_move_workset.reason.too_many_worktrees",
+      "cli.sessions_move_workset.reason.clone_parent_refused",
+      "cli.sessions_move_workset.reason.kept_as_confirmed",
+      "cli.sessions_move_workset.probe_refused_by_policy",
+      "cli.sessions_move_workset.receipt_sent",
+      "cli.sessions_move_workset.receipt_sent_row",
+      "cli.sessions_move_workset.receipt_sent_unknown"
+    ],
+    "wire.settings": [
+      "wire.settings.mesh_moves.title",
+      "wire.settings.mesh_moves.description",
+      "wire.settings.mesh_move_working_set_max_bytes.label",
+      "wire.settings.mesh_move_working_set_max_bytes.help",
+      "wire.settings.mesh_move_working_set_roots.label",
+      "wire.settings.mesh_move_working_set_roots.help"
+    ]
+  },
+  "auditor": {
+    "agent": "task (lopdev) / SECOND independent safety i18n-auditor 1946542ef662",
+    "session": "1946542ef662",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "model_independent": false
+  },
+  "translator": {
+    "agent": "coder",
+    "jobs": [
+      "1768f308a175",
+      "04a689e5090b",
+      "b57675c8318a",
+      "b7523be856f2",
+      "b404dd5868ee",
+      "19556dc3b91a (mechanical fixes, a69e0e74b)"
+    ],
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "first_auditor": {
+    "session": "482db48afe47",
+    "evidence": "i18n/audits/evidence/fr/cli.sessions_move_workset/mt1/"
+  },
+  "input_hashes": {
+    "en:cli.sessions_move_workset": "6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050",
+    "target:cli.sessions_move_workset": "224786f6570eb964ff7cc34e71988c332a30b1280a8b56c8ef82224132d4d40f",
+    "en:wire.settings": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+    "target:wire.settings": "887445f38b7241b6f4d98fa64ce428ffd46b5ea62bc800ceac8386b846946071"
+  },
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "findings": [
+      {
+        "id": "T-ALL-2",
+        "severity": "minor",
+        "keys": "cli.sessions_move_workset.reason.too_many_worktrees",
+        "problem": "'worktrees' is translated as a calque (arbres de travail / árboles de trabajo / 工作树 / рабочих деревьев / cây làm việc / ورک ٹری / वर्कट्री), but every other key in this namespace keeps Latin 'worktree'. Glossary consistency.",
+        "fix": "use worktree(s) as in brings_summary and receipt_*"
+      }
+    ]
+  },
+  "not_claimed": [
+    "native-speaker review",
+    "rendered frame / RTL paint",
+    "model independence"
+  ]
+}

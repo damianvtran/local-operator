@@ -1,0 +1,197 @@
+{
+  "locale": "vi",
+  "namespace": "tui.tool_card",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "target_sha256": "d9ec2446755a5230b5a0edbc7c09107721de24a716a769bc1dfd78a9b41fbe11",
+  "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by manager; not independently route-log verified"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "ad6a8a8d8911",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean",
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "scope": "Round 2: tui.tool_card.more.diff_lines only; composition with more.lines, more.search_lines and hint.expand. Not a full-namespace re-audit.",
+    "fallback": "No fallback used"
+  },
+  "status": "passed",
+  "note": "Changed wording còn {shown} dòng thay đổi is idiomatic, accurately describes hidden diff lines, matches neighbouring còn {shown} dòng / dòng khớp and lowercase terse register. Source count plural and shown string preserved; vi other-only correct. Four scoped keys verified mechanically; all 16 namespace key pairs read for context, not re-approved. No fixed maxCells for changed marker; runtime truncates to available line_width. At single-digit counts changed text is 19 cells vs English 16 at 1 or 17 at 0/2/5; marker plus expand is 31 cells (21:32). Expansion not materially problematic and hint is shed whole if it does not fit. No rendered full-app frame captured; runtime text/cell evidence only. Counts 0/1/2/5/21 tested; no many branch in vi. No findings. Unchanged cache kept per binding vi style guide; outside round-2 changed-key scope, not a newly introduced English leak.",
+  "findings": [],
+  "evidence": {
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "runtime_module": "/Users/damian/local-operator/.worktrees/i18n-tool-card/local_operator/i18n/runtime.py",
+    "worktree_head": "4e164d26c8ecc5a8f5fe8d510526277efc4fdd0e",
+    "keys_read": 16,
+    "keys_in_delta": 1,
+    "keys_mechanically_checked": 4,
+    "renders": [
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 0,
+        "en": "0 more diff lines",
+        "vi": "còn 0 dòng thay đổi",
+        "en_cells": 17,
+        "vi_cells": 19,
+        "composition": "… còn 0 dòng thay đổi ⟨mở rộng⟩",
+        "composition_cells": 31
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 1,
+        "en": "1 more diff line",
+        "vi": "còn 1 dòng thay đổi",
+        "en_cells": 16,
+        "vi_cells": 19,
+        "composition": "… còn 1 dòng thay đổi ⟨mở rộng⟩",
+        "composition_cells": 31
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 2,
+        "en": "2 more diff lines",
+        "vi": "còn 2 dòng thay đổi",
+        "en_cells": 17,
+        "vi_cells": 19,
+        "composition": "… còn 2 dòng thay đổi ⟨mở rộng⟩",
+        "composition_cells": 31
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 5,
+        "en": "5 more diff lines",
+        "vi": "còn 5 dòng thay đổi",
+        "en_cells": 17,
+        "vi_cells": 19,
+        "composition": "… còn 5 dòng thay đổi ⟨mở rộng⟩",
+        "composition_cells": 31
+      },
+      {
+        "key": "tui.tool_card.more.diff_lines",
+        "count": 21,
+        "en": "21 more diff lines",
+        "vi": "còn 21 dòng thay đổi",
+        "en_cells": 18,
+        "vi_cells": 20,
+        "composition": "… còn 21 dòng thay đổi ⟨mở rộng⟩",
+        "composition_cells": 32
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 0,
+        "en": "0 more lines",
+        "vi": "còn 0 dòng",
+        "en_cells": 12,
+        "vi_cells": 10,
+        "composition": "… còn 0 dòng",
+        "composition_cells": 12
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 1,
+        "en": "1 more line",
+        "vi": "còn 1 dòng",
+        "en_cells": 11,
+        "vi_cells": 10,
+        "composition": "… còn 1 dòng",
+        "composition_cells": 12
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 2,
+        "en": "2 more lines",
+        "vi": "còn 2 dòng",
+        "en_cells": 12,
+        "vi_cells": 10,
+        "composition": "… còn 2 dòng",
+        "composition_cells": 12
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 5,
+        "en": "5 more lines",
+        "vi": "còn 5 dòng",
+        "en_cells": 12,
+        "vi_cells": 10,
+        "composition": "… còn 5 dòng",
+        "composition_cells": 12
+      },
+      {
+        "key": "tui.tool_card.more.lines",
+        "count": 21,
+        "en": "21 more lines",
+        "vi": "còn 21 dòng",
+        "en_cells": 13,
+        "vi_cells": 11,
+        "composition": "… còn 21 dòng",
+        "composition_cells": 13
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 0,
+        "en": "0 more search lines",
+        "vi": "còn 0 dòng khớp",
+        "en_cells": 19,
+        "vi_cells": 15,
+        "composition": "… còn 0 dòng khớp",
+        "composition_cells": 17
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 1,
+        "en": "1 more search line",
+        "vi": "còn 1 dòng khớp",
+        "en_cells": 18,
+        "vi_cells": 15,
+        "composition": "… còn 1 dòng khớp",
+        "composition_cells": 17
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 2,
+        "en": "2 more search lines",
+        "vi": "còn 2 dòng khớp",
+        "en_cells": 19,
+        "vi_cells": 15,
+        "composition": "… còn 2 dòng khớp",
+        "composition_cells": 17
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 5,
+        "en": "5 more search lines",
+        "vi": "còn 5 dòng khớp",
+        "en_cells": 19,
+        "vi_cells": 15,
+        "composition": "… còn 5 dòng khớp",
+        "composition_cells": 17
+      },
+      {
+        "key": "tui.tool_card.more.search_lines",
+        "count": 21,
+        "en": "21 more search lines",
+        "vi": "còn 21 dòng khớp",
+        "en_cells": 20,
+        "vi_cells": 16,
+        "composition": "… còn 21 dòng khớp",
+        "composition_cells": 18
+      },
+      {
+        "key": "tui.tool_card.hint.expand",
+        "count": null,
+        "en": "expand",
+        "vi": "mở rộng",
+        "en_cells": 6,
+        "vi_cells": 7,
+        "composition": "⟨mở rộng⟩",
+        "composition_cells": 9
+      }
+    ]
+  }
+}

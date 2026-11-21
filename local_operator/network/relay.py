@@ -85,7 +85,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, redial, store, uplink, wire
+from local_operator.network import nat64, projection, redial, store, uplink, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -128,6 +128,7 @@ from local_operator.network.invite import (
 from local_operator.network.invite import mint as mint_invite
 from local_operator.network.invite import release
 from local_operator.network.types import (
+    CAPABILITIES,
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NET_PAIR_OPS,
@@ -1052,14 +1053,49 @@ def probe_candidates(
                         started = time.monotonic()
                         states[endpoint] = ("issued", started)
                     sock.connect((host, port))
-                except BaseException:
+                except BaseException as exc:
                     # Stamp first: a slow close must not count as time spent
                     # waiting for an answer (U4).
                     ended = time.monotonic()
                     _close_quietly(sock)
-                    raise
+                    # NAT64 (roaming stage 3): an IPv4 literal refused LOCALLY
+                    # (ENETUNREACH/EHOSTUNREACH/EADDRNOTAVAIL — an IPv6-only
+                    # host) is exactly the case the fallback exists for. A
+                    # timeout never tries it: a silent IPv4 dial on a dual-stack
+                    # host is a quiet peer, not a missing route, and a second
+                    # dial would only double the wait. The fallback shares this
+                    # connect's deadline (``started + budget``), and ``ended`` is
+                    # re-stamped once it returns or raises, so the silence gate
+                    # below sees the whole attempt. On ``None`` the ORIGINAL
+                    # error propagates; "issued" still means the first connect.
+                    if (
+                        isinstance(exc, OSError)
+                        and not isinstance(exc, TimeoutError)
+                        and ":" not in host
+                    ):
+                        dial_deadline = started + budget
+                        try:
+                            rescued = nat64.fallback(
+                                host,
+                                port,
+                                exc,
+                                timeout=max(0.0, dial_deadline - time.monotonic()),
+                                deadline=dial_deadline,
+                            )
+                        finally:
+                            ended = time.monotonic()
+                        if rescued is None:
+                            raise
+                        sock = rescued
+                    else:
+                        raise
             else:
-                sock = socket.create_connection((address or endpoint, port), timeout=budget)
+                # ``nat64.create_connection``, not ``socket``'s: the ONE dial seam
+                # that retries an IPv4-only name through this network's NAT64 when
+                # this host has no IPv4 route (roaming stage 3). Same first connect,
+                # same exceptions; trust is still the handshake's call on the
+                # winning socket.
+                sock = nat64.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
             waited = (ended if ended is not None else time.monotonic()) - started
             with opened_lock:
@@ -1885,6 +1921,10 @@ def adopt_members(
             adopt, retired = _rotation_retirements(record, incoming, survivor=incoming)
             if not adopt:
                 continue
+            # S15 (#4245 security round 3): an admin may introduce a device, never a
+            # receiver-local grant for it. Before ``_take_over_standing``, so a signed
+            # successor still inherits a grant THIS device made to its predecessor.
+            incoming.capabilities = _without_receiver_local(incoming.capabilities)
             if retired:
                 _retire_superseded_rows(record, retired, survivor=incoming)
                 _take_over_standing(retired[-1], incoming)
@@ -2637,7 +2677,7 @@ def set_member_capabilities(
     refused rather than stored, since a typo stored is an authority nobody decided.
     The CALLER holds the record's write lock and saves; this function only mutates.
     """
-    from local_operator.network.types import CAPABILITIES, SELF_DECIDED_SCOPES
+    from local_operator.network.types import SELF_DECIDED_SCOPES
 
     me = record.self_member()
     is_admin = bool(me and me.active and "admin" in me.capabilities)
@@ -2881,6 +2921,18 @@ def _sanitise_frame_names(rows: list[MemberRecord], *, source: str) -> None:
         row.name = _accepted_name(row.name, "", source=source)
 
 
+#: Capabilities that exist only as THIS device's own decision about a peer (#4245
+#: security round 3, S15): ``workset_import`` lets a peer write working files into
+#: this device's home, and the ruling is "granted on the receiver, never implied by
+#: any role incl. admin". A row learned from a peer's table (a pull or a rotation
+#: frame) therefore never brings it in; only ``set_member_capabilities`` here does.
+_RECEIVER_LOCAL_CAPABILITIES: frozenset[str] = frozenset({"workset_import"})
+
+
+def _without_receiver_local(capabilities: Sequence[str]) -> list[str]:
+    return [name for name in capabilities if name not in _RECEIVER_LOCAL_CAPABILITIES]
+
+
 def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> None:
     """Give each incoming row this device already holds its LOCAL role, set and name.
 
@@ -2902,6 +2954,9 @@ def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> No
             row.role = local.role
             row.capabilities = list(local.capabilities)
             row.name = local.name or row.name
+        else:
+            # Taken as the frame carries it, minus what only this device may grant.
+            row.capabilities = _without_receiver_local(row.capabilities)
     # LAST, so it also covers the name just copied from a held row that has none.
     _sanitise_frame_names(rows, source="a rotation frame")
 
@@ -3458,7 +3513,13 @@ def _members_inconsistent(
     for row in rows:
         if not row.public_key:
             return "member_without_key"
-        if not set(row.capabilities) <= set(capabilities_for_role("admin")):
+        # Validate against the whole vocabulary, NOT the admin role's set: since
+        # #4245 ``admin`` deliberately omits ``workset_import`` (it is a
+        # receive-side grant each device decides for itself), so checking rows
+        # against the admin set refused every rotation frame from a device that
+        # had granted it — that device then cut itself off at its next rotation
+        # (#4245 agent review round 3, B1).
+        if not set(row.capabilities) <= CAPABILITIES:
             return "member_capability_unknown"
     return ""
 
@@ -14173,7 +14234,10 @@ class RelayServer:
             except ValueError:
                 return None, "bad_endpoint"
             try:
-                sock = socket.create_connection((address or host, port), timeout=budget)
+                # The shared NAT64-aware seam (see ``probe_candidates``): a synthesised
+                # address only carries the bytes; the handshake below still decides
+                # whether the device on the other end is the member we meant.
+                sock = nat64.create_connection((address or host, port), timeout=budget)
             except OSError as exc:
                 return None, f"connect_failed:{exc.__class__.__name__}"
         deadline = wire.deadline_in(budget)

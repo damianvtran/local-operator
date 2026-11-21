@@ -299,6 +299,13 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/network/nat64.py": (
+        1,
+        "``_DISCOVERY_NAME`` ('ipv4only.arpa') is the RFC 7050 DNS discovery hostname "
+        "used to discover a network's NAT64 prefix, not a file or directory name. "
+        "It is never an entry of a session directory, so nothing under this name "
+        "belongs in the session copy set.",
+    ),
     "local_operator/session/row_clip.py": (
         1,
         "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "
@@ -513,6 +520,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "before the commit deletes the session directory. Deliberately a sibling of "
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
+    "local_operator/network/workset_transfer.py": (
+        2,
+        "``CLONE_MARKER`` ('lop-cloned.json') and ``ARRIVED_MARKER`` ('lop-arrived.json') "
+        "are written inside a moved REPOSITORY's git dir (``<repo>/.git/`` or a linked "
+        "worktree's admin dir) on the destination, to recognise a clone/restore this "
+        "move made. They are classified here, and never WRITTEN into a session "
+        "directory (the working-set staging trees live under ``<config>/network/`` "
+        "beside ``sessions/``), but they may travel inside a session tree that holds a "
+        "``.git/`` copy. That is inert: a marker is only ever READ at a primary vetted "
+        "by ``primary_path_refusal`` or a linked worktree git registers for it.",
     ),
     "local_operator/network/routing_sync.py": (
         1,

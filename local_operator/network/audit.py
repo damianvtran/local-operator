@@ -116,6 +116,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # manifest, and a destination probed remotes at a peer's request.
         "session.workset.preflight",
         "session.workset.probe",
+        # A moved session's working set (move-working-set.md §8.3; workset_move).
+        "session.workset.serve",
+        "session.workset.restore",
+        "session.workset.departed",
         # transport scope (§7.6 of mesh-transport-identity.md)
         "pairing_refused",
         "invite_minted",
@@ -837,6 +841,17 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # fixed result codes only — never a path, a URL path, userinfo or git output.
     "session.workset.preflight": frozenset({"peer", "worktrees", "planned", "bytes", "excluded"}),
     "session.workset.probe": frozenset({"peer", "hosts", "results", "refused"}),
+    # A moved session's working set (design move-working-set.md §8.3). Bounded
+    # metadata only — ids, sizes, one home-relative path, reason codes — never
+    # bytes or file contents. ``serve`` is the required row written before the
+    # first byte of each artifact (and before each resumed serve) leaves.
+    # ``kind``: ``span`` (bytes served from ``offset``) or ``prefix`` (the sha256 of the
+    # first ``offset`` bytes, answered for a resume; security review #4245 S4).
+    "session.workset.serve": frozenset(
+        {"peer", "to_device", "lease_epoch", "artifact", "bytes", "offset", "path", "kind"}
+    ),
+    "session.workset.restore": frozenset({"peer", "state", "worktrees"}),
+    "session.workset.departed": frozenset({"peer", "marked"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
@@ -885,6 +900,10 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         # unattributable. Each independently authorized fetch is an admission,
         # not transport telemetry; ordinary frames remain unlogged/batched.
         "session_file_read_admitted",
+        # A moved session's working-set bytes leave this device only after this row
+        # is on disk (``workset_move._audit_workset_serve``, design §8.3): an egress
+        # an incident cannot reconstruct is the loss this table exists for.
+        "session.workset.serve",
         "panic_raised",
         "panic_received",
         "disconnect_initiated",
@@ -1239,6 +1258,19 @@ class AuditLog:
 
     # -- writing ------------------------------------------------------------
 
+    def admits_required(self) -> bool:
+        """Would :meth:`record_required` admit a row right now (enabled, not degraded)?
+
+        WHY A PUBLIC PREDICATE: a caller whose ONE durable row already covers a stream
+        (the working-set serve's contiguous continuations, #4245 security review S-1)
+        must still stop the moment the trail it relies on is disabled or has a hole,
+        without writing another row per chunk or reading this writer's privates.
+        ``record_required`` uses this same predicate, so the two cannot drift. A
+        ``True`` here is advisory, not an admission: only ``record_required`` holds
+        the write lock and proves a row durable.
+        """
+        return bool(self._enabled) and not self.degraded
+
     def record_required(self, event: AuditEvent, *, expected_file_phase: str = "fetch") -> bool:
         """Commit a durable admission before its caller releases protected bytes.
 
@@ -1251,7 +1283,7 @@ class AuditLog:
         if event.event not in self.DURABLE_EVENTS:
             raise ValueError("a required audit record must be a durable event")
         with self._write_lock:
-            if not self._enabled or self.degraded:
+            if not self.admits_required():
                 return False
             expected_detail = None
             if event.event == "session_file_read_admitted":

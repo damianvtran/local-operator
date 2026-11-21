@@ -7,6 +7,7 @@
   "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' spec.resume के लिए एक व्यूअर खोलता है; यह टीम, प्रोफ़ाइल, टूल, नाम, लक्ष्य या स्वीकृति नीतियाँ अटैच नहीं करता — वह स्वामी का पक्ष है। इस spec पर केवल resume सेट करें (या mode=''own'' उपयोग करें)। समस्या वाले फ़ील्ड: {fields}।",
   "wire.errors.sdk_spec.attach_output_unsupported": "अटैच किए गए सत्र पर आउटपुट प्रवर्तन सेट नहीं किया जा सकता; स्वामी रनटाइम तय करता है",
   "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' के लिए spec.resume चाहिए: व्यूअर एक id से अटैच होता है",
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": "mcp_ready_timeout_s: timeout_s एक परिमित संख्या होनी चाहिए जो >= 0 हो",
   "wire.errors.sdk_spec.mode_invalid": "mode ''own'' या ''attach'' होना चाहिए, {mode} नहीं",
   "wire.errors.sdk_spec.output_format_invalid": "output_format इनमें से एक होना चाहिए: {formats}",
   "wire.errors.sdk_spec.output_retries_range": "output_retries 0 और 5 के बीच होना चाहिए",

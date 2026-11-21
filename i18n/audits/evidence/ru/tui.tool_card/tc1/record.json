@@ -1,0 +1,66 @@
+{
+  "locale": "ru",
+  "namespace": "tui.tool_card",
+  "date": "2026-11-20",
+  "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by delegator; not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "a85b340e5906",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 1
+  },
+  "files": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.json",
+      "sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/tui.tool_card.json",
+      "sha256": "3f43a9bac00009465b6934d692287b12242d27132afee91d80bc02a6a57e43a9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.tool_card.context.json",
+      "sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087"
+    }
+  },
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [
+      {
+        "id": "RU-1",
+        "key": "tui.tool_card.fetch.final",
+        "current": "(итоговый адрес: {url})",
+        "proposed": "(итог: {url})",
+        "reason": "Width-only advisory: with https://example.com, 37 cells versus English 28; shorten the suffix or check its cropped-row rendering. No maxCells is specified; not a semantic defect or proven overflow."
+      }
+    ],
+    "nit": []
+  },
+  "verdict": "clean-with-findings",
+  "status": "passed",
+  "checks": {
+    "keys_read": 16,
+    "argument_parity": "16/16 exact name/kind parity",
+    "plurals": "5/5 messages have one/few/many/other and no =N; counts 0,1,2,5,21 plus fraction 1.5 rendered successfully with shown digits retained",
+    "rendering": "80 required runtime renders passed; 5 additional fraction renders passed",
+    "maxCells": "All five capped keys pass rich.cells.cell_len: chip 3/4, collapse 8/10, expand 10/10, interrupt 15/24, stop 17/18",
+    "bidi": "No manual bidi controls; Russian is LTR",
+    "rendered_frame": "Not captured; width advisory only"
+  },
+  "notes": [
+    "User attribution chip вы: correctly labels the operator, per context, and follows ru style guide lines 8-10.",
+    "свернуть/развернуть match tui.small.todo_panel.collapse/expand and tui.small.subagent_panel.ctrl_g_shrink/expand.",
+    "стоп под вопросом matches wire.tool_rows.bridge.outcome_short.unconfirmed = под вопросом; the stop is named and no success is implied.",
+    "кэш follows ru style guide line 25; no untranslated static Latin prose. miss, ctrl+c and URLs are intentionally literal tokens per context and glossary lines 28-29.",
+    "No repository files edited. Model used as reported, no fallback."
+  ]
+}

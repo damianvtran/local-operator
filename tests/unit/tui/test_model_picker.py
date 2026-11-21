@@ -1356,3 +1356,65 @@ def test_the_picker_filters_on_the_listings_human_name() -> None:
     # ADDITION to the matcher, not a matcher that now matches anything.
     picker.set_query("gpt 6 luna")
     assert picker.suggestions() == []
+
+
+def test_a_dead_stored_sign_in_is_named_with_its_login_command() -> None:
+    """``reauth_required`` is a stored sign-in the provider refused for good.
+
+    Unlike ``unauthenticated`` its rows are NOT hidden (a stored credential still
+    counts as usable), so the access note counts nothing for it: without this
+    clause the picker showed the bundled rows with no hint they would fail. It
+    leads the status clauses, uses the welcome screen's audited words, and
+    fits the 39-cell budget at the reference width.
+    """
+    from local_operator.tui.app import _catalogue_status, _reauth_status
+
+    clause = _reauth_status({"google-vertex": "reauth_required", "anthropic": "ok"})
+    assert clause == "not logged in — /login google-vertex"
+    assert cell_len(clause) <= 39, clause
+    # Its own clause, not folded into the stale/empty summary: the caller
+    # places it ahead of the access note (see the footer test below).
+    statuses = {"google-vertex": "reauth_required", "xai": "stale"}
+    assert _reauth_status(statuses) == "not logged in — /login google-vertex"
+    assert _catalogue_status(statuses) == "stale list: xai"
+    assert _reauth_status({"xai": "stale", "google": "unauthenticated"}) == ""
+
+
+# 76, 73 and 98 are the PICKER widths the real OperatorApp gives at 80-, 100- and
+# 150-column terminals (measured with the round-2 capture script); the round
+# figures cover a picker that spans the terminal.
+@pytest.mark.parametrize("width", [73, 76, 80, 98, 100, 150])
+def test_a_dead_sign_in_survives_the_footer_beside_hidden_rows(width: int) -> None:
+    """QA round 1, Q1: the rendered footer, not the clause in isolation.
+
+    With hidden providers (the normal case) the access note
+    ``225 hidden — /login <provider> · /model --all shows`` used to lead, and
+    ``_fit_clauses`` drops trailing clauses: at 100 columns the whole
+    ``not logged in — /login google-vertex`` clause vanished and at 150 the
+    provider id was cut. The status is composed exactly as
+    ``_refresh_catalogue`` composes it, and the command must render whole with
+    its argument at every width the app is used at.
+    """
+    from local_operator.tui.app import (
+        PERSIST_HINT,
+        _catalogue_status,
+        _reauth_status,
+        _status_line,
+    )
+
+    statuses = {"google-vertex": "reauth_required", "anthropic": "ok", "xai": "stale"}
+    note = "225 hidden — /login <provider> · /model --all shows"
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        _rows(),
+        status=_status_line(
+            _reauth_status(statuses), note, _catalogue_status(statuses), PERSIST_HINT
+        ),
+    )
+    picker.open("")
+    rows = [row.plain for row in picker._footer_rows(width)]
+    assert any("not logged in — /login google-vertex" in row for row in rows), (width, rows)
+    # The persist hint keeps its own protected row, untouched by the reorder.
+    assert any(PERSIST_HINT_PREFIX in row for row in rows), (width, rows)
+    # And the access note is degraded, never silently erased: rows did hide.
+    assert any("225 hidden" in row for row in rows), (width, rows)

@@ -39,6 +39,11 @@
     "tone": "developer diagnostic with remedy; byte-compatible English source",
     "note": "Placeholders: none. Preserve technical tokens: mode='attach', spec.resume. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
   },
+  "wire.errors.sdk_spec.mcp_ready_timeout_invalid": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Raised when SessionSpec.mcp_ready_timeout_s (how long an in-process session's FIRST prompt waits for MCP servers that are still connecting, in seconds; None opts out) is set to something that is not a finite number >= 0: a bool, a string, NaN, infinity or a negative value. The prefix names the spec field the caller set; timeout_s is the parameter name Session.wait_for_tools uses for the same bound, so the sentence matches that method's own refusal. Preserve technical tokens byte-identical: mcp_ready_timeout_s, timeout_s, 0. Keep the code comparison `>= 0` as written in left-to-right locales; in right-to-left locales state the bound in words (zero or greater) instead, because a bare `>=` between right-to-left words is mirrored and reordered by the bidi algorithm. No width cap."
+  },
   "wire.errors.sdk_spec.mode_invalid": {
     "role": "SDK invalid-input diagnostic from open_session",
     "tone": "developer diagnostic with remedy; byte-compatible English source",

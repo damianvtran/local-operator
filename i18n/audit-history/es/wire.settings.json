@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "edea912e0d175225b2f792480e4a8d7edc9f17d4f38e4565e975bf39c6945d03",
+  "history_sha256": "c5ad300245b91c0b9810711d9eb4ecb09d1c8e3f7fe3d7f4eee9c15e3d1d4cd2",
   "entries": [
     {
       "locale": "es",
@@ -1333,6 +1333,186 @@
       "note": "PR #4317 copy r2 delta audit at feac0a8c484c: keys audited wire.settings.team_bridge_hold_release.label, wire.settings.team_bridge_hold_release.help against the remediated en source; prior r1 C1-C3 MAJORs verified fixed (eligibility covers org+machine, sign-in covers expired+wrong account, consent 'given', help hedged 'Some', label <=29 cells, title arms <=40 cells, measured with rich.cells.cell_len). Every other key in this namespace is byte-identical to the base 736fd54f06f0, whose last receipt was passed; no other key re-audited. Open non-gating findings: C10. Native/rendered certification not claimed.",
       "round": "pr4317-copy-r2",
       "keys_audited": 2
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "es `wire.settings` PR #4245 delta audit (696a18338..a69e0e74b, new move-transfer keys): PASS, 0 BLOCKER/0 MAJOR, 0 minor deferred. Other keys byte-identical to the last passed copy. No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/mt1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/record.json",
+          "sha256": "ada43d5edc011c19ce2342760342bc3ef4e971edc185a03edba2db13bab54555"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/report.md",
+          "sha256": "6db32fdf1382f72d0df854e280b6444c86ba149debac55bce1cb46245a2b8518"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/audit.log",
+          "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
+        }
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "task (lopdev) / SECOND independent safety i18n-auditor 1946542ef662 [es]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit of the PR #4245 delta in es `wire.settings` (6 keys vs 696a18338) at 4ba2f4218: PASS, 0 BLOCKER/0 MAJOR; 0 non-gating finding(s) [none] proposed for deferral, no wording changed. Other keys carried by prior receipts. First audit 482db48afe47 (mt1). Agent-independent only (same model as translators/first auditor). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/record.json",
+          "sha256": "a5df6a186a72b403606e0ab427bbd491292a9e89135317363727bc8964e9df40"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/report.md",
+          "sha256": "3d6317b4be1051e628be49276b6c575ff62565025394e475a6e427424d386785"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/audit.log",
+          "sha256": "15cde9155b4197b10215f1422fde146165f06157f1d7057b39a6fd2ddc5bb06f"
+        }
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+      "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+      "target_sha256": "6863fc599cd42891402d36b7145c9dfb7fa70775580e777f2b8d253d4e7dff7c",
+      "translator": {
+        "agent": "no value authored in this convergence (merge af6351c89 of origin/main 1a8dae591 into PR #4245); per-side provenance in composition_translators, copied from the parent receipts",
+        "model": "anthropic/claude-opus-5-5 (as recorded by every parent receipt cited; bedrock row 28 recorded unknown, corrected by row 29)",
+        "date": "2026-11-21"
+      },
+      "composition_translators": [
+        {
+          "side": "feature (PR #4245)",
+          "provenance": {
+            "agent": "coder",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-18"
+          },
+          "keys": [
+            "wire.settings.mesh_move_working_set_max_bytes.help",
+            "wire.settings.mesh_move_working_set_max_bytes.label",
+            "wire.settings.mesh_move_working_set_roots.help",
+            "wire.settings.mesh_move_working_set_roots.label",
+            "wire.settings.mesh_moves.description",
+            "wire.settings.mesh_moves.title"
+          ]
+        },
+        {
+          "side": "main 1a8dae591 (PR #4266 bedrock keys)",
+          "provenance": {
+            "agent": "task (lopdev i18n translator lane), job 35241b9c509a",
+            "session": "35241b9c509a",
+            "session_kind": "lopdev task subagent JOB id, relayed by the manager",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-19",
+            "fallback": "none reported by the manager"
+          },
+          "keys": [
+            "wire.settings.providers_bedrock_auth.help",
+            "wire.settings.providers_bedrock_auth.label",
+            "wire.settings.providers_bedrock_region.help",
+            "wire.settings.providers_bedrock_region.label"
+          ]
+        },
+        {
+          "side": "main 1a8dae591 (PR #4317 team_bridge_hold_release keys)",
+          "provenance": {
+            "agent": "coder (radientdev team task subagent, PR #4317 remediation implementer; translated all 28 changed strings)",
+            "session": "4d8fffdeba64",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-20",
+            "fallback": "none: auditor read the session record (origin.json agent=coder, subagent; every transcript response model claude-opus-5-5)"
+          },
+          "keys": [
+            "wire.settings.team_bridge_hold_release.help",
+            "wire.settings.team_bridge_hold_release.label"
+          ]
+        }
+      ],
+      "auditor": {
+        "agent": "reviewer (lopdev team task subagent, PR #4245 round-10 convergence reviewer) acting as independent i18n convergence auditor; convergence rebind, not a new linguistic audit; did not author or edit any value",
+        "session": "90c977d2ceeb",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed (harness system prompt: Model: anthropic/claude-opus-5-5)",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        }
+      },
+      "status": "passed",
+      "round": "pr4245-i18n-convergence-r10",
+      "keys_audited": 0,
+      "composition_audit": {
+        "source_head": "af6351c8933053a965e76f2e8bc08884db2f0697",
+        "parent_revisions": [
+          "be2280f4bd30bce1d55e3a19748e4cbe2ef9858e",
+          "1a8dae5916913fab884fd6799a4a0d64f6853c41"
+        ],
+        "common_base": "37b118a361920bba970f2f5bf15fa0db4db8f585",
+        "parent_receipts": [
+          {
+            "side": "feature (PR #4245)",
+            "source_sha256": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+            "target_sha256": "f652e763ce904b28067db6a031f102dda63f11f1c560b2844f8e631828a7183d",
+            "receipt_canonical_sha256": [
+              "2fc8635c79327c225ad5f508ad0eb1e39cce968ba909a054b57fb305aa235f20",
+              "5d6dba855510eb8961d4c7f0972f73453c389fa98bdc50774f999614d8136692"
+            ],
+            "evidence": [
+              "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/record.json",
+              "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/record.json"
+            ]
+          },
+          {
+            "side": "main",
+            "source_sha256": "10a336b2a4aff78821258f858a2e9f4906ce0f5ada653dd2da62bb7ba6bd7cc2",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "b3c9fa2ce11f7f22a77d253f7ef503f656f4e23d4f5739e039b6a268ecae76d5",
+            "receipt_canonical_sha256": "ef4b534dd0366a404f555cd6ab63ff7eb5779381b22161c745b6b97a3d42a98f",
+            "bedrock_receipt_canonical_sha256": "a19acdc460cd3f1a7fb7bda01da560d5c68c09971557d2d76039e9a45e9e1446"
+          }
+        ]
+      },
+      "note": "PR #4245 convergence rebind at af6351c89 (merge of origin/main 1a8dae591; common base 37b118a36). Mechanical union verified by the auditor from git blobs: the 6 PR keys (mesh_move_working_set_max_bytes.help, mesh_move_working_set_max_bytes.label, mesh_move_working_set_roots.help, mesh_move_working_set_roots.label, mesh_moves.description, mesh_moves.title) are codepoint-equal to be2280f4b, whose es target f652e763ce90 is the exact target hashed in both PR #4245 audits (mt1 at a69e0e74b, second safety audit mt-secondary at 4ba2f4218, en 562655dc455f); main's 6-key delta (providers_bedrock_auth.help, providers_bedrock_auth.label, providers_bedrock_region.help, providers_bedrock_region.label, team_bridge_hold_release.help, team_bridge_hold_release.label) is codepoint-equal to 1a8dae591, whose last receipt is passed at en 10a336b2a4af / target b3c9fa2ce11f (PR #4317 copy r2, session aa991fa2d698; bedrock keys PR #4266 r1, session f1e8189586d6); every other key is codepoint-equal to both parents and the base. Key deltas disjoint (0 overlap), merged key set equals en (895). en context is main's bytes (the PR changed none). No value re-audited and no new linguistic, native-speaker or rendered certification claimed beyond the cited receipts; their open non-gating findings carry unchanged."
     }
   ]
 }

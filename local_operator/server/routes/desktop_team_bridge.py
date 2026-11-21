@@ -4596,11 +4596,18 @@ HOLDS_QUERY_PARAMS = frozenset({"expected_account_id"})
 
 
 class TeamBridgeHoldDecision(_Strict):
-    """Deliver/Discard body. ``body_sha256`` is the hash of the body the card showed."""
+    """Deliver/Discard body: exactly one of ``body_sha256`` or ``hold_receipt``.
+
+    ``body_sha256`` is the hash of the body the card showed. ``hold_receipt``
+    is the list's ``discard_receipt`` for a hold whose body can no longer be
+    loaded (expired at the hub, owner-audit unavailable): it binds the local
+    hold record, is accepted by Discard only, and Deliver answers 422 for it.
+    """
 
     expected_account_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
-    body_sha256: str = Field(min_length=64, max_length=64)
+    body_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    hold_receipt: str | None = Field(default=None, min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeHoldDecision":
@@ -4608,8 +4615,11 @@ class TeamBridgeHoldDecision(_Strict):
             raise ValueError("expected_account_id is outside the accepted grammar")
         if not re.fullmatch(CONVERSATION_ID_PATTERN, self.conversation_id):
             raise ValueError("conversation_id is outside the accepted grammar")
-        if not re.fullmatch(r"[0-9a-f]{64}", self.body_sha256):
-            raise ValueError("body_sha256 must be a lowercase sha256 hex")
+        if (self.body_sha256 is None) == (self.hold_receipt is None):
+            raise ValueError("exactly one of body_sha256 or hold_receipt is required")
+        for value in (self.body_sha256, self.hold_receipt):
+            if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("body_sha256 and hold_receipt must be lowercase sha256 hex")
         return self
 
 
@@ -4691,6 +4701,7 @@ async def _decide_hold(
             body_sha256=body.body_sha256,
             word=word,
             account_id=body.expected_account_id,
+            hold_receipt=body.hold_receipt,
         )
     except holds.HoldRefused as refusal:
         _raise_hold(refusal.code)

@@ -69,6 +69,12 @@ _AMBIENT_VARS = (
     # in would widen the allowlist the host-policy tests assert on and could
     # aim a probe at a real host; tests that cover the override set their own.
     "LOCAL_OPERATOR_MOVE_PROBE_HOSTS",
+    # The working-set clone (``network/workset_transfer._run_clone``) keeps an
+    # inherited GIT_SSH_COMMAND instead of forcing ``ssh -o BatchMode=yes``. A
+    # developer's value (an agent-forwarding wrapper, a ProxyJump to a real
+    # bastion) would replace the batch-mode default under test and could reach a
+    # real machine; tests that cover the inherited case set their own.
+    "GIT_SSH_COMMAND",
     # The per-build runtime image root (``procname.runtime_root``) is resolved
     # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
@@ -96,6 +102,11 @@ _AMBIENT_VARS = (
     # exit early, changing what the serve cells assert. Scrubbed; deadline
     # cells set their own.
     "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS",
+    # A suite launched from a leased command (a `pytest -n 8` through the bash
+    # tool) inherits the operator's slot marker; it names the REAL lease dir, so
+    # it can only fail verification here, but a cell asserting the queue must
+    # not depend on that. Scrubbed; the re-entrancy cells set their own.
+    "LOCAL_OPERATOR_HEAVY_LEASE",
     # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
     # disable the sensor in every cell, silently waiving what the sensor cells
     # assert. Scrubbed; the sensor-specific cells set it explicitly via

@@ -3354,8 +3354,14 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
         # stop's meaning — "wake delivery for this store is going away" — and
         # each such runtime drains its turn and denies its parked gate exactly as
         # on a stop; the surviving supervisor re-engages any wake still due.
-        if stop_requested:
+        if stop_requested and not _stop_is_build_restart():
             sweep(config_dir, any_owner=True, why="supervisor stop")
+        elif stop_requested:
+            logger.info(
+                "wake supervisor: stopped for a build restart (the install pointer "
+                "names a newer generation); owned runtimes are left to retire through "
+                "their own build-replaced drain"
+            )
         for stop_signal in stop_signals:
             try:
                 loop.remove_signal_handler(stop_signal)
@@ -3365,6 +3371,47 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
             if primary_error is not None:
                 cleanup_errors.insert(0, primary_error)
             raise BaseExceptionGroup("supervisor cleanup failures", cleanup_errors)
+
+
+def _stop_is_build_restart() -> bool:
+    """Was this SIGTERM an upgrade bouncing the supervisor, not the unit going away?
+
+    WHY THIS EXISTS (incident 2026-11-20, session e6883d17d1a3). ``lop-update``
+    flips ``~/.local/share/lop/current`` to the new generation and then restarts
+    every supervised daemon still on an older one — for this unit that is
+    ``launchd.restart_if_build_moved``'s ``kickstart -k``, which launchd delivers
+    as SIGTERM. The stop handler could not tell that apart from a real unit stop,
+    so every upgrade swept every wake-owned runtime: the supervisor log shows
+    eight to twelve ``supervisor stop; SIGTERM to owned runtime`` lines at each of
+    six installs that day (00:30, 04:19, 07:55, 09:37, 12:13, 14:11), each
+    followed within seconds by ``wake supervisor pid … is running build <new>``.
+    One of those runtimes was mid-turn with a subagent running; its signal drain
+    then refused the operator's prompts for ~7 minutes. That contradicts the
+    upgrade path's own contract (``update.py``: session runtimes DETACH so a
+    supervisor bounce does not end them, and each one retires through its own
+    build-replaced drain at its first idle instant).
+
+    THE DISCRIMINATOR IS THE ONE THE RESTART ITSELF ACTS ON: this process's own
+    generation is provably not the one ``current`` names
+    (``update.stale_generation_of_process``). A real stop of an up-to-date unit
+    answers ``None`` there and still sweeps. Every way the comparison can fail to
+    be made (no generation layout, unreadable pointer, a probe error) also answers
+    "not a restart", so the uncertain direction keeps the pre-existing sweep — a
+    missed skip costs a drain, a wrong skip would orphan runtimes on a stop.
+
+    RESIDUAL, stated: a deliberate stop of a supervisor that happens to be on a
+    stale generation (an upgrade landed and nothing restarted it yet) also skips
+    the sweep. Its runtimes are detached and still idle-retire on their own
+    residency rules and build drain, which is the same end state a supervisor
+    retirement already leaves.
+    """
+    try:
+        from local_operator.update import stale_generation_of_process
+
+        return stale_generation_of_process(os.getpid()) is not None
+    except Exception:  # noqa: BLE001 — an instrument fault must not skip a real stop
+        logger.debug("could not compare this supervisor's build to current", exc_info=True)
+        return False
 
 
 def _install_stop_handlers(
