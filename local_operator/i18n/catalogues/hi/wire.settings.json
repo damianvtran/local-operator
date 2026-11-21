@@ -459,6 +459,10 @@
   "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label": "Anthropic 1h कैश इससे ऊपर (टोकन)",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": "इस संदर्भ आकार (टोकन) से आगे उप-एजेंट अनुरोध 1-घंटे वाला प्रॉम्प्ट-कैश TTL इस्तेमाल करते हैं। 0 आकार के आधार पर कोई नियम नहीं जोड़ता, क्योंकि मापने पर सिर्फ़ आकार के आधार पर 1 घंटा उप-एजेंटों के लिए हर आकार में ज़्यादा महँगा निकला। इससे अलग, Claude सदस्यता पर कोई उप-एजेंट 4 मिनट या उससे ज़्यादा चली कॉल के बाद 1 घंटे पर चला जाता है; मुख्य 1-घंटे वाली सेटिंग में 0 इसे बंद कर देता है।",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": "Anthropic उप-एजेंट 1h कैश सीमा",
+  "wire.settings.providers_bedrock_auth.help": "ambient: Bedrock के लिए इस मशीन के AWS क्रेडेंशियल्स (IAM रोल) इस्तेमाल करें।",
+  "wire.settings.providers_bedrock_auth.label": "Amazon Bedrock प्रमाणीकरण",
+  "wire.settings.providers_bedrock_region.help": "कनेक्शन में क्षेत्र न होने पर Bedrock के लिए AWS क्षेत्र। खाली: AWS_REGION।",
+  "wire.settings.providers_bedrock_region.label": "Amazon Bedrock क्षेत्र",
   "wire.settings.providers_openai_api.choice.chat_completions.description": "साफ़ तौर पर कॉम्पैटिबिलिटी का ऑप्ट-आउट",
   "wire.settings.providers_openai_api.choice.chat_completions.label": "chat_completions",
   "wire.settings.providers_openai_api.choice.responses.description": "सार्वजनिक Responses API (डिफ़ॉल्ट)",
@@ -762,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "असंबोधित सीमा प्रति घंटा",
   "wire.settings.team_bridge_session.help": "वह सत्र जिसे नए संदेशों के लिए जगाया जा सकता है; खाली = सिर्फ़ बैज।",
   "wire.settings.team_bridge_session.label": "CoS सत्र",
+  "wire.settings.team_bridge_hold_release.label": "काम के अनुरोध समीक्षा के लिए रोकें",
+  "wire.settings.team_bridge_hold_release.help": "नए काम के कुछ अनुरोध रोके जाते हैं, ताकि आप उन्हें पहुँचाएँ या खारिज करें। आपके पहुँचाए बिना आपके एजेंट तक कुछ नहीं पहुँचता। बंद होने पर वे अस्वीकार होते हैं।",
   "wire.settings.tool_approval_mode.choice.ask.description": "लिखने/चलाने वाले टूल से पहले पूछें",
   "wire.settings.tool_approval_mode.choice.ask.label": "पूछें",
   "wire.settings.tool_approval_mode.choice.auto.description": "बिना पूछे चलाएँ",
@@ -881,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 घंटे",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 घंटे",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "इतनी देर बाद अस्थायी चैट हटाएँ",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "अस्थायी चैट हटाए जाने से पहले कितनी देर निष्क्रिय रह सकती है। स्क्रीन पर रहने का समय, चल रहा काम या खुला सवाल निष्क्रियता में नहीं गिना जाता।"
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "अस्थायी चैट हटाए जाने से पहले कितनी देर निष्क्रिय रह सकती है। स्क्रीन पर रहने का समय, चल रहा काम या खुला सवाल निष्क्रियता में नहीं गिना जाता।",
+  "wire.settings.mesh_moves.title": "सत्र मूव",
+  "wire.settings.mesh_moves.description": "किसी दूसरे डिवाइस पर ले जाई गई बातचीत अपने साथ क्या ले जाती है। हर मूव पर पढ़ा जाता है, इसलिए बदलाव अगले मूव पर लागू होता है।",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "प्रति मूव वर्किंग फ़ाइलों की सीमा (बाइट)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "वर्किंग-फ़ाइल डेटा (बंडल किए commits और staged, unstaged व untracked फ़ाइलें) की अधिकतम मात्रा जो एक मूव किसी दूसरे डिवाइस को भेजता है या उससे स्वीकार करता है। इससे ज़्यादा होने पर मूव अस्वीकार होता है और कुछ नहीं बदलता। डिफ़ॉल्ट 256 MiB।",
+  "wire.settings.mesh_move_working_set_roots.label": "वे फ़ोल्डर जो मूव की गई रिपॉज़िटरी पा सकते हैं",
+  "wire.settings.mesh_move_working_set_roots.help": "इस डिवाइस पर सत्र मूव कहाँ रिपॉज़िटरी बना या बहाल कर सकता है: आपके होम के अंदर के फ़ोल्डर, ~ से लिखे और कॉमा से अलग किए गए (जैसे ~/code, ~/work)। छिपे, सिस्टम, कमांड (PATH पर) और node_modules फ़ोल्डर कभी इस्तेमाल नहीं होते। सेट न होने पर: रिपॉज़िटरी वहीं बहाल होती है जहाँ वह पहले से है, और गायब रिपॉज़िटरी सिर्फ़ ऐसे फ़ोल्डर में क्लोन होती है जिसमें पहले से आपकी रिपॉज़िटरी हों; दूसरे फ़ोल्डरों की अनुमति देने के लिए इसे सेट करें।"
 }

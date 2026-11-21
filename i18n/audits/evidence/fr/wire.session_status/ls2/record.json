@@ -1,0 +1,158 @@
+{
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "dddc1ae29ef5",
+  "round": 2,
+  "scope": {
+    "keys": [
+      "wire.session_status.wedged_heartbeat",
+      "wire.session_status.delegating_queued_addend"
+    ],
+    "keys_read": 2,
+    "consistency_only_keys": [
+      "wire.session_status.wedged",
+      "wire.session_status.delegating_queued",
+      "wire.session_status.delegating_running",
+      "wire.session_status.waiting"
+    ],
+    "base_commit": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+    "full_namespace_reaudit": false
+  },
+  "en": {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+    "sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e"
+  },
+  "target": {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/fr/wire.session_status.json",
+    "sha256": "531f93976a9d9badebbee9bb02e38fe49ff637fbf02164615c80935d2b955b64"
+  },
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [],
+    "nit": []
+  },
+  "verdict": "clean",
+  "resolutions": [
+    {
+      "id": "F1",
+      "severity": "major",
+      "status": "fixed",
+      "reason": "signal de vie accurately and idiomatically replaces heartbeat, preserves last-signal age, process-alive qualification, separator and duration argument."
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "status": "rejection-accepted",
+      "reason": "en file d’attente distinguishes capacity-queued subagents from En attente de background jobs. At count=1 this is 19 cells versus English 8, but context explicitly sets no fixed cell cap; the added precision justifies the expansion. No rendered UI fit claim."
+    }
+  ],
+  "verification": {
+    "interpreter": "/Users/damian/local-operator/.venv/bin/python",
+    "PYTHONPATH": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status",
+    "plural_categories": [
+      "many",
+      "one",
+      "other"
+    ],
+    "samples": {
+      "wire.session_status.wedged_heartbeat": {
+        "en": "Not answering · process alive (last heartbeat {duration} ago)",
+        "fr": "Ne répond pas · processus actif (dernier signal de vie il y a {duration})",
+        "arguments": [
+          [
+            "duration",
+            "simple"
+          ]
+        ],
+        "plural_selectors": [],
+        "renders": [
+          {
+            "value": 0,
+            "en": "Not answering · process alive (last heartbeat 0m ago)",
+            "fr": "Ne répond pas · processus actif (dernier signal de vie il y a 0m)"
+          },
+          {
+            "value": 1,
+            "en": "Not answering · process alive (last heartbeat 1m ago)",
+            "fr": "Ne répond pas · processus actif (dernier signal de vie il y a 1m)"
+          },
+          {
+            "value": 2,
+            "en": "Not answering · process alive (last heartbeat 2m ago)",
+            "fr": "Ne répond pas · processus actif (dernier signal de vie il y a 2m)"
+          },
+          {
+            "value": 5,
+            "en": "Not answering · process alive (last heartbeat 5m ago)",
+            "fr": "Ne répond pas · processus actif (dernier signal de vie il y a 5m)"
+          },
+          {
+            "value": 21,
+            "en": "Not answering · process alive (last heartbeat 21m ago)",
+            "fr": "Ne répond pas · processus actif (dernier signal de vie il y a 21m)"
+          },
+          {
+            "value": 1000000,
+            "en": "Not answering · process alive (last heartbeat 1000000m ago)",
+            "fr": "Ne répond pas · processus actif (dernier signal de vie il y a 1000000m)"
+          }
+        ]
+      },
+      "wire.session_status.delegating_queued_addend": {
+        "en": "{count, plural, one {# queued} other {# queued}}",
+        "fr": "{count, plural, one {# en file d’attente} many {# en file d’attente} other {# en file d’attente}}",
+        "arguments": [
+          [
+            "count",
+            "plural"
+          ]
+        ],
+        "plural_selectors": [
+          [
+            "one",
+            "many",
+            "other"
+          ]
+        ],
+        "renders": [
+          {
+            "value": 0,
+            "en": "0 queued",
+            "fr": "0 en file d’attente"
+          },
+          {
+            "value": 1,
+            "en": "1 queued",
+            "fr": "1 en file d’attente"
+          },
+          {
+            "value": 2,
+            "en": "2 queued",
+            "fr": "2 en file d’attente"
+          },
+          {
+            "value": 5,
+            "en": "5 queued",
+            "fr": "5 en file d’attente"
+          },
+          {
+            "value": 21,
+            "en": "21 queued",
+            "fr": "21 en file d’attente"
+          },
+          {
+            "value": 1000000,
+            "en": "1,000,000 queued",
+            "fr": "1 000 000 en file d’attente"
+          }
+        ]
+      }
+    },
+    "rendered_ui_checked": false
+  },
+  "notes": "Independent remediation-delta audit only; unchanged keys retained from round 1, not re-audited. No provider fallback."
+}

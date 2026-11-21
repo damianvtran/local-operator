@@ -55,6 +55,31 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # The working-set receipt block (PR B): ``str()`` normalises a restore/left-behind
+    # REASON CODE as it is copied from the restore report into the block's row. It
+    # stays a machine code there; the human sentence is ``workset_text.reason_text``.
+    ("local_operator/network/workset_move.py", "arrival_receipt", "reason"): (
+        2,
+        "a reason CODE copied into the receipt block, rendered later by workset_text",
+    ),
+    # The offload's return path (#4245 round 3, B2). Each ``str()`` normalises a reason
+    # CODE in transit and never renders it: ``destination_transfer`` journals the coarse
+    # code the owner was already sent into ``pending.json``'s ``source_left``;
+    # ``destination_outcome`` copies it into the ``done`` frame's row; ``source_receipt``
+    # keeps a peer code only if ``workset_text.known_reason`` admits it (else
+    # ``not_transferred``). The sentence is ``workset_text.reason_text``, at render time.
+    ("local_operator/network/workset_move.py", "destination_transfer", "reason"): (
+        1,
+        "a decline reason CODE journaled for the source's receipt, never rendered raw",
+    ),
+    ("local_operator/network/workset_move.py", "destination_outcome", "reason"): (
+        1,
+        "a reason CODE copied into the done frame's row, rendered later by workset_text",
+    ),
+    ("local_operator/network/workset_move.py", "source_receipt", "reason"): (
+        1,
+        "a peer reason CODE kept only if workset_text's closed table knows it",
+    ),
     # These f-strings use this device's HeavyClass.reason command label
     # (long-lived-command and acquired notices) and memory_budget.reason
     # (why the local cap is off). Neither value comes from a mesh peer.
@@ -106,6 +131,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/credentials/consent.py", "verified_permission", "detail"): (
         1,
         "internal executed-receipt verification discriminator, never rendered",
+    ),
+    # This local operator-entered audit explanation is persisted with the
+    # notification grant. It is not a peer refusal token or mesh-rendered reason.
+    ("local_operator/cli.py", "sessions_notifications_command", "reason"): (
+        1,
+        "operator-entered local notification-authority audit explanation, not a mesh code",
     ),
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
@@ -647,6 +678,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # The reading for reachability rows READS the stage code only to classify it —
     # every sentence it returns is authored in one place — and the one verbatim arm
     # is the no-relay fallback's own prose row.
+    # The ``uplink`` rows (``network.uplink``) carry a detail this device composed
+    # from its own catalogue (``cli.network_uplink``) — localized prose, never a
+    # peer code — so both renderers print it as written.
+    ("local_operator/network/cli.py", "_cmd_doctor", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
+    ("local_operator/network/readiness.py", "uplink_lines", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
     ("local_operator/network/readiness.py", "reachability_reading", "detail"): (
         1,
         "classifier input; the returned sentences are authored here, never echoed",
@@ -865,6 +907,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the bridge's refusal code, mapped to this project's own refusal copy and "
         "returned as a machine code field, never rendered",
+    ),
+    # The same refusal on a SUBAGENT's site card (PR #4283): ``site_decide`` hands
+    # the card to ``_site_decide_bound`` with its own ``_refuse``, and the bound path
+    # reads the bridge's ``applied: false`` code exactly as above -- ``str()`` keys
+    # ``_site_not_applied_copy`` (one mapping shared with the host's own cards), and
+    # the raw token rides only in the answer's machine ``code`` field.
+    ("local_operator/session/session.py", "Session._site_decide_bound", "reason"): (
+        1,
+        "the bridge's refusal code on a subagent's card, mapped to the same refusal "
+        "copy and returned as a machine code field, never rendered",
     ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same

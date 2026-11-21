@@ -17,6 +17,10 @@ def github_borrow_timeout(*, owner: str, seconds: str) -> Msg:
     return Msg("cli.failures.github_borrow_timeout", {"owner": owner, "seconds": seconds})
 
 
+def github_owner_offline(*, owner: str) -> Msg:
+    return Msg("cli.failures.github_owner_offline", {"owner": owner})
+
+
 def invalid_choice(*, argument: str, value: str, choices: str) -> Msg:
     return Msg(
         "cli.failures.invalid_choice",

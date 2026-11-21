@@ -122,7 +122,7 @@ def test_the_dry_run_digest_round_trips_through_confirm_working_set(
     receipt = json.loads(capsys.readouterr().out)
     assert code == 0, receipt
     assert receipt["working_set"]["scope_digest"] == digest
-    assert receipt["working_set"]["transferred"] is False
+    assert receipt["working_set"]["transferred"] is True
     assert not (server_a.root / "sessions" / SESSION).exists()
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
@@ -152,27 +152,19 @@ def test_an_interactive_terminal_is_warned_and_only_y_moves(
 
     assert declined == 1
     # The warning names the session and the DESTINATION device, says plainly that the
-    # files do not travel yet (PR A), and lists the worktree and the withheld secret.
+    # files TRAVEL there (both relays speak the transfer protocol, PR B), and lists the
+    # worktree and the withheld secret; the prompt asks to SEND them to that device.
     assert f"Moving {SESSION} to device-b mid-conversation" in first.out
-    assert "does not bring its working files yet" in first.out
-    # A RECALL runs this prompt on the DESTINATION: the files stay on the owner, which
-    # is named — never "this device", which here would be the wrong machine.
-    assert "They stay on device-a:" in first.out
-    assert (
-        prompts[0]
-        == f"Move {SESSION} to device-b and leave these working files on device-a? [y/N] "
-    )
+    assert "sends its working files there" in first.out
+    assert "Only continue if device-b should receive these files." in first.out
+    assert prompts[0] == "Send these working files to device-b? [y/N] "
     assert "~/proj/.worktrees/feat" in first.out
     assert "withheld (looks like a secret): ~/proj/.worktrees/feat/.env.local" in first.out
     assert prompts[0].endswith("[y/N] ")
     assert "Not moved" in first.err
     assert still_here
     assert accepted == 0, second
-    assert "Working files were not transferred: 1 worktree stays on device-a." in second.out
-    # QA round 1, Q-2: the receipt LISTS what stayed, not only the count.
-    assert "~/proj/.worktrees/feat  stays on device-a:" in second.out
-    assert "withheld (looks like a secret): ~/proj/.worktrees/feat/.env.local" in second.out
-    assert "not copied: ~/proj/.worktrees/feat/node_modules" in second.out
+    assert "Working files arrived from device-a: 1 worktree restored here." in second.out
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
 
@@ -368,10 +360,16 @@ def test_a_mistyped_digest_says_it_does_not_match(
 
 
 def test_a_scripted_refusal_speaks_once_and_names_the_keeper(
-    staged: tuple[Devices, Rig], capsys: pytest.CaptureFixture[str]
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """U4: a non-tty refusal printed the owner's English sentence ("on this device",
-    the wrong machine on a recall) and then the keyed summary."""
+    the wrong machine on a recall) and then the keyed summary. The destination here
+    speaks the pre-transfer protocol, so the files STAY and the keeper is named."""
+    from local_operator.network import workset
+
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
     code = _run([])
 
     err = capsys.readouterr().err

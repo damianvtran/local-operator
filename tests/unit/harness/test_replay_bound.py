@@ -29,6 +29,8 @@ import pytest
 from local_operator.compaction.tokens import estimate_tokens
 from local_operator.harness.replay_bound import (
     DEFAULT_REPLAY_BOUND_CHARS,
+    DEFAULT_REPLAY_RESULT_BOUND_CHARS,
+    READ_REPLAY_BOUND_CHARS,
     REPLAY_ARGUMENT_MARKER,
     REPLAY_RESULT_MARKER,
     bound_replay_payloads,
@@ -145,7 +147,137 @@ def test_a_leaked_oversized_result_is_caught_at_the_default():
     """The backstop's actual job: rows that escaped the tool-level cap."""
     row = tool_row(lines(40000))  # ~1.2 MB, the shape that leaked in the store
     out = bound_replay_payloads([row])
-    assert len(text_at(out[0], 0)) <= DEFAULT_REPLAY_BOUND_CHARS
+    assert len(text_at(out[0], 0)) <= DEFAULT_REPLAY_RESULT_BOUND_CHARS
+    assert "elided on replay" in text_at(out[0], 0)
+    read_row = tool_row(lines(40000), name="read")
+    (read_out,) = bound_replay_payloads([read_row])
+    assert len(text_at(read_out, 0)) <= READ_REPLAY_BOUND_CHARS
+
+
+# --------------------------------------------------------------------------
+# No double elision: a result the tool already capped keeps its own footer
+# --------------------------------------------------------------------------
+
+
+def test_a_spilled_bash_result_is_not_elided_a_second_time(tmp_path, monkeypatch):
+    """REPRODUCTION: ``spill_truncate`` caps the body at 8 KiB and THEN appends
+    its recovery footer, so the result is 8 KiB + footer. A replay bound equal to
+    the cap cut the middle of that body again and added a marker telling the
+    model to re-run — contradicting the footer's "expand the handle"."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    context = ToolContext(cwd=str(tmp_path), session_id="replay-bound-test")
+    body, details = builtin.spill_truncate(lines(5000), "bash", context)
+    assert details is not None, "the spill store must have kept the full output"
+    assert len(body) > builtin.TOOL_OUTPUT_LIMIT_CHARS, "precondition: footer rides past the cap"
+    row = tool_row(body)
+
+    (out,) = bound_replay_payloads([row])
+
+    assert out is row, "an already-capped result must replay byte-identical"
+    assert "elided on replay" not in text_at(out, 0)
+    # The historical uniform bound is what produced the second marker.
+    (old,) = bound_replay_payloads([row], bound_chars=DEFAULT_REPLAY_BOUND_CHARS)
+    assert "elided on replay" in text_at(old, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_clamped_file_read_and_a_whole_internal_read_replay_untouched(tmp_path):
+    """``read`` caps a file at 8 KiB plus a continuation footer, and delivers an
+    internal document whole up to ``INTERNAL_READ_LIMIT_CHARS`` (16 KiB): both
+    must reach the model as the tool returned them."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(cwd=str(tmp_path), session_id="replay-bound-read")
+    big = tmp_path / "big.txt"
+    big.write_text(lines(2000))
+    read = next(tool for tool in create_tools(context) if tool.name == "read")
+    assert read.execute is not None
+    result = await read.execute("c1", {"path": str(big)}, None, None, context)
+    file_text = "".join(b.text for b in result.content if isinstance(b, TextContent))
+    assert "[truncated at" in file_text and len(file_text) > DEFAULT_REPLAY_BOUND_CHARS
+    internal = "x" * (builtin.INTERNAL_READ_LIMIT_CHARS - 1)  # whole-delivered guide size
+    rows = [tool_row(file_text, name="read"), tool_row(internal, tool_call_id="c2", name="read")]
+
+    out = bound_replay_payloads(rows)
+
+    assert out[0] is rows[0] and out[1] is rows[1]
+
+
+def test_the_read_bound_tracks_the_internal_read_cap():
+    """``READ_REPLAY_BOUND_CHARS`` is a literal (harness must not import tools);
+    this keeps it in step with the cap it exists to respect."""
+    from local_operator.harness.replay_bound import REPLAY_RESULT_HEADROOM_CHARS
+    from local_operator.tools.builtin import INTERNAL_READ_LIMIT_CHARS
+
+    assert READ_REPLAY_BOUND_CHARS == INTERNAL_READ_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS
+
+
+def test_the_wide_result_bound_tracks_the_unreadable_spill_inline_cap():
+    """``WIDE_RESULT_REPLAY_BOUND_CHARS`` is a literal for the same reason as the
+    read bound; this keeps it in step with the inline cap it must not undercut."""
+    from local_operator.harness.replay_bound import (
+        REPLAY_RESULT_HEADROOM_CHARS,
+        WIDE_RESULT_REPLAY_BOUND_CHARS,
+    )
+    from local_operator.tools.builtin import UNREADABLE_SPILL_INLINE_LIMIT_CHARS
+
+    assert (
+        WIDE_RESULT_REPLAY_BOUND_CHARS
+        == UNREADABLE_SPILL_INLINE_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS
+    )
+
+
+@pytest.mark.parametrize("name", ["mcp__bd_fetch", "web_fetch"])
+def test_a_result_inlined_whole_without_read_replays_untouched(tmp_path, monkeypatch, name):
+    """A session without ``read`` inlines MCP / web_fetch results up to 24,000
+    chars. The 9 KiB default bound would middle-elide that on its FIRST view
+    (the bound applies to the current turn's results too) — the very bytes the
+    wider inline cap exists to deliver."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    context = ToolContext(cwd=str(tmp_path), session_id="no-read", spill_readable=False)
+    whole, _ = builtin.spill_truncate("x" * 12_000, name, context, 24_000)
+    capped, _ = builtin.spill_truncate("y" * 60_000, name, context, 24_000)
+    rows = [tool_row(whole, name=name), tool_row(capped, tool_call_id="c2", name=name)]
+    assert len(whole) == 12_000 and len(capped) == 24_000
+
+    out = bound_replay_payloads(rows)
+
+    assert out[0] is rows[0] and out[1] is rows[1]
+    # A non-wide tool at the same size is still bounded: the widening is by name.
+    (bash,) = bound_replay_payloads([tool_row(whole, name="bash")])
+    assert "elided on replay" in text_at(bash, 0)
+
+
+def test_a_readable_mcp_result_replays_exactly_as_before(tmp_path, monkeypatch):
+    """With ``read`` an MCP result is capped at 8 KiB + footer, under the old
+    9 KiB bound, so the wider bound leaves its replay bytes unchanged."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    context = ToolContext(cwd=str(tmp_path), session_id="with-read")
+    body, details = builtin.spill_truncate("z" * 12_000, "mcp__bd_fetch", context)
+    assert details is not None and "spill://" in body
+    row = tool_row(body, name="mcp__bd_fetch")
+
+    (out,) = bound_replay_payloads([row])
+    (old,) = bound_replay_payloads([row], bound_chars=DEFAULT_REPLAY_RESULT_BOUND_CHARS)
+
+    assert out is row and old is row
+
+
+def test_arguments_keep_the_tools_layer_bound_at_the_default():
+    message = assistant_call({"content": "y" * (DEFAULT_REPLAY_BOUND_CHARS + 500)})
+    (out,) = bound_replay_payloads([message])
+    assert len(out.tool_calls[0].arguments["content"]) <= DEFAULT_REPLAY_BOUND_CHARS
 
 
 def test_every_text_block_is_bounded_and_images_are_left_alone():

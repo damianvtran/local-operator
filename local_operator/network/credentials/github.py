@@ -133,6 +133,7 @@ import shlex
 import subprocess
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
@@ -252,6 +253,27 @@ SOURCE_GH = "gh"
 #: a wider arm than one that could not be read is exactly the silent downgrade
 #: the ladder forbids.
 SOURCE_UNREADABLE = "unreadable"
+
+#: What a listing SHOWS for the gh arm (lend honesty, 2026-11-19). ``GITHUB_KIND``
+#: stays the machine ``kind`` — it is the placement row's wire type, the offer
+#: table's key and the relay's grant filter, so renaming it would break those
+#: readers — but printing ``github-app`` beside a lend served from a gh login
+#: told the operator an App-scoped credential was travelling when gh's token is
+#: the account's own broad user token, fenced to the designated repositories
+#: only by the git-side checks. The App and token arms keep ``GITHUB_KIND`` as
+#: their label: that is exactly what they showed before.
+GH_SOURCE_LABEL = "gh CLI login (full account)"
+
+
+def source_label(source: str) -> str:
+    """The label a listing shows for the arm ``source`` names (never a secret).
+
+    Only the gh arm reads differently; every other answer — App, token, no arm,
+    unreadable — keeps the row's historic ``GITHUB_KIND`` so nothing that was
+    honest before changes its words.
+    """
+    return GH_SOURCE_LABEL if source == SOURCE_GH else GITHUB_KIND
+
 
 #: How much of ``gh``'s hosts file one read may take. gh writes a few hundred
 #: bytes; the bound exists so a pathological file cannot make the lender read
@@ -1476,6 +1498,17 @@ def resolve_source(root: Path | None = None, *, home: Path | None = None) -> str
     PRESENCE, not usability, for each arm it does resolve: a configured but
     broken arm RESOLVES so the serve-time refusal can name it. THE ONE ORDER:
     the lender serves with this, and the receipts name the arm with it.
+
+    SELECTION ORDER, first match wins (narrowest credential first):
+
+    1. ``SOURCE_APP`` — the ``APP_SECRET_NAME`` entry in the encrypted store;
+    2. ``SOURCE_TOKEN`` — the ``TOKEN_SECRET_NAME`` (PAT) entry in that store;
+    3. ``SOURCE_GH`` — a ``gh`` CLI login for github.com (:func:`gh_login_present`),
+       the account's full user token: the widest arm, so the listing labels it
+       :data:`GH_SOURCE_LABEL` and ``ready`` warns about it;
+    4. ``""`` — nothing to serve.
+
+    An unreadable store at step 1 or 2 answers ``SOURCE_UNREADABLE`` and stops.
     """
     app_state = _secret_state(root, APP_SECRET_NAME)
     if app_state is None:
@@ -2103,7 +2136,15 @@ _SELF_REVOKE_SCHEDULED: set[str] = set()
 #: cancels the belt it supersedes: since the belt moved to the hold end it can be
 #: pending for up to the token's hour, and a second DELETE then is noise.
 _SELF_REVOKE_TIMERS: dict[str, threading.Timer] = {}
+#: Tokens whose belt is INSIDE its fire (the DELETE has been committed to). A
+#: firing timer ignores ``cancel()``, so :func:`_cancel_self_revoke` leaves it
+#: registered and its own ``finally`` removes it: a teardown that joins the
+#: registry must keep seeing it until the DELETE returns (PR #4263 R1/Q1).
+_SELF_REVOKE_FIRING: set[str] = set()
 _SELF_REVOKE_LOCK = threading.Lock()
+#: Name every belt timer carries, so an overrun teardown names it and a thread
+#: listing tells a belt from an anonymous ``Thread-N``.
+SELF_REVOKE_BELT_THREAD_NAME = "lop-github-revoke-belt"
 
 
 def _client_for(root: Path | None) -> Any:
@@ -2142,14 +2183,25 @@ def _schedule_self_revoke(token: str, revoke_at_ms: int) -> None:
     delay = max(0.1, revoke_at_ms / 1000.0 - time.time())
 
     def _fire() -> None:
+        # Commit to the DELETE under the lock, and only if this timer is still the
+        # registered one: a cancel that won the race between the Timer's wait
+        # ending and this line has already popped it, and ``cancel()`` could no
+        # longer stop us, so we stand down here instead of firing untracked.
+        with _SELF_REVOKE_LOCK:
+            if _SELF_REVOKE_TIMERS.get(token) is not timer:
+                return
+            _SELF_REVOKE_FIRING.add(token)
         try:
             revoke_installation_token(token)
         finally:
             with _SELF_REVOKE_LOCK:
+                _SELF_REVOKE_FIRING.discard(token)
                 _SELF_REVOKE_SCHEDULED.discard(token)
-                _SELF_REVOKE_TIMERS.pop(token, None)
+                if _SELF_REVOKE_TIMERS.get(token) is timer:
+                    del _SELF_REVOKE_TIMERS[token]
 
     timer = threading.Timer(delay, _fire)
+    timer.name = SELF_REVOKE_BELT_THREAD_NAME
     timer.daemon = True
     with _SELF_REVOKE_LOCK:
         _SELF_REVOKE_TIMERS[token] = timer
@@ -2159,24 +2211,73 @@ def _schedule_self_revoke(token: str, revoke_at_ms: int) -> None:
 def _cancel_self_revoke(token: str) -> None:
     """Cancel a pending belt for ``token`` (it is being revoked now, or never will be)."""
     with _SELF_REVOKE_LOCK:
+        if token in _SELF_REVOKE_FIRING:
+            # Too late to cancel: leave it registered (its ``finally`` removes it)
+            # so pending_self_revoke_threads() still reports it until it returns.
+            return
         timer = _SELF_REVOKE_TIMERS.pop(token, None)
         _SELF_REVOKE_SCHEDULED.discard(token)
     if timer is not None:
         timer.cancel()
 
 
-def cancel_pending_self_revokes() -> int:
+def cancel_pending_self_revokes(*, join_timeout_s: float | None = None) -> int:
     """Cancel every pending belt in this process; returns how many. For teardown.
 
     A test that scheduled a belt at a hold end seconds away must not leave it to fire
     after its loopback GitHub is gone — the module base it reads at call time would
     then be the real ``api.github.com``.
+
+    ``join_timeout_s`` makes the teardown JOINABLE, not just cancelling: a timer
+    whose ``_fire`` is already running ignores ``cancel()`` and stays in
+    ``_SELF_REVOKE_TIMERS`` until its DELETE returns, so cancel alone can hand a
+    live DELETE to whatever runs next in the process (measured: a 600 s belt armed
+    by ``test_github_helper_diagnostic`` fired inside an unrelated
+    ``test_cli_remote`` cell on the same xdist worker, run 44408211857). With a
+    bound, each cancelled timer is joined for up to that long; the caller checks
+    :func:`pending_self_revoke_threads` for anything that outlived it. ``None``
+    keeps the old cancel-only behaviour for callers that must not block.
     """
     with _SELF_REVOKE_LOCK:
         tokens = list(_SELF_REVOKE_TIMERS)
+        timers = list(_SELF_REVOKE_TIMERS.values())
     for token in tokens:
         _cancel_self_revoke(token)
+    if join_timeout_s is not None:
+        for timer in timers:
+            if timer is not threading.current_thread():
+                timer.join(timeout=join_timeout_s)
     return len(tokens)
+
+
+#: Name every :func:`revoke_now` thread carries, so an overrun teardown names it
+#: and a thread listing tells an immediate revoke from an anonymous ``Thread-N``.
+REVOKE_NOW_THREAD_NAME = "lop-github-revoke-now"
+#: Every :func:`revoke_now` thread this process started, guarded by
+#: ``_SELF_REVOKE_LOCK``. The joinable contract reads THIS, never
+#: ``threading.enumerate()``: ``tests/unit/conftest.py`` runs
+#: :func:`pending_self_revoke_threads` after every unit cell, and a per-cell
+#: thread scan is both wasted cost on thousands of cells and a breach of the
+#: thread-leak reporter's contract, whose own tests monkeypatch ``enumerate`` to
+#: fail (merge gate 44481472281, shard 4). With nothing ever scheduled the read
+#: is an empty-set copy, no ``threading`` sampling at all. A ``WeakSet`` because a
+#: live thread is held strongly by ``threading`` itself, so it stays visible until
+#: it finishes, and a finished one the caller dropped needs no pruning.
+_REVOKE_NOW_THREADS: weakref.WeakSet[threading.Thread] = weakref.WeakSet()
+
+
+def pending_self_revoke_threads() -> list[threading.Thread]:
+    """Every borrower-side revoke thread still alive in this process.
+
+    The belt timers (pending or firing) and the :func:`revoke_now` threads: the
+    two borrower paths that can send a ``DELETE /installation/token`` from a
+    thread nobody awaits. A test teardown joins these so no revoke started by one
+    cell can land inside the next one's network tripwire.
+    """
+    with _SELF_REVOKE_LOCK:
+        alive: list[threading.Thread] = [t for t in _SELF_REVOKE_TIMERS.values() if t.is_alive()]
+        alive.extend(t for t in _REVOKE_NOW_THREADS if t.is_alive())
+    return alive
 
 
 def is_installation_grant(grant: Any) -> bool:
@@ -2258,12 +2359,17 @@ def revoke_now(grants: Any, *, base_url: str | None = None) -> list[threading.Th
             target=revoke_installation_token,
             args=(token,),
             kwargs={"base_url": base_url},
-            name="lop-github-revoke-now",
+            name=REVOKE_NOW_THREAD_NAME,
             daemon=True,
         )
+        # Registered before start so no window exists where it runs untracked.
+        with _SELF_REVOKE_LOCK:
+            _REVOKE_NOW_THREADS.add(thread)
         try:
             thread.start()
         except RuntimeError:  # interpreter shutting down; the ceiling remains
+            with _SELF_REVOKE_LOCK:
+                _REVOKE_NOW_THREADS.discard(thread)
             continue
         started.append(thread)
     return started
@@ -2702,14 +2808,27 @@ def apply_grant_narrowing(outcome: Any, *, client: Any, root: Path | None = None
         return {"changed": False, "repositories": [], "error": exc.__class__.__name__}
 
 
+#: The owner-outage refusals that, with no saved access, leave a bash child with no
+#: GitHub login: ``borrowed_git_env`` reports them through ``on_refusal``. A deny,
+#: a withdrawn share or a panic is not an outage and keeps its existing copy.
+OUTAGE_REFUSALS: frozenset[str] = frozenset({"owner_offline", "owner_unreachable", "owner_busy"})
+
+
 def borrowed_git_env(
     *,
     root: Path | None = None,
     session_id: str = "",
     client: Any = None,
     on_timeout: Callable[[Any], object] | None = None,
+    on_refusal: Callable[[Any], object] | None = None,
+    hold_fallback_session_ids: tuple[str, ...] = (),
 ) -> tuple[dict[str, str], str]:
     """Fetch-on-use: ``(env, token)`` for one child, or ``({}, "")``. Never raises.
+
+    ``hold_fallback_session_ids`` are the session's ancestors in the harness's
+    task tree; while the owner is away a subagent may serve its ancestor's held
+    grant (``MeshCredentialClient._bridge_ancestor_hold``). ``on_refusal`` hears
+    an owner-outage refusal that left nothing to inject (:data:`OUTAGE_REFUSALS`).
 
     ``{}`` is every not-now answer on purpose — this runs on the bash tool's
     spawn path, and a command must never fail because a borrow could not: the
@@ -2726,18 +2845,36 @@ def borrowed_git_env(
             return {}, ""
         if not client.should_borrow(GITHUB_KEY):
             return {}, ""
-        outcome = client.request_grant_sync(GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY)
+        # Only when there are ancestors, so a caller (or test double) without any
+        # keeps the exact call it always made.
+        bridge: dict[str, Any] = (
+            {"hold_fallback_session_ids": tuple(hold_fallback_session_ids)}
+            if hold_fallback_session_ids
+            else {}
+        )
+        outcome = client.request_grant_sync(
+            GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY, **bridge
+        )
     except Exception:  # noqa: BLE001 — see the docstring
         return {}, ""
     token = str(getattr(outcome, "access_token", "") or "")
     if not token:
         from .types import BorrowTimeout
 
-        if isinstance(outcome, BorrowTimeout) and on_timeout is not None:
-            # A local diagnostic only. Denials, missing sinks and policy answers
-            # do not become timeouts, and nothing enters the child's environment.
+        if isinstance(outcome, BorrowTimeout):
+            if on_timeout is not None:
+                # A local diagnostic only. Denials, missing sinks and policy answers
+                # do not become timeouts, and nothing enters the child's environment.
+                try:
+                    on_timeout(outcome)
+                except Exception:  # noqa: BLE001 — diagnostics cannot break a command
+                    pass
+        elif on_refusal is not None and getattr(outcome, "code", "") in OUTAGE_REFUSALS:
+            # WHY: an outage with no saved access used to return silently, and
+            # ``gh`` then said only "set the GH_TOKEN environment variable" (remote
+            # review/QA subagents, 2026-11-21). Codes and the owner label only.
             try:
-                on_timeout(outcome)
+                on_refusal(outcome)
             except Exception:  # noqa: BLE001 — diagnostics cannot break a command
                 pass
         return {}, ""
@@ -2770,7 +2907,7 @@ def borrowed_git_env(
                 if grants is not None:
                     grants.drop(GITHUB_KEY)
                 fresh = client.request_grant_sync(
-                    GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY
+                    GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY, **bridge
                 )
                 fresh_token = str(getattr(fresh, "access_token", "") or "")
                 if fresh_token:
@@ -2810,6 +2947,8 @@ def lent_github_env(
     register: Callable[[str], object] | None,
     client: Any = None,
     on_timeout: Callable[[Any], object] | None = None,
+    on_refusal: Callable[[Any], object] | None = None,
+    hold_fallback_session_ids: tuple[str, ...] = (),
 ) -> tuple[dict[str, str], str]:
     """The ONE door a mesh-lent github bearer takes into a local consumer.
 
@@ -2851,6 +2990,10 @@ def lent_github_env(
         # Only when asked for: a caller (or test double) that never passes it keeps
         # the exact call it always made.
         extra: dict[str, Any] = {"on_timeout": on_timeout} if on_timeout is not None else {}
+        if on_refusal is not None:
+            extra["on_refusal"] = on_refusal
+        if hold_fallback_session_ids:
+            extra["hold_fallback_session_ids"] = tuple(hold_fallback_session_ids)
         env, token = borrowed_git_env(session_id=session_id, client=client, **extra)
     except Exception:  # noqa: BLE001 — borrowed_git_env never raises; belt and braces
         return {}, ""

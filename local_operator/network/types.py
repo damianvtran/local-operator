@@ -165,7 +165,8 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: for a signing challenge; the signature still decides admission), and
 #: ``unattended`` is the right to start sessions here without a per-card gate.
 #: Both are granted PER MEMBER: no ``read``/``drive`` role carries them — an
-#: ``admin`` member holds the full vocabulary (``ROLE_CAPABILITIES``), so a
+#: ``admin`` member holds every capability except the receiver-local
+#: ``workset_import`` (``ROLE_CAPABILITIES``), so a
 #: consumer reads the member row rather than a role name — and both are in
 #: :data:`GRANTABLE_CAPABILITIES`.
 #:
@@ -198,6 +199,7 @@ CAPABILITIES: frozenset[str] = frozenset(
         "approve",
         "unattended",
         "update",
+        "workset_import",
         "admin",
     }
 )
@@ -211,7 +213,15 @@ ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
     # fleet" is a common and much safer ask than "let it drive everything".
     "read": frozenset({"list", "view"}),
     "drive": frozenset({"list", "view", "prompt", "steer", "stop", "slash"}),
-    "admin": CAPABILITIES,
+    # ``admin`` is the full vocabulary EXCEPT ``workset_import`` (security-lead
+    # ruling on #4245, 2026-11-18): accepting a peer's working files and the writes
+    # they make into this device's home is a permission the RECEIVING operator
+    # grants on purpose, separate from session mobility. An admin invite is minted
+    # to administer the network; were it to imply file import, every admin pairing
+    # (most pairings of one's own second machine) would silently accept repositories
+    # and branches from that peer, which is exactly the coupling the ruling refuses.
+    # Granted per member on the receiving device instead (``SELF_DECIDED_SCOPES``).
+    "admin": CAPABILITIES - {"workset_import"},
 }
 
 ROLES: tuple[str, ...] = ("read", "drive", "admin")
@@ -635,6 +645,9 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
         # the day this table changed. The blanket ``admin`` role holds the full
         # vocabulary by construction, as it does for every capability.
         "update",
+        # Per member, on the RECEIVING device, and in no role (not even ``admin``):
+        # see ``ROLE_CAPABILITIES`` and ``CAPABILITY_WORDS``.
+        "workset_import",
     }
 )
 
@@ -653,7 +666,15 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
 #: record a decision it had already made with its operator (§3.3 step 9 runs the
 #: grant on the node). Every capability outside this set keeps the admin-only
 #: write rule; ``broker_credential`` and the role caps explicitly.
-SELF_DECIDED_SCOPES: frozenset[str] = frozenset({"approve", "unattended", "update"})
+#:
+#: ``workset_import`` (security-lead ruling on #4245, 2026-11-18) is the same kind
+#: of decision: "may this peer send working files — repositories, branches,
+#: uncommitted changes — into THIS device's home". It is checked here, against
+#: the AUTHENTICATED source of a move (``workset_move.import_authorised``), never
+#: on the sender, so the device the writes land on is the one that records it.
+SELF_DECIDED_SCOPES: frozenset[str] = frozenset(
+    {"approve", "unattended", "update", "workset_import"}
+)
 
 #: What each capability lets the peer DO, in words, for ``member grant/revoke``'s
 #: human output. A capability name alone ("broker_credential") does not tell the
@@ -677,6 +698,13 @@ CAPABILITY_WORDS: dict[str, str] = {
     "update": (
         "install a newer build here from this device's own update channel, or restart "
         "only this device's relay for recovery, when this peer asks"
+    ),
+    # Names the WRITES, not just the transfer: the grant lets a moved session's
+    # repositories and changes be cloned and restored under this device's home.
+    # Never implied by ``move`` (which moves only the conversation without it).
+    "workset_import": (
+        "send a moved session's working files (repositories, branches, uncommitted "
+        "changes) into this device's home"
     ),
     "admin": "administer the network",
 }
@@ -2295,3 +2323,11 @@ class HandshakeResult:
     # Keep the local MAC-covered advertisement without changing raw peer semantics.
     local_capabilities: list[str] = field(default_factory=list)
     network_name: str = ""
+    #: True only when THIS side checked the PEER's auth signature and MAC
+    #: (``Handshake.verify_auth``), i.e. the peer's ``device_id`` is PROVEN rather
+    #: than declared. Today that is the listener only: the dialer reads the
+    #: listener's id off the challenge unverified until G1 lands. Carried onto
+    #: ``PeerLink.peer_verified`` and MAC-bound into the relay→runtime proof's
+    #: block (``network/origin.py``), so a stamp can say "verified" only for a link
+    #: whose peer identity was actually proved (mesh-origin-stamp design §2 rule 3).
+    peer_verified: bool = False

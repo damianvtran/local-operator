@@ -440,10 +440,10 @@ async def test_invalid_target_or_cwd_never_publishes_session(api):
 
 async def test_failed_binding_write_does_not_publish_false_success(api, monkeypatch):
     client, root = api
-    monkeypatch.setattr(
-        "local_operator.server.utils.desktop_sessions.write_session_attachment",
-        lambda *a, **kw: None,
-    )
+    # The write now goes through the shared ``resume.bind_session_attachment``
+    # (the relay's start route calls it too), so the silent no-op writer is
+    # patched where that helper resolves it.
+    monkeypatch.setattr("local_operator.resume.write_session_attachment", lambda *a, **kw: None)
     result = await client.post(
         "/v1/desktop/sessions",
         json=mutation(cwd=str(root), target={"kind": "agent", "name": "reviewer"}),

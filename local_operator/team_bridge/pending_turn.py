@@ -258,6 +258,12 @@ class PendingTurn:
             conversation_seq=int(row["conversation_seq"]),
             mention=bool(row["mention"]),
             sender_kind=fetched.sender_kind if fetched.sender_kind in ("human", "agent") else None,
+            # Neither the reservation row nor the body route carries the hub's
+            # thread root, so this ref must not claim the message IS a root:
+            # a reply presented here would then be answered under its own id
+            # (refused by the hub as ``invalid_root``). Placement resolves an
+            # unknown root from the hub at post time (tool._default_thread_root).
+            thread_root_known=False,
         ).validated()
         reservation_id = f"{conversation_id}/{message_id}"
         try:
@@ -321,7 +327,11 @@ class PendingTurn:
             return False
         try:
             row = self._store.body_reservation(self._owner, self._conversation_id, self._message_id)
-            facts = self._store.per_call_admission_state(self._owner, self._session_id)
+            facts = self._store.per_call_admission_state(
+                self._owner,
+                self._session_id,
+                reservation=(self._conversation_id or "", self._message_id or ""),
+            )
             return bool(
                 row
                 and self._facts_hold(facts)
@@ -428,7 +438,11 @@ class PendingTurn:
             self._drift_reason = "claim_lost"
             return None
         try:
-            facts = self._store.per_call_admission_state(self._owner, self._session_id)
+            facts = self._store.per_call_admission_state(
+                self._owner,
+                self._session_id,
+                reservation=(self._conversation_id or "", self._message_id or ""),
+            )
         except StoreRefused:
             facts = None
         if not self._facts_hold(facts):

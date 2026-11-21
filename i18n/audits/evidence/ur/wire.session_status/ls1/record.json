@@ -1,0 +1,153 @@
+{
+  "locale": "ur",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/ur/wire.session_status.json",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "as supplied in delegation; not independently inspected"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "2b5a56c684ba",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "fallback": "none used"
+  },
+  "status": "passed",
+  "result": "clean",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "keys_read": 31,
+  "new_keys_read": 14,
+  "preexisting_keys_read": 17,
+  "evidence": {
+    "head": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+    "preexisting_entry_bytes": "17/17 unchanged, ignoring structural trailing comma on previous final member; independently compared HEAD lines and decoded values",
+    "arguments": "runtime.message_arguments parity for all 31 keys",
+    "plurals": "format.plural_categories(ur) is one/other (plural_categories is in format.py, not runtime.py); runtime.plural_arguments confirms every category, no exact selectors, nonempty arms and count rendering",
+    "render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000000
+    ],
+    "rendered_plural_keys": [
+      "waiting",
+      "waiting_subagents",
+      "delegating_jobs",
+      "delegating_running",
+      "delegating_queued",
+      "delegating_queued_addend"
+    ],
+    "literal_exec": "preserved exactly as (exec)",
+    "joiner": "source-count parity for literal U+0020 U+00B7 U+0020 on every key",
+    "bidi_controls": "none in entire target catalogue, including ALM/LRM/RLM and embedding/isolate controls",
+    "bidi_projection": [
+      {
+        "key": "exec_headless",
+        "token": "(exec)",
+        "projection": "'\\u2067\\u06c1\\u06cc\\u0688 \\u0644\\u06cc\\u0633 \\u0686\\u0644 \\u0631\\u06c1\\u0627 \\u06c1\\u06d2 \\u2066(exec)\\u2069\\u2069'",
+        "result": "balanced RLI/PDI prose and LRI/PDI technical island; original logical bytes recover unchanged"
+      },
+      {
+        "key": "wedged_heartbeat",
+        "token": "4m",
+        "projection": "'\\u2067\\u062c\\u0648\\u0627\\u0628 \\u0646\\u06c1\\u06cc\\u06ba \\u062f\\u06d2 \\u0631\\u06c1\\u0627 \\xb7 \\u067e\\u0631\\u0648\\u0633\\u06cc\\u0633 \\u0645\\u0648\\u062c\\u0648\\u062f \\u06c1\\u06d2 (\\u0622\\u062e\\u0631\\u06cc \\u06c1\\u0627\\u0631\\u0679 \\u0628\\u06cc\\u0679 \\u20664m\\u2069 \\u067e\\u06c1\\u0644\\u06d2)\\u2069'",
+        "result": "balanced RLI/PDI prose and LRI/PDI technical island; original logical bytes recover unchanged"
+      },
+      {
+        "key": "wedged_heartbeat",
+        "token": "1h 5m",
+        "projection": "'\\u2067\\u062c\\u0648\\u0627\\u0628 \\u0646\\u06c1\\u06cc\\u06ba \\u062f\\u06d2 \\u0631\\u06c1\\u0627 \\xb7 \\u067e\\u0631\\u0648\\u0633\\u06cc\\u0633 \\u0645\\u0648\\u062c\\u0648\\u062f \\u06c1\\u06d2 (\\u0622\\u062e\\u0631\\u06cc \\u06c1\\u0627\\u0631\\u0679 \\u0628\\u06cc\\u0679 \\u20661h 5m\\u2069 \\u067e\\u06c1\\u0644\\u06d2)\\u2069'",
+        "result": "balanced RLI/PDI prose and LRI/PDI technical island; original logical bytes recover unchanged"
+      }
+    ],
+    "terminology_citations": [
+      "relay.chrome.session.subtitle.not_answering: جواب نہیں دے رہا",
+      "tui.small.info_panel.last_heartbeat_ago: آخری ہارٹ بیٹ {age} پہلے",
+      "tui.status.jobs: invariant جاب in both plural arms",
+      "wire.settings.subagents.title: ذیلی ایجنٹس",
+      "tui.analytics.table.subagent_suffix: ذیلی ایجنٹ / ذیلی ایجنٹس",
+      "cli.global_help.no_tui: ہیڈ لیس"
+    ],
+    "grammar": "Session masculine singular agrees with کھلا ہوا and جواب نہیں دے رہا. جاری and قطار میں avoid number/gender mismatch; invariant job noun matches existing status usage. No second-person address mismatch. All 17 preexisting entries read against English; no newly introduced defect found.",
+    "width_cells_en_ur_at_count2_duration4m": {
+      "approval_needed": [
+        15,
+        12
+      ],
+      "answer_needed": [
+        13,
+        10
+      ],
+      "wedged": [
+        29,
+        34
+      ],
+      "wedged_heartbeat": [
+        53,
+        58
+      ],
+      "working": [
+        7,
+        8
+      ],
+      "attached": [
+        4,
+        8
+      ],
+      "ready": [
+        5,
+        4
+      ],
+      "exec_headless": [
+        23,
+        24
+      ],
+      "waiting": [
+        17,
+        15
+      ],
+      "waiting_subagents": [
+        39,
+        36
+      ],
+      "delegating_jobs": [
+        14,
+        10
+      ],
+      "delegating_running": [
+        19,
+        18
+      ],
+      "delegating_queued": [
+        18,
+        22
+      ],
+      "delegating_queued_addend": [
+        8,
+        10
+      ]
+    },
+    "overflow": "No fixed cell cap in context sidecar; largest absolute expansion is 5 cells. Longer strings flagged for downstream rendered fit check: wedged 34 vs 29; wedged_heartbeat 58 vs 53; delegating_queued 22 vs 18; attached 8 vs 4 (can shorten to کھلا if fit requires). Not asserting measured clipping.",
+    "limitations": "Catalogue/source and opt-in production bidi adapter checks only. No desktop/mobile/terminal rendered frame or native shaping proof; explicit technical spans used in adapter test do not prove every consuming surface declares them."
+  },
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "target_sha256": "9e6d81897de87e8031defe46c6a76fe265a474880fa17cad86e88e46a8787ec6",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20"
+}

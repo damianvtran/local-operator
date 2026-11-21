@@ -459,6 +459,10 @@
   "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label": "Anthropic 1h کیشے حد (ٹوکنز)",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": "کس سیاق و سباق کے سائز (ٹوکنز) سے ذیلی ایجنٹ کی درخواستیں 1 گھنٹے کی پرامپٹ کیشے TTL استعمال کریں۔ 0 سائز کی بنیاد پر کوئی اصول شامل نہیں کرتا، کیونکہ پیمائش میں صرف سائز کی بنیاد پر 1 گھنٹہ ذیلی ایجنٹس کے لیے ہر سائز پر مہنگا ثابت ہوا۔ اس سے الگ، Claude سبسکرپشن پر کوئی ذیلی ایجنٹ 4 منٹ یا اس سے زیادہ چلنے والی کال کے بعد 1 گھنٹے پر چلا جاتا ہے؛ مرکزی 1 گھنٹے والی ترتیب میں 0 اسے بند کر دیتا ہے۔",
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": "Anthropic ذیلی ایجنٹ 1h کیشے",
+  "wire.settings.providers_bedrock_auth.help": "ambient: Bedrock کے لیے اس مشین کے AWS کریڈینشلز (IAM رول) استعمال کریں۔",
+  "wire.settings.providers_bedrock_auth.label": "Amazon Bedrock تصدیق",
+  "wire.settings.providers_bedrock_region.help": "کنکشن میں ریجن نہ ہو تو Bedrock کے لیے AWS ریجن۔ خالی ہو تو AWS_REGION۔",
+  "wire.settings.providers_bedrock_region.label": "Amazon Bedrock ریجن",
   "wire.settings.providers_openai_api.choice.chat_completions.description": "مطابقت سے واضح اختیاری انحراف",
   "wire.settings.providers_openai_api.choice.chat_completions.label": "chat_completions",
   "wire.settings.providers_openai_api.choice.responses.description": "عوامی Responses API (ڈیفالٹ)",
@@ -762,6 +766,8 @@
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "غیر مخاطب کی فی گھنٹہ حد",
   "wire.settings.team_bridge_session.help": "نئے پیغامات پر جس سیشن کو جگایا جا سکے؛ خالی = صرف بیج۔",
   "wire.settings.team_bridge_session.label": "CoS سیشن",
+  "wire.settings.team_bridge_hold_release.label": "کام کی درخواستیں روکیں",
+  "wire.settings.team_bridge_hold_release.help": "نئے کام کی کچھ درخواستیں روکی جاتی ہیں تاکہ آپ انہیں پہنچائیں یا مسترد کریں۔ آپ کے پہنچائے بغیر ایجنٹ تک کچھ نہیں پہنچتا۔ بند ہونے پر ان سے انکار ہوتا ہے۔",
   "wire.settings.tool_approval_mode.choice.ask.description": "لکھنے/چلانے والے ٹولز سے پہلے پوچھیں",
   "wire.settings.tool_approval_mode.choice.ask.label": "ask",
   "wire.settings.tool_approval_mode.choice.auto.description": "بغیر پوچھے چلائیں",
@@ -881,5 +887,11 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 گھنٹے",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 گھنٹے",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "اتنی دیر بعد عارضی چیٹس حذف کریں",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "عارضی چیٹ کتنی دیر غیر فعال رہ سکتی ہے اس سے پہلے کہ حذف ہو جائے۔ اسکرین پر رہنے کا وقت، چلتا ہوا کام یا کھلا سوال غیر فعالی میں شمار نہیں ہوتا۔"
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "عارضی چیٹ کتنی دیر غیر فعال رہ سکتی ہے اس سے پہلے کہ حذف ہو جائے۔ اسکرین پر رہنے کا وقت، چلتا ہوا کام یا کھلا سوال غیر فعالی میں شمار نہیں ہوتا۔",
+  "wire.settings.mesh_moves.title": "سیشن منتقلی",
+  "wire.settings.mesh_moves.description": "دوسری ڈیوائس پر منتقل کی گئی گفتگو اپنے ساتھ کیا لے جاتی ہے۔ ہر منتقلی پر پڑھا جاتا ہے، اس لیے تبدیلی اگلی منتقلی پر لاگو ہوتی ہے۔",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "فی منتقلی ورکنگ فائلوں کی حد (بائٹس)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "ورکنگ فائل ڈیٹا (بنڈل شدہ commits کے ساتھ staged، unstaged اور untracked فائلیں) کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیجتی ہے یا اس سے قبول کرتی ہے۔ اس سے زیادہ ہونے پر منتقلی مسترد ہو جاتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔",
+  "wire.settings.mesh_move_working_set_roots.label": "وہ فولڈر جو منتقل شدہ ریپوزٹریز وصول کر سکتے ہیں",
+  "wire.settings.mesh_move_working_set_roots.help": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کاموں سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔"
 }

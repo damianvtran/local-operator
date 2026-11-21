@@ -1,0 +1,26 @@
+{
+  "command": [
+    "/Users/damian/local-operator/.venv/bin/python",
+    "scripts/i18n/ledger.py",
+    "append",
+    "--receipt",
+    "/Users/damian/.local-operator/sessions/5f0a2918d2f2/scratchpad/second-audits/vi-r2/receipt.json",
+    "--expected-history-sha",
+    "f3329749bec6e39c39a685e16aad99a9c7d8e34f272bff08b9b3cb9c8383dc2e",
+    "--dry-run"
+  ],
+  "exit_code": 0,
+  "stdout": "i18n/audit-history/vi/wire.session_status.json\n",
+  "stderr": "",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_translator": true
+  },
+  "record_reference": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/record.json",
+  "receipt_sha256": "739c6cad423894280af7fe506214d9fd3ecf75b076ce91b2a3e428a83d761aee"
+}

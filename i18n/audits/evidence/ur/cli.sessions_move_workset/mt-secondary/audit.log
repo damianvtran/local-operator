@@ -1,0 +1,23 @@
+# Second independent safety audit — ur — PR #4245 delta (22 cli.sessions_move_workset + 6 wire.settings mesh_* keys vs 696a18338)
+# auditor session 1946542ef662 (anthropic/claude-opus-5-5); worktree HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10
+
+## HOWTO gates (each alone)
+# HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10 origin/main 1d7e456afbb93d14e855884a4eb988cbbe5f7553 — before second-audit receipts
+$ python scripts/i18n/generate.py --check
+generate.py --check: 179 artifact(s) byte-identical
+exit=0
+$ python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ python scripts/i18n/check.py --audit-base origin/main
+check.py: ok — 235 file(s) scanned, 2714 literal(s) at or below the baseline, catalogues consistent; 107 advisory finding(s) (report-only until activated)
+exit=0
+
+## Independent mechanical pass + plural renders (n=0,1,2,5,21; source=mbp, device=studio)
+ur cli.sessions_move_workset: 22 delta keys present=True; mismatches=none
+ur wire.settings: 6 delta keys present=True; mismatches=none
+ur n=0: ورکنگ فائلیں mbp سے آ گئیں: 0 worktrees یہاں بحال ہوئے۔ | 0 worktrees ابھی بحال نہیں ہوئے؛ یہ ڈیوائس اپنا relay دوبارہ شروع ہونے پر پھر کوشش کرتی ہے، اور فائلیں اب بھی mbp پر ہیں۔ | ورکنگ فائلیں studio کو بھیجی گئیں: وہاں 0 worktrees موصول ہوئے؛ گفتگو پہنچنے پر studio انہیں بحال کرتی ہے۔
+ur n=1: ورکنگ فائلیں mbp سے آ گئیں: 1 worktree یہاں بحال ہوئے۔ | 1 worktree ابھی بحال نہیں ہوا؛ یہ ڈیوائس اپنا relay دوبارہ شروع ہونے پر پھر کوشش کرتی ہے، اور فائلیں اب بھی mbp پر ہیں۔ | ورکنگ فائلیں studio کو بھیجی گئیں: وہاں 1 worktree موصول ہوا؛ گفتگو پہنچنے پر studio انہیں بحال کرتی ہے۔
+ur n=2: ورکنگ فائلیں mbp سے آ گئیں: 2 worktrees یہاں بحال ہوئے۔ | 2 worktrees ابھی بحال نہیں ہوئے؛ یہ ڈیوائس اپنا relay دوبارہ شروع ہونے پر پھر کوشش کرتی ہے، اور فائلیں اب بھی mbp پر ہیں۔ | ورکنگ فائلیں studio کو بھیجی گئیں: وہاں 2 worktrees موصول ہوئے؛ گفتگو پہنچنے پر studio انہیں بحال کرتی ہے۔
+ur n=5: ورکنگ فائلیں mbp سے آ گئیں: 5 worktrees یہاں بحال ہوئے۔ | 5 worktrees ابھی بحال نہیں ہوئے؛ یہ ڈیوائس اپنا relay دوبارہ شروع ہونے پر پھر کوشش کرتی ہے، اور فائلیں اب بھی mbp پر ہیں۔ | ورکنگ فائلیں studio کو بھیجی گئیں: وہاں 5 worktrees موصول ہوئے؛ گفتگو پہنچنے پر studio انہیں بحال کرتی ہے۔
+ur n=21: ورکنگ فائلیں mbp سے آ گئیں: 21 worktrees یہاں بحال ہوئے۔ | 21 worktrees ابھی بحال نہیں ہوئے؛ یہ ڈیوائس اپنا relay دوبارہ شروع ہونے پر پھر کوشش کرتی ہے، اور فائلیں اب بھی mbp پر ہیں۔ | ورکنگ فائلیں studio کو بھیجی گئیں: وہاں 21 worktrees موصول ہوئے؛ گفتگو پہنچنے پر studio انہیں بحال کرتی ہے۔

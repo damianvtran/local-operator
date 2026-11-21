@@ -44,6 +44,7 @@ from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import NoticeBlock
 from local_operator.update import BuildStamp
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -558,6 +559,13 @@ async def test_the_refresh_callback_re_engages_eagerly(monkeypatch, tmp_path) ->
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
+        # JOIN THE BOOT WORKER BEFORE INSTALLING THE SPY. Boot ends in its own
+        # eager engage (``reason="mount"``); one ``pilot.pause()`` does not wait
+        # for that worker's thread hop, so on a loaded runner boot finished
+        # AFTER the spy went in and the spy recorded ``['refresh', 'mount']``
+        # (CI jobs 135515723991, 136088027078). Waiting on the worker makes the
+        # spy observe only the refresh this test fires.
+        await await_session_boot(app)
         reasons: list[str] = []
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: reasons.append(reason))
         app._warm_engage_started = True
@@ -1987,6 +1995,13 @@ async def test_a_title_that_raises_does_not_cost_the_re_engage(monkeypatch, tmp_
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
+        # JOIN THE BOOT WORKER BEFORE INSTALLING THE SPY. Boot ends in its own
+        # eager engage (``reason="mount"``); one ``pilot.pause()`` does not wait
+        # for that worker's thread hop, so on a loaded runner boot finished
+        # AFTER the spy went in and the spy recorded ``['refresh', 'mount']``
+        # (CI jobs 135515723991, 136088027078). Waiting on the worker makes the
+        # spy observe only the refresh this test fires.
+        await await_session_boot(app)
         reasons: list[str] = []
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: reasons.append(reason))
         app._warm_engage_started = True

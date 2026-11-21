@@ -65,6 +65,12 @@ def test_shipped_wire_namespaces_exist() -> None:
         # the frame still inherits that one English sentence mid-sentence.
         "wire.errors.hosting",
         "wire.errors.media",
+        # Amazon Bedrock connect/credential refusals (`providers/bedrock/errors.py`),
+        # rendered verbatim by the desktop's provider-connect surface.
+        "wire.errors.bedrock",
+        # The Bedrock sign-in flow's progress/prompt copy (`providers/bedrock/login.py`,
+        # `sso_login.py`) shown by `lop login bedrock`, the TUI and desktop connect.
+        "wire.login.bedrock",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
         # imaging_unavailable, empty_body), rendered by the desktop and phone
@@ -192,6 +198,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Effective-team provenance reasons are an approved populated child,
         # not a stub or a prefix-wide exemption from the exact inventory.
         "wire.teams.effective",
+        # Per-session voice mode: its route refusals, spoken phrases and its
+        # settings section. Its own namespace so no audited catalogue's hash
+        # moves; all seven locales carry it, each with its own audit ledger rows.
+        "wire.voice",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

@@ -71,6 +71,7 @@ from local_operator.server.models.desktop_sessions import (
     DraftPreviewPayload,
     DraftReceipt,
     HistoryPage,
+    HistoryRowRange,
     InterruptReceipt,
     JobCancelReceipt,
     MessageAdmission,
@@ -157,6 +158,11 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.index_prewarm import start_session_warm
 from local_operator.session.remote_open import PeerSessionUnresolved
+from local_operator.session.row_clip import (
+    ROW_RANGE_MAX_BYTES,
+    RowRangeUnsatisfiable,
+    wire_json,
+)
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -2385,7 +2391,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         ) from None
     except TemporaryRefusal as error:
         raise HTTPException(error.status, error.envelope()) from None
-    except KeyError:
+    except KeyError as error:
+        # AN UNRESOLVABLE LAUNCH TARGET (``desktop_profiles.UnresolvedTarget``)
+        # keeps the same 404 and the same catalogued sentence, and adds which
+        # team/slot/member failed as machine fields, plus a log line: a team
+        # whose roster names a row that is not a role used to surface only as a
+        # bare 404 that the desktop rendered as "model was not resolved", with
+        # nothing anywhere naming the member. Duck-typed so this ladder does not
+        # import the profile helpers at module load; the ``isinstance(dict)``
+        # check keeps that duck typing honest for the type checker and refuses
+        # to merge anything but a mapping into the catalogued envelope.
+        wire_fields = getattr(error, "wire_fields", None)
+        fields = wire_fields() if callable(wire_fields) else None
+        if isinstance(fields, dict):
+            logger.warning("desktop launch target refused: %s", error)
+            raise HTTPException(404, {**_wd.requested_not_found().envelope(), **fields}) from None
         # A DELETED TEMPORARY CHAT answers its own 404 code on every session
         # route (snapshot, history, events, message, pin, archive, temporary),
         # so a client can say "this temporary chat was deleted" rather than
@@ -3945,6 +3965,54 @@ async def history(
                 **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
             )
         )
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/history/rows/{ref}",
+    response_model=CRUDResponse[HistoryRowRange],
+)
+async def history_row(
+    session_id: str,
+    ref: str,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    # No ``le``: an oversized limit is CLAMPED to ``ROW_RANGE_MAX_BYTES`` (1 MiB)
+    # and the answer's ``limit`` states the clamp, so a reader that asks for
+    # "the rest" in one call still makes progress instead of failing.
+    limit: int = Query(default=ROW_RANGE_MAX_BYTES, ge=1),
+):
+    """One byte range of the FULL content of a row ``/history`` served clipped.
+
+    A clipped row (``truncated`` on a history entry, ``docs/DESKTOP_API.md``
+    §"Clipped rows") names an opaque ``ref``; the reader pages this route with
+    ``offset``/``limit`` and concatenates the decoded ranges, which reassemble
+    to exactly ``truncated.bytes_total`` bytes of the row's wire JSON.
+
+    THE SAME DOOR AS ``/history``, deliberately: this router's bearer auth and
+    the identical ``host(request).session(session_id, read=True,
+    allow_draft=True)`` admission, so placement, the retiring latch, the
+    remote-owner refusal and the read-only engagement are whatever ``/history``
+    gets — a full row is never reachable where its clipped page is not.
+    ``/history`` writes no route-level audit record; neither does this (the
+    request log is the shared middleware's, identical for both).
+
+    THREAT MODEL: the ref is the only new input. It is an HMAC over
+    ``(session_id, row_id)`` under a per-process secret
+    (``session.row_clip.row_ref``), so a ref from another session, a forged
+    or guessed ref, and a ref from an earlier serve process all fail the same
+    constant-time check and answer the same 404 as a row that no longer
+    exists. ``limit`` is clamped so one request can never re-create the
+    oversized response the clip exists to prevent. An ``offset`` past the end
+    answers 416; ``offset == bytes_total`` is an empty, ``eof`` range.
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        try:
+            return reply(await bridge.history_row(ref=ref, offset=offset, limit=limit))
+        except RowRangeUnsatisfiable as error:
+            raise HTTPException(416, {"code": "row_offset_past_end", "error": str(error)}) from None
 
 
 @router.get(
@@ -5771,7 +5839,34 @@ async def delete_session_route(session_id: str, body: ConfirmDeletion, request: 
         )
         if remote is not None:
             return reply(remote)
-        return reply(await host(request).delete(session_id))
+        result = await host(request).delete(session_id)
+    if result.get("deleted"):
+        await _release_voice_slot(request, session_id)
+    return reply(result)
+
+
+async def _release_voice_slot(request: Request, session_id: str) -> None:
+    """Clear the voice slot if the conversation just deleted held it.
+
+    Best effort, never the answer: the delete already happened, and the voice
+    routes treat a slot naming a missing directory as empty anyway. Clearing
+    the file is what moves the machine feed's ``voice`` frame, so other windows
+    learn voice is off without polling.
+    """
+    from local_operator.voice import slot as voice_slot
+
+    config_dir = request.app.state.config_manager.config_dir
+    # An unlocked read first, and the common answer ends here: on a machine that
+    # never used voice this creates no ``voice/`` directory or lock file, and a
+    # delete never waits on the slot lock (up to ``LOCK_WAIT_S``) for a session
+    # that does not hold it. ``disable`` re-reads under the lock, so a slot that
+    # moved after this read is left alone.
+    if not voice_slot.is_voice_session(config_dir, session_id):
+        return
+    try:
+        await asyncio.to_thread(voice_slot.disable, config_dir, session_id)
+    except Exception:  # noqa: BLE001 - a busy or unreadable slot must not fail a delete
+        logger.warning("voice slot not cleared after deleting %s", session_id, exc_info=True)
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])
@@ -6656,8 +6751,13 @@ async def move(session_id: str, body: MoveSession, request: Request):
 
 
 def _sse_data(frame: Any) -> str:
-    """One SSE ``data:`` record for ``frame``; synchronous so it can run in a thread."""
-    return "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+    """One SSE ``data:`` record for ``frame``; synchronous so it can run in a thread.
+
+    ``wire_json`` is shared with ``session.row_clip`` on purpose: the row and
+    page budgets are counted in exactly this encoding, so the bound and the
+    record it bounds cannot drift apart.
+    """
+    return "data: " + wire_json(frame) + "\n\n"
 
 
 @router.get("/v1/desktop/sessions/{session_id}/events")
@@ -6929,7 +7029,7 @@ async def desktop_events(request: Request):
     async def stream():
         try:
             async for frame in engine.events(subscription):
-                yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                yield _sse_data(frame)
         finally:
             await release_once()
 

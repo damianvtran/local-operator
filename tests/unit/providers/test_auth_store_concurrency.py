@@ -417,3 +417,209 @@ def test_a_failing_rollback_does_not_mask_the_reservation_error(
     assert rollbacks == [1]
     monkeypatch.undo()
     assert store._conn.in_transaction is False  # noqa: SLF001
+
+
+# -- the post-refresh persist (#4269 round 1, deferred lost update) -----------
+#
+# `_ensure_oauth_fresh` reads the row (`fresh`), POSTs, and used to persist
+# `fresh + refreshed` as one whole-payload UPDATE. Anything another writer
+# committed during the POST -- a renewal claim, a delegate-record or marker
+# change -- was overwritten whenever the stored refresh token had not moved. The
+# providers make it worse: they return `dict(creds)` plus the new tokens, so the
+# returned dict itself carries the stale copy of every other field. These stubs
+# return that same shape on purpose.
+
+_CLAIM_KEY = "synthetic_concurrent_claim"
+
+
+def _expired_store(tmp_path: Path) -> tuple[AuthStore, int]:
+    store = AuthStore(db_path=tmp_path / "auth.db")
+    row = store.upsert_credential(
+        "anthropic",
+        {
+            "type": "oauth",
+            "refresh": "synthetic-refresh-0",
+            "access": "synthetic-access-0",
+            "expires": 1,
+            "org_id": "synthetic-org",
+        },
+    )
+    return store, row.id
+
+
+def _provider_shaped_refresh(during_post: Any, *, rotate: bool) -> Any:
+    """A stub `_refresh_fn` result: runs ``during_post`` as the "POST", then
+    answers like the real providers (``dict(creds)`` + new tokens)."""
+
+    async def refresh(creds: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
+        during_post()
+        merged = dict(creds)
+        merged["access"] = "synthetic-access-1"
+        merged["expires"] = 2**62
+        if rotate:
+            merged["refresh"] = "synthetic-refresh-1"
+        # A misbehaving refresh fn may not rewrite identity (PR-12).
+        merged["org_id"] = "synthetic-other-org"
+        return merged
+
+    return refresh
+
+
+def _claim(data: dict[str, Any]) -> bool:
+    data[_CLAIM_KEY] = {"epoch": 7}
+    return True
+
+
+@pytest.mark.parametrize("rotate", [False, True], ids=["same-refresh", "rotated-refresh"])
+@pytest.mark.parametrize("writer", ["same-store", "peer-store"])
+def test_a_payload_change_committed_during_the_refresh_post_survives_the_persist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rotate: bool, writer: str
+) -> None:
+    """The reproduction: a claim committed mid-POST is still on the row after.
+
+    ``same-store`` is another thread/coroutine of this process (the mesh claim
+    on the shared store); ``peer-store`` is another process's connection. On
+    main both lost the claim; the access token, the rotation (when there is one)
+    and the identity restore must land as before.
+    """
+    store, row_id = _expired_store(tmp_path)
+    peer = store if writer == "same-store" else AuthStore(db_path=tmp_path / "auth.db")
+    refresh = _provider_shaped_refresh(
+        lambda: peer._update_payload(row_id, _claim), rotate=rotate  # noqa: SLF001
+    )
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: refresh)
+
+    stored = store.get_credential(row_id)
+    assert stored is not None
+    returned = asyncio.run(store._ensure_oauth_fresh(stored))  # noqa: SLF001
+
+    after = _payload(store, row_id)
+    expected_refresh = "synthetic-refresh-1" if rotate else "synthetic-refresh-0"
+    for view in (after, returned):
+        assert view.get(_CLAIM_KEY) == {"epoch": 7}, "the concurrent claim was overwritten"
+        assert view["access"] == "synthetic-access-1"
+        assert view["refresh"] == expected_refresh
+        assert view["org_id"] == "synthetic-org"
+        assert auth_store.REFRESH_SEND_UNCONFIRMED_KEY not in view
+    assert store._conn.in_transaction is False  # noqa: SLF001
+    if peer is not store:
+        peer.close()
+    store.close()
+
+
+def test_a_relogin_during_the_refresh_post_is_not_clobbered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rotation guard, now run on the row read inside the reservation: a
+    sign-in that replaced the payload mid-POST wins, and the caller is handed
+    the sign-in's credential rather than the stale refresh's."""
+    store, row_id = _expired_store(tmp_path)
+    peer = AuthStore(db_path=tmp_path / "auth.db")
+    relogin = {
+        "type": "oauth",
+        "refresh": "synthetic-relogin-refresh",
+        "access": "synthetic-relogin-access",
+        "expires": 2**62,
+        "org_id": "synthetic-org",
+    }
+
+    def sign_in() -> None:
+        assert peer.upsert_credential("anthropic", relogin).id == row_id
+
+    refresh = _provider_shaped_refresh(sign_in, rotate=True)
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: refresh)
+
+    stored = store.get_credential(row_id)
+    assert stored is not None
+    returned = asyncio.run(store._ensure_oauth_fresh(stored))  # noqa: SLF001
+
+    after = _payload(store, row_id)
+    for view in (after, returned):
+        assert view["refresh"] == "synthetic-relogin-refresh"
+        assert view["access"] == "synthetic-relogin-access"
+    assert store._conn.in_transaction is False  # noqa: SLF001
+    peer.close()
+    store.close()
+
+
+def test_a_tombstone_during_the_refresh_post_still_stands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grant-dead guard, also on the in-reservation read: the rotation is
+    dropped, the tombstone stays, and the caller is told the grant is dead."""
+    store, row_id = _expired_store(tmp_path)
+    peer = AuthStore(db_path=tmp_path / "auth.db")
+
+    def tombstone(data: dict[str, Any]) -> bool:
+        data[auth_store.GRANT_DEAD_AT_KEY] = 5
+        return True
+
+    refresh = _provider_shaped_refresh(
+        lambda: peer._update_payload(row_id, tombstone), rotate=True  # noqa: SLF001
+    )
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: refresh)
+
+    stored = store.get_credential(row_id)
+    assert stored is not None
+    with pytest.raises(auth_store.CredentialInvalidError):
+        asyncio.run(store._ensure_oauth_fresh(stored))  # noqa: SLF001
+
+    after = _payload(store, row_id)
+    assert after[auth_store.GRANT_DEAD_AT_KEY] == 5
+    assert after["refresh"] == "synthetic-refresh-0"
+    assert store._conn.in_transaction is False  # noqa: SLF001
+    peer.close()
+    store.close()
+
+
+def test_a_busy_persist_raises_instead_of_dropping_the_refreshed_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persist is NOT best-effort like a marker write: the presented token
+    is already spent, so a skipped write would strand the rotation in memory
+    and report success. Contention surfaces as the error the former bare UPDATE
+    raised, with nothing held afterwards and the row untouched."""
+    store, row_id = _expired_store(tmp_path)
+    store._conn.execute("PRAGMA busy_timeout = 0")  # noqa: SLF001
+    blocker = sqlite3.connect(tmp_path / "auth.db", timeout=0, isolation_level=None)
+
+    refresh = _provider_shaped_refresh(lambda: blocker.execute("BEGIN IMMEDIATE"), rotate=True)
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: refresh)
+    # Sampled as the lease release starts, i.e. right after the persist raised:
+    # the persist's own reservation must be gone by then. (The lease DELETE that
+    # follows fails on the same blocker and is not part of this change.)
+    in_tx_at_lease_release: list[bool] = []
+    real_release = store._release_refresh_lease  # noqa: SLF001
+
+    def release(credential_id: int) -> None:
+        in_tx_at_lease_release.append(store._conn.in_transaction)  # noqa: SLF001
+        real_release(credential_id)
+
+    monkeypatch.setattr(store, "_release_refresh_lease", release)
+
+    stored = store.get_credential(row_id)
+    assert stored is not None
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            asyncio.run(store._ensure_oauth_fresh(stored))  # noqa: SLF001
+        assert in_tx_at_lease_release == [False]
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+    assert _payload(store, row_id)["refresh"] == "synthetic-refresh-0"
+    store.close()
+
+
+def test_a_non_best_effort_write_error_propagates_after_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`best_effort=False` turns a write-phase sqlite error into a raise (the
+    marker writes keep their `False`), with the reservation released."""
+    store, row_id = _lent_store(tmp_path)
+    before = _payload(store, row_id)
+    _raise_after(monkeypatch, store, "UPDATE", sqlite3.OperationalError("disk I/O error"))
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        store._update_payload(row_id, _claim, best_effort=False)  # noqa: SLF001
+    monkeypatch.undo()
+    assert store._conn.in_transaction is False  # noqa: SLF001
+    assert _payload(store, row_id) == before

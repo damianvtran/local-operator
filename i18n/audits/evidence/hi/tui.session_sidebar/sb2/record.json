@@ -1,0 +1,160 @@
+{
+  "locale": "hi",
+  "namespace": "tui.session_sidebar",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "target_sha256": "4e8685ac2f9dcf6a5b443b6dab7e8601f9ac511871ec5deef662adb610cdffa5",
+  "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor/sidebar-reaudit-hi",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "pass",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "Round 2 delta-only independent re-audit: 2 changed keys plus 5 unchanged composition neighbours (7 unique sidebar keys). Retains round-1 audit for remaining keys; not a fresh full-namespace audit. अनाम डिवाइस idiomatically denotes an unnamed device and composes correctly with पर; लिंक matches counted object noun in shipped हब लिंक door title. No findings. Actual model openai/gpt-6.1-sol; no fallback. Runtime and Rich checks executed with primary .venv Python and worktree PYTHONPATH. No rendered TUI-frame claim.",
+  "verdict": "clean",
+  "scope": {
+    "round": 2,
+    "head": "c8343f3a608785b5064e61307c7333a2473126ae",
+    "changed_keys": [
+      "tui.session_sidebar.tooltip.unnamed_device",
+      "tui.session_sidebar.footer.hub_note"
+    ],
+    "keys_read": 7,
+    "additional_cross_namespace_keys": [
+      "tui.hub_links.detail.title"
+    ]
+  },
+  "findings": [],
+  "evidence": {
+    "runtime_module": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/runtime.py",
+    "renders": [
+      {
+        "key": "tui.session_sidebar.tooltip.unnamed_device",
+        "count": 0,
+        "rendered": "अनाम डिवाइस",
+        "cells": 8,
+        "maxCells": null
+      },
+      {
+        "key": "tui.session_sidebar.tooltip.unnamed_device",
+        "count": 1,
+        "rendered": "अनाम डिवाइस",
+        "cells": 8,
+        "maxCells": null
+      },
+      {
+        "key": "tui.session_sidebar.tooltip.unnamed_device",
+        "count": 9,
+        "rendered": "अनाम डिवाइस",
+        "cells": 8,
+        "maxCells": null
+      },
+      {
+        "key": "tui.session_sidebar.tooltip.unnamed_device",
+        "count": 10,
+        "rendered": "अनाम डिवाइस",
+        "cells": 8,
+        "maxCells": null
+      },
+      {
+        "key": "tui.session_sidebar.tooltip.unnamed_device",
+        "count": 99,
+        "rendered": "अनाम डिवाइस",
+        "cells": 8,
+        "maxCells": null
+      },
+      {
+        "key": "tui.session_sidebar.footer.hub_note",
+        "count": 0,
+        "rendered": "लिंक: 0",
+        "cells": 5,
+        "maxCells": 10
+      },
+      {
+        "key": "tui.session_sidebar.footer.hub_note",
+        "count": 1,
+        "rendered": "लिंक: 1",
+        "cells": 5,
+        "maxCells": 10
+      },
+      {
+        "key": "tui.session_sidebar.footer.hub_note",
+        "count": 9,
+        "rendered": "लिंक: 9",
+        "cells": 5,
+        "maxCells": 10
+      },
+      {
+        "key": "tui.session_sidebar.footer.hub_note",
+        "count": 10,
+        "rendered": "लिंक: 10",
+        "cells": 6,
+        "maxCells": 10
+      },
+      {
+        "key": "tui.session_sidebar.footer.hub_note",
+        "count": 99,
+        "rendered": "लिंक: 99",
+        "cells": 6,
+        "maxCells": 10
+      }
+    ],
+    "compositions": [
+      {
+        "key": "tui.session_sidebar.tooltip.location",
+        "rendered": "अनाम डिवाइस पर"
+      },
+      {
+        "key": "tui.session_sidebar.tooltip.location_network",
+        "rendered": "अनाम डिवाइस पर · मेरा नेटवर्क"
+      },
+      {
+        "key": "tui.session_sidebar.tooltip.location_stale",
+        "rendered": "अनाम डिवाइस पर (अंतिम ज्ञात स्थिति)"
+      },
+      {
+        "key": "tui.session_sidebar.tooltip.location_network_stale",
+        "rendered": "अनाम डिवाइस पर · मेरा नेटवर्क (अंतिम ज्ञात स्थिति)"
+      },
+      {
+        "key": "tui.session_sidebar.footer.asks_note",
+        "count": 0,
+        "rendered": "सवाल: 0",
+        "cells": 6
+      },
+      {
+        "key": "tui.session_sidebar.footer.asks_note",
+        "count": 1,
+        "rendered": "सवाल: 1",
+        "cells": 6
+      },
+      {
+        "key": "tui.session_sidebar.footer.asks_note",
+        "count": 9,
+        "rendered": "सवाल: 9",
+        "cells": 6
+      },
+      {
+        "key": "tui.session_sidebar.footer.asks_note",
+        "count": 10,
+        "rendered": "सवाल: 10",
+        "cells": 7
+      },
+      {
+        "key": "tui.session_sidebar.footer.asks_note",
+        "count": 99,
+        "rendered": "सवाल: 99",
+        "cells": 7
+      }
+    ],
+    "door_title": "हब लिंक"
+  }
+}

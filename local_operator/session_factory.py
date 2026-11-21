@@ -39,7 +39,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -812,6 +812,22 @@ def resolve_hosting_model_with_source(
     model_name: str | None = (
         agent_model or flag_model or team_model or config_manager.get_config_value("model_name")
     )
+    if not hosting:
+        # Nothing chose a hosting: let Bedrock's documented self-enable rule
+        # (``bedrock/<id>`` model id, or its explicit env signal with Bedrock
+        # the only credentialed provider) fill it in before giving up. Lives
+        # BELOW the whole precedence above, so it can never override a choice.
+        from local_operator.providers.bedrock.auto_select import implied_bedrock_hosting
+
+        # getattr, not attribute access: callers (the SDK and its tests) pass
+        # lighter config-shaped objects with only ``get_config_value``, and this
+        # preflight must reach its own HostingNotConfiguredError, never die on
+        # an AttributeError first. No dir means prefix-only inference.
+        implied = implied_bedrock_hosting(
+            model_name, config_dir=getattr(config_manager, "config_dir", None)
+        )
+        if implied is not None:
+            hosting, model_name = implied
     if not hosting:
         raise HostingNotConfiguredError("Hosting platform is not configured.")
     # Validate the RESOLVED hosting here, in the same preflight that already
@@ -4251,6 +4267,18 @@ def _make_system_blocks_provider(
         # zero. Ask the owning Session, never infer from host type or a stub.
         notify_probe = getattr(provider, "notify_available", None)
         has_notify = bool(notify_probe()) if callable(notify_probe) else None
+        # The SESSION's live tool set when it installed the probe (see
+        # ``Session.__init__``'s ``session_tool_membership``), else the factory
+        # list. ``tools`` below is the PRE-narrowing construction snapshot: a
+        # declared SDK/exec inventory, a role prune or ``set_ask_handler`` all
+        # rebind the session's copy, never this one, so rendering block zero
+        # from it shipped usage prose for tools the session did not hold. Every
+        # membership-derived flag and the cache key read ``current_tools`` so the
+        # head moves exactly when membership does.
+        live_probe = getattr(provider, "live_tools", None)
+        current_tools: list[AgentTool] = (
+            cast("list[AgentTool]", live_probe()) if callable(live_probe) else tools
+        )
         # The coordination clause and the ``guide://team-bridge`` it names are
         # ONE unit, so the clause takes the SAME answer the guide resolver and
         # the bridge recommendation above take: does this session actually have
@@ -4265,7 +4293,8 @@ def _make_system_blocks_provider(
         # dead end the recommendation trigger was fixed for above. Enrolled and
         # fresh is unchanged: both halves hold, so the clause still renders.
         has_bridge = (
-            any(tool.name == "bridge" for tool in tools) and "team-bridge" in hooks.guides_by_name
+            any(tool.name == "bridge" for tool in current_tools)
+            and "team-bridge" in hooks.guides_by_name
         )
         # ``model_label`` is passed live by the Session on each provider step, so
         # a deliberate ``set_model`` or a failover fallback is reflected in the
@@ -4374,7 +4403,7 @@ def _make_system_blocks_provider(
             interactive,
             channel,
             open_asks or "",
-            tuple((tool.name, tool.description) for tool in tools),
+            tuple((tool.name, tool.description) for tool in current_tools),
             has_notify,
             has_bridge,
         )
@@ -4386,7 +4415,7 @@ def _make_system_blocks_provider(
         if key == cached_key:
             return list(cached_blocks)
         cached_blocks = build_system_blocks(
-            tools,
+            current_tools,
             knowledge_block,
             environment,
             date_str,
@@ -4422,6 +4451,8 @@ def _make_system_blocks_provider(
     # protocol explicitly; benchmarks can still call this builder read-only.
     setattr(provider, "append_only_state", True)
     setattr(provider, "session_notify_membership", True)
+    # Asks the owning Session to install ``live_tools`` (see ``provider``).
+    setattr(provider, "session_tool_membership", True)
     # Asks the owning Session to install ``cos_display_name`` (see above).
     setattr(provider, "session_cos_identity", True)
     setattr(provider, "repo_guidance", repo_guidance)
@@ -5298,6 +5329,9 @@ async def _prepare(
     auth_store = build_auth_store(
         config_manager.config_dir, db_path=config_manager.config_dir / "auth.db"
     )
+    from local_operator.providers.bedrock.connection import configure_invocation_auth
+
+    configure_invocation_auth(auth_store, hosting)
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.
@@ -6151,8 +6185,21 @@ async def wire_mcp_into_session(
         live = list(getattr(session, "_tools", None) or getattr(session, "tools", None) or ())
         base = [tool for tool in live if tool.name not in installed_mcp] or base_inventory
         selected = selected_tools(source)
+        # ONE COPY PER NAME, ``selected`` winning. ``base`` is "whatever is live
+        # that this function did not install", so a tool that entered the
+        # inventory by another route -- a declaration's grant
+        # (``Session.materialize_declared_tools``) -- is still in it when the
+        # model later activates the same tool through an over-cap ``mcp://``
+        # read. Concatenating both published the name twice, and Anthropic
+        # refuses a request whose tool names repeat (400 "Tool names must be
+        # unique"), so every later request in the session failed (PR #4349
+        # agent review round 1, R1). The selected copy wins because it is the
+        # one this wiring tracks: it gets fresh schemas on ``tools/list_changed``
+        # and is the copy cold-boundary demotion knows how to remove.
+        selected_names = {tool.name for tool in selected}
+        base = [tool for tool in base if tool.name not in selected_names]
         installed_mcp.clear()
-        installed_mcp.update(tool.name for tool in selected)
+        installed_mcp.update(selected_names)
         return session.refresh_tools(base + selected)
 
     # Per-origin USE clock, in session runs (``Session._generation``, bumped
@@ -6174,6 +6221,42 @@ async def wire_mcp_into_session(
         enabled_origins.add((server_name, raw_tool_name))
         stamp_use(server_name, raw_tool_name)
         return refresh_selected(manager.get_tools())
+
+    def activate_named(names: Collection[str]) -> tuple[str, ...]:
+        """Activate the manager's tools named in ``names``, as ``activate`` does.
+
+        WHY. ``Session.wait_for_tools`` grants a lazy MCP tool a caller named,
+        which is the activation a model would otherwise perform by reading its
+        ``mcp://`` URL. Installing it straight into the session's inventory left
+        it outside ``enabled_origins``/``installed_mcp``, so a later read of the
+        same over-cap tool selected it AGAIN beside the untracked copy (two tools
+        of one name, an Anthropic 400 on every later request), it was never
+        demoted at a cold boundary, and it outlived a ``tools/list_changed``
+        that removed it (PR #4349 agent review round 1, R1). Routing the grant
+        through this wiring keeps one bookkeeping for every activation.
+
+        Returns the names whose origin was enabled; one rebind for the batch.
+        Names the manager does not list, or lists without an origin, are
+        skipped, never guessed.
+        """
+        wanted = set(names)
+        enabled: list[str] = []
+        for tool in manager.get_tools():
+            if tool.name not in wanted:
+                continue
+            meta = manager.get_tool_meta(tool.name) or {}
+            server_name = str(meta.get("server_name", ""))
+            raw_name = str(meta.get("mcp_tool_name", ""))
+            if not server_name or not raw_name:
+                continue
+            enabled_origins.add((server_name, raw_name))
+            stamp_use(server_name, raw_name)
+            enabled.append(tool.name)
+        if enabled:
+            refresh_selected(manager.get_tools())
+        return tuple(enabled)
+
+    setattr(session, "_mcp_activate_named", activate_named)
 
     def cold_boundary_prune() -> bool:
         """Demote published-but-idle MCP schemas at a cache-cold boundary.

@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "待答：{count}",
+  "tui.session_sidebar.footer.hub_note": "链接：{count}",
+  "tui.session_sidebar.footer.opening": "正在打开……",
+  "tui.session_sidebar.footer.refresh_failed": "刷新失败",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, other {还有{shown}个置顶项，滚动查看}}",
+  "tui.session_sidebar.row.untitled": "未命名对话",
+  "tui.session_sidebar.section.active": "活跃会话",
+  "tui.session_sidebar.section.pinned": "已置顶",
+  "tui.session_sidebar.section.previous": "历史会话",
+  "tui.session_sidebar.section.subagent": "子智能体运行",
+  "tui.session_sidebar.state.empty": "暂无对话",
+  "tui.session_sidebar.state.error": "无法加载对话",
+  "tui.session_sidebar.state.loading": "正在加载对话……",
+  "tui.session_sidebar.title": "会话",
+  "tui.session_sidebar.tooltip.location": "位于{device}",
+  "tui.session_sidebar.tooltip.location_network": "位于{device} · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "位于{device} · {network}（上次已知状态）",
+  "tui.session_sidebar.tooltip.location_stale": "位于{device}（上次已知状态）",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · 如果一直没有响应，请运行{command}",
+  "tui.session_sidebar.tooltip.unnamed_device": "未命名设备",
+  "tui.session_sidebar.tooltip.unreachable": "无法连接 · {reason}"
+}

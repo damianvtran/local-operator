@@ -183,6 +183,84 @@ def test_push_lands_rows_on_the_peer_and_is_idempotent(
     server_b.stop()
 
 
+def test_a_disabled_server_is_withdrawn_over_the_wire_and_re_enabling_restores_it(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The owner turns a mirrored server off; the peer drops its copy, by name.
+
+    Two real relays and the shipped CLI: the first push mirrors both servers,
+    disabling one withdraws exactly that mirror (and its provenance entry) on
+    the peer with the human receipt saying so, the audit names it, and
+    re-enabling it re-installs it as an ordinary mirror.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    live = _bind_and_start(server_b, record)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    peer = server_b.identity.name
+    servers = {
+        "crm": {"type": "http", "url": "https://m.example/mcp"},
+        "gl": {"type": "stdio", "command": "npx", "args": ["-y", "gitlab-mcp"]},
+    }
+
+    def _owner(doc_extra: dict[str, Any]) -> None:
+        (server_a.root / "mcp.json").write_text(
+            json.dumps({"mcpServers": servers, **doc_extra}, indent=2) + "\n", encoding="utf-8"
+        )
+
+    def _peer_index() -> set[str]:
+        section = definitions.read_index(server_b.root).get(mcpdefs.INDEX_SECTION) or {}
+        return set(section)
+
+    _owner({})
+    rc, payload = _run_json(capsys, "push", "--peer", peer)
+    assert rc == 0 and set(_peer_servers(server_b)) == {"crm", "gl"}, payload
+    assert _peer_index() == {"crm", "gl"}
+
+    _owner({"disabledServers": ["gl"]})
+    assert _run("push", "--peer", peer) == 0
+    text = capsys.readouterr().out
+    assert "withdrew 1 of 1 disabled server" in text, text
+    assert "withdrawn server 'gl'" in text, text
+    assert set(_peer_servers(server_b)) == {"crm"}
+    assert _peer_index() == {"crm"}
+
+    # Nothing left to withdraw: one state round trip, no apply — even with a
+    # disabled name the PEER authored itself: its ``state`` says that copy is
+    # not mirrored from the owner, so it is not re-asked every tick (review M1).
+    peer_doc = json.loads((server_b.root / "mcp.json").read_text(encoding="utf-8"))
+    peer_doc["mcpServers"]["mine"] = {"type": "http", "url": "https://mine.example/mcp"}
+    (server_b.root / "mcp.json").write_text(json.dumps(peer_doc, indent=2) + "\n", "utf-8")
+    _owner({"disabledServers": ["gl", "mine"]})
+    rc, payload = _run_json(capsys, "push", "--peer", peer)
+    assert payload["peers"][0]["code"] == "in_sync", payload
+    assert "mine" in _peer_servers(server_b)
+    _owner({"disabledServers": ["gl"]})
+
+    server_b.audit.flush()  # noqa: SLF001 — the writer batches; read after its own flush
+    rows = [
+        json.loads(line)
+        for line in store.audit_path(server_b.root).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    applied = [row for row in rows if row.get("event") == "mcp_defs_applied"]
+    withdrawal = [row for row in applied if (row.get("detail") or {}).get("withdrawn") == ["gl"]]
+    assert withdrawal, applied
+    # The record of a delete names the AUTHENTICATED sender (security S4).
+    assert withdrawal[0]["subject"] == server_a.identity.device_id, withdrawal
+
+    _owner({})
+    rc, payload = _run_json(capsys, "push", "--peer", peer)
+    assert [item["name"] for item in payload["peers"][0]["installed"]] == ["gl"], payload
+    assert set(_peer_servers(server_b)) == {"crm", "gl", "mine"}
+    server_b.stop()
+
+
 def test_an_adopted_literal_lands_on_the_peer_as_a_reference(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,

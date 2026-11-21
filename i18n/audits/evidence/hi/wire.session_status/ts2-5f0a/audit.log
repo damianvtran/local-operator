@@ -1,0 +1,387 @@
+{
+  "execution": "scoped check.check_catalogues() with scratch catalogue root; runtime.render_message on actual submitted messages; independent AST category/select completeness guard",
+  "validator_problems": [],
+  "negative_controls": {
+    "missing_key_rejected": true,
+    "renamed_placeholder_rejected": true,
+    "bad_syntax_rejected": true,
+    "missing_one_repo_accepted_known_gap": true,
+    "missing_one_independent_guard_rejected": true,
+    "missing_cause_independent_guard_rejected": true,
+    "missing_cause_repo_accepted": true
+  },
+  "formatter_cases": [
+    {
+      "message_id": "wire.session_status.retired_label",
+      "parameters": {
+        "base": "Interrupted"
+      },
+      "formatted": "Interrupted — अपडेट के कारण रोका गया"
+    },
+    {
+      "message_id": "wire.session_status.interrupted",
+      "parameters": {},
+      "formatted": "बाधित"
+    },
+    {
+      "message_id": "wire.session_status.unseen_interruption",
+      "parameters": {},
+      "formatted": "बाधित (अपठित)"
+    },
+    {
+      "message_id": "wire.session_status.retired",
+      "parameters": {},
+      "formatted": "बाधित — अपडेट के लिए रनटाइम बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_retirement",
+      "parameters": {},
+      "formatted": "बाधित (अपठित) — अपडेट के लिए रनटाइम बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "बाधित — सिग्नल से रोका गया"
+    },
+    {
+      "message_id": "wire.session_status.signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "बाधित — /stop --all द्वारा सिग्नल से रोका गया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "बाधित (अपठित) — सिग्नल से रोका गया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_signal_stop",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "बाधित (अपठित) — /stop --all द्वारा सिग्नल से रोका गया"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "बाधित — ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "message_id": "wire.session_status.forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "बाधित — /stop --all द्वारा ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "none"
+      },
+      "formatted": "बाधित (अपठित) — ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_forced_kill",
+      "parameters": {
+        "command": "/stop --all"
+      },
+      "formatted": "बाधित (अपठित) — /stop --all द्वारा ज़बरदस्ती बंद किया गया"
+    },
+    {
+      "message_id": "wire.session_status.complete",
+      "parameters": {},
+      "formatted": "पूरा हुआ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_completion",
+      "parameters": {},
+      "formatted": "पूरा हुआ (अपठित)"
+    },
+    {
+      "message_id": "wire.session_status.recent",
+      "parameters": {},
+      "formatted": "हाल का"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 0
+      },
+      "formatted": "रुका हुआ (0 जागृति निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 1
+      },
+      "formatted": "रुका हुआ (1 जागृति निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 2
+      },
+      "formatted": "रुका हुआ (2 जागृतियाँ निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 5
+      },
+      "formatted": "रुका हुआ (5 जागृतियाँ निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 21
+      },
+      "formatted": "रुका हुआ (21 जागृतियाँ निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 101
+      },
+      "formatted": "रुका हुआ (101 जागृतियाँ निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 0.5
+      },
+      "formatted": "रुका हुआ (0.5 जागृति निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.dormant",
+      "parameters": {
+        "count": 1.5
+      },
+      "formatted": "रुका हुआ (1.5 जागृतियाँ निष्क्रिय)"
+    },
+    {
+      "message_id": "wire.session_status.error",
+      "parameters": {},
+      "formatted": "त्रुटि"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error",
+      "parameters": {},
+      "formatted": "त्रुटि (अपठित)"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "user_stop"
+      },
+      "formatted": "त्रुटि — उपयोगकर्ता ने रोका"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "त्रुटि — प्रगति रुकी रहने की समय-सीमा के बाद रनटाइम अपने आप बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "continuation_limit"
+      },
+      "formatted": "त्रुटि — जारी रखने की सीमा पूरी हुई; लंबित संदेश छोड़ दिया गया"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "output_limit"
+      },
+      "formatted": "त्रुटि — मॉडल आउटपुट की सीमा पूरी हुई; जारी नहीं रख सका"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "त्रुटि — अपडेट के लिए रनटाइम बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_shutdown"
+      },
+      "formatted": "त्रुटि — टर्न के दौरान रनटाइम बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "त्रुटि — प्रगति के लिए तय समय-सीमा के बाद रनटाइम अपडेट के लिए बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "त्रुटि — अपडेट पूरा नहीं हुआ; रनटाइम ने पहले से लोड किया हुआ बिल्ड बनाए रखा"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "runtime_killed"
+      },
+      "formatted": "त्रुटि — रनटाइम सही तरीके से बंद हुए बिना गायब हो गया; रोकने का अनुरोध नहीं था"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "install_mid_update"
+      },
+      "formatted": "त्रुटि — टर्न के दौरान इंस्टॉलेशन बदल दिया गया"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "owner_lost"
+      },
+      "formatted": "त्रुटि — टर्न के दौरान रनटाइम ने जवाब देना बंद कर दिया"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "disposed"
+      },
+      "formatted": "त्रुटि — टर्न के दौरान सत्र समाप्त कर दिया गया"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "त्रुटि"
+    },
+    {
+      "message_id": "wire.session_status.error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "त्रुटि"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "user_stop"
+      },
+      "formatted": "त्रुटि (अपठित) — उपयोगकर्ता ने रोका"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_stall_bound"
+      },
+      "formatted": "त्रुटि (अपठित) — प्रगति रुकी रहने की समय-सीमा के बाद रनटाइम अपने आप बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "continuation_limit"
+      },
+      "formatted": "त्रुटि (अपठित) — जारी रखने की सीमा पूरी हुई; लंबित संदेश छोड़ दिया गया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "output_limit"
+      },
+      "formatted": "त्रुटि (अपठित) — मॉडल आउटपुट की सीमा पूरी हुई; जारी नहीं रख सका"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_retired"
+      },
+      "formatted": "त्रुटि (अपठित) — अपडेट के लिए रनटाइम बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_shutdown"
+      },
+      "formatted": "त्रुटि (अपठित) — टर्न के दौरान रनटाइम बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_overdue"
+      },
+      "formatted": "त्रुटि (अपठित) — प्रगति के लिए तय समय-सीमा के बाद रनटाइम अपडेट के लिए बंद हुआ"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_update_failed"
+      },
+      "formatted": "त्रुटि (अपठित) — अपडेट पूरा नहीं हुआ; रनटाइम ने पहले से लोड किया हुआ बिल्ड बनाए रखा"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "runtime_killed"
+      },
+      "formatted": "त्रुटि (अपठित) — रनटाइम सही तरीके से बंद हुए बिना गायब हो गया; रोकने का अनुरोध नहीं था"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "install_mid_update"
+      },
+      "formatted": "त्रुटि (अपठित) — टर्न के दौरान इंस्टॉलेशन बदल दिया गया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "owner_lost"
+      },
+      "formatted": "त्रुटि (अपठित) — टर्न के दौरान रनटाइम ने जवाब देना बंद कर दिया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "disposed"
+      },
+      "formatted": "त्रुटि (अपठित) — टर्न के दौरान सत्र समाप्त कर दिया गया"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "other"
+      },
+      "formatted": "त्रुटि (अपठित)"
+    },
+    {
+      "message_id": "wire.session_status.unseen_error_cause",
+      "parameters": {
+        "cause": "unknown_future_cause"
+      },
+      "formatted": "त्रुटि (अपठित)"
+    }
+  ],
+  "counts": {
+    "keys": 17,
+    "cause_arms_per_seen_unseen": 13,
+    "rendered_cases": 54
+  },
+  "not_claimed": [
+    "runtime",
+    "visual",
+    "pseudo",
+    "native RTL",
+    "admission to shipped locales"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "locale": "ru",
+  "namespace": "wire.session_status",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "3f1cf5b56ba0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Task brief and translator receipt.json",
+    "fallback_used": false,
+    "date": "2026-11-19"
+  },
+  "auditor": {
+    "agent": "i18n-auditor / terminal-status-ru-audit",
+    "session": "56bc997306a1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "3f1cf5b56ba0",
+    "actual_model_source": "Host session model declaration",
+    "fallback_used": false,
+    "date": "2026-11-19",
+    "result": "passed",
+    "unresolved_blocker_major_count": 0
+  },
+  "status": "passed",
+  "note": "First independent 17-key safety-copy audit passed; second pending. Record: i18n/audits/evidence/ru/wire.session_status/tsrua1/record.json. Scratch handoff; promote evidence before apply.",
+  "evidence": "i18n/audits/evidence/ru/wire.session_status/tsrua1/record.json",
+  "keys_audited": 17,
+  "round": "first"
+}
