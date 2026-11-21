@@ -85,7 +85,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, redial, store, uplink, wire
+from local_operator.network import nat64, projection, redial, store, uplink, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -1052,14 +1052,49 @@ def probe_candidates(
                         started = time.monotonic()
                         states[endpoint] = ("issued", started)
                     sock.connect((host, port))
-                except BaseException:
+                except BaseException as exc:
                     # Stamp first: a slow close must not count as time spent
                     # waiting for an answer (U4).
                     ended = time.monotonic()
                     _close_quietly(sock)
-                    raise
+                    # NAT64 (roaming stage 3): an IPv4 literal refused LOCALLY
+                    # (ENETUNREACH/EHOSTUNREACH/EADDRNOTAVAIL — an IPv6-only
+                    # host) is exactly the case the fallback exists for. A
+                    # timeout never tries it: a silent IPv4 dial on a dual-stack
+                    # host is a quiet peer, not a missing route, and a second
+                    # dial would only double the wait. The fallback shares this
+                    # connect's deadline (``started + budget``), and ``ended`` is
+                    # re-stamped once it returns or raises, so the silence gate
+                    # below sees the whole attempt. On ``None`` the ORIGINAL
+                    # error propagates; "issued" still means the first connect.
+                    if (
+                        isinstance(exc, OSError)
+                        and not isinstance(exc, TimeoutError)
+                        and ":" not in host
+                    ):
+                        dial_deadline = started + budget
+                        try:
+                            rescued = nat64.fallback(
+                                host,
+                                port,
+                                exc,
+                                timeout=max(0.0, dial_deadline - time.monotonic()),
+                                deadline=dial_deadline,
+                            )
+                        finally:
+                            ended = time.monotonic()
+                        if rescued is None:
+                            raise
+                        sock = rescued
+                    else:
+                        raise
             else:
-                sock = socket.create_connection((address or endpoint, port), timeout=budget)
+                # ``nat64.create_connection``, not ``socket``'s: the ONE dial seam
+                # that retries an IPv4-only name through this network's NAT64 when
+                # this host has no IPv4 route (roaming stage 3). Same first connect,
+                # same exceptions; trust is still the handshake's call on the
+                # winning socket.
+                sock = nat64.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
             waited = (ended if ended is not None else time.monotonic()) - started
             with opened_lock:
@@ -14173,7 +14208,10 @@ class RelayServer:
             except ValueError:
                 return None, "bad_endpoint"
             try:
-                sock = socket.create_connection((address or host, port), timeout=budget)
+                # The shared NAT64-aware seam (see ``probe_candidates``): a synthesised
+                # address only carries the bytes; the handshake below still decides
+                # whether the device on the other end is the member we meant.
+                sock = nat64.create_connection((address or host, port), timeout=budget)
             except OSError as exc:
                 return None, f"connect_failed:{exc.__class__.__name__}"
         deadline = wire.deadline_in(budget)
