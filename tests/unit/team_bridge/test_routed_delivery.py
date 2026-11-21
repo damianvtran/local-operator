@@ -266,9 +266,7 @@ def test_the_pair_lane_never_meets_the_router() -> None:
     assert "plan_route" in inspect.getsource(conversation_mod.handle_conversation_available)
 
 
-def test_a_routed_card_binds_its_hand_off_id_against_the_designation(
-    tmp_path, monkeypatch
-) -> None:
+def test_a_routed_card_binds_its_hand_off_id_against_the_designation(tmp_path, monkeypatch) -> None:
     """Merge of #4258 into PR #4348: a routed row keeps ``designated_session``.
 
     The bind fences rows against the designation; passing the routed TARGET
