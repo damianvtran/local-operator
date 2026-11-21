@@ -1,0 +1,31 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.teams.effective",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "89b8acddcc7c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json",
+      "sha256": "6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454"
+    }
+  },
+  "validator": "scripts.i18n.check.check_catalogues() with namespaces/locales/load_catalogue scoped in memory to frozen source and scratch contribution; real context sidecar remains loaded from frozen tree",
+  "validator_problems": [],
+  "independent_checks": "Strict duplicate-free JSON; nine-key source/context/target parity; exact placeholders; literal tokens; no ICU plural/select or bidi controls; width measurements",
+  "result": "PASS",
+  "key_count": 9,
+  "first_auditor_receipt_opened": false
+}

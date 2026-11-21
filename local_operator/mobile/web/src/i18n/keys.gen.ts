@@ -2315,6 +2315,15 @@ export type MessageParams = {
   "wire.slash.library.help": undefined;
   "wire.slash.library.librarian_help": undefined;
   "wire.slash.notifications_page.help": undefined;
+  "wire.teams.effective.config_unreadable": undefined;
+  "wire.teams.effective.model_unresolvable": { "selector": string };
+  "wire.teams.effective.registry_unreadable": undefined;
+  "wire.teams.effective.team_missing": { "role": string };
+  "wire.teams.effective.tier_invalid_mapping": { "tier": string };
+  "wire.teams.effective.tier_invalid_selector": { "tier": string };
+  "wire.teams.effective.tier_invalid_value": { "tier": string };
+  "wire.teams.effective.tier_unconfigured": { "tier": string };
+  "wire.teams.effective.unavailable": undefined;
   "wire.tool_rows.bridge.count.conversations": { "count": number };
   "wire.tool_rows.bridge.count.members": { "count": number };
   "wire.tool_rows.bridge.count.messages": { "count": number };

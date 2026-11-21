@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/check.py", line 35, in <module>
+    assert all(t in hi for t in literals)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

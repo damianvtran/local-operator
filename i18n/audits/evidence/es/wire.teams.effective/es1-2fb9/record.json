@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "frozen_core_commit": "e70bc818b8553dca1fad007705257817be49ee37",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2fb9f8e55f96",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19",
+    "actual_model_source": "Runtime model declaration in developer context of session 2fb9f8e55f96",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed or used in this audit session",
+    "independent_from_translator_session": "8fba0458db34",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8fba0458db34",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Runtime session model declaration in developer context",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed in this session. No translation service/API/SDK used."
+  },
+  "translator_identity_source": {
+    "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.translator-provenance.json",
+    "sha256": "ce95251a453698bb6421eff617e1711c529222a091d11945a6b39751e666be75"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    },
+    "provenance": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.translator-provenance.json",
+      "sha256": "ce95251a453698bb6421eff617e1711c529222a091d11945a6b39751e666be75"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.report.md",
+      "sha256": "a41d4654d99d7c0f88be967f60bf901823e3c05c8d57093aca3c22159227b406",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.mechanical.json",
+      "sha256": "4658dfa869d2e27dbf24dd5b5b4618cf7b52eb1469fac167b08fa3a7a71072ee",
+      "kind": "actual_execution_output"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.audit.log",
+      "sha256": "4658dfa869d2e27dbf24dd5b5b4618cf7b52eb1469fac167b08fa3a7a71072ee",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/audit_es_effective.py",
+      "sha256": "c26589da6cd21bb43c1954a0dc120ea43658b5a6ad8f5261cef1370a9e79aa38",
+      "kind": "validator_source"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_scope": "One independent full nine-key semantic/idiomatic/glossary/mechanical audit; not integration or release clearance",
+  "execution": {
+    "executed": true,
+    "entrypoint": "scripts.i18n.check.check_catalogues",
+    "scope": "Only assigned namespace; in-memory enumeration/load adapters for scratch candidate, no repository catalogue mutation; not the full check.py CLI",
+    "problems": [],
+    "negative_control": {
+      "mutation": "In-memory removal of {role}, candidate file untouched",
+      "actual_problems": [
+        "es/wire.teams.effective: wire.teams.effective.team_missing: arguments () != en's (('role', 'simple'),): en has 1 argument(s), translation has 0"
+      ],
+      "result": "detected"
+    }
+  },
+  "gaps": {
+    "second_independent_high_visibility_audit": "required; not performed by this session, other-session completion unverified",
+    "rendered": "applicable; not executed",
+    "pseudo": "applicable component fit evidence; not executed",
+    "rtl": "Spanish LTR; catalog bidi-controls check executed, mixed-direction dynamic values not rendered",
+    "full_repository_cli": "not executed",
+    "ledger_append": "not executed",
+    "tracked_retention": "not executed; task expressly scratch-only"
+  },
+  "retention": {
+    "status": "scratch_only_pending_coordinator_retention",
+    "canonical_destination_root": "i18n/audits/evidence/es/wire.teams.effective/",
+    "note": "No claim of tracked record or presence on main; coordinator must retain and update receipt reference before integration"
+  }
+}

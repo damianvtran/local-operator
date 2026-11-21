@@ -1,0 +1,263 @@
+{
+  "locale": "hi",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "audit_kind": "second_independent_pass",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2851856c6680",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "47e37aebb87c",
+    "independent_from_first_auditor_session": "1a6e70595b8d",
+    "actual_model_source": "Host session model declaration: openai/gpt-6.1-sol",
+    "fallback": "none used"
+  },
+  "frozen_core": "e70bc818b8553dca1fad007705257817be49ee37",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "hi": {
+      "path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/hi/wire.teams.effective.json",
+      "sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92"
+    }
+  },
+  "first_verdict_read_before_independent_verdict": false,
+  "findings": [],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "per_key": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "arguments": [
+        [
+          "role",
+          "simple"
+        ]
+      ],
+      "technical_literals": [],
+      "latin_runs": [
+        "role"
+      ],
+      "source": "No team named {role} was found.",
+      "current_text": "{role} नाम की कोई टीम नहीं मिली।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Accurate absence statement; team glossary term टीम; opaque {role} remains intact. Natural Hindi नाम की…नहीं मिली, with no claim about launch.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "arguments": [],
+      "technical_literals": [],
+      "latin_runs": [],
+      "source": "The agent registry could not be read. Check the agent definitions and try again.",
+      "current_text": "एजेंट रजिस्ट्री पढ़ी नहीं जा सकी। एजेंट की परिभाषाएँ जाँचें और फिर से कोशिश करें।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Accurately covers registry read failure without inventing corrupt files. Both remedies retained: inspect agent definitions and retry. Polite जाँचें / कोशिश करें.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "arguments": [],
+      "technical_literals": [],
+      "latin_runs": [],
+      "source": "The model configuration could not be read. Check your configuration and try again.",
+      "current_text": "मॉडल की सेटिंग पढ़ी नहीं जा सकीं। अपनी सेटिंग जाँचें और फिर से कोशिश करें।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Configuration becomes natural product Hindi सेटिंग; read failure and inspection/retry both preserved. Plural feminine सकीं is compatible with collective settings, not a polarity error.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "technical_literals": [
+        "subagents.models.",
+        "provider/model"
+      ],
+      "latin_runs": [
+        "subagents.models.",
+        "tier",
+        "provider/model"
+      ],
+      "source": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "current_text": "subagents.models.{tier} का मान अमान्य है। इसे provider/model के रूप में या मॉडल मैपिंग के तौर पर सेट करें।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Invalid value and both alternatives retained: provider/model-shaped selector OR model mapping/config object. मॉडल मैपिंग is intelligible developer Hindi; not an instruction to translate the token.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "technical_literals": [
+        "subagents.models.",
+        "provider/model",
+        "model",
+        "effort"
+      ],
+      "latin_runs": [
+        "subagents.models.",
+        "tier",
+        "model",
+        "provider/model",
+        "effort"
+      ],
+      "source": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "current_text": "subagents.models.{tier} की मैपिंग अमान्य है। model में provider/model के रूप में मान दें और, चाहें तो, effort में समर्थित तर्क-प्रयास का स्तर दें।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Complete two-sentence instruction. model receives a provider/model value unconditionally; चाहें तो scopes ONLY effort. समर्थित तर्क-प्रयास का स्तर conveys supported reasoning effort. All four config literals remain exact; no English prose.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "technical_literals": [
+        "subagents.models."
+      ],
+      "latin_runs": [
+        "subagents.models.",
+        "tier"
+      ],
+      "source": "No model is configured at subagents.models.{tier}.",
+      "current_text": "subagents.models.{tier} में कोई मॉडल सेट नहीं है।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Correctly distinguishes absent configuration from invalid configuration. कोई मॉडल सेट नहीं है is concise natural Hindi; path stays intact.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "technical_literals": [
+        "subagents.models.",
+        "provider/model"
+      ],
+      "latin_runs": [
+        "subagents.models.",
+        "tier",
+        "provider/model"
+      ],
+      "source": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "current_text": "subagents.models.{tier} में मॉडल चुनने के लिए दिया गया मान अमान्य है। provider/model के रूप में मान दें।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Correctly identifies the model-selection value as invalid, without exposing raw invalid input; remedy keeps provider/model syntax. Descriptive Hindi avoids opaque selector jargon.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "arguments": [
+        [
+          "selector",
+          "simple"
+        ]
+      ],
+      "technical_literals": [],
+      "latin_runs": [
+        "selector"
+      ],
+      "source": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "current_text": "मॉडल {selector} पहचाना नहीं जा सका। मॉडल चुनने के लिए दिए गए मान और प्रोवाइडर की सेटिंग जाँचें।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "पहचाना नहीं जा सका is an appropriate user-facing rendering of failure to resolve the configured model identifier; both selector and provider settings remain the inspection targets. No unsupported specific root cause.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "arguments": [],
+      "technical_literals": [],
+      "latin_runs": [],
+      "source": "This team member is unavailable. Check its model configuration and agent definition.",
+      "current_text": "टीम का यह सदस्य उपलब्ध नहीं है। इसके मॉडल की सेटिंग और एजेंट की परिभाषा जाँचें।",
+      "mechanical": "passed",
+      "plurals": "none; CLDR categories not applicable",
+      "width_hint": {},
+      "accuracy_and_native_idiom": "Unavailable is not mistranslated as running, launched, deleted or permission denied. Both model settings and agent definition remedies preserved; member-relative इसके is unambiguous.",
+      "terminology": "passed; Hindi model/team terms and allowed technical Latin preserved",
+      "fit": "Logical text only: context explicitly allows natural wrapping; no maxCells/maxChars. No rendered-fit or font-shaping certification.",
+      "verdict": "passed",
+      "finding_ids": []
+    }
+  ],
+  "execution_summary": {
+    "normal_catalogue_validator": "check_catalogues() returned [] on scratch fixture containing exact pinned bytes",
+    "initial_supplemental_check_failure": "Own token inventory incorrectly treated English model prose as a required Latin literal; narrowed literal inventory to sidecar-declared tokens, reran successfully. Initial traceback retained in mechanical.log. No target change.",
+    "not_performed": [
+      "rendered UI/runtime flows",
+      "pseudo-localization",
+      "fallback behavior",
+      "bidi/shaping certification",
+      "repo edits",
+      "ledger apply",
+      "build/install/PR"
+    ]
+  },
+  "audit_notes_not_execution_log": true,
+  "source_procedure": "guide://i18n; frozen docs/I18N.md and docs/design/i18n.md; hi style guide and glossary. Requested guide://i18n/coreHOWTO was not found; authoritative guide://i18n points to docs/I18N.md."
+}
