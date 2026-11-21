@@ -549,7 +549,7 @@ async def test_the_inventory_block_is_identical_before_and_after_activation(tmp_
     assert before == after
     assert "- read" in before and "- console" not in before
     assert "Schema on demand" in before and "console (drive an interactive terminal)" in before
-    assert "call these directly by name" in before
+    assert "call by name" in before
     await session.dispose()
 
 

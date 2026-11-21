@@ -311,6 +311,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "
         "(``row_ref``), a wire token, never a session-directory entry.",
     ),
+    "local_operator/tools/integrations_tool.py": (
+        1,
+        "``TOOL_NAME`` ('integrations') identifies the registered provisioning tool, "
+        "not a session-directory entry. Its consent records live in the existing "
+        "ask queue, which already travels; credentials stay in the device secret store.",
+    ),
     "local_operator/session/temporary.py": (
         3,
         "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "

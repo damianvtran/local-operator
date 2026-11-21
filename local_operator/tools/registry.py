@@ -29,6 +29,7 @@ from local_operator.tools.audio_tool import (
 from local_operator.tools.eval import build_eval_tool
 from local_operator.tools.harness_import_tool import build_harness_import_tool
 from local_operator.tools.image_tool import build_generate_image_tool
+from local_operator.tools.integrations_tool import build_integrations_tool
 from local_operator.tools.library_tool import build_library_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.memory_tools import build_memory_tool
@@ -238,6 +239,12 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "generate_music": build_generate_music_tool,
     "modify_music": build_modify_music_tool,
     "music_status": build_music_status_tool,
+    # createIf: rung 3 — Radient Team Integrations provisioning (RFC §8.1). Only
+    # where a person can answer (``ask_user``), the session bound its consent
+    # seam (never a child) and a Radient OAuth row exists; deferred, so even
+    # there it costs the inventory phrase until read. Appended at END: appending
+    # never shifts a provider-visible array prefix.
+    "integrations": lambda context: build_integrations_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -306,6 +313,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "generate_music",
     "modify_music",
     "music_status",
+    "integrations",
 ]
 
 
