@@ -223,10 +223,11 @@ def _reserve(
     seq: int = 3,
     config_dir: Path | None = None,
     routed_session: str | None = None,
+    conversation_id: str = CONVERSATION_ID,
 ) -> None:
     assert store.record_body_reservation(
         _owner(),
-        conversation_id=CONVERSATION_ID,
+        conversation_id=conversation_id,
         message_id=message_id,
         conversation_seq=seq,
         mention=True,
@@ -2035,3 +2036,45 @@ async def test_multi_frame_off_keeps_one_turn_per_body(tmp_path) -> None:
     assert len(stream.requests) == 5, _layout(stream)
     assert all(sum(BODY in t for t in stream.texts(i)) == 1 for i in range(5))
     assert set(_states(config_dir).values()) == {"completed"}
+
+
+async def _serve_interleaved(tmp_path: Path, *, multi_frame: bool) -> tuple[CapturingStream, Path]:
+    """Two conversations interleaved: aa1, bb1, aa2, bb2, aa3 (FIFO by admission)."""
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir, multi_frame=multi_frame)
+    other = "bcv_qaconvbb"
+    for n, (conversation, message_id) in enumerate(
+        [
+            (CONVERSATION_ID, "bcmsg_aa000001"),
+            (other, "bcmsg_bb000001"),
+            (CONVERSATION_ID, "bcmsg_aa000002"),
+            (other, "bcmsg_bb000002"),
+            (CONVERSATION_ID, "bcmsg_aa000003"),
+        ],
+        start=1,
+    ):
+        _reserve(store, message_id, 2 + n, config_dir, conversation_id=conversation)
+    stream = CapturingStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient()))
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+    return stream, config_dir
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multi_frame,requests", [(True, 2), (False, 5)])
+async def test_an_interleaved_two_conversation_burst_is_drained_in_one_pass(
+    tmp_path, multi_frame: bool, requests: int
+) -> None:
+    """Q1 (PR #4382): after the first row is attempted, the drain's exclusion
+    must not narrow the next read to that row's conversation. ``on``: one turn
+    per conversation; ``off``: one turn per body, exactly as before."""
+
+    stream, config_dir = await _serve_interleaved(tmp_path, multi_frame=multi_frame)
+    assert len(stream.requests) == requests, _layout(stream)
+    assert set(_states(config_dir).values()) == {"completed"}, _states(config_dir)

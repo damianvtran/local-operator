@@ -261,10 +261,12 @@ def frame_rules_head(*, participation: bool, omitted_ambient: int = 0) -> list[s
     if omitted_ambient > 0:
         # A count, never content: the dropped rows are still readable through
         # the bridge's own history read, which the model can choose to call.
-        head.append(
-            f"{int(omitted_ambient)} older ambient messages not shown; "
-            "channel_history reads them."
-        )
+        # "more", not "older": the count is every scanned digest row this
+        # request does not show (row cap, byte cap, or a failed read/claim/
+        # fetch), and a row dropped for bytes can be newer than one shown.
+        count = int(omitted_ambient)
+        noun = "message" if count == 1 else "messages"
+        head.append(f"{count} more ambient {noun} not shown; channel_history reads them.")
     return head
 
 

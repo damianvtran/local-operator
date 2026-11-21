@@ -4855,9 +4855,13 @@ class Store:
         if selected is not None:
             filters.append("AND conversation_id = ? AND message_id = ? ")
             bindings.extend(selected)
-        for conversation_id, message_id in sorted(exclude):
+        # Distinct loop names on purpose: binding ``conversation_id`` here once
+        # rebound the parameter below, so ANY exclusion silently scoped the read
+        # to the last excluded row's conversation and the drain skipped every
+        # other conversation's rows (PR #4382 Q1).
+        for excluded_conversation, excluded_message in sorted(exclude):
             filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
-            bindings.extend((conversation_id, message_id))
+            bindings.extend((excluded_conversation, excluded_message))
         if admitted_before is not None:
             filters.append("AND created_at <= ? ")
             bindings.append(float(admitted_before))
@@ -4950,9 +4954,9 @@ class Store:
             moment,
         ]
         filters: list[str] = []
-        for conversation_id, message_id in sorted(exclude):
+        for excluded_conversation, excluded_message in sorted(exclude):
             filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
-            bindings.extend((conversation_id, message_id))
+            bindings.extend((excluded_conversation, excluded_message))
         with self._connect_readonly() as conn:
             if conn is None or not self._has_wake_class_column(conn):
                 return []

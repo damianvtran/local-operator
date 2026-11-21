@@ -311,8 +311,13 @@ def test_a_digest_frame_states_its_delivery_in_the_trusted_section() -> None:
         omitted_ambient=3,
     )
     head, _, rest = frame.partition("VERIFIED SOURCE")
-    assert (
-        head.splitlines()[-1] == "3 older ambient messages not shown; channel_history reads them."
+    assert head.splitlines()[-1] == "3 more ambient messages not shown; channel_history reads them."
+    from local_operator.team_bridge.body_frame import frame_rules_head
+
+    # Singular, and "more" not "older": the count includes rows dropped for
+    # bytes or a failed read, which need not be older than those shown.
+    assert frame_rules_head(participation=False, omitted_ambient=1)[-1] == (
+        "1 more ambient message not shown; channel_history reads them."
     )
     source = rest.partition("UNTRUSTED DATA OBJECT")[0]
     assert "\ndelivery: ambient_digest\n" in source

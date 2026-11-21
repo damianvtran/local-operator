@@ -229,7 +229,10 @@ def test_a_companion_over_capacity_is_released_for_the_next_pass(tmp_path) -> No
     for n in range(1, 4):
         _reserve(probe_store, probe_epoch, n)
     assert _open(probe)
-    sizes = [m.frame_size for m in probe.members]
+    from local_operator.team_bridge.body_frame import request_size
+
+    # The bytes one request carries: three frames, the rules head on the first.
+    sizes = [request_size(t) for _, t in _frames(probe.transform([Message.user("wake")]))]
     probe.settle(entry_id=None, error="x", stop_reason=None, aborted=True)
     budget = _budget(sum(sizes) - 10)
 
@@ -348,7 +351,7 @@ def test_digest_bounds_drop_old_rows_uncounted_and_say_how_many(tmp_path) -> Non
     frames = _frames(batch.transform([Message.user("wake")]))
     # Newest two shown, oldest-first on the wire; the first frame counts the rest.
     assert _message_ids(frames)[:2] == digest[2:]
-    assert "2 older ambient messages not shown; channel_history reads them." in frames[0][1]
+    assert "2 more ambient messages not shown; channel_history reads them." in frames[0][1]
     assert [_state(tmp_path, d)["state"] for d in digest[:2]] == ["deferred"] * 2
 
     # Over the byte cap: claimed, then dropped UN-COUNTED back to deferred.
@@ -459,3 +462,156 @@ def test_store_reads_several_woken_rows_and_the_newest_digest_rows(tmp_path) -> 
             _owner(), SESSION, limit=10, now=time.time() + 120
         )
     ]
+
+
+# -- round-1 remediation (PR #4382: Q1, R1, R2, R3) ----------------------------
+
+
+def test_an_exclusion_never_scopes_the_woken_reader_to_its_conversation(tmp_path) -> None:
+    """Q1: the ``exclude`` loop once rebound the ``conversation_id`` parameter,
+    so excluding ONE row silently filtered the reader to that row's
+    conversation and the drain skipped every other conversation's rows."""
+
+    store, epoch = _store(tmp_path)
+    now = time.time()
+    first = _reserve(store, epoch, 1, created_at=now)
+    other = _reserve(store, epoch, 2, conversation_id=OTHER_CONVERSATION, created_at=now + 0.1)
+    excluded = frozenset({(CONVERSATION_ID, first)})
+    row = store.pending_body_reservation_for(_owner(), SESSION, exclude=excluded)
+    assert row is not None and row["message_id"] == other
+    # An explicit conversation scope still applies, exclusion or not.
+    assert (
+        store.pending_body_reservations_for(
+            _owner(), SESSION, exclude=excluded, conversation_id=CONVERSATION_ID, limit=5
+        )
+        == []
+    )
+
+
+def _flaky_renew(member: Any, failures: int = 1) -> None:
+    """Make ``member``'s NEXT lease renewal(s) refuse as a busy store would."""
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    original = member._store.renew_body_claim
+    left = {"n": failures}
+
+    def renew(owner: Any, **kw: Any) -> Any:
+        if kw["message_id"] == member.identity[1] and left["n"] > 0:
+            left["n"] -= 1
+            raise StoreRefused("store_busy", "busy")
+        return original(owner, **kw)
+
+    member._store.renew_body_claim = renew
+
+
+def test_the_receiver_rules_move_to_the_first_live_frame_when_the_carrier_drops(
+    tmp_path,
+) -> None:
+    """R1: one transient refusal on the rule carrier's renewal drops it for the
+    rest of the turn; the remaining untrusted bodies must still be preceded by
+    the receiver rules (config-request boundary included) on every call."""
+
+    from local_operator.harness.message_types import BRIDGE_CONFIG_REQUEST_RULE
+    from local_operator.harness.types import Message
+
+    store, epoch = _store(tmp_path)
+    ids = [_reserve(store, epoch, n) for n in range(1, 4)]
+    _reserve(store, epoch, 10, wake_class="ambient")
+    batch = _batch(tmp_path, digest_max=2)
+    assert _open(batch)
+    call1 = _frames(batch.transform([Message.user("wake card")]))
+    assert call1[0][1].startswith(BRIDGE_RECEIVER_RULES)
+    carrier = next(m for m in batch.members if m.identity[1] == _message_ids(call1)[0])
+    _flaky_renew(carrier)
+    for _ in range(2):  # calls 2 and 3
+        frames = _frames(batch.transform([Message.user("wake card")]))
+        assert _message_ids(frames) == ids
+        texts = [t for _, t in frames]
+        assert texts[0].startswith(BRIDGE_RECEIVER_RULES)
+        assert BRIDGE_CONFIG_REQUEST_RULE in texts[0]
+        assert BRIDGE_CHANNEL_PARTICIPATION_RULE in texts[0]
+        assert "ambient messages not shown" not in texts[0]  # nothing omitted
+        # Still exactly ONE rules head per request.
+        assert sum(BRIDGE_RECEIVER_RULES in t for t in texts) == 1
+        assert all(t.startswith("VERIFIED SOURCE") for t in texts[1:])
+
+
+def test_digest_rows_never_crowd_out_a_woken_body_that_fits_alone(tmp_path) -> None:
+    """R2: participation rule + "not shown" line belong to the digest's cost;
+    a DM body whose one-body frame fits exactly must still be served."""
+
+    from local_operator.harness.types import Message
+    from local_operator.team_bridge.pending_turn import PendingTurn
+
+    async def fetch(conversation_id: str, message_id: str) -> FetchedBody | None:
+        return FetchedBody(
+            body=_body(message_id),
+            body_sha256=_sha(message_id),
+            conversation_label="x",
+            sender_label="Ada",
+            sender_kind="agent",
+            conversation_kind="channel" if conversation_id == OTHER_CONVERSATION else "dm",
+        )
+
+    alone = tmp_path / "alone"
+    store1, epoch1 = _store(alone)
+    _reserve(store1, epoch1, 1)
+    one = PendingTurn(_owner(), SESSION, config_dir=alone)
+    assert asyncio.run(one.open(budget=_budget(), fetch=fetch))
+    size = one.frame_size
+
+    store, epoch = _store(tmp_path)
+    digest = [
+        _reserve(store, epoch, n, conversation_id=OTHER_CONVERSATION, wake_class="ambient")
+        for n in range(50, 53)
+    ]
+    primary = _reserve(store, epoch, 1)
+    batch = _batch(tmp_path)
+    assert _open(batch, fetch=fetch, budget=_budget(size))
+    assert _state(tmp_path, primary)["state"] == "claimed"
+    frames = _frames(batch.transform([Message.user("wake")]))
+    assert _message_ids(frames) == [primary]
+    # The digest rows that did not fit went back un-counted, and no
+    # participation rule rode a DM-only request.
+    assert BRIDGE_CHANNEL_PARTICIPATION_RULE not in frames[0][1]
+    for d in digest:
+        row = _state(tmp_path, d)
+        assert row["state"] == "deferred" and row["attempts"] == 0
+
+
+def test_a_refused_optional_read_degrades_to_fewer_members(tmp_path) -> None:
+    """R3: a transient refusal reading companions or the digest must not cancel
+    the turn; the primary is served as the one-body path would serve it."""
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    for reader in ("deferred_body_reservations_for", "pending_body_reservations_for"):
+        root = tmp_path / reader
+        store, epoch = _store(root)
+        primary = _reserve(store, epoch, 1)
+        companion = _reserve(store, epoch, 2)
+        ambient = _reserve(store, epoch, 10, wake_class="ambient")
+        batch = _batch(root)
+        original = getattr(batch._store, reader)
+
+        def boom(*args: Any, _original: Any = original, _r: str = reader, **kwargs: Any) -> Any:
+            # Only the OPTIONAL reads refuse: the primary's own read (the
+            # same woken reader, no conversation scope) must succeed.
+            if _r.startswith("deferred") or kwargs.get("conversation_id") is not None:
+                raise StoreRefused("state_unreadable", "database is locked")
+            return _original(*args, **kwargs)
+
+        setattr(batch._store, reader, boom)
+        assert _open(batch), reader
+        served = [m.identity[1] for m in batch.members]  # type: ignore[index]
+        assert _state(root, primary)["state"] == "claimed"
+        if reader == "pending_body_reservations_for":
+            # Companions unread: left pending, untouched, for the next pass;
+            # the digest (read fine) still leads the block.
+            assert served == [ambient, primary]
+            row = _state(root, companion)
+            assert row["state"] == "pending" and row["attempts"] == 0
+        else:
+            assert served == [primary, companion]
+            assert _state(root, ambient)["state"] == "deferred"

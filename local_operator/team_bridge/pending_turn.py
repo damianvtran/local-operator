@@ -211,6 +211,12 @@ class PendingTurn:
         self._digest = False
         self._row: dict[str, Any] | None = None
         self._injected: InjectedBody | None = None
+        #: A batch member's RULE-CARRYING variant of the same frame (receiver
+        #: rules head + the same VERIFIED SOURCE/body bytes), rendered at open
+        #: so whichever member is the first LIVE frame of a call can carry the
+        #: rules. ``None`` for a one-body turn, whose single frame already
+        #: carries them.
+        self._rules_text: str | None = None
         #: The message Call 1 placed the ephemeral frame right after (``None``
         #: until Call 1; :data:`_ANCHOR_AT_START` when Call 1's history was
         #: empty). Call 2+ re-inserts after the SAME message so the pre-turn +
@@ -455,19 +461,42 @@ class PendingTurn:
             self._release("binding_drift")
             return None
 
-    def render(self, budget: BodyBudget, **shape: Any) -> bool:
-        """Render and cache this member's frame, or release it."""
+    def render(
+        self,
+        budget: BodyBudget,
+        *,
+        rules: tuple[BodyBudget, dict[str, Any]] | None = None,
+        **shape: Any,
+    ) -> bool:
+        """Render and cache this member's frame, or release it.
+
+        ``rules`` = (budget, shape) of the rule-carrying variant a batch member
+        must ALSO hold (see ``PendingTurnBatch``): both are fixed now so every
+        later call re-sends exact admitted bytes, and a member that cannot
+        render the variant is not served at all — a live frame that could not
+        carry the rules would otherwise reach the model without them.
+        """
 
         if self._row is None or self._fetched is None or self._claim_token is None:
             return False
         try:
             self._injected = assemble_injection(self._pending_body(**shape), budget, self._fence)
+            if rules is not None:
+                rules_budget, rules_shape = rules
+                # A scratch fence: the member's own fence caches ONE text per
+                # turn (the plain frame); this variant is the same message
+                # with the trusted head prepended, never a second admission.
+                self._rules_text = assemble_injection(
+                    self._pending_body(**rules_shape), rules_budget, TurnFence()
+                ).text
         except BodyNotFitted:
+            self._injected = None
             # Capacity is a fact about THIS request, not a verdict on the
             # message: the row goes back to pending so a roomier turn can serve it.
             self._release("body_not_fitted")
             return False
         except BodyFrameRefused:
+            self._injected = None
             self._release("binding_drift")
             return False
         return True
@@ -591,14 +620,22 @@ class PendingTurn:
             self._drift_reason = "claim_lost"
         return held
 
-    def for_call(self) -> str | None:
+    def for_call(self, *, with_rules: bool = False) -> str | None:
         """The bytes to append for THIS provider call, or None to send without.
 
         Called once per physical request, synchronously, on the loop's own
         thread: renew, four local reads, then the cached bytes. Every early
         return is a call that goes WITHOUT the frame; none of them raises, so a
         store hiccup can never fail a turn.
+
+        ``with_rules`` asks for the rule-carrying variant (batch members only;
+        the batch asks it of the first live frame). A member rendered without
+        one answers None rather than its bare frame: untrusted bytes must
+        never lead a request without the receiver rules ahead of them.
         """
+
+        if with_rules and self._rules_text is None:
+            return None
 
         if not self.binding_intact():
             return None
@@ -648,7 +685,7 @@ class PendingTurn:
             self._drift_reason = "admission_drift"
             return None
         self._fence.record_append()
-        return self._injected.text
+        return self._rules_text if with_rules else self._injected.text
 
     def settle(
         self,
@@ -790,7 +827,7 @@ MAX_COMPANIONS = 7
 #: LAST, newest first, and capped well under one 16 KiB body pair.
 DIGEST_MAX = 10
 DIGEST_MAX_BYTES = 24 * 1024
-#: Rows the digest reader scans to count what it did NOT show (the "N older
+#: Rows the digest reader scans to count what it did NOT show (the "N more
 #: ambient messages not shown" head line). A count only; no row is claimed.
 _DIGEST_SCAN = 200
 
@@ -817,16 +854,33 @@ class PendingTurnBatch:
     :data:`DIGEST_MAX` deferred ambient rows (newest first, <=
     :data:`DIGEST_MAX_BYTES`). Order on the wire: digest frames first (oldest
     to newest), then the woken frames in ``conversation_seq`` order, so the
-    message that woke the turn reads last — one contiguous block at the single
-    anchor :class:`_FrameAnchor` computes. Only the first frame carries the
-    receiver/participation rules.
+    newest woken message reads last (the primary, the drain's OLDEST pending
+    row, reads first among the woken frames) — one contiguous block at the
+    single anchor :class:`_FrameAnchor` computes. Only the first LIVE frame of
+    each call carries the receiver/participation rules.
+
+    RULES FOLLOW THE FIRST LIVE FRAME: every member renders a plain frame AND
+    a rule-carrying variant at open, and each call gives the variant to its
+    first live member. A member drops out for the rest of the turn on ONE
+    transient refusal of its own renewal; were the rules fixed to a member,
+    that one busy read would leave every later call carrying untrusted bodies
+    with no receiver rules and no config-request boundary. Budget is unchanged:
+    the head is reserved once and only one frame per call ever carries it.
+    The cost: when the carrier changes, the block's bytes change, so that
+    call misses the prompt cache through the block (it changed anyway — a
+    frame dropped out).
+
+    CAPACITY ORDER: woken members are fitted against the head THEY need (the
+    receiver rules, plus participation only if a woken member is a
+    group/channel post). The digest's extra head bytes (participation for its
+    channel rows, the "N more ambient messages not shown" line) are charged to
+    the digest step and the whole digest is dropped when they do not fit, so
+    ambient context can never crowd out a woken body that fits on its own.
 
     SETTLEMENT: one turn-level verdict applied to every member (all complete
     or all release, as a one-body turn would); a member that lost its claim or
     drifted mid-turn has already dropped out of later calls (its ``for_call``
-    answers None) and settles its own way. Residual, stated: if the RULE
-    CARRIER drops out mid-turn, later calls carry the remaining frames without
-    the rules (bytes are fixed at open so the prefix stays cacheable).
+    answers None) and settles its own way.
     """
 
     def __init__(
@@ -963,14 +1017,21 @@ class PendingTurnBatch:
         if self._max_companions == 0:
             return []
         identity = (str(primary_row["conversation_id"]), str(primary_row["message_id"]))
-        rows = self._store.pending_body_reservations_for(
-            self._owner,
-            self._session_id,
-            exclude=frozenset({*self._exclude, identity}),
-            admitted_before=self._admitted_before,
-            conversation_id=identity[0],
-            limit=self._max_companions,
-        )
+        try:
+            rows = self._store.pending_body_reservations_for(
+                self._owner,
+                self._session_id,
+                exclude=frozenset({*self._exclude, identity}),
+                admitted_before=self._admitted_before,
+                conversation_id=identity[0],
+                limit=self._max_companions,
+            )
+        except StoreRefused as failure:
+            # Companions are optional: a busy read must cost them, not the
+            # primary the one-body path would have served. Unread rows stay
+            # pending and untouched for the next pass.
+            logger.debug("bridge: companion read refused code=%s", failure.code)
+            return []
         out: list[PendingTurn] = []
         for row in rows:
             if self._admissible is not None and not self._admissible(row):
@@ -985,9 +1046,15 @@ class PendingTurnBatch:
     def _claim_digest(self, taken: set[tuple[str, str]]) -> tuple[list[PendingTurn], int]:
         if self._digest_max == 0:
             return [], 0
-        rows = self._store.deferred_body_reservations_for(
-            self._owner, self._session_id, limit=_DIGEST_SCAN, exclude=frozenset(taken)
-        )
+        try:
+            rows = self._store.deferred_body_reservations_for(
+                self._owner, self._session_id, limit=_DIGEST_SCAN, exclude=frozenset(taken)
+            )
+        except StoreRefused as failure:
+            # Ambient context is optional: no digest (and no "not shown"
+            # count) rather than no turn. Rows stay ``deferred``.
+            logger.debug("bridge: digest read refused code=%s", failure.code)
+            return [], 0
         out: list[PendingTurn] = []
         for row in rows[: self._digest_max]:
             if self._admissible is not None and not self._admissible(row):
@@ -1029,22 +1096,32 @@ class PendingTurnBatch:
             return False
         woken = [m for m in hydrated if not m.is_digest]
         digest = [m for m in hydrated if m.is_digest]
-        participation = any(m.conversation_kind in ("group", "channel") for m in hydrated)
-        # The rules head is counted ONCE, before anyone is fitted, with the
-        # worst-case omitted count: which member carries it is not known until
-        # the digest is fitted, and its bytes must never be under-measured.
-        head_bytes = (
-            request_size(
-                "\n".join(frame_rules_head(participation=participation, omitted_ambient=scanned))
-            )
-            + 1
-        )
+
+        def channel(members: list[PendingTurn]) -> bool:
+            return any(m.conversation_kind in ("group", "channel") for m in members)
+
+        def head_size(*, participation: bool, omitted: int) -> int:
+            # +1: the newline joining the head to the frame's VERIFIED SOURCE.
+            lines = frame_rules_head(participation=participation, omitted_ambient=omitted)
+            return request_size("\n".join(lines)) + 1
+
+        # The WOKEN head is reserved first, against the woken members alone:
+        # which member carries it varies per call, so it is counted once and
+        # every member's size below is measured WITHOUT it.
+        woken_participation = channel(woken)
+        head_bytes = head_size(participation=woken_participation, omitted=0)
         remaining = budget.available_bytes - head_bytes
         sizes: dict[int, int] = {}
 
         def fits(member: PendingTurn, *, delivery: str | None) -> int | None:
-            # Sized WITHOUT the rules: their bytes are already reserved above.
+            # Sized WITHOUT the rules: their bytes are reserved separately.
             return member.measure(with_rules=False, delivery=delivery)
+
+        def drop_digest(members: list[PendingTurn]) -> None:
+            # Dropped for the digest's own bounds before any request carried
+            # it: un-counted, back to ``deferred``.
+            for member in members:
+                member._release("body_not_fitted", count_attempt=False)
 
         # PRIMARY: today's refusal path — if it cannot fit, nothing is served.
         size = fits(primary, delivery=None)
@@ -1079,36 +1156,58 @@ class PendingTurnBatch:
             remaining -= size
             sizes[id(member)] = size
             kept_woken.append(member)
+        # DIGEST: its extra head bytes first (worst case: participation if any
+        # candidate is a channel post, every scanned row counted as omitted —
+        # the real count is never larger, so never more digits), then rows
+        # newest first (the reader's order: the most recent context wins).
+        participation = woken_participation
+        omitted = 0
         kept_digest: list[PendingTurn] = []
-        digest_bytes = 0
-        # Newest first (the reader's order): the most recent context wins.
-        for member in digest:
-            size = fits(member, delivery=DELIVERY_AMBIENT_DIGEST)
-            if size is None:
-                continue
-            if size > remaining or digest_bytes + size > self._digest_max_bytes:
-                # Dropped for the digest's own bounds before any request
-                # carried it: un-counted, back to ``deferred``.
-                member._release("body_not_fitted", count_attempt=False)
-                continue
-            remaining -= size
-            digest_bytes += size
-            sizes[id(member)] = size
-            kept_digest.append(member)
-        omitted = max(0, scanned - len(kept_digest))
+        if digest or scanned:
+            digest_head = head_size(
+                participation=woken_participation or channel(digest), omitted=scanned
+            )
+            extra = digest_head - head_bytes
+            if extra > remaining:
+                drop_digest(digest)
+            else:
+                remaining -= extra
+                head_bytes = digest_head
+                digest_bytes = 0
+                for member in digest:
+                    size = fits(member, delivery=DELIVERY_AMBIENT_DIGEST)
+                    if size is None:
+                        continue
+                    if size > remaining or digest_bytes + size > self._digest_max_bytes:
+                        drop_digest([member])
+                        continue
+                    remaining -= size
+                    digest_bytes += size
+                    sizes[id(member)] = size
+                    kept_digest.append(member)
+                # Every scanned row this request does not show — capped by
+                # row count, by bytes, or lost to a failed read/claim/fetch.
+                omitted = max(0, scanned - len(kept_digest))
+                participation = woken_participation or channel(kept_digest)
         kept_digest.sort(key=lambda m: (m._row or {}).get("created_at") or 0.0)
         kept_woken.sort(key=lambda m: m.conversation_seq)
         ordered = [*kept_digest, *kept_woken]
         rendered: list[PendingTurn] = []
         for index, member in enumerate(ordered):
-            shape: dict[str, Any] = {
-                "with_rules": index == 0,
+            delivery = DELIVERY_AMBIENT_DIGEST if member.is_digest else None
+            plain: dict[str, Any] = {
+                "with_rules": False,
                 "participation": participation,
-                "delivery": DELIVERY_AMBIENT_DIGEST if member.is_digest else None,
-                "omitted_ambient": omitted if index == 0 else 0,
+                "delivery": delivery,
+                "omitted_ambient": 0,
             }
-            allowance = sizes[id(member)] + (head_bytes if index == 0 else 0)
-            if member.render(_Budget(allowance, budget.measured_from), **shape):
+            # EVERY member also holds the rule-carrying variant: whichever is
+            # the first live frame of a call carries the rules (class docstring).
+            with_rules = {**plain, "with_rules": True, "omitted_ambient": omitted}
+            rules = (_Budget(sizes[id(member)] + head_bytes, budget.measured_from), with_rules)
+            if member.render(
+                _Budget(sizes[id(member)], budget.measured_from), rules=rules, **plain
+            ):
                 rendered.append(member)
             elif member is primary:
                 for other in rendered:
@@ -1126,12 +1225,21 @@ class PendingTurnBatch:
         physical call; a member that fails drops out for the rest of the turn
         while the others still ride. The block's position is the one-body
         frame's: after the Call 1 predecessor, or last when that is unsafe.
+
+        The FIRST live frame of THIS call carries the receiver rules, so the
+        rules precede every untrusted body even after the previous carrier
+        dropped out (one transient refusal of its renewal is enough).
         """
 
         from .request_body import CustomFrameInjection
 
-        live = [(member, member.for_call()) for member in self._members]
-        frames = [(member, text) for member, text in live if text is not None]
+        frames: list[tuple[PendingTurn, str]] = []
+        for member in self._members:
+            # Members are asked in wire order, so "first live" is known the
+            # moment one answers; each still renews/checks exactly once.
+            text = member.for_call(with_rules=not frames)
+            if text is not None:
+                frames.append((member, text))
         if not frames:
             return messages
         at = self._anchor.index(messages)
